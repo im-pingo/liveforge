@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 )
 
 var version = "dev"
@@ -26,5 +29,23 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	log.Printf("liveforge %s starting, server name: %s", version, cfg.Server.Name)
+	s := core.NewServer(cfg)
+
+	// TODO: register protocol modules here as they are implemented
+	// e.g. s.RegisterModule(rtmp.NewModule())
+
+	if err := s.Init(); err != nil {
+		log.Fatalf("server init failed: %v", err)
+	}
+
+	log.Printf("liveforge %s started, server name: %s", version, cfg.Server.Name)
+
+	// Block until signal
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigCh
+	log.Printf("received signal %v, shutting down...", sig)
+
+	s.Shutdown()
+	log.Println("liveforge stopped")
 }
