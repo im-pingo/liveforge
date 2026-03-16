@@ -1,0 +1,131 @@
+server:
+  name: "streamserver-01"
+  log_level: info
+  drain_timeout: 30s
+
+tls:
+  cert_file: ""
+  key_file: ""
+
+limits:
+  max_streams: 0
+  max_subscribers_per_stream: 0
+  max_connections: 0
+  max_bitrate_per_stream: 0
+
+rtmp:
+  enabled: true
+  listen: ":1935"
+  chunk_size: 4096
+
+rtsp:
+  enabled: false
+  listen: ":554"
+  rtp_port_range: [10000, 20000]
+
+http_stream:
+  enabled: false
+  listen: ":8080"
+  cors: true
+
+websocket:
+  enabled: false
+  listen: ":8080"
+  path: "/ws/{stream}.{format}"
+
+webrtc:
+  enabled: false
+  listen: ":8443"
+  ice_servers:
+    - urls: ["stun:stun.l.google.com:19302"]
+  udp_port_range: [20000, 30000]
+  candidates: []
+
+sip:
+  enabled: false
+  listen: ":5060"
+  transport: ["udp", "tcp"]
+
+stream:
+  gop_cache: true
+  gop_cache_num: 1
+  audio_cache_ms: 1000
+  ring_buffer_size: 1024
+  max_skip_count: 3
+  max_skip_window: 60s
+  idle_timeout: 30s
+  no_publisher_timeout: 15s
+  simulcast:
+    enabled: false
+    auto_pause_layer: true
+    layers:
+      - rid: h
+        max_bitrate: 2500000
+      - rid: l
+        max_bitrate: 500000
+  audio_on_demand:
+    enabled: false
+    pause_delay: 3s
+  feedback:
+    default_mode: auto
+    auto_thresholds:
+      passthrough_max: 1
+      aggregate_max: 5
+
+auth:
+  enabled: false
+  publish:
+    mode: "none"
+    token:
+      secret: "${AUTH_JWT_SECRET}"
+      algorithm: HS256
+    callback:
+      url: ""
+      timeout: 3s
+  subscribe:
+    mode: "none"
+    token:
+      secret: "${AUTH_JWT_SECRET}"
+  api:
+    bearer_token: "${API_TOKEN}"
+
+notify:
+  http:
+    enabled: false
+    endpoints: []
+  websocket:
+    enabled: false
+    path: /api/v1/ws/notify
+  alive_interval: 10s
+
+cluster:
+  forward:
+    enabled: false
+    targets: []
+    schedule_url: ""
+    retry_max: 5
+    retry_interval: 3s
+  origin:
+    enabled: false
+    servers: []
+    schedule_url: ""
+    idle_timeout: 30s
+    retry_max: 3
+
+record:
+  enabled: false
+  stream_pattern: "live/*"
+  format: flv
+  path: "/data/record/{date}/{stream}_{time}.{ext}"
+  segment:
+    mode: duration
+    duration: 30m
+    max_size: 512MB
+  on_file_complete:
+    url: ""
+
+api:
+  enabled: true
+  listen: ":8090"
+  auth:
+    bearer_token: "${API_TOKEN}"
