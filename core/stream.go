@@ -50,6 +50,9 @@ type Stream struct {
 	ringBuffer *util.RingBuffer[*avframe.AVFrame]
 	gopCache   []*avframe.AVFrame
 
+	videoSeqHeader *avframe.AVFrame
+	audioSeqHeader *avframe.AVFrame
+
 	eventBus         *EventBus
 	noPublisherTimer *time.Timer
 }
@@ -129,15 +132,24 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Store sequence headers separately for late-joining subscribers
+	if frame.FrameType == avframe.FrameTypeSequenceHeader {
+		if frame.MediaType.IsVideo() {
+			s.videoSeqHeader = frame
+		} else if frame.MediaType.IsAudio() {
+			s.audioSeqHeader = frame
+		}
+	}
+
 	// Update GOP cache for video frames
 	if frame.MediaType.IsVideo() {
 		if frame.FrameType.IsKeyframe() {
 			// Start new GOP
 			s.gopCache = []*avframe.AVFrame{frame}
-		} else if len(s.gopCache) > 0 {
+		} else if frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
 			s.gopCache = append(s.gopCache, frame)
 		}
-	} else if frame.MediaType.IsAudio() && len(s.gopCache) > 0 {
+	} else if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
 		// Interleave audio into GOP cache for DTS ordering
 		s.gopCache = append(s.gopCache, frame)
 	}
@@ -153,6 +165,20 @@ func (s *Stream) GOPCache() []*avframe.AVFrame {
 	result := make([]*avframe.AVFrame, len(s.gopCache))
 	copy(result, s.gopCache)
 	return result
+}
+
+// VideoSeqHeader returns the cached video sequence header (SPS/PPS), if any.
+func (s *Stream) VideoSeqHeader() *avframe.AVFrame {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.videoSeqHeader
+}
+
+// AudioSeqHeader returns the cached audio sequence header (AudioSpecificConfig), if any.
+func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.audioSeqHeader
 }
 
 // RingBuffer returns the stream's ring buffer for reader creation.

@@ -2,9 +2,9 @@ package rtmp
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strings"
 
@@ -12,6 +12,18 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	flvpkg "github.com/im-pingo/liveforge/pkg/muxer/flv"
 )
+
+// isConnClosed checks if an error indicates a closed connection.
+func isConnClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return strings.Contains(netErr.Err.Error(), "use of closed")
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
 
 // Handler manages a single RTMP connection.
 type Handler struct {
@@ -46,7 +58,7 @@ func (h *Handler) Handle() error {
 	for {
 		msg, err := h.cr.ReadMessage()
 		if err != nil {
-			if err == io.EOF {
+			if err == io.EOF || isConnClosed(err) {
 				return nil
 			}
 			return fmt.Errorf("read message: %w", err)
@@ -218,6 +230,11 @@ func (h *Handler) onPlay(vals []any) error {
 		RemoteAddr: h.conn.RemoteAddr().String(),
 	})
 
+	// Send StreamBegin user control message
+	if err := h.sendStreamBegin(1); err != nil {
+		return err
+	}
+
 	// Send onStatus(NetStream.Play.Start)
 	if err := h.sendOnStatus("status", "NetStream.Play.Start", "Playback started"); err != nil {
 		return err
@@ -316,6 +333,13 @@ func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
 
 // Protocol messages
 
+func (h *Handler) sendStreamBegin(streamID uint32) error {
+	payload := make([]byte, 6)
+	binary.BigEndian.PutUint16(payload[0:2], 0) // StreamBegin event type
+	binary.BigEndian.PutUint32(payload[2:6], streamID)
+	return h.cw.WriteMessage(2, &Message{TypeID: MsgUserControl, Length: 6, Payload: payload})
+}
+
 func (h *Handler) sendSetWindowAckSize(size uint32) error {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, size)
@@ -374,11 +398,4 @@ func (h *Handler) sendOnStatus(level, code, description string) error {
 		return err
 	}
 	return h.cw.WriteMessage(5, &Message{TypeID: MsgAMF0Command, Length: uint32(len(payload)), Payload: payload, StreamID: 1})
-}
-
-// logError logs errors that occur during connection handling.
-func logError(msg string, err error) {
-	if err != nil {
-		log.Printf("RTMP: %s: %v", msg, err)
-	}
 }
