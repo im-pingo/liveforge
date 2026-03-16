@@ -10,6 +10,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/module/rtmp"
 )
 
 var version = "dev"
@@ -31,8 +32,9 @@ func main() {
 
 	s := core.NewServer(cfg)
 
-	// TODO: register protocol modules here as they are implemented
-	// e.g. s.RegisterModule(rtmp.NewModule())
+	if cfg.RTMP.Enabled {
+		s.RegisterModule(rtmp.NewModule())
+	}
 
 	if err := s.Init(); err != nil {
 		log.Fatalf("server init failed: %v", err)
