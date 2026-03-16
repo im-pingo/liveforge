@@ -58,17 +58,35 @@ func (s *Subscriber) Close() error {
 func (s *Subscriber) WriteLoop() {
 	defer s.Close()
 
-	// Send GOP cache first if in GOP mode
+	// Send sequence headers first (required for decoder initialization)
+	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
+		if err := s.sendFrame(vsh); err != nil {
+			log.Printf("RTMP subscriber %s: video seq header send error: %v", s.id, err)
+			return
+		}
+	}
+	if ash := s.stream.AudioSeqHeader(); ash != nil {
+		if err := s.sendFrame(ash); err != nil {
+			log.Printf("RTMP subscriber %s: audio seq header send error: %v", s.id, err)
+			return
+		}
+	}
+
+	// Send GOP cache if in GOP mode and track last DTS sent
+	var lastDTS int64
 	if s.opts.StartMode == core.StartModeGOP {
 		for _, frame := range s.stream.GOPCache() {
 			if err := s.sendFrame(frame); err != nil {
 				log.Printf("RTMP subscriber %s: GOP cache send error: %v", s.id, err)
 				return
 			}
+			if frame.DTS > lastDTS {
+				lastDTS = frame.DTS
+			}
 		}
 	}
 
-	// Read live frames from ring buffer
+	// Read live frames from ring buffer, skipping frames already sent via GOP cache
 	reader := s.stream.RingBuffer().NewReader()
 	for {
 		select {
@@ -79,11 +97,19 @@ func (s *Subscriber) WriteLoop() {
 
 		frame, ok := reader.TryRead()
 		if !ok {
-			// Use blocking read
 			frame, ok = reader.Read()
 			if !ok {
 				return
 			}
+		}
+
+		if frame == nil {
+			continue
+		}
+
+		// Skip frames that were already covered by the GOP cache
+		if frame.FrameType == avframe.FrameTypeSequenceHeader || frame.DTS <= lastDTS {
+			continue
 		}
 
 		if err := s.sendFrame(frame); err != nil {
@@ -92,34 +118,41 @@ func (s *Subscriber) WriteLoop() {
 	}
 }
 
-func (s *Subscriber) sendFrame(frame *avframe.AVFrame) error {
-	// Convert AVFrame to RTMP message
+func (s *Subscriber) buildRTMPPayload(frame *avframe.AVFrame) ([]byte, error) {
 	var buf bytes.Buffer
 	muxer := flvpkg.NewMuxer()
 	if err := muxer.WriteFrame(&buf, frame); err != nil {
-		return err
+		return nil, err
 	}
 
-	// Extract the FLV tag data (skip previous tag size at end)
+	// Extract the FLV tag body (skip tag header and trailing prev tag size)
 	tagData := buf.Bytes()
 	if len(tagData) < flvpkg.TagHeaderSize+4 {
+		return nil, nil
+	}
+
+	dataSize := len(tagData) - flvpkg.TagHeaderSize - 4
+	if dataSize <= 0 {
+		return nil, nil
+	}
+	return tagData[flvpkg.TagHeaderSize : flvpkg.TagHeaderSize+dataSize], nil
+}
+
+func (s *Subscriber) sendFrame(frame *avframe.AVFrame) error {
+	payload, err := s.buildRTMPPayload(frame)
+	if err != nil {
+		return err
+	}
+	if payload == nil {
 		return nil
 	}
 
-	// Send as RTMP message using the original payload format
 	var msgTypeID uint8
 	if frame.MediaType.IsVideo() {
 		msgTypeID = MsgVideo
 	} else {
 		msgTypeID = MsgAudio
 	}
-
-	// Reconstruct the RTMP payload (FLV tag data portion, without tag header)
-	dataSize := len(tagData) - flvpkg.TagHeaderSize - 4 // minus header and prev tag size
-	if dataSize <= 0 {
-		return nil
-	}
-	payload := tagData[flvpkg.TagHeaderSize : flvpkg.TagHeaderSize+dataSize]
 
 	msg := &Message{
 		TypeID:    msgTypeID,
