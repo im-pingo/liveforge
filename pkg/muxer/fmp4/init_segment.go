@@ -53,15 +53,26 @@ func writeFtyp(w *bytes.Buffer) {
 }
 
 func writeMvhd(w *bytes.Buffer) {
-	payload := make([]byte, 96) // version 0 mvhd
-	binary.BigEndian.PutUint32(payload[12:16], timescaleVideo) // timescale
-	binary.BigEndian.PutUint32(payload[16:20], 0)              // duration
-	binary.BigEndian.PutUint32(payload[20:24], 0x00010000)     // rate = 1.0
-	binary.BigEndian.PutUint16(payload[24:26], 0x0100)         // volume = 1.0
+	// mvhd version 0 layout (96 bytes payload after fullbox header):
+	//   [0:4]   creation_time
+	//   [4:8]   modification_time
+	//   [8:12]  timescale
+	//   [12:16] duration
+	//   [16:20] rate (fixed-point 16.16)
+	//   [20:22] volume (fixed-point 8.8)
+	//   [22:32] reserved
+	//   [32:68] matrix (9 x int32)
+	//   [68:92] pre_defined
+	//   [92:96] next_track_ID
+	payload := make([]byte, 96)
+	binary.BigEndian.PutUint32(payload[8:12], timescaleVideo)  // timescale
+	binary.BigEndian.PutUint32(payload[12:16], 0)              // duration
+	binary.BigEndian.PutUint32(payload[16:20], 0x00010000)     // rate = 1.0
+	binary.BigEndian.PutUint16(payload[20:22], 0x0100)         // volume = 1.0
 	// matrix (identity): [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000]
-	binary.BigEndian.PutUint32(payload[36:40], 0x00010000)
-	binary.BigEndian.PutUint32(payload[52:56], 0x00010000)
-	binary.BigEndian.PutUint32(payload[68:72], 0x40000000)
+	binary.BigEndian.PutUint32(payload[32:36], 0x00010000)
+	binary.BigEndian.PutUint32(payload[48:52], 0x00010000)
+	binary.BigEndian.PutUint32(payload[64:68], 0x40000000)
 	binary.BigEndian.PutUint32(payload[92:96], 3) // next_track_ID
 	WriteFullBox(w, BoxMvhd, 0, 0, payload)
 }
@@ -69,16 +80,26 @@ func writeMvhd(w *bytes.Buffer) {
 func writeVideoTrak(w *bytes.Buffer, codec avframe.CodecType, seqHeader []byte, width, height int) {
 	var trak bytes.Buffer
 
-	// tkhd
-	tkhd := make([]byte, 80) // version 0
-	binary.BigEndian.PutUint32(tkhd[0:4], 0)       // creation_time
-	binary.BigEndian.PutUint32(tkhd[4:8], 0)       // modification_time
+	// tkhd version 0 layout (80 bytes payload after fullbox header):
+	//   [0:4]   creation_time
+	//   [4:8]   modification_time
+	//   [8:12]  track_ID
+	//   [12:16] reserved
+	//   [16:20] duration
+	//   [20:28] reserved
+	//   [28:30] layer
+	//   [30:32] alternate_group
+	//   [32:34] volume
+	//   [34:36] reserved
+	//   [36:72] matrix (9 x int32)
+	//   [72:76] width (fixed-point 16.16)
+	//   [76:80] height (fixed-point 16.16)
+	tkhd := make([]byte, 80)
 	binary.BigEndian.PutUint32(tkhd[8:12], videoTrackID)
-	binary.BigEndian.PutUint32(tkhd[16:20], 0)     // duration
 	// matrix identity
-	binary.BigEndian.PutUint32(tkhd[32:36], 0x00010000)
-	binary.BigEndian.PutUint32(tkhd[48:52], 0x00010000)
-	binary.BigEndian.PutUint32(tkhd[64:68], 0x40000000)
+	binary.BigEndian.PutUint32(tkhd[36:40], 0x00010000)
+	binary.BigEndian.PutUint32(tkhd[52:56], 0x00010000)
+	binary.BigEndian.PutUint32(tkhd[68:72], 0x40000000)
 	binary.BigEndian.PutUint32(tkhd[72:76], uint32(width)<<16)
 	binary.BigEndian.PutUint32(tkhd[76:80], uint32(height)<<16)
 	WriteFullBox(&trak, BoxTkhd, 0, 0x000003, tkhd) // flags: track_enabled | track_in_movie
@@ -111,13 +132,14 @@ func writeVideoTrak(w *bytes.Buffer, codec avframe.CodecType, seqHeader []byte, 
 func writeAudioTrak(w *bytes.Buffer, codec avframe.CodecType, seqHeader []byte, sampleRate, channels int) {
 	var trak bytes.Buffer
 
-	// tkhd
+	// tkhd (same layout as video tkhd)
 	tkhd := make([]byte, 80)
 	binary.BigEndian.PutUint32(tkhd[8:12], audioTrackID)
-	tkhd[24] = 0x01 // volume = 1.0 (byte 24-25 in tkhd after reserved)
-	binary.BigEndian.PutUint32(tkhd[32:36], 0x00010000)
-	binary.BigEndian.PutUint32(tkhd[48:52], 0x00010000)
-	binary.BigEndian.PutUint32(tkhd[64:68], 0x40000000)
+	binary.BigEndian.PutUint16(tkhd[32:34], 0x0100) // volume = 1.0
+	// matrix identity
+	binary.BigEndian.PutUint32(tkhd[36:40], 0x00010000)
+	binary.BigEndian.PutUint32(tkhd[52:56], 0x00010000)
+	binary.BigEndian.PutUint32(tkhd[68:72], 0x40000000)
 	WriteFullBox(&trak, BoxTkhd, 0, 0x000003, tkhd)
 
 	// mdia
