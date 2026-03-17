@@ -58,3 +58,30 @@ func ParseAudioSpecificConfig(data []byte) (*AACInfo, error) {
 		Channels:   channels,
 	}, nil
 }
+
+// SampleRateIndex returns the MPEG-4 frequency index for a sample rate.
+func SampleRateIndex(rate int) int {
+	for i, r := range sampleRates {
+		if r == rate {
+			return i
+		}
+	}
+	return 0x0F
+}
+
+// BuildADTSHeader builds a 7-byte ADTS header for an AAC frame.
+func BuildADTSHeader(info *AACInfo, frameLength int) []byte {
+	header := make([]byte, 7)
+	totalLen := 7 + frameLength
+	freqIdx := SampleRateIndex(info.SampleRate)
+	profile := info.ObjectType - 1
+
+	header[0] = 0xFF
+	header[1] = 0xF1 // sync + MPEG-4, Layer 0, no CRC
+	header[2] = byte((profile<<6)&0xC0) | byte((freqIdx<<2)&0x3C) | byte((info.Channels>>2)&0x01)
+	header[3] = byte((info.Channels<<6)&0xC0) | byte((totalLen>>11)&0x03)
+	header[4] = byte((totalLen >> 3) & 0xFF)
+	header[5] = byte((totalLen<<5)&0xE0) | 0x1F
+	header[6] = 0xFC
+	return header
+}
