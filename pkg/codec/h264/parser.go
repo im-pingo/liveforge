@@ -2,6 +2,7 @@ package h264
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -169,6 +170,83 @@ func ExtractNALUs(data []byte) [][]byte {
 	}
 
 	return nalus
+}
+
+// AVCCToAnnexB converts AVCC format (4-byte big-endian length-prefixed NALUs)
+// to Annex-B format (0x00000001 start code prefixed NALUs).
+func AVCCToAnnexB(data []byte) []byte {
+	startCode := []byte{0x00, 0x00, 0x00, 0x01}
+	var result []byte
+	offset := 0
+	for offset+4 <= len(data) {
+		naluLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		offset += 4
+		if offset+naluLen > len(data) {
+			break
+		}
+		result = append(result, startCode...)
+		result = append(result, data[offset:offset+naluLen]...)
+		offset += naluLen
+	}
+	return result
+}
+
+// ExtractSPSPPSFromAVCRecord parses an AVCDecoderConfigurationRecord and
+// extracts the first SPS and first PPS NAL units.
+func ExtractSPSPPSFromAVCRecord(data []byte) (sps, pps []byte, err error) {
+	if len(data) < 7 {
+		return nil, nil, errors.New("AVC record too short")
+	}
+
+	offset := 5 // skip configurationVersion, profile, compat, level, lengthSizeMinusOne
+	numSPS := int(data[offset] & 0x1F)
+	offset++
+
+	for i := 0; i < numSPS; i++ {
+		if offset+2 > len(data) {
+			return nil, nil, errors.New("AVC record truncated reading SPS length")
+		}
+		spsLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		if offset+spsLen > len(data) {
+			return nil, nil, errors.New("AVC record truncated reading SPS data")
+		}
+		if i == 0 {
+			sps = make([]byte, spsLen)
+			copy(sps, data[offset:offset+spsLen])
+		}
+		offset += spsLen
+	}
+
+	if offset >= len(data) {
+		return nil, nil, errors.New("AVC record truncated before PPS")
+	}
+	numPPS := int(data[offset])
+	offset++
+
+	for i := 0; i < numPPS; i++ {
+		if offset+2 > len(data) {
+			return nil, nil, errors.New("AVC record truncated reading PPS length")
+		}
+		ppsLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		if offset+ppsLen > len(data) {
+			return nil, nil, errors.New("AVC record truncated reading PPS data")
+		}
+		if i == 0 {
+			pps = make([]byte, ppsLen)
+			copy(pps, data[offset:offset+ppsLen])
+		}
+		offset += ppsLen
+	}
+
+	if sps == nil {
+		return nil, nil, errors.New("no SPS found in AVC record")
+	}
+	if pps == nil {
+		return nil, nil, errors.New("no PPS found in AVC record")
+	}
+	return sps, pps, nil
 }
 
 func skipScalingList(r *bitReader, size int) {
