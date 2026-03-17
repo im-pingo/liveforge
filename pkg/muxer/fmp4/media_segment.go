@@ -27,6 +27,12 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte 
 		}
 	}
 
+	// Calculate total video data size (needed for audio data_offset)
+	var videoDataSize uint32
+	for _, f := range videoFrames {
+		videoDataSize += uint32(len(f.Payload))
+	}
+
 	var buf bytes.Buffer
 
 	// Build moof
@@ -36,10 +42,6 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte 
 	mfhd := make([]byte, 4)
 	binary.BigEndian.PutUint32(mfhd, sequenceNumber)
 	WriteFullBox(&moof, BoxMfhd, 0, 0, mfhd)
-
-	// Calculate moof size upfront for data_offset in trun
-	// We'll write a placeholder and fix it after
-	moofSizePos := buf.Len() // will be 0
 
 	// Video traf
 	if len(videoFrames) > 0 {
@@ -54,7 +56,7 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte 
 	moofBytes := moof.Bytes()
 	moofBoxSize := 8 + len(moofBytes)
 
-	// Build mdat
+	// Build mdat: video samples first, then audio samples
 	var mdatPayload bytes.Buffer
 	for _, f := range videoFrames {
 		mdatPayload.Write(f.Payload)
@@ -63,10 +65,13 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte 
 		mdatPayload.Write(f.Payload)
 	}
 
-	// Fix data_offset in trun boxes to point past moof+mdat_header
-	mdatHeaderSize := 8
-	dataOffset := uint32(moofBoxSize + mdatHeaderSize)
-	fixTrunDataOffsets(moofBytes, dataOffset, moofSizePos)
+	// Fix data_offset in trun boxes:
+	// - Video trun data_offset = moofBoxSize + mdat_header(8)
+	// - Audio trun data_offset = moofBoxSize + mdat_header(8) + videoDataSize
+	mdatHeaderSize := uint32(8)
+	videoOffset := uint32(moofBoxSize) + mdatHeaderSize
+	audioOffset := videoOffset + videoDataSize
+	fixTrunDataOffsetsPerTrack(moofBytes, videoOffset, audioOffset)
 
 	// Write moof box
 	WriteBox(&buf, BoxMoof, moofBytes)
@@ -144,35 +149,27 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 	WriteBox(w, BoxTraf, traf.Bytes())
 }
 
-// fixTrunDataOffsets scans moofBytes for trun boxes and patches the data_offset field.
-func fixTrunDataOffsets(moofBytes []byte, dataOffset uint32, _ int) {
-	// Simple scan for trun box type and patch data_offset
+// fixTrunDataOffsetsPerTrack scans moofBytes for traf boxes and patches each
+// trun's data_offset. The first traf gets videoOffset, the second gets audioOffset.
+func fixTrunDataOffsetsPerTrack(moofBytes []byte, videoOffset, audioOffset uint32) {
+	trafType := []byte{'t', 'r', 'a', 'f'}
 	trunType := []byte{'t', 'r', 'u', 'n'}
+
+	trafIndex := 0
 	offset := 0
 	for offset+8 <= len(moofBytes) {
 		boxSize := int(binary.BigEndian.Uint32(moofBytes[offset : offset+4]))
 		if boxSize < 8 || offset+boxSize > len(moofBytes) {
 			break
 		}
-		if bytes.Equal(moofBytes[offset+4:offset+8], trunType) {
-			// Found trun box: header(8) + version(1) + flags(3) + sample_count(4) + data_offset(4)
-			dataOffsetPos := offset + 8 + 4 + 4 // past fullbox header + sample_count
-			if dataOffsetPos+4 <= len(moofBytes) {
-				binary.BigEndian.PutUint32(moofBytes[dataOffsetPos:], dataOffset)
+		if bytes.Equal(moofBytes[offset+4:offset+8], trafType) {
+			// Determine data_offset for this traf
+			dataOffset := videoOffset
+			if trafIndex > 0 {
+				dataOffset = audioOffset
 			}
-		}
-		offset += boxSize
-	}
+			trafIndex++
 
-	// Also search nested inside traf boxes
-	offset = 0
-	for offset+8 <= len(moofBytes) {
-		boxSize := int(binary.BigEndian.Uint32(moofBytes[offset : offset+4]))
-		if boxSize < 8 || offset+boxSize > len(moofBytes) {
-			break
-		}
-		boxType := moofBytes[offset+4 : offset+8]
-		if bytes.Equal(boxType, []byte{'t', 'r', 'a', 'f'}) {
 			// Search inside traf for trun
 			inner := offset + 8
 			end := offset + boxSize
@@ -182,6 +179,7 @@ func fixTrunDataOffsets(moofBytes []byte, dataOffset uint32, _ int) {
 					break
 				}
 				if bytes.Equal(moofBytes[inner+4:inner+8], trunType) {
+					// trun: header(8) + version+flags(4) + sample_count(4) + data_offset(4)
 					dataOffsetPos := inner + 8 + 4 + 4
 					if dataOffsetPos+4 <= end {
 						binary.BigEndian.PutUint32(moofBytes[dataOffsetPos:], dataOffset)

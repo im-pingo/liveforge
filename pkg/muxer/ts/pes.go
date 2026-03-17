@@ -33,8 +33,11 @@ func BuildPESHeader(streamID byte, pts, dts int64, payloadLen int) []byte {
 	}
 	binary.BigEndian.PutUint16(header[4:6], uint16(pesLen))
 
-	// Flags
-	header[6] = 0x80 // '10' marker bits, no scrambling, no priority, no alignment, no copyright, no original
+	// Flags: '10' marker bits + data_alignment_indicator for video
+	header[6] = 0x80
+	if streamID >= 0xE0 {
+		header[6] = 0x84 // data_alignment_indicator=1 for video
+	}
 	if hasDTS {
 		header[7] = 0xC0 // PTS_DTS_flags = 11
 	} else {
@@ -82,10 +85,21 @@ func writeDTS(buf []byte, ts int64) {
 	buf[4] = byte((ts90<<1)&0xFE) | 0x01
 }
 
+// PESPacketizeOptions controls optional fields embedded in the first TS packet.
+type PESPacketizeOptions struct {
+	// RandomAccess sets the random_access_indicator in the adaptation field
+	// of the first TS packet (used for keyframes).
+	RandomAccess bool
+	// PCR, if non-negative, embeds a PCR value in the adaptation field of the
+	// first TS packet. The value is in milliseconds and will be converted to
+	// 90 kHz internally.
+	PCR int64
+}
+
 // PacketizePES splits a PES (header + payload) into 188-byte TS packets.
 // The first packet has payload_unit_start_indicator=1.
-// continuityCounter is incremented for each packet and the updated value is returned.
-func PacketizePES(pid uint16, pesData []byte, continuityCounter *uint8, isKeyframe bool) []byte {
+// continuityCounter is incremented for each packet with payload.
+func PacketizePES(pid uint16, pesData []byte, continuityCounter *uint8, opts *PESPacketizeOptions) []byte {
 	var result []byte
 	offset := 0
 	first := true
@@ -100,14 +114,50 @@ func PacketizePES(pid uint16, pesData []byte, continuityCounter *uint8, isKeyfra
 
 		if first {
 			pkt[1] |= 0x40 // payload_unit_start_indicator
-			first = false
+		}
+
+		// Determine if the first packet needs a forced adaptation field
+		// for PCR and/or random_access_indicator.
+		forceAdapt := false
+		adaptBodyLen := 0 // minimum adaptation body length needed
+		if first && opts != nil {
+			if opts.PCR >= 0 {
+				// flags(1) + PCR(6) = 7 bytes
+				adaptBodyLen = 7
+				forceAdapt = true
+			} else if opts.RandomAccess {
+				// flags(1) = 1 byte
+				adaptBodyLen = 1
+				forceAdapt = true
+			}
 		}
 
 		headerLen := 4
 		remaining := len(pesData) - offset
 		maxPayload := PacketSize - headerLen
 
-		if remaining < maxPayload {
+		if forceAdapt {
+			// Reserve space for the adaptation field (1 byte length + body)
+			minAdaptTotal := 1 + adaptBodyLen // adapt_field_length byte + body
+			maxPayload = PacketSize - headerLen - minAdaptTotal
+
+			if remaining <= maxPayload {
+				// Last (or only) packet — may need extra stuffing
+				stuffingNeeded := maxPayload - remaining
+				totalAdaptBody := adaptBodyLen + stuffingNeeded
+				pkt[3] = 0x30 | (*continuityCounter & 0x0F) // adaptation + payload
+				pkt[4] = byte(totalAdaptBody)
+				writeAdaptationBody(pkt[5:5+totalAdaptBody], opts, stuffingNeeded)
+				headerLen = 4 + 1 + totalAdaptBody
+			} else {
+				// More packets to follow — use minimum adaptation
+				pkt[3] = 0x30 | (*continuityCounter & 0x0F)
+				pkt[4] = byte(adaptBodyLen)
+				writeAdaptationBody(pkt[5:5+adaptBodyLen], opts, 0)
+				headerLen = 4 + 1 + adaptBodyLen
+			}
+			first = false
+		} else if remaining < maxPayload {
 			// Need adaptation field for stuffing
 			stuffingLen := maxPayload - remaining
 			if stuffingLen == 1 {
@@ -126,10 +176,16 @@ func PacketizePES(pid uint16, pesData []byte, continuityCounter *uint8, isKeyfra
 						pkt[i] = 0xFF
 					}
 				}
-				headerLen = 4 + 1 + int(adaptLen) // 4 TS + 1 adapt_len + adapt body
+				headerLen = 4 + 1 + int(adaptLen)
+			}
+			if first {
+				first = false
 			}
 		} else {
 			pkt[3] = 0x10 | (*continuityCounter & 0x0F) // payload only
+			if first {
+				first = false
+			}
 		}
 
 		payloadStart := headerLen
@@ -146,4 +202,37 @@ func PacketizePES(pid uint16, pesData []byte, continuityCounter *uint8, isKeyfra
 	}
 
 	return result
+}
+
+// writeAdaptationBody writes the adaptation field body (flags + optional PCR + stuffing).
+func writeAdaptationBody(buf []byte, opts *PESPacketizeOptions, stuffingBytes int) {
+	flags := byte(0x00)
+	off := 0
+
+	if opts != nil && opts.RandomAccess {
+		flags |= 0x40 // random_access_indicator
+	}
+	if opts != nil && opts.PCR >= 0 {
+		flags |= 0x10 // PCR_flag
+	}
+
+	buf[off] = flags
+	off++
+
+	// Write PCR if requested
+	if opts != nil && opts.PCR >= 0 {
+		pcr90 := opts.PCR * 90
+		buf[off+0] = byte(pcr90 >> 25)
+		buf[off+1] = byte(pcr90 >> 17)
+		buf[off+2] = byte(pcr90 >> 9)
+		buf[off+3] = byte(pcr90 >> 1)
+		buf[off+4] = byte((pcr90&1)<<7) | 0x7E // 6 reserved bits
+		buf[off+5] = 0x00                       // extension = 0
+		off += 6
+	}
+
+	// Fill remaining with stuffing bytes (0xFF)
+	for i := 0; i < stuffingBytes; i++ {
+		buf[off+i] = 0xFF
+	}
 }

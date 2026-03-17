@@ -103,9 +103,8 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 	case "mp4":
 		w.Header().Set("Content-Type", "video/mp4")
 	}
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "close")
 	m.setCORSHeaders(w)
 
 	// Wait for init data (FLV header, FMP4 init segment)

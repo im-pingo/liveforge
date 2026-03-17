@@ -11,6 +11,20 @@ import (
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
+// copyBytes returns a newly allocated copy of the given slice.
+func copyBytes(b []byte) []byte {
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
+}
+
+// bufCopyAndReset returns a copy of buf's content and resets the buffer.
+func bufCopyAndReset(buf *bytes.Buffer) []byte {
+	c := copyBytes(buf.Bytes())
+	buf.Reset()
+	return c
+}
+
 // ensureMuxerCallbacks registers muxer start callbacks for a stream (idempotent).
 func (m *Module) ensureMuxerCallbacks(stream *core.Stream) {
 	m.registeredMu.Lock()
@@ -54,21 +68,21 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		muxer.WriteFrame(&buf, ash)
 	}
 
-	initBytes := make([]byte, buf.Len())
-	copy(initBytes, buf.Bytes())
-	inst.SetInitData(initBytes)
-	buf.Reset()
+	inst.SetInitData(bufCopyAndReset(&buf))
+
+	// Snapshot write cursor before sending GOP cache, so the reader
+	// starts right after the cached frames and we avoid duplicates.
+	startPos := stream.RingBuffer().WriteCursor()
 
 	// Send GOP cache
 	for _, f := range stream.GOPCache() {
 		if err := muxer.WriteFrame(&buf, f); err == nil && buf.Len() > 0 {
-			inst.Buffer.Write(buf.Bytes())
-			buf.Reset()
+			inst.Buffer.Write(bufCopyAndReset(&buf))
 		}
 	}
 
-	// Read live frames from ring buffer
-	reader := stream.RingBuffer().NewReader()
+	// Read live frames from ring buffer (only new frames)
+	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		select {
 		case <-inst.Done:
@@ -86,8 +100,7 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 
 		if err := muxer.WriteFrame(&buf, frame); err == nil && buf.Len() > 0 {
-			inst.Buffer.Write(buf.Bytes())
-			buf.Reset()
+			inst.Buffer.Write(bufCopyAndReset(&buf))
 		}
 	}
 }
@@ -113,15 +126,18 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 	// No init data needed for TS (PAT/PMT sent inline)
 
+	// Snapshot write cursor before sending GOP cache
+	startPos := stream.RingBuffer().WriteCursor()
+
 	// Send GOP cache
 	for _, f := range stream.GOPCache() {
 		if data := muxer.WriteFrame(f); len(data) > 0 {
-			inst.Buffer.Write(data)
+			inst.Buffer.Write(copyBytes(data))
 		}
 	}
 
-	// Read live frames
-	reader := stream.RingBuffer().NewReader()
+	// Read live frames (only new frames)
+	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		select {
 		case <-inst.Done:
@@ -136,7 +152,7 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 
 		if data := muxer.WriteFrame(frame); len(data) > 0 {
-			inst.Buffer.Write(data)
+			inst.Buffer.Write(copyBytes(data))
 		}
 	}
 }
@@ -167,6 +183,9 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	// For FMP4, we buffer a GOP and emit as a segment
 	var gopBuf []*avframe.AVFrame
 
+	// Snapshot write cursor before sending GOP cache
+	startPos := stream.RingBuffer().WriteCursor()
+
 	// Send GOP cache as first segment
 	gopCache := stream.GOPCache()
 	if len(gopCache) > 0 {
@@ -176,8 +195,8 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 	}
 
-	// Read live frames, buffer by GOP
-	reader := stream.RingBuffer().NewReader()
+	// Read live frames, buffer by GOP (only new frames)
+	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		select {
 		case <-inst.Done:

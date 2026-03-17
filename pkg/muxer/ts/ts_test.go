@@ -112,7 +112,7 @@ func TestPacketizePES(t *testing.T) {
 	pesData[2] = 0x01
 
 	var cc uint8
-	result := PacketizePES(PIDVideo, pesData, &cc, false)
+	result := PacketizePES(PIDVideo, pesData, &cc, nil)
 
 	if len(result)%PacketSize != 0 {
 		t.Fatalf("result length %d not multiple of %d", len(result), PacketSize)
@@ -130,7 +130,7 @@ func TestPacketizePESMultiPacket(t *testing.T) {
 	// Payload larger than one TS packet
 	pesData := make([]byte, 500)
 	var cc uint8
-	result := PacketizePES(PIDVideo, pesData, &cc, false)
+	result := PacketizePES(PIDVideo, pesData, &cc, nil)
 
 	numPackets := len(result) / PacketSize
 	if numPackets < 3 {

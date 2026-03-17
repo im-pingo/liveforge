@@ -144,14 +144,20 @@ func (m *Muxer) writeVideoFrame(frame *avframe.AVFrame) []byte {
 	pesHeader := BuildPESHeader(0xE0, frame.PTS, frame.DTS, len(payload))
 	pesData := append(pesHeader, payload...)
 
-	// Insert PCR if needed
+	// Build packetization options: embed PCR in first TS packet if needed,
+	// set random_access_indicator for keyframes. This avoids separate
+	// PCR-only packets that cause continuity counter issues with demuxers.
+	opts := &PESPacketizeOptions{
+		RandomAccess: frame.FrameType.IsKeyframe(),
+		PCR:          -1, // no PCR by default
+	}
 	if m.shouldInsertPCR(frame.DTS) {
-		result = append(result, m.buildPCRPacket(frame.DTS)...)
+		opts.PCR = frame.DTS
 		m.lastPCR = frame.DTS
 	}
 
 	// Packetize into TS
-	tsPackets := PacketizePES(PIDVideo, pesData, &m.videoContinuity, frame.FrameType.IsKeyframe())
+	tsPackets := PacketizePES(PIDVideo, pesData, &m.videoContinuity, opts)
 	result = append(result, tsPackets...)
 
 	return result
@@ -181,7 +187,7 @@ func (m *Muxer) writeAudioFrame(frame *avframe.AVFrame) []byte {
 	pesHeader := BuildPESHeader(0xC0, frame.PTS, frame.PTS, len(payload))
 	pesData := append(pesHeader, payload...)
 
-	tsPackets := PacketizePES(PIDAudio, pesData, &m.audioContinuity, false)
+	tsPackets := PacketizePES(PIDAudio, pesData, &m.audioContinuity, nil)
 	return tsPackets
 }
 
@@ -192,33 +198,6 @@ func (m *Muxer) shouldInsertPCR(dts int64) bool {
 	return dts-m.lastPCR >= MaxPCRInterval
 }
 
-func (m *Muxer) buildPCRPacket(dts int64) []byte {
-	pkt := make([]byte, PacketSize)
-	pkt[0] = SyncByte
-	pkt[1] = byte((PIDPCR >> 8) & 0x1F)
-	pkt[2] = byte(PIDPCR & 0xFF)
-	pkt[3] = 0x20 | (m.videoContinuity & 0x0F) // adaptation only, no payload
-
-	// Adaptation field
-	pkt[4] = PacketSize - 5 // adaptation_field_length
-	pkt[5] = 0x10           // PCR flag
-
-	// PCR: 33-bit base (90kHz) + 6 reserved + 9-bit extension
-	pcr90 := dts * 90
-	pkt[6] = byte(pcr90 >> 25)
-	pkt[7] = byte(pcr90 >> 17)
-	pkt[8] = byte(pcr90 >> 9)
-	pkt[9] = byte(pcr90 >> 1)
-	pkt[10] = byte((pcr90&1)<<7) | 0x7E // 6 reserved bits set to 1
-	pkt[11] = 0x00                       // extension = 0
-
-	// Fill rest with stuffing
-	for i := 12; i < PacketSize; i++ {
-		pkt[i] = 0xFF
-	}
-
-	return pkt
-}
 
 func (m *Muxer) rebuildPATandPMT() []byte {
 	pat := BuildPAT(m.patContinuity)
