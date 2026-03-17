@@ -24,7 +24,7 @@ rtsp:
   rtp_port_range: [10000, 20000]
 
 http_stream:
-  enabled: false
+  enabled: true
   listen: ":8080"
   cors: true
 

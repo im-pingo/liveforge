@@ -10,6 +10,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/module/httpstream"
 	"github.com/im-pingo/liveforge/module/rtmp"
 )
 
@@ -34,6 +35,10 @@ func main() {
 
 	if cfg.RTMP.Enabled {
 		s.RegisterModule(rtmp.NewModule())
+	}
+
+	if cfg.HTTP.Enabled {
+		s.RegisterModule(httpstream.NewModule())
 	}
 
 	if err := s.Init(); err != nil {
