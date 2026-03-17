@@ -64,3 +64,12 @@ func (m *orderTrackModule) Name() string             { return m.name }
 func (m *orderTrackModule) Init(s *Server) error      { return nil }
 func (m *orderTrackModule) Hooks() []HookRegistration { return nil }
 func (m *orderTrackModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
+
+func TestServerStreamHub(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Stream.RingBufferSize = 256
+	s := NewServer(cfg)
+	if s.StreamHub() == nil {
+		t.Fatal("expected StreamHub to be initialized")
+	}
+}

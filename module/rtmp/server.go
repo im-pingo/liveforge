@@ -34,7 +34,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.eventBus = s.GetEventBus()
 
 	cfg := s.Config()
-	m.hub = core.NewStreamHub(cfg.Stream, m.eventBus)
+	m.hub = s.StreamHub()
 
 	ln, err := net.Listen("tcp", cfg.RTMP.Listen)
 	if err != nil {

@@ -6,14 +6,17 @@ import "github.com/im-pingo/liveforge/config"
 type Server struct {
 	config   *config.Config
 	eventBus *EventBus
+	hub      *StreamHub
 	modules  []Module
 }
 
 // NewServer creates a new Server instance.
 func NewServer(cfg *config.Config) *Server {
+	bus := NewEventBus()
 	return &Server{
 		config:   cfg,
-		eventBus: NewEventBus(),
+		eventBus: bus,
+		hub:      NewStreamHub(cfg.Stream, bus),
 	}
 }
 
@@ -22,9 +25,14 @@ func (s *Server) Config() *config.Config {
 	return s.config
 }
 
-// EventBus returns the server's event bus.
+// GetEventBus returns the server's event bus.
 func (s *Server) GetEventBus() *EventBus {
 	return s.eventBus
+}
+
+// StreamHub returns the shared stream hub.
+func (s *Server) StreamHub() *StreamHub {
+	return s.hub
 }
 
 // RegisterModule adds a module to the server.
