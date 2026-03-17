@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"testing"
+	"time"
 )
 
 func TestSharedBufferWriteRead(t *testing.T) {
@@ -51,5 +52,34 @@ func TestSharedBufferOverflow(t *testing.T) {
 	data, ok := r.Read()
 	if !ok || data[0] != 2 {
 		t.Errorf("expected [2], got %v (ok=%v)", data, ok)
+	}
+}
+
+func TestSharedBufferClose(t *testing.T) {
+	sb := NewSharedBuffer(64)
+	sb.Write([]byte{1})
+	r := sb.NewReader()
+
+	data, ok := r.Read()
+	if !ok || data[0] != 1 {
+		t.Fatalf("expected [1], got %v", data)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, ok := r.Read()
+		if ok {
+			t.Error("expected false after Close")
+		}
+		close(done)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	sb.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Read did not unblock after Close")
 	}
 }

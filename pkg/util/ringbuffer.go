@@ -11,6 +11,7 @@ type RingBuffer[T any] struct {
 	size        int64
 	writeCursor atomic.Int64 // next write position (monotonically increasing)
 	signal      chan struct{}
+	closed      atomic.Bool
 }
 
 // NewRingBuffer creates a new ring buffer with the given capacity.
@@ -23,8 +24,11 @@ func NewRingBuffer[T any](size int) *RingBuffer[T] {
 }
 
 // Write adds a value to the ring buffer. If the buffer is full, the oldest
-// value is silently overwritten.
+// value is silently overwritten. No-op if the buffer is closed.
 func (rb *RingBuffer[T]) Write(val T) {
+	if rb.closed.Load() {
+		return
+	}
 	pos := rb.writeCursor.Add(1) - 1
 	rb.buf[pos%rb.size] = val
 
@@ -33,6 +37,22 @@ func (rb *RingBuffer[T]) Write(val T) {
 	case rb.signal <- struct{}{}:
 	default:
 	}
+}
+
+// Close signals all blocked readers to return (zero, false).
+// After Close, Write is a no-op.
+func (rb *RingBuffer[T]) Close() {
+	rb.closed.Store(true)
+	// Wake all blocked readers
+	select {
+	case rb.signal <- struct{}{}:
+	default:
+	}
+}
+
+// IsClosed returns whether the ring buffer has been closed.
+func (rb *RingBuffer[T]) IsClosed() bool {
+	return rb.closed.Load()
 }
 
 // WriteCursor returns the current write position (number of items written).
@@ -68,12 +88,16 @@ type RingReader[T any] struct {
 }
 
 // Read returns the next value, blocking until data is available.
-// Returns (value, true) on success, or (zero, false) if the reader is closed.
+// Returns (value, true) on success, or (zero, false) if the buffer is closed and no data remains.
 func (r *RingReader[T]) Read() (T, bool) {
 	for {
 		val, ok := r.TryRead()
 		if ok {
 			return val, true
+		}
+		if r.rb.closed.Load() {
+			var zero T
+			return zero, false
 		}
 		// Wait for signal from writer
 		<-r.rb.signal

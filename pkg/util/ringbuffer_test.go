@@ -2,6 +2,7 @@ package util
 
 import (
 	"testing"
+	"time"
 )
 
 func TestRingBufferWriteRead(t *testing.T) {
@@ -65,5 +66,45 @@ func TestRingBufferMultipleReaders(t *testing.T) {
 	v2, _ = r2.Read()
 	if v1 != 3 || v2 != 2 {
 		t.Errorf("expected r1=3, r2=2, got r1=%d, r2=%d", v1, v2)
+	}
+}
+
+func TestRingBufferClose(t *testing.T) {
+	rb := NewRingBuffer[int](8)
+	rb.Write(1)
+
+	r := rb.NewReader()
+	val, ok := r.Read()
+	if !ok || val != 1 {
+		t.Fatalf("expected (1, true), got (%d, %v)", val, ok)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, ok := r.Read()
+		if ok {
+			t.Error("expected Read to return false after Close")
+		}
+		close(done)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	rb.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Read did not unblock after Close")
+	}
+}
+
+func TestRingBufferCloseStopsWrite(t *testing.T) {
+	rb := NewRingBuffer[int](4)
+	rb.Write(1)
+	rb.Close()
+	rb.Write(2) // should be no-op
+
+	if rb.WriteCursor() != 1 {
+		t.Errorf("expected cursor=1 after close, got %d", rb.WriteCursor())
 	}
 }

@@ -22,6 +22,11 @@ func (sb *SharedBuffer) Write(packet []byte) {
 	sb.rb.Write(packet)
 }
 
+// Close signals all readers to unblock and return (nil, false).
+func (sb *SharedBuffer) Close() {
+	sb.rb.Close()
+}
+
 // NewReader creates a new reader starting at the oldest available position.
 func (sb *SharedBuffer) NewReader() *SharedBufferReader {
 	return &SharedBufferReader{

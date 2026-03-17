@@ -43,3 +43,78 @@ func TestMuxerManagerRelease(t *testing.T) {
 		t.Errorf("expected 0 subscribers, got %d", mm.SubscriberCount("flv"))
 	}
 }
+
+func TestMuxerManagerStartCallback(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	stream := NewStream("live/test", cfg, bus)
+	mm := NewMuxerManager(stream, 256)
+
+	started := false
+	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
+		started = true
+	})
+
+	mm.GetOrCreateMuxer("flv")
+	if !started {
+		t.Error("start callback was not invoked")
+	}
+
+	// Second subscriber should NOT re-trigger callback
+	started = false
+	mm.GetOrCreateMuxer("flv")
+	if started {
+		t.Error("start callback should not fire for existing muxer")
+	}
+}
+
+func TestMuxerInstanceDoneChannel(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	stream := NewStream("live/test", cfg, bus)
+	mm := NewMuxerManager(stream, 256)
+
+	var capturedInst *MuxerInstance
+	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
+		capturedInst = inst
+	})
+
+	mm.GetOrCreateMuxer("flv")
+
+	select {
+	case <-capturedInst.Done:
+		t.Fatal("Done should not be closed yet")
+	default:
+	}
+
+	mm.ReleaseMuxer("flv")
+
+	select {
+	case <-capturedInst.Done:
+		// success
+	default:
+		t.Fatal("Done should be closed after last release")
+	}
+}
+
+func TestMuxerInstanceInitData(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	stream := NewStream("live/test", cfg, bus)
+	mm := NewMuxerManager(stream, 256)
+
+	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
+		inst.SetInitData([]byte("FLV-HEADER"))
+	})
+
+	_, inst := mm.GetOrCreateMuxer("flv")
+	if string(inst.InitData()) != "FLV-HEADER" {
+		t.Errorf("expected FLV-HEADER, got %s", inst.InitData())
+	}
+
+	// SetInitData should be idempotent
+	inst.SetInitData([]byte("OTHER"))
+	if string(inst.InitData()) != "FLV-HEADER" {
+		t.Error("SetInitData should only work once")
+	}
+}

@@ -47,8 +47,9 @@ type Stream struct {
 	state     StreamState
 	publisher Publisher
 
-	ringBuffer *util.RingBuffer[*avframe.AVFrame]
-	gopCache   []*avframe.AVFrame
+	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
+	muxerManager *MuxerManager
+	gopCache     []*avframe.AVFrame
 
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
@@ -59,13 +60,15 @@ type Stream struct {
 
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, bus *EventBus) *Stream {
-	return &Stream{
+	s := &Stream{
 		key:        key,
 		config:     cfg,
 		state:      StreamStateIdle,
 		ringBuffer: util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
 		eventBus:   bus,
 	}
+	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
+	return s
 }
 
 // Key returns the stream key.
@@ -184,4 +187,9 @@ func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
 // RingBuffer returns the stream's ring buffer for reader creation.
 func (s *Stream) RingBuffer() *util.RingBuffer[*avframe.AVFrame] {
 	return s.ringBuffer
+}
+
+// MuxerManager returns the stream's muxer manager.
+func (s *Stream) MuxerManager() *MuxerManager {
+	return s.muxerManager
 }
