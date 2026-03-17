@@ -43,7 +43,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.listener = ln
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", m.handleStream)
+	mux.HandleFunc("/{path...}", m.handleStream)
 	m.httpSrv = &http.Server{Handler: mux}
 
 	log.Printf("[httpstream] listening on %s", ln.Addr())
