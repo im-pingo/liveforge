@@ -102,3 +102,128 @@ func TestMuxRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestMuxEnhancedVideoH265(t *testing.T) {
+	var buf bytes.Buffer
+	m := NewMuxer()
+
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x26, 0x01, 0x02, 0x03},
+	)
+
+	if err := m.WriteFrame(&buf, frame); err != nil {
+		t.Fatalf("WriteFrame error: %v", err)
+	}
+
+	data := buf.Bytes()
+	if data[0] != TagTypeVideo {
+		t.Errorf("tag type = %d, want %d", data[0], TagTypeVideo)
+	}
+
+	// Enhanced video: first data byte should have 0x80 set
+	videoByte := data[TagHeaderSize]
+	if videoByte&0x80 == 0 {
+		t.Errorf("enhanced flag not set: 0x%02X", videoByte)
+	}
+
+	// FourCC should be "hvc1"
+	fourcc := string(data[TagHeaderSize+1 : TagHeaderSize+5])
+	if fourcc != "hvc1" {
+		t.Errorf("FourCC = %s, want hvc1", fourcc)
+	}
+}
+
+func TestMuxEnhancedVideoAV1(t *testing.T) {
+	var buf bytes.Buffer
+	m := NewMuxer()
+
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecAV1, avframe.FrameTypeKeyframe,
+		100, 100, []byte{0x0A, 0x05, 0x00},
+	)
+
+	if err := m.WriteFrame(&buf, frame); err != nil {
+		t.Fatalf("WriteFrame error: %v", err)
+	}
+
+	data := buf.Bytes()
+	fourcc := string(data[TagHeaderSize+1 : TagHeaderSize+5])
+	if fourcc != "av01" {
+		t.Errorf("FourCC = %s, want av01", fourcc)
+	}
+}
+
+func TestMuxEnhancedVideoSequenceHeader(t *testing.T) {
+	var buf bytes.Buffer
+	m := NewMuxer()
+
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x01, 0x60},
+	)
+
+	if err := m.WriteFrame(&buf, frame); err != nil {
+		t.Fatalf("WriteFrame error: %v", err)
+	}
+
+	data := buf.Bytes()
+	videoByte := data[TagHeaderSize]
+	// Packet type should be 0 (SequenceStart) in lower nibble
+	packetType := videoByte & 0x0F
+	if packetType != ExVideoPacketSequenceStart {
+		t.Errorf("packet type = %d, want %d", packetType, ExVideoPacketSequenceStart)
+	}
+}
+
+func TestMuxEnhancedAudioOpus(t *testing.T) {
+	var buf bytes.Buffer
+	m := NewMuxer()
+
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe,
+		100, 100, []byte{0xFC, 0x01, 0x02},
+	)
+
+	if err := m.WriteFrame(&buf, frame); err != nil {
+		t.Fatalf("WriteFrame error: %v", err)
+	}
+
+	data := buf.Bytes()
+	if data[0] != TagTypeAudio {
+		t.Errorf("tag type = %d, want %d", data[0], TagTypeAudio)
+	}
+
+	// Enhanced audio: first data byte should be 0x90
+	audioByte := data[TagHeaderSize]
+	if audioByte != 0x90 {
+		t.Errorf("enhanced audio byte = 0x%02X, want 0x90", audioByte)
+	}
+
+	// FourCC should be "Opus"
+	fourcc := string(data[TagHeaderSize+1 : TagHeaderSize+5])
+	if fourcc != "Opus" {
+		t.Errorf("FourCC = %s, want Opus", fourcc)
+	}
+}
+
+func TestMuxMP3Audio(t *testing.T) {
+	var buf bytes.Buffer
+	m := NewMuxer()
+
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+		0, 0, []byte{0xFF, 0xFB, 0x90, 0x00},
+	)
+
+	if err := m.WriteFrame(&buf, frame); err != nil {
+		t.Fatalf("WriteFrame error: %v", err)
+	}
+
+	data := buf.Bytes()
+	// MP3 format ID = 2, upper nibble of first audio byte
+	audioFormat := data[TagHeaderSize] >> 4
+	if audioFormat != AudioFormatMP3 {
+		t.Errorf("audio format = %d, want %d", audioFormat, AudioFormatMP3)
+	}
+}

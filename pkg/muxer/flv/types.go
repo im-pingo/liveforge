@@ -22,6 +22,43 @@ const (
 	VideoCodecAV1  uint8 = 13 // Enhanced RTMP
 )
 
+// Enhanced FLV FourCC codes.
+var (
+	FourCCAVC  = [4]byte{'a', 'v', 'c', '1'}
+	FourCCHEVC = [4]byte{'h', 'v', 'c', '1'}
+	FourCCAV1  = [4]byte{'a', 'v', '0', '1'}
+	FourCCVP9  = [4]byte{'v', 'p', '0', '9'}
+)
+
+// Enhanced video packet types (ExVideoTagHeader).
+const (
+	ExVideoPacketSequenceStart  uint8 = 0
+	ExVideoPacketCodedFrames    uint8 = 1
+	ExVideoPacketSequenceEnd    uint8 = 2
+	ExVideoPacketCodedFramesX   uint8 = 3
+)
+
+// IsEnhancedVideoCodec returns true for codecs that use the Enhanced FLV format.
+func IsEnhancedVideoCodec(c avframe.CodecType) bool {
+	return c == avframe.CodecH265 || c == avframe.CodecAV1 || c == avframe.CodecVP9
+}
+
+// VideoCodecToFourCC returns the FourCC for an enhanced video codec.
+func VideoCodecToFourCC(c avframe.CodecType) [4]byte {
+	switch c {
+	case avframe.CodecH264:
+		return FourCCAVC
+	case avframe.CodecH265:
+		return FourCCHEVC
+	case avframe.CodecAV1:
+		return FourCCAV1
+	case avframe.CodecVP9:
+		return FourCCVP9
+	default:
+		return [4]byte{}
+	}
+}
+
 // FLV audio format IDs (upper 4 bits of first audio data byte).
 const (
 	AudioFormatAAC  uint8 = 10
