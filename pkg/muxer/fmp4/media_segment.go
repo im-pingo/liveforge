@@ -1,0 +1,195 @@
+package fmp4
+
+import (
+	"bytes"
+	"encoding/binary"
+
+	"github.com/im-pingo/liveforge/pkg/avframe"
+)
+
+// BuildMediaSegment generates a moof+mdat segment from a slice of frames.
+// Returns the concatenated moof+mdat bytes.
+func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte {
+	if len(frames) == 0 {
+		return nil
+	}
+
+	// Separate video and audio frames
+	var videoFrames, audioFrames []*avframe.AVFrame
+	for _, f := range frames {
+		if f.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		if f.MediaType.IsVideo() {
+			videoFrames = append(videoFrames, f)
+		} else if f.MediaType.IsAudio() {
+			audioFrames = append(audioFrames, f)
+		}
+	}
+
+	var buf bytes.Buffer
+
+	// Build moof
+	var moof bytes.Buffer
+
+	// mfhd
+	mfhd := make([]byte, 4)
+	binary.BigEndian.PutUint32(mfhd, sequenceNumber)
+	WriteFullBox(&moof, BoxMfhd, 0, 0, mfhd)
+
+	// Calculate moof size upfront for data_offset in trun
+	// We'll write a placeholder and fix it after
+	moofSizePos := buf.Len() // will be 0
+
+	// Video traf
+	if len(videoFrames) > 0 {
+		writeTraf(&moof, videoTrackID, videoFrames, timescaleVideo)
+	}
+
+	// Audio traf
+	if len(audioFrames) > 0 {
+		writeTraf(&moof, audioTrackID, audioFrames, 0) // timescale handled in trun
+	}
+
+	moofBytes := moof.Bytes()
+	moofBoxSize := 8 + len(moofBytes)
+
+	// Build mdat
+	var mdatPayload bytes.Buffer
+	for _, f := range videoFrames {
+		mdatPayload.Write(f.Payload)
+	}
+	for _, f := range audioFrames {
+		mdatPayload.Write(f.Payload)
+	}
+
+	// Fix data_offset in trun boxes to point past moof+mdat_header
+	mdatHeaderSize := 8
+	dataOffset := uint32(moofBoxSize + mdatHeaderSize)
+	fixTrunDataOffsets(moofBytes, dataOffset, moofSizePos)
+
+	// Write moof box
+	WriteBox(&buf, BoxMoof, moofBytes)
+
+	// Write mdat box
+	WriteBox(&buf, BoxMdat, mdatPayload.Bytes())
+
+	return buf.Bytes()
+}
+
+func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, timescale uint32) {
+	var traf bytes.Buffer
+
+	// tfhd: track ID + default flags
+	tfhd := make([]byte, 4)
+	binary.BigEndian.PutUint32(tfhd, trackID)
+	// flags: 0x020000 = default-base-is-moof
+	WriteFullBox(&traf, BoxTfhd, 0, 0x020000, tfhd)
+
+	// tfdt: base media decode time
+	if len(frames) > 0 {
+		var dts int64
+		if timescale > 0 {
+			dts = frames[0].DTS * int64(timescale) / 1000
+		} else {
+			dts = frames[0].DTS
+		}
+		tfdt := make([]byte, 8)
+		binary.BigEndian.PutUint64(tfdt, uint64(dts))
+		WriteFullBox(&traf, BoxTfdt, 1, 0, tfdt)
+	}
+
+	// trun: sample entries
+	// flags: 0x000001 (data-offset-present) | 0x000100 (sample-duration-present) |
+	//        0x000200 (sample-size-present) | 0x000400 (sample-flags-present)
+	trunFlags := uint32(0x000001 | 0x000100 | 0x000200 | 0x000400)
+	var trun bytes.Buffer
+	binary.Write(&trun, binary.BigEndian, uint32(len(frames))) // sample_count
+	binary.Write(&trun, binary.BigEndian, uint32(0))           // data_offset (placeholder)
+
+	for i, f := range frames {
+		// Duration: difference to next frame, or default 33ms for video / 23ms for audio
+		var duration uint32
+		if i+1 < len(frames) {
+			dt := frames[i+1].DTS - f.DTS
+			if timescale > 0 {
+				duration = uint32(dt * int64(timescale) / 1000)
+			} else {
+				duration = uint32(dt)
+			}
+		} else {
+			if f.MediaType.IsVideo() {
+				duration = 3000 // ~33ms at 90kHz
+			} else {
+				duration = 1024 // common for AAC
+			}
+		}
+
+		sampleSize := uint32(len(f.Payload))
+
+		// Sample flags: keyframe = 0x02000000, non-keyframe = 0x01010000
+		var sampleFlags uint32
+		if f.FrameType.IsKeyframe() {
+			sampleFlags = 0x02000000
+		} else {
+			sampleFlags = 0x01010000
+		}
+
+		binary.Write(&trun, binary.BigEndian, duration)
+		binary.Write(&trun, binary.BigEndian, sampleSize)
+		binary.Write(&trun, binary.BigEndian, sampleFlags)
+	}
+
+	WriteFullBox(&traf, BoxTrun, 0, trunFlags, trun.Bytes())
+	WriteBox(w, BoxTraf, traf.Bytes())
+}
+
+// fixTrunDataOffsets scans moofBytes for trun boxes and patches the data_offset field.
+func fixTrunDataOffsets(moofBytes []byte, dataOffset uint32, _ int) {
+	// Simple scan for trun box type and patch data_offset
+	trunType := []byte{'t', 'r', 'u', 'n'}
+	offset := 0
+	for offset+8 <= len(moofBytes) {
+		boxSize := int(binary.BigEndian.Uint32(moofBytes[offset : offset+4]))
+		if boxSize < 8 || offset+boxSize > len(moofBytes) {
+			break
+		}
+		if bytes.Equal(moofBytes[offset+4:offset+8], trunType) {
+			// Found trun box: header(8) + version(1) + flags(3) + sample_count(4) + data_offset(4)
+			dataOffsetPos := offset + 8 + 4 + 4 // past fullbox header + sample_count
+			if dataOffsetPos+4 <= len(moofBytes) {
+				binary.BigEndian.PutUint32(moofBytes[dataOffsetPos:], dataOffset)
+			}
+		}
+		offset += boxSize
+	}
+
+	// Also search nested inside traf boxes
+	offset = 0
+	for offset+8 <= len(moofBytes) {
+		boxSize := int(binary.BigEndian.Uint32(moofBytes[offset : offset+4]))
+		if boxSize < 8 || offset+boxSize > len(moofBytes) {
+			break
+		}
+		boxType := moofBytes[offset+4 : offset+8]
+		if bytes.Equal(boxType, []byte{'t', 'r', 'a', 'f'}) {
+			// Search inside traf for trun
+			inner := offset + 8
+			end := offset + boxSize
+			for inner+8 <= end {
+				innerSize := int(binary.BigEndian.Uint32(moofBytes[inner : inner+4]))
+				if innerSize < 8 || inner+innerSize > end {
+					break
+				}
+				if bytes.Equal(moofBytes[inner+4:inner+8], trunType) {
+					dataOffsetPos := inner + 8 + 4 + 4
+					if dataOffsetPos+4 <= end {
+						binary.BigEndian.PutUint32(moofBytes[dataOffsetPos:], dataOffset)
+					}
+				}
+				inner += innerSize
+			}
+		}
+		offset += boxSize
+	}
+}
