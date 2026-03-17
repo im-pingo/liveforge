@@ -54,7 +54,9 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		muxer.WriteFrame(&buf, ash)
 	}
 
-	inst.SetInitData(buf.Bytes())
+	initBytes := make([]byte, buf.Len())
+	copy(initBytes, buf.Bytes())
+	inst.SetInitData(initBytes)
 	buf.Reset()
 
 	// Send GOP cache
@@ -76,7 +78,7 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 
 		frame, ok := reader.Read()
-		if !ok {
+		if !ok || frame == nil {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -129,7 +131,7 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 
 		frame, ok := reader.Read()
-		if !ok {
+		if !ok || frame == nil {
 			return
 		}
 
@@ -185,7 +187,7 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 
 		frame, ok := reader.Read()
-		if !ok {
+		if !ok || frame == nil {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {

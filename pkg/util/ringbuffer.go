@@ -29,8 +29,11 @@ func (rb *RingBuffer[T]) Write(val T) {
 	if rb.closed.Load() {
 		return
 	}
-	pos := rb.writeCursor.Add(1) - 1
+	// Single-producer: store value first, then advance cursor so readers
+	// never see an uninitialized slot.
+	pos := rb.writeCursor.Load()
 	rb.buf[pos%rb.size] = val
+	rb.writeCursor.Store(pos + 1)
 
 	// Non-blocking notify to wake any waiting readers
 	select {
