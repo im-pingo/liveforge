@@ -95,6 +95,18 @@ func (mm *MuxerManager) ReleaseMuxer(format string) {
 	}
 }
 
+// Formats returns a map of active format names to their subscriber counts.
+func (mm *MuxerManager) Formats() map[string]int {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	result := make(map[string]int, len(mm.muxers))
+	for format, inst := range mm.muxers {
+		result[format] = inst.subCount
+	}
+	return result
+}
+
 // SubscriberCount returns the number of subscribers for a given format.
 func (mm *MuxerManager) SubscriberCount(format string) int {
 	mm.mu.Lock()
