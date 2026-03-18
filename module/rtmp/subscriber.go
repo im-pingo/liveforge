@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"net"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -58,7 +59,13 @@ func (s *Subscriber) Close() error {
 func (s *Subscriber) WriteLoop() {
 	defer s.Close()
 
-	// Send sequence headers first (required for decoder initialization)
+	// Wait for video sequence header (SPS/PPS) — required for decoder init.
+	// If publisher hasn't started yet, poll until available or closed.
+	if !s.waitForSequenceHeaders() {
+		return
+	}
+
+	// Send sequence headers
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		if err := s.sendFrame(vsh); err != nil {
 			log.Printf("RTMP subscriber %s: video seq header send error: %v", s.id, err)
@@ -114,6 +121,22 @@ func (s *Subscriber) WriteLoop() {
 
 		if err := s.sendFrame(frame); err != nil {
 			return
+		}
+	}
+}
+
+// waitForSequenceHeaders blocks until at least one sequence header is available,
+// or returns false if the subscriber is closed while waiting.
+func (s *Subscriber) waitForSequenceHeaders() bool {
+	for {
+		if s.stream.VideoSeqHeader() != nil || s.stream.AudioSeqHeader() != nil {
+			return true
+		}
+		select {
+		case <-s.closed:
+			return false
+		default:
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 }

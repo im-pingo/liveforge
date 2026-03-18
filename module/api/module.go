@@ -1,4 +1,4 @@
-package httpstream
+package api
 
 import (
 	"log"
@@ -9,67 +9,61 @@ import (
 	"github.com/im-pingo/liveforge/core"
 )
 
-// Module implements the HTTP streaming module for FLV, TS, and FMP4.
+// Module implements the management API and stream console dashboard.
 type Module struct {
 	server   *core.Server
 	listener net.Listener
 	httpSrv  *http.Server
 	wg       sync.WaitGroup
-
-	// Track which stream instances have muxer callbacks registered.
-	registeredMu sync.Mutex
-	registered   map[*core.Stream]bool
 }
 
-// NewModule creates a new HTTP streaming module.
+// NewModule creates a new API module.
 func NewModule() *Module {
-	return &Module{
-		registered: make(map[*core.Stream]bool),
-	}
+	return &Module{}
 }
 
 // Name returns the module name.
-func (m *Module) Name() string { return "httpstream" }
+func (m *Module) Name() string { return "api" }
 
-// Init initializes the HTTP server.
+// Init initializes the API HTTP server.
 func (m *Module) Init(s *core.Server) error {
 	m.server = s
 	cfg := s.Config()
 
-	ln, err := net.Listen("tcp", cfg.HTTP.Listen)
+	ln, err := net.Listen("tcp", cfg.API.Listen)
 	if err != nil {
 		return err
 	}
 	m.listener = ln
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/{path...}", m.handleWebSocket)
-	mux.HandleFunc("/{path...}", m.handleStream)
+	mux.HandleFunc("GET /api/v1/streams", m.handleStreams)
+	mux.HandleFunc("GET /", m.handleConsole)
 	m.httpSrv = &http.Server{Handler: mux}
 
-	log.Printf("[httpstream] listening on %s", ln.Addr())
+	log.Printf("[api] listening on %s", ln.Addr())
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := m.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[httpstream] serve error: %v", err)
+			log.Printf("[api] serve error: %v", err)
 		}
 	}()
 
 	return nil
 }
 
-// Hooks returns the module's event hooks (none for HTTP streaming).
+// Hooks returns the module's event hooks (none for the API module).
 func (m *Module) Hooks() []core.HookRegistration { return nil }
 
-// Close shuts down the HTTP server.
+// Close shuts down the API server.
 func (m *Module) Close() error {
 	if m.httpSrv != nil {
 		m.httpSrv.Close()
 	}
 	m.wg.Wait()
-	log.Println("[httpstream] stopped")
+	log.Println("[api] stopped")
 	return nil
 }
 

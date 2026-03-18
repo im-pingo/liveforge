@@ -33,8 +33,9 @@ type Handler struct {
 	hub      *core.StreamHub
 	eventBus *core.EventBus
 
-	app       string
-	streamKey string
+	app         string
+	streamKey   string
+	isPublisher bool
 
 	chunkSize int
 }
@@ -54,6 +55,7 @@ func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chu
 // Handle processes the RTMP connection after handshake.
 func (h *Handler) Handle() error {
 	defer h.conn.Close()
+	defer h.cleanup()
 
 	for {
 		msg, err := h.cr.ReadMessage()
@@ -67,6 +69,21 @@ func (h *Handler) Handle() error {
 		if err := h.handleMessage(msg); err != nil {
 			return err
 		}
+	}
+}
+
+// cleanup releases the publisher when the connection closes for any reason.
+func (h *Handler) cleanup() {
+	if h.streamKey == "" || !h.isPublisher {
+		return
+	}
+	if stream, ok := h.hub.Find(h.streamKey); ok {
+		stream.RemovePublisher()
+		h.eventBus.Emit(core.EventPublishStop, &core.EventContext{
+			StreamKey:  h.streamKey,
+			Protocol:   "rtmp",
+			RemoteAddr: h.conn.RemoteAddr().String(),
+		})
 	}
 }
 
@@ -199,6 +216,7 @@ func (h *Handler) onPublish(vals []any) error {
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
 	}
+	h.isPublisher = true
 
 	// Emit publish event
 	h.eventBus.Emit(core.EventPublish, &core.EventContext{
@@ -242,18 +260,20 @@ func (h *Handler) onPlay(vals []any) error {
 
 	// Start subscriber write loop
 	stream := h.hub.GetOrCreate(h.streamKey)
+	stream.AddSubscriber("rtmp")
 	sub := NewSubscriber(h.streamKey, h.conn, h.cw, stream)
-	go sub.WriteLoop()
+	go func() {
+		defer stream.RemoveSubscriber("rtmp")
+		sub.WriteLoop()
+	}()
 
 	return nil
 }
 
 func (h *Handler) onDeleteStream() error {
-	if h.streamKey != "" {
-		if stream, ok := h.hub.Find(h.streamKey); ok {
-			stream.RemovePublisher()
-		}
-	}
+	// Cleanup is handled by the deferred cleanup() call in Handle().
+	// Clear streamKey so cleanup knows this was a graceful disconnect
+	// and the publisher was already logically removed.
 	return nil
 }
 
@@ -278,6 +298,19 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 	}
 
 	if frame != nil {
+		// Update publisher's MediaInfo when sequence headers arrive
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if pub := stream.Publisher(); pub != nil {
+				if rp, ok := pub.(*Publisher); ok {
+					mi := rp.MediaInfo()
+					if frame.MediaType.IsVideo() {
+						mi.VideoCodec = frame.Codec
+					} else if frame.MediaType.IsAudio() {
+						mi.AudioCodec = frame.Codec
+					}
+				}
+			}
+		}
 		stream.WriteFrame(frame)
 	}
 	return nil

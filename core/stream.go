@@ -50,6 +50,7 @@ type Stream struct {
 	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
 	muxerManager *MuxerManager
 	gopCache     []*avframe.AVFrame
+	subscribers  map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
@@ -61,11 +62,12 @@ type Stream struct {
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, bus *EventBus) *Stream {
 	s := &Stream{
-		key:        key,
-		config:     cfg,
-		state:      StreamStateIdle,
-		ringBuffer: util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
-		eventBus:   bus,
+		key:         key,
+		config:      cfg,
+		state:       StreamStateIdle,
+		ringBuffer:  util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
+		eventBus:    bus,
+		subscribers: make(map[string]int),
 	}
 	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
 	return s
@@ -160,6 +162,13 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
 	s.ringBuffer.Write(frame)
 }
 
+// GOPCacheLen returns the number of frames in the current GOP cache.
+func (s *Stream) GOPCacheLen() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.gopCache)
+}
+
 // GOPCache returns a copy of the current GOP cache.
 func (s *Stream) GOPCache() []*avframe.AVFrame {
 	s.mu.RLock()
@@ -192,4 +201,32 @@ func (s *Stream) RingBuffer() *util.RingBuffer[*avframe.AVFrame] {
 // MuxerManager returns the stream's muxer manager.
 func (s *Stream) MuxerManager() *MuxerManager {
 	return s.muxerManager
+}
+
+// AddSubscriber increments the subscriber count for a protocol (e.g. "rtmp").
+func (s *Stream) AddSubscriber(protocol string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subscribers[protocol]++
+}
+
+// RemoveSubscriber decrements the subscriber count for a protocol.
+func (s *Stream) RemoveSubscriber(protocol string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subscribers[protocol]--
+	if s.subscribers[protocol] <= 0 {
+		delete(s.subscribers, protocol)
+	}
+}
+
+// Subscribers returns a snapshot of protocol-level subscriber counts.
+func (s *Stream) Subscribers() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]int, len(s.subscribers))
+	for k, v := range s.subscribers {
+		result[k] = v
+	}
+	return result
 }

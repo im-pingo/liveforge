@@ -30,11 +30,10 @@ func (m *Module) ensureMuxerCallbacks(stream *core.Stream) {
 	m.registeredMu.Lock()
 	defer m.registeredMu.Unlock()
 
-	key := stream.Key()
-	if m.registered[key] {
+	if m.registered[stream] {
 		return
 	}
-	m.registered[key] = true
+	m.registered[stream] = true
 
 	mm := stream.MuxerManager()
 	mm.RegisterMuxerStart("flv", func(inst *core.MuxerInstance, s *core.Stream) {

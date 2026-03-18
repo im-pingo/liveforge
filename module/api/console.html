@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiveForge Console</title>
+<style>
+:root {
+  --bg: #0f0f0f;
+  --surface: #1a1a1a;
+  --surface2: #222;
+  --border: #2a2a2a;
+  --text: #e0e0e0;
+  --text2: #888;
+  --accent: #6c9eff;
+  --green: #4ade80;
+  --yellow: #fbbf24;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --radius: 8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
+
+/* Header */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.logo svg { width: 28px; height: 28px; }
+.logo h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+.logo span { color: var(--text2); font-weight: 400; }
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text2);
+}
+.dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Stats cards */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+.stat-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.stat-value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-value.accent { color: var(--accent); }
+
+/* Table */
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  padding: 12px 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text2);
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 14px 20px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+.stream-key { font-weight: 500; color: #fff; font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; }
+.publisher-id { font-size: 12px; color: var(--text2); font-family: "SF Mono", "Fira Code", monospace; }
+.codec-tag {
+  display: inline-block;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+.codec-tag.video { color: var(--blue); border-color: rgba(96,165,250,0.2); background: rgba(96,165,250,0.08); }
+.codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
+.gop-val { font-variant-numeric: tabular-nums; font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; }
+
+/* State badge */
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+.state-publishing { background: rgba(74,222,128,0.1); color: var(--green); }
+.state-publishing::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.state-idle { background: rgba(136,136,136,0.1); color: var(--text2); }
+.state-no_publisher { background: rgba(251,191,36,0.1); color: var(--yellow); }
+.state-waiting_pull { background: rgba(96,165,250,0.1); color: var(--blue); }
+
+/* Subscriber pills */
+.subs { display: flex; gap: 6px; flex-wrap: wrap; }
+.sub-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+.sub-pill.active {
+  background: rgba(108,158,255,0.12);
+  border-color: rgba(108,158,255,0.25);
+  color: var(--accent);
+}
+.sub-pill .count {
+  background: rgba(255,255,255,0.06);
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.sub-pill.active .count {
+  background: rgba(108,158,255,0.2);
+}
+
+/* Empty state */
+.empty-state {
+  padding: 80px 20px;
+  text-align: center;
+}
+.empty-icon { font-size: 40px; margin-bottom: 16px; opacity: 0.3; }
+.empty-title { font-size: 15px; color: var(--text2); margin-bottom: 6px; }
+.empty-sub { font-size: 13px; color: #555; }
+.empty-sub code {
+  background: var(--surface2);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text2);
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="28" height="28" rx="6" fill="#6c9eff" fill-opacity="0.15"/>
+        <path d="M8 10l4-3v14l-4-3V10zM14 7l6 4v6l-6 4V7z" fill="#6c9eff"/>
+      </svg>
+      <h1>LiveForge <span>Console</span></h1>
+    </div>
+    <div class="status-bar">
+      <span><span class="dot"></span></span>
+      <span id="updated"></span>
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-label">Active Streams</div>
+      <div class="stat-value accent" id="stat-streams">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Publishing</div>
+      <div class="stat-value" id="stat-publishing" style="color:var(--green)">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Subscribers</div>
+      <div class="stat-value" id="stat-subs">0</div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Stream Key</th>
+          <th>State</th>
+          <th>Publisher</th>
+          <th>Codecs</th>
+          <th>GOP</th>
+          <th>Subscribers</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div id="empty" class="empty-state" style="display:none">
+      <div class="empty-icon">&#9655;</div>
+      <div class="empty-title">No active streams</div>
+      <div class="empty-sub">Push a stream to get started, e.g. <code>ffmpeg ... -f flv rtmp://host/live/test</code></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function esc(s) {
+  if (!s) return "";
+  var d = document.createElement("div");
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+
+function refresh() {
+  fetch("/api/v1/streams")
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var streams = data.streams || [];
+      var tbody = document.getElementById("tbody");
+      var empty = document.getElementById("empty");
+      var totalSubs = 0;
+      var publishing = 0;
+
+      for (var i = 0; i < streams.length; i++) {
+        var subs = streams[i].subscribers || {};
+        var keys = Object.keys(subs);
+        for (var j = 0; j < keys.length; j++) totalSubs += subs[keys[j]];
+        if (streams[i].state === "publishing") publishing++;
+      }
+
+      document.getElementById("stat-streams").textContent = streams.length;
+      document.getElementById("stat-publishing").textContent = publishing;
+      document.getElementById("stat-subs").textContent = totalSubs;
+      document.getElementById("updated").textContent = new Date().toLocaleTimeString();
+
+      if (streams.length === 0) {
+        tbody.innerHTML = "";
+        empty.style.display = "block";
+        return;
+      }
+      empty.style.display = "none";
+
+      var html = "";
+      for (var i = 0; i < streams.length; i++) {
+        var s = streams[i];
+
+        // Codecs
+        var codecs = "";
+        if (s.video_codec) codecs += '<span class="codec-tag video">' + esc(s.video_codec) + '</span> ';
+        if (s.audio_codec) codecs += '<span class="codec-tag audio">' + esc(s.audio_codec) + '</span>';
+        if (!codecs) codecs = '<span style="color:#555">—</span>';
+
+        // Subscribers
+        var subHtml = "";
+        var subKeys = Object.keys(s.subscribers || {}).sort();
+        for (var j = 0; j < subKeys.length; j++) {
+          var fmt = subKeys[j];
+          var cnt = s.subscribers[fmt];
+          var cls = cnt > 0 ? "sub-pill active" : "sub-pill";
+          subHtml += '<span class="' + cls + '">' + esc(fmt.toUpperCase()) + ' <span class="count">' + cnt + '</span></span>';
+        }
+        if (!subHtml) subHtml = '<span style="color:#555;font-size:12px">—</span>';
+
+        html += "<tr>"
+          + '<td class="stream-key">' + esc(s.key) + "</td>"
+          + '<td><span class="state state-' + esc(s.state) + '">' + esc(s.state.replace("_", " ")) + '</span></td>'
+          + '<td class="publisher-id">' + (s.publisher ? esc(s.publisher) : '<span style="color:#555">—</span>') + "</td>"
+          + "<td>" + codecs + "</td>"
+          + '<td class="gop-val">' + s.gop_cache_len + "</td>"
+          + '<td><div class="subs">' + subHtml + "</div></td>"
+          + "</tr>";
+      }
+      tbody.innerHTML = html;
+    })
+    .catch(function() {});
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

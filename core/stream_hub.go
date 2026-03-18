@@ -24,12 +24,17 @@ func NewStreamHub(cfg config.StreamConfig, bus *EventBus) *StreamHub {
 }
 
 // GetOrCreate returns an existing stream or creates a new one.
+// If the existing stream is in the destroying state, it is replaced with a fresh stream.
 func (h *StreamHub) GetOrCreate(key string) *Stream {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if s, ok := h.streams[key]; ok {
-		return s
+		if s.State() != StreamStateDestroying {
+			return s
+		}
+		// Stream is being destroyed; replace it with a fresh one.
+		delete(h.streams, key)
 	}
 
 	s := NewStream(key, h.config, h.eventBus)
