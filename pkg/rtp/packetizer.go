@@ -40,16 +40,3 @@ func NewDepacketizer(codec avframe.CodecType) (Depacketizer, error) {
 	}
 }
 
-// H264Packetizer is a stub packetizer for H.264 — replaced with real implementation in Task 6.
-type H264Packetizer struct{}
-
-func (p *H264Packetizer) Packetize(frame *avframe.AVFrame, mtu int) ([]*pionrtp.Packet, error) {
-	return nil, fmt.Errorf("H264Packetizer not yet implemented")
-}
-
-// H264Depacketizer is a stub depacketizer for H.264 — replaced with real implementation in Task 6.
-type H264Depacketizer struct{}
-
-func (d *H264Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, error) {
-	return nil, fmt.Errorf("H264Depacketizer not yet implemented")
-}
