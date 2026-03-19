@@ -97,14 +97,14 @@ type MediaDescription struct {
     Type       string     // "video" | "audio"
     Port       int
     Proto      string     // "RTP/AVP" | "RTP/SAVP"
-    Formats    []int      // payload types
+    Formats    []int      // payload types (numeric only, sufficient for RTP use cases)
     Connection *Connection
     Bandwidth  int
     Attributes []Attribute
 }
 
 type RTPMap struct {
-    PayloadType int
+    PayloadType  int
     EncodingName string
     ClockRate    int
     Channels     int    // audio only, 0 if not specified
@@ -123,7 +123,9 @@ func (md *MediaDescription) FMTP(pt int) string
 func (md *MediaDescription) Control() string         // a=control value
 func (md *MediaDescription) Direction() string        // sendrecv|sendonly|recvonly|inactive
 
-// Builder helpers for generating SDP from stream info
+// Builder helpers for generating SDP from stream info.
+// Uses MediaInfo.SampleRate and MediaInfo.Channels for audio a=rtpmap lines.
+// Maps CodecType to RTP encoding name and clock rate via the payload type table.
 func BuildFromMediaInfo(info *avframe.MediaInfo, baseURL string, serverAddr string) *SessionDescription
 ```
 
@@ -142,13 +144,14 @@ Based on `pion/rtp` for the base `rtp.Packet` type. Custom packetizers/depacketi
 
 ```go
 // Packetizer splits an AVFrame into RTP packets.
-// Stateless — does not track SSRC/seq/timestamp.
+// Does not track SSRC/seq/timestamp — those are managed by Session.
 type Packetizer interface {
     Packetize(frame *avframe.AVFrame, mtu int) ([]*rtp.Packet, error)
 }
 
 // Depacketizer reassembles RTP packets into AVFrames.
 // Stateful — buffers fragments until a complete frame is received.
+// Returns nil AVFrame when the packet is a fragment that doesn't complete a frame yet.
 type Depacketizer interface {
     Depacketize(pkt *rtp.Packet) (*avframe.AVFrame, error)
 }
@@ -177,6 +180,41 @@ func NewSession(pt uint8, clockRate uint32) *Session
 
 // WrapPackets stamps packets with session's SSRC, incrementing seq/timestamp.
 func (s *Session) WrapPackets(pkts []*rtp.Packet, dtsMsec int64) []*rtp.Packet
+```
+
+### RTCP Helpers
+
+RTCP helpers are placed in `pkg/rtp/` for reuse by future WebRTC/SIP modules.
+
+```go
+// pkg/rtp/rtcp.go — minimal RTCP support
+func BuildSR(ssrc uint32, ntpTime uint64, rtpTime uint32, packetCount, octetCount uint32) []byte
+func BuildRR(ssrc uint32, reports []ReceptionReport) []byte
+func ParseSR(data []byte) (*SenderReport, error)
+func ParseRR(data []byte) (*ReceiverReport, error)
+
+type SenderReport struct {
+    SSRC        uint32
+    NTPTime     uint64
+    RTPTime     uint32
+    PacketCount uint32
+    OctetCount  uint32
+}
+
+type ReceiverReport struct {
+    SSRC    uint32
+    Reports []ReceptionReport
+}
+
+type ReceptionReport struct {
+    SSRC             uint32
+    FractionLost     uint8
+    TotalLost        uint32
+    HighestSeq       uint32
+    Jitter           uint32
+    LastSR           uint32
+    DelaySinceLastSR uint32
+}
 ```
 
 ### Packetizer Details
@@ -230,6 +268,7 @@ func (s *Session) WrapPackets(pkts []*rtp.Packet, dtsMsec int64) []*rtp.Packet
 pkg/rtp/
 ├── packetizer.go       — Packetizer/Depacketizer interfaces, NewPacketizer/NewDepacketizer factories
 ├── session.go          — RTP Session state management
+├── rtcp.go             — RTCP SR/RR build/parse helpers
 ├── h264.go             — H264Packetizer, H264Depacketizer (FU-A, STAP-A)
 ├── h264_test.go
 ├── h265.go             — H265Packetizer, H265Depacketizer (FU, AP)
@@ -254,6 +293,7 @@ pkg/rtp/
 ├── g729_test.go
 ├── speex.go            — SpeexPacketizer, SpeexDepacketizer
 ├── speex_test.go
+├── rtcp_test.go
 ├── session_test.go
 └── packetizer_test.go  — Factory tests
 ```
@@ -264,14 +304,14 @@ pkg/rtp/
 
 ```
 module/rtsp/
-├── server.go       — TCP listener, core.Module implementation
-├── conn.go         — RTSP connection: request/response parser, read/write
-├── session.go      — RTSP session state machine, session ID management
-├── handler.go      — Command dispatching: OPTIONS/DESCRIBE/SETUP/PLAY/ANNOUNCE/RECORD/TEARDOWN/GET_PARAMETER
-├── publisher.go    — RTSP Publisher: receives RTP → Depacketize → AVFrame → Stream.WriteFrame
-├── subscriber.go   — RTSP Subscriber: Stream.RingBuffer → AVFrame → Packetize → RTP → send
-├── transport.go    — Transport negotiation + UDP RTP sender/receiver + port manager
-├── interleaved.go  — TCP interleaved frame: $ + channel(1) + length(2) + payload
+├── server.go        — TCP listener, core.Module implementation
+├── conn.go          — RTSP connection: request/response parser, read/write
+├── session.go       — RTSP session state machine, session ID management, timeout
+├── handler.go       — Command dispatching: OPTIONS/DESCRIBE/SETUP/PLAY/PAUSE/ANNOUNCE/RECORD/TEARDOWN/GET_PARAMETER
+├── publisher.go     — RTSP Publisher: receives RTP → Depacketize → AVFrame → Stream.WriteFrame
+├── subscriber.go    — RTSP Subscriber: Stream.RingBuffer → AVFrame → Packetize → RTP → send
+├── transport.go     — Transport negotiation + UDP RTP sender/receiver + port manager
+├── interleaved.go   — TCP interleaved frame: $ + channel(1) + length(2) + payload
 ├── handler_test.go
 ├── publisher_test.go
 ├── subscriber_test.go
@@ -293,14 +333,14 @@ Key headers: `CSeq`, `Session`, `Transport`, `Content-Type`, `Content-Length`.
 type Request struct {
     Method  string
     URL     string
-    Headers map[string]string
+    Headers http.Header  // case-insensitive, supports multiple values per key
     Body    []byte
 }
 
 type Response struct {
     StatusCode int
     Reason     string
-    Headers    map[string]string
+    Headers    http.Header
     Body       []byte
 }
 
@@ -320,10 +360,12 @@ Transitions:
   Announced + SETUP   → Ready (after all tracks setup)
   Ready + PLAY        → Playing
   Ready + RECORD      → Recording
+  Playing + PAUSE     → Ready
   Playing + TEARDOWN  → Closed
   Recording + TEARDOWN → Closed
   Any + TEARDOWN      → Closed
   Any + connection close → Closed
+  Any + session timeout → Closed
 ```
 
 ```go
@@ -345,6 +387,8 @@ type RTSPSession struct {
     StreamKey  string
     Tracks     []*Track       // negotiated tracks
     Transport  TransportMode  // TCP or UDP
+    Timeout    time.Duration  // session timeout (default 60s)
+    lastActive time.Time      // last activity timestamp
     mu         sync.Mutex
 }
 
@@ -365,11 +409,20 @@ type Track struct {
 }
 ```
 
+### Session Timeout
+
+Sessions have a configurable timeout (default 60 seconds). The SETUP response includes `Session: <id>;timeout=60`. Activity that resets the timer:
+- Any RTSP request (PLAY, GET_PARAMETER, TEARDOWN, etc.)
+- Incoming RTCP packets (for UDP sessions)
+- Incoming RTP data (for publish sessions)
+
+A background goroutine in the server checks for expired sessions periodically (every 10s) and cleans them up, closing transport and releasing resources.
+
 ### RTSP Command Handling
 
 **OPTIONS:**
 ```
-Response: Public: OPTIONS, DESCRIBE, SETUP, PLAY, ANNOUNCE, RECORD, TEARDOWN, GET_PARAMETER
+Response: Public: OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, ANNOUNCE, RECORD, TEARDOWN, GET_PARAMETER
 ```
 
 **DESCRIBE** (subscribe path):
@@ -384,14 +437,18 @@ Response: Public: OPTIONS, DESCRIBE, SETUP, PLAY, ANNOUNCE, RECORD, TEARDOWN, GE
 2. If TCP interleaved: allocate channel pair, record in Track
 3. If UDP: allocate server RTP/RTCP port pair from port range, record in Track
 4. Create session if first SETUP, add track to session
-5. Return `200 OK` with negotiated Transport header and `Session` header
+5. Return `200 OK` with negotiated Transport header and `Session: <id>;timeout=60` header
 
 **PLAY:**
 1. Verify session state is Ready, with DESCRIBE flow
-2. Emit `EventSubscribe` on EventBus (triggers auth)
-3. Create RTSP Subscriber, attach to Stream
-4. Start sending RTP packets via negotiated transport
-5. Return `200 OK` with `RTP-Info` header (seq, rtptime per track)
+2. Emit `EventSubscribe` on EventBus (triggers auth + codec check)
+3. If auth or codec check hook returns error: return `401 Unauthorized` or `415 Unsupported Media Type`
+4. Create RTSP Subscriber, attach to Stream
+5. Start sending RTP packets via negotiated transport
+6. Return `200 OK` with `RTP-Info` header (seq, rtptime per track)
+
+**PAUSE:**
+- For live streams: return `200 OK` but delivery continues (live streams cannot be paused meaningfully). The subscriber can be kept alive to allow PLAY resume.
 
 **ANNOUNCE** (publish path):
 1. Parse SDP from body
@@ -413,7 +470,89 @@ Response: Public: OPTIONS, DESCRIBE, SETUP, PLAY, ANNOUNCE, RECORD, TEARDOWN, GE
 4. Return `200 OK`
 
 **GET_PARAMETER:**
-- Used as keepalive. Return `200 OK` with empty body.
+- Used as keepalive. Resets session timeout timer. Return `200 OK` with empty body.
+
+### Subscriber Data Flow
+
+The RTSP subscriber reads directly from `Stream.RingBuffer()` (not via MuxerManager — RTP is per-subscriber due to independent SSRC/seq/timestamp state).
+
+```go
+func (s *RTSPSubscriber) WriteLoop() {
+    // 1. Create RTP Sessions per track from negotiated Track info
+    videoSession := rtp.NewSession(track.PayloadType, track.ClockRate)
+    audioSession := rtp.NewSession(track.PayloadType, track.ClockRate)
+
+    // 2. Create Packetizers per codec from MediaInfo
+    videoPacketizer, _ := rtp.NewPacketizer(stream.MediaInfo().VideoCodec)
+    audioPacketizer, _ := rtp.NewPacketizer(stream.MediaInfo().AudioCodec)
+
+    // 3. Send sequence headers as initial RTP packets
+    //    For H.264: send SPS/PPS via STAP-A packet
+    //    For H.265: send VPS/SPS/PPS via AP packet
+
+    // 4. Send GOP cache with correct RTP timestamps
+    //    Convert each frame's DTS (milliseconds) to RTP timestamp:
+    //    rtpTimestamp = dts * clockRate / 1000
+    for _, frame := range stream.GOPCache() {
+        pkts, _ := packetizer.Packetize(frame, 1400)
+        pkts = session.WrapPackets(pkts, frame.DTS)
+        s.sendPackets(pkts) // via TCP interleaved or UDP
+    }
+
+    // 5. Read live frames from RingBuffer
+    reader := stream.RingBuffer().NewReader()
+    for {
+        frame, ok := reader.Read()
+        if !ok {
+            return // stream closed
+        }
+
+        var packetizer rtp.Packetizer
+        var session *rtp.Session
+        if frame.MediaType.IsVideo() {
+            packetizer = videoPacketizer
+            session = videoSession
+        } else {
+            packetizer = audioPacketizer
+            session = audioSession
+        }
+
+        pkts, err := packetizer.Packetize(frame, 1400)
+        if err != nil {
+            continue
+        }
+        pkts = session.WrapPackets(pkts, frame.DTS)
+        if err := s.sendPackets(pkts); err != nil {
+            return // client disconnected
+        }
+    }
+}
+
+func (s *RTSPSubscriber) sendPackets(pkts []*rtp.Packet) error {
+    for _, pkt := range pkts {
+        data, _ := pkt.Marshal()
+        switch s.transport {
+        case TransportTCP:
+            // Write interleaved frame: $ + channel + length + data
+            s.tcpTransport.WriteInterleaved(s.track.InterleavedRTP, data)
+        case TransportUDP:
+            s.udpTransport.WriteRTP(data)
+        }
+    }
+    return nil
+}
+```
+
+### RTCP in RTSP Context
+
+**Publisher direction (server receiving RTP from client):**
+- Parse incoming SR (Sender Reports) from the publishing client
+- Send RR (Receiver Reports) periodically (every 5s)
+- RTCP uses the same transport as RTP: UDP on RTCP port (RTP port + 1), or TCP interleaved on odd channel
+
+**Subscriber direction (server sending RTP to client):**
+- Send SR periodically (every 5s) with NTP timestamp + RTP timestamp + packet/octet counts
+- Parse incoming RR from the subscribing client for monitoring (log only, no congestion control in Phase 3)
 
 ### Transport Layer
 
@@ -427,24 +566,29 @@ const (
 
 // UDPTransport manages UDP RTP/RTCP sockets for one track.
 type UDPTransport struct {
-    rtpConn   *net.UDPConn
-    rtcpConn  *net.UDPConn
+    rtpConn    *net.UDPConn
+    rtcpConn   *net.UDPConn
     clientAddr *net.UDPAddr
 }
 
 // TCPTransport wraps RTP data in interleaved frames over the RTSP TCP connection.
 type TCPTransport struct {
-    conn       net.Conn
-    mu         sync.Mutex  // serialize writes
+    conn net.Conn
+    mu   sync.Mutex  // serialize writes
 }
 
 // PortManager allocates UDP port pairs from the configured range.
+// Scans from minPort upward in steps of 2, returning the first even port
+// where both port (RTP) and port+1 (RTCP) are free.
 type PortManager struct {
     minPort int
     maxPort int
     mu      sync.Mutex
     used    map[int]bool
 }
+
+func (pm *PortManager) Allocate() (rtpPort, rtcpPort int, err error)
+func (pm *PortManager) Release(rtpPort int)
 ```
 
 **TCP Interleaved Frame Format:**
@@ -454,30 +598,6 @@ $ (0x24) | channel (1 byte) | length (2 bytes big-endian) | RTP/RTCP data
 
 Even channels = RTP, odd channels = RTCP (convention: channel 0/1 for first track, 2/3 for second).
 
-### UDP Port Management
-
-Port range from config (`rtsp.rtp_port_range: [10000, 20000]`). Allocates pairs of consecutive ports (even for RTP, odd for RTCP). Released on TEARDOWN or connection close.
-
-### RTCP Support
-
-Minimal RTCP for protocol correctness:
-
-**Publisher direction (receiving RTP):**
-- Parse incoming SR (Sender Reports) for timing sync
-- Send RR (Receiver Reports) periodically (every 5s)
-
-**Subscriber direction (sending RTP):**
-- Send SR periodically (every 5s) with NTP timestamp + RTP timestamp + packet/octet counts
-- Parse incoming RR for monitoring (log only, no congestion control in Phase 3)
-
-```go
-// rtcp.go — minimal RTCP support
-func BuildSR(ssrc uint32, ntpTime uint64, rtpTime uint32, packetCount, octetCount uint32) []byte
-func BuildRR(ssrc uint32, reports []ReceptionReport) []byte
-func ParseSR(data []byte) (*SenderReport, error)
-func ParseRR(data []byte) (*ReceiverReport, error)
-```
-
 ### Integration with Core
 
 - `server.go` implements `core.Module` interface
@@ -485,9 +605,21 @@ func ParseRR(data []byte) (*ReceiverReport, error)
 - Publisher implements `core.Publisher` interface
 - Subscriber reads directly from `Stream.RingBuffer()` (not via MuxerManager — RTP is per-subscriber)
 - Events emitted: `EventPublish`, `EventPublishStop`, `EventSubscribe`, `EventSubscribeStop`
-- Auth module hooks into these events for token/callback verification
+- Auth module hooks into `EventPublish`/`EventSubscribe` events (sync, priority 10) for token/callback verification
+- CodecCheck module hooks into `EventSubscribe` (sync, priority 15) to verify codec compatibility between stream codecs and RTSP-supported codecs. Returns `415 Unsupported Media Type` if incompatible.
 
 ### Config
+
+Uses the existing `RTSPConfig` already defined in `config/config.go`:
+
+```go
+// Already exists in config/config.go
+type RTSPConfig struct {
+    Enabled      bool   `yaml:"enabled"`
+    Listen       string `yaml:"listen"`
+    RTPPortRange []int  `yaml:"rtp_port_range"` // slice, validated at startup to contain exactly 2 elements
+}
+```
 
 ```yaml
 rtsp:
@@ -496,30 +628,24 @@ rtsp:
   rtp_port_range: [10000, 20000]
 ```
 
-Add to `config.Config`:
-```go
-type RTSPConfig struct {
-    Enabled      bool   `yaml:"enabled"`
-    Listen       string `yaml:"listen"`
-    RTPPortRange [2]int `yaml:"rtp_port_range"`
-}
-```
-
 ## Error Handling
 
 - Unknown stream in DESCRIBE/PLAY: `404 Not Found`
 - Stream exists but no publisher: `503 Service Unavailable`
 - Auth failure (from EventBus hook): `401 Unauthorized`
+- Codec incompatibility (from CodecCheck hook): `415 Unsupported Media Type`
 - Unsupported transport: `461 Unsupported Transport`
 - Session not found: `454 Session Not Found`
 - Invalid state transition: `455 Method Not Valid In This State`
 - Port range exhausted: `503 Service Unavailable`
+- Session timeout: silent cleanup (no response sent — session already expired)
 
 ## Testing Strategy
 
 1. **Unit tests** for SDP: parse/marshal round-trip, builder output
 2. **Unit tests** for RTP: per-codec packetize/depacketize round-trip with known payloads
-3. **Unit tests** for RTSP: request/response parsing, session state machine
-4. **Integration test**: RTMP push → RTSP pull with simulated RTSP client
-5. **Integration test**: RTSP push → RTMP pull with simulated RTSP publisher
-6. **E2E test**: `ffmpeg -f rtsp` push + `ffplay rtsp://` pull
+3. **Unit tests** for RTCP: SR/RR build/parse round-trip
+4. **Unit tests** for RTSP: request/response parsing, session state machine, session timeout
+5. **Integration test**: RTMP push → RTSP pull with simulated RTSP client
+6. **Integration test**: RTSP push → RTMP pull with simulated RTSP publisher
+7. **E2E test**: `ffmpeg -f rtsp` push + `ffplay rtsp://` pull
