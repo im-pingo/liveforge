@@ -25,6 +25,16 @@ func NewPacketizer(codec avframe.CodecType) (Packetizer, error) {
 	switch codec {
 	case avframe.CodecH264:
 		return &H264Packetizer{}, nil
+	case avframe.CodecH265:
+		return &H265Packetizer{}, nil
+	case avframe.CodecAAC:
+		return &AACPacketizer{}, nil
+	case avframe.CodecOpus:
+		return &OpusPacketizer{}, nil
+	case avframe.CodecG711U:
+		return &G711Packetizer{}, nil
+	case avframe.CodecG711A:
+		return &G711Packetizer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported codec for packetizer: %v", codec)
 	}
@@ -35,6 +45,16 @@ func NewDepacketizer(codec avframe.CodecType) (Depacketizer, error) {
 	switch codec {
 	case avframe.CodecH264:
 		return &H264Depacketizer{}, nil
+	case avframe.CodecH265:
+		return &H265Depacketizer{}, nil
+	case avframe.CodecAAC:
+		return &AACDepacketizer{}, nil
+	case avframe.CodecOpus:
+		return &OpusDepacketizer{}, nil
+	case avframe.CodecG711U:
+		return &G711Depacketizer{Codec: avframe.CodecG711U}, nil
+	case avframe.CodecG711A:
+		return &G711Depacketizer{Codec: avframe.CodecG711A}, nil
 	default:
 		return nil, fmt.Errorf("unsupported codec for depacketizer: %v", codec)
 	}
