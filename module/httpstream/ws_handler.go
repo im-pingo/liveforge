@@ -28,6 +28,18 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	streamKey := app + "/" + key
+
+	// Emit subscribe event (auth hooks can reject)
+	if err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "ws-" + format,
+		RemoteAddr: r.RemoteAddr,
+		Params:     queryToMap(r.URL.Query()),
+	}); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	stream, found := m.server.StreamHub().Find(streamKey)
 	if !found || stream.State() != core.StreamStatePublishing {
 		http.Error(w, "stream not found or not publishing", http.StatusNotFound)

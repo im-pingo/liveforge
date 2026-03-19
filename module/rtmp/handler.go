@@ -36,6 +36,7 @@ type Handler struct {
 	app         string
 	streamKey   string
 	isPublisher bool
+	appParams   map[string]string // params from connect (app field query string)
 
 	chunkSize int
 }
@@ -151,7 +152,13 @@ func (h *Handler) onConnect(vals []any) error {
 	if len(vals) >= 3 {
 		if obj, ok := vals[2].(map[string]any); ok {
 			if app, ok := obj["app"].(string); ok {
-				h.app = app
+				// Parse query string from app field (e.g. "live?token=xxx")
+				if parts := strings.SplitN(app, "?", 2); len(parts) == 2 {
+					h.app = parts[0]
+					h.appParams = parseQueryParams(parts[1])
+				} else {
+					h.app = app
+				}
 			}
 		}
 	}
@@ -204,7 +211,22 @@ func (h *Handler) onCreateStream(vals []any) error {
 func (h *Handler) onPublish(vals []any) error {
 	if len(vals) >= 4 {
 		if name, ok := vals[3].(string); ok {
-			h.streamKey = h.app + "/" + name
+			// Parse query string from stream name (e.g. "test?token=xxx")
+			cleanName, params := splitNameParams(name)
+			h.streamKey = h.app + "/" + cleanName
+			// Merge app-level params with stream-level params (stream-level wins)
+			mergedParams := mergeParams(h.appParams, params)
+
+			// Emit publish event BEFORE action — auth hooks can reject
+			if err := h.eventBus.Emit(core.EventPublish, &core.EventContext{
+				StreamKey:  h.streamKey,
+				Protocol:   "rtmp",
+				RemoteAddr: h.conn.RemoteAddr().String(),
+				Params:     mergedParams,
+			}); err != nil {
+				_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
+				return fmt.Errorf("publish %s: %w", h.streamKey, err)
+			}
 		}
 	}
 	if h.streamKey == "" {
@@ -218,13 +240,6 @@ func (h *Handler) onPublish(vals []any) error {
 	}
 	h.isPublisher = true
 
-	// Emit publish event
-	h.eventBus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  h.streamKey,
-		Protocol:   "rtmp",
-		RemoteAddr: h.conn.RemoteAddr().String(),
-	})
-
 	// Send onStatus(NetStream.Publish.Start)
 	return h.sendOnStatus("status", "NetStream.Publish.Start", "Publishing started")
 }
@@ -232,21 +247,26 @@ func (h *Handler) onPublish(vals []any) error {
 func (h *Handler) onPlay(vals []any) error {
 	if len(vals) >= 4 {
 		if name, ok := vals[3].(string); ok {
-			// Remove query string if present
-			name = strings.SplitN(name, "?", 2)[0]
-			h.streamKey = h.app + "/" + name
+			// Parse query string from stream name
+			cleanName, params := splitNameParams(name)
+			h.streamKey = h.app + "/" + cleanName
+			mergedParams := mergeParams(h.appParams, params)
+
+			// Emit subscribe event BEFORE action — auth hooks can reject
+			if err := h.eventBus.Emit(core.EventSubscribe, &core.EventContext{
+				StreamKey:  h.streamKey,
+				Protocol:   "rtmp",
+				RemoteAddr: h.conn.RemoteAddr().String(),
+				Params:     mergedParams,
+			}); err != nil {
+				_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
+				return fmt.Errorf("play %s: %w", h.streamKey, err)
+			}
 		}
 	}
 	if h.streamKey == "" {
 		return fmt.Errorf("play: missing stream name")
 	}
-
-	// Emit subscribe event
-	h.eventBus.Emit(core.EventSubscribe, &core.EventContext{
-		StreamKey:  h.streamKey,
-		Protocol:   "rtmp",
-		RemoteAddr: h.conn.RemoteAddr().String(),
-	})
 
 	// Send StreamBegin user control message
 	if err := h.sendStreamBegin(1); err != nil {
@@ -362,6 +382,47 @@ func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
 	}
 
 	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, data[2:])
+}
+
+// splitNameParams splits "test?token=xxx&key=val" into ("test", {"token":"xxx","key":"val"}).
+func splitNameParams(name string) (string, map[string]string) {
+	parts := strings.SplitN(name, "?", 2)
+	if len(parts) == 1 {
+		return name, nil
+	}
+	return parts[0], parseQueryParams(parts[1])
+}
+
+// parseQueryParams parses "key=val&key2=val2" into a map.
+func parseQueryParams(query string) map[string]string {
+	params := make(map[string]string)
+	for _, pair := range strings.Split(query, "&") {
+		if pair == "" {
+			continue
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) == 2 {
+			params[kv[0]] = kv[1]
+		} else {
+			params[kv[0]] = ""
+		}
+	}
+	return params
+}
+
+// mergeParams merges base and override params, with override taking precedence.
+func mergeParams(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(base)+len(override))
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range override {
+		result[k] = v
+	}
+	return result
 }
 
 // Protocol messages

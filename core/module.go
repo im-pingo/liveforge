@@ -36,6 +36,7 @@ type EventContext struct {
 	StreamKey  string
 	Protocol   string
 	RemoteAddr string
+	Params     map[string]string // URL query params (e.g. "token" -> "xxx")
 	Extra      map[string]any
 }
 

@@ -68,8 +68,20 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up stream
 	streamKey := app + "/" + key
+
+	// Emit subscribe event (auth hooks can reject)
+	if err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "http-" + format,
+		RemoteAddr: r.RemoteAddr,
+		Params:     queryToMap(r.URL.Query()),
+	}); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Look up stream
 	stream, found := m.server.StreamHub().Find(streamKey)
 	if !found || stream.State() != core.StreamStatePublishing {
 		http.Error(w, "stream not found or not publishing", http.StatusNotFound)
@@ -78,6 +90,20 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[httpstream] %s subscriber for %s from %s", format, streamKey, r.RemoteAddr)
 	m.serveStream(w, r, format, stream)
+}
+
+// queryToMap converts url.Values to a flat map (first value wins).
+func queryToMap(vals map[string][]string) map[string]string {
+	if len(vals) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(vals))
+	for k, v := range vals {
+		if len(v) > 0 {
+			m[k] = v[0]
+		}
+	}
+	return m
 }
 
 func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format string, stream *core.Stream) {

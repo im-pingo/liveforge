@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/im-pingo/liveforge/core"
@@ -39,7 +40,12 @@ func (m *Module) Init(s *core.Server) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/streams", m.handleStreams)
 	mux.HandleFunc("GET /", m.handleConsole)
-	m.httpSrv = &http.Server{Handler: mux}
+
+	var handler http.Handler = mux
+	if token := cfg.API.Auth.BearerToken; token != "" {
+		handler = bearerAuthMiddleware(token, mux)
+	}
+	m.httpSrv = &http.Server{Handler: handler}
 
 	log.Printf("[api] listening on %s", ln.Addr())
 
@@ -73,4 +79,22 @@ func (m *Module) Addr() net.Addr {
 		return m.listener.Addr()
 	}
 	return nil
+}
+
+// bearerAuthMiddleware protects API endpoints (but not the console) with a bearer token.
+func bearerAuthMiddleware(token string, next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth for console (non-API) paths
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || auth[7:] != token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
 }

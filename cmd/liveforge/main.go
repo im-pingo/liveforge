@@ -11,6 +11,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/module/api"
+	"github.com/im-pingo/liveforge/module/auth"
 	"github.com/im-pingo/liveforge/module/httpstream"
 	"github.com/im-pingo/liveforge/module/rtmp"
 )
@@ -33,6 +34,12 @@ func main() {
 	}
 
 	s := core.NewServer(cfg)
+
+	// Auth module must be registered before protocol modules
+	// so its hooks are in place when connections arrive.
+	if cfg.Auth.Enabled {
+		s.RegisterModule(auth.NewModule())
+	}
 
 	if cfg.RTMP.Enabled {
 		s.RegisterModule(rtmp.NewModule())
