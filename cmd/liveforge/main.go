@@ -14,6 +14,7 @@ import (
 	"github.com/im-pingo/liveforge/module/auth"
 	"github.com/im-pingo/liveforge/module/httpstream"
 	"github.com/im-pingo/liveforge/module/rtmp"
+	"github.com/im-pingo/liveforge/module/rtsp"
 )
 
 var version = "dev"
@@ -43,6 +44,10 @@ func main() {
 
 	if cfg.RTMP.Enabled {
 		s.RegisterModule(rtmp.NewModule())
+	}
+
+	if cfg.RTSP.Enabled {
+		s.RegisterModule(rtsp.NewModule())
 	}
 
 	if cfg.HTTP.Enabled {
