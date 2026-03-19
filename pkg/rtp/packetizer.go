@@ -43,6 +43,12 @@ func NewPacketizer(codec avframe.CodecType) (Packetizer, error) {
 		return &G729Packetizer{}, nil
 	case avframe.CodecSpeex:
 		return &SpeexPacketizer{}, nil
+	case avframe.CodecVP8:
+		return &VP8Packetizer{}, nil
+	case avframe.CodecVP9:
+		return &VP9Packetizer{}, nil
+	case avframe.CodecAV1:
+		return &AV1Packetizer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported codec for packetizer: %v", codec)
 	}
@@ -71,6 +77,12 @@ func NewDepacketizer(codec avframe.CodecType) (Depacketizer, error) {
 		return &G729Depacketizer{}, nil
 	case avframe.CodecSpeex:
 		return &SpeexDepacketizer{}, nil
+	case avframe.CodecVP8:
+		return &VP8Depacketizer{}, nil
+	case avframe.CodecVP9:
+		return &VP9Depacketizer{}, nil
+	case avframe.CodecAV1:
+		return &AV1Depacketizer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported codec for depacketizer: %v", codec)
 	}
