@@ -12,6 +12,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
@@ -97,6 +98,10 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// sequence numbers, timestamps, and RTP header extensions.
 	var videoTrack, audioTrack *webrtc.TrackLocalStaticSample
 
+	// pliCh signals the feed loop to immediately send a keyframe when the
+	// browser requests one via PLI or FIR. Buffered so drainRTCP never blocks.
+	pliCh := make(chan struct{}, 1)
+
 	// drainRTCP consumes RTCP packets from an RTPSender to prevent the
 	// sender's read buffer from filling up and blocking WriteSample.
 	drainRTCP := func(sender *webrtc.RTPSender) {
@@ -105,6 +110,29 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 			for {
 				if _, _, err := sender.Read(buf); err != nil {
 					return
+				}
+			}
+		}()
+	}
+
+	// readVideoRTCP reads RTCP from the video sender and detects PLI/FIR
+	// requests. When detected, it signals the feed loop to send a keyframe.
+	readVideoRTCP := func(sender *webrtc.RTPSender) {
+		go func() {
+			for {
+				pkts, _, err := sender.ReadRTCP()
+				if err != nil {
+					return
+				}
+				for _, pkt := range pkts {
+					switch pkt.(type) {
+					case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+						log.Printf("[webrtc] WHEP session %s received PLI/FIR", sessionID)
+						select {
+						case pliCh <- struct{}{}:
+						default:
+						}
+					}
 				}
 			}
 		}()
@@ -120,7 +148,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				if sender, err := pc.AddTrack(vt); err == nil {
 					videoTrack = vt
-					drainRTCP(sender)
+					readVideoRTCP(sender)
 					restrictTransceiverCodec(pc, vt, mime)
 				}
 			}
@@ -174,8 +202,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 			default:
 				close(connected)
 			}
-		case webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed,
-			webrtc.ICEConnectionStateDisconnected:
+		case webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
 			stream.RemoveSubscriber("webrtc")
 			m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
 				StreamKey:  streamKey,
@@ -226,7 +253,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	// Start the feed goroutine. It will wait for the connection to be
 	// established before sending any media data.
-	go whepFeedLoop(stream, videoTrack, audioTrack, sess.done, connected, mode)
+	go whepFeedLoop(stream, videoTrack, audioTrack, sess.done, connected, pliCh, mode)
 
 	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
@@ -249,7 +276,10 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 // mode controls startup behavior:
 //   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
 //   - "live": send GOP cache (paced at 10x speed), then live frames.
-func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocalStaticSample, done <-chan struct{}, connected <-chan struct{}, mode string) {
+//
+// pliCh is signaled when the browser sends a PLI or FIR RTCP request, asking
+// for an immediate keyframe to recover from decoder corruption.
+func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocalStaticSample, done <-chan struct{}, connected <-chan struct{}, pliCh <-chan struct{}, mode string) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
@@ -383,6 +413,46 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 		}
 	}
 
+	// sendKeyframeNow sends the most recent keyframe from GOP cache in
+	// response to a PLI/FIR request. This lets the browser recover from
+	// decoder corruption without waiting for the next live keyframe (which
+	// could be 2 seconds away), dramatically reducing freeze duration.
+	sendKeyframeNow := func() {
+		if videoTrack == nil {
+			return
+		}
+		// Refresh SPS/PPS from current sequence header.
+		if sh := stream.VideoSeqHeader(); sh != nil {
+			spsppsBuf = pkgrtp.ToAnnexB(sh.Payload, true)
+		}
+		gopCache := stream.GOPCache()
+		for _, frame := range gopCache {
+			if !frame.MediaType.IsVideo() {
+				continue
+			}
+			if frame.FrameType != avframe.FrameTypeKeyframe {
+				continue
+			}
+			// Found the keyframe — build payload with SPS/PPS prepended.
+			payload := pkgrtp.ToAnnexB(frame.Payload, false)
+			if len(payload) == 0 {
+				break
+			}
+			if len(spsppsBuf) > 0 {
+				combined := make([]byte, len(spsppsBuf)+len(payload))
+				copy(combined, spsppsBuf)
+				copy(combined[len(spsppsBuf):], payload)
+				payload = combined
+			}
+			_ = videoTrack.WriteSample(media.Sample{
+				Data:     payload,
+				Duration: 40 * time.Millisecond,
+			})
+			log.Printf("[webrtc] PLI response: sent keyframe (%d bytes)", len(payload))
+			break
+		}
+	}
+
 	// Live frame loop: start reading only NEW frames (after snapshot).
 	// In realtime mode, skip all frames until the first video keyframe
 	// arrives, then start sending from that keyframe onward.
@@ -410,6 +480,8 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 		select {
 		case <-done:
 			return
+		case <-pliCh:
+			sendKeyframeNow()
 		case <-stream.RingBuffer().Signal():
 		}
 	}

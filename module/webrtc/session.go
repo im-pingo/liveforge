@@ -31,7 +31,7 @@ func newSession(id string, pc *webrtc.PeerConnection, streamKey, role string, m 
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("[webrtc] session %s ICE state: %s", id, state)
-		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateDisconnected {
+		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
 			s.Close()
 		}
 	})

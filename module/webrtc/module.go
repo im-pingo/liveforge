@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -59,9 +60,18 @@ func (m *Module) Init(s *core.Server) error {
 		return err
 	}
 
+	// Register interceptors: NACK responder (retransmission), TWCC sender (congestion control),
+	// and RTCP report generation. Without these, browser NACK requests go unanswered,
+	// causing packet loss → decoder freeze → visible stutter.
+	ir := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
+		return err
+	}
+
 	m.api = webrtc.NewAPI(
 		webrtc.WithSettingEngine(se),
 		webrtc.WithMediaEngine(me),
+		webrtc.WithInterceptorRegistry(ir),
 	)
 
 	// Start HTTP signaling server.
