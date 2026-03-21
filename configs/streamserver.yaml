@@ -129,3 +129,6 @@ api:
   listen: ":8090"
   auth:
     bearer_token: "${API_TOKEN}"
+  console:
+    username: "admin"
+    password: "admin"
