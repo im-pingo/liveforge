@@ -732,10 +732,10 @@ function playFMP4(streamKey) {
   });
 }
 
-function playWHEP(streamKey) {
+function playWHEP(streamKey, mode) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.webrtc);
-  var url = "http://" + location.hostname + ":" + port + "/webrtc/whep/" + streamKey;
+  var url = "http://" + location.hostname + ":" + port + "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime");
   setPlayerURL(url);
   setPlayerStatus("Negotiating WebRTC...");
 
@@ -814,7 +814,8 @@ function openPlayer(streamKey) {
     protocols.push({ id: "fmp4", label: "FMP4", fn: playFMP4 });
   }
   if (endpoints.webrtc) {
-    protocols.push({ id: "whep", label: "WebRTC", fn: playWHEP });
+    protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime"); } });
+    protocols.push({ id: "whep-live", label: "WebRTC-Live", fn: function(k) { playWHEP(k, "live"); } });
   }
 
   if (protocols.length === 0) {

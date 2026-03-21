@@ -97,6 +97,19 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// sequence numbers, timestamps, and RTP header extensions.
 	var videoTrack, audioTrack *webrtc.TrackLocalStaticSample
 
+	// drainRTCP consumes RTCP packets from an RTPSender to prevent the
+	// sender's read buffer from filling up and blocking WriteSample.
+	drainRTCP := func(sender *webrtc.RTPSender) {
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				if _, _, err := sender.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
 	if info.HasVideo() {
 		mime := codecToMime(info.VideoCodec)
 		if mime != "" {
@@ -105,9 +118,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				"video", "liveforge",
 			)
 			if err == nil {
-				if _, err := pc.AddTrack(vt); err == nil {
+				if sender, err := pc.AddTrack(vt); err == nil {
 					videoTrack = vt
-					// Restrict the transceiver to only the codec we're sending.
+					drainRTCP(sender)
 					restrictTransceiverCodec(pc, vt, mime)
 				}
 			}
@@ -130,8 +143,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				"audio", "liveforge",
 			)
 			if err == nil {
-				if _, err := pc.AddTrack(at); err == nil {
+				if sender, err := pc.AddTrack(at); err == nil {
 					audioTrack = at
+					drainRTCP(sender)
 					restrictTransceiverCodec(pc, at, mime)
 				}
 			}
@@ -202,9 +216,17 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	<-gatherComplete
 
+	// Determine playback mode from query parameter.
+	// "realtime" (default): skip GOP cache, wait for next live keyframe.
+	// "live": send GOP cache like other protocols for immediate playback.
+	mode := r.URL.Query().Get("mode")
+	if mode != "live" {
+		mode = "realtime"
+	}
+
 	// Start the feed goroutine. It will wait for the connection to be
 	// established before sending any media data.
-	go whepFeedLoop(stream, videoTrack, audioTrack, sess.done, connected)
+	go whepFeedLoop(stream, videoTrack, audioTrack, sess.done, connected, mode)
 
 	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
@@ -223,17 +245,20 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 // whepFeedLoop reads AVFrames from the stream's RingBuffer and writes them
 // to the WebRTC tracks via pion's WriteSample API. It waits for the peer
 // connection to be established before sending any data.
-func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocalStaticSample, done <-chan struct{}, connected <-chan struct{}) {
+//
+// mode controls startup behavior:
+//   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
+//   - "live": send GOP cache (paced at 10x speed), then live frames.
+func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocalStaticSample, done <-chan struct{}, connected <-chan struct{}, mode string) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
-		log.Printf("[webrtc] peer connected, starting media feed")
+		log.Printf("[webrtc] peer connected, starting media feed (mode=%s)", mode)
 	case <-done:
 		return
 	}
 
-	// Snapshot write position before sending GOP cache, so the live reader
-	// starts right after the snapshot — no duplicate frames from GOP cache.
+	// Snapshot write position so the live reader starts from here.
 	startPos := stream.RingBuffer().WriteCursor()
 
 	// Track the last DTS to compute sample durations.
@@ -332,21 +357,49 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 		}
 	}
 
-	// Send GOP cache so the subscriber gets an immediate keyframe
-	// (with SPS/PPS prepended).
-	for _, frame := range stream.GOPCache() {
-		if frame.MediaType.IsVideo() {
-			writeVideoSample(frame)
-		} else if frame.MediaType.IsAudio() {
-			writeAudioSample(frame)
+	// Live mode: send GOP cache so the subscriber gets an immediate keyframe,
+	// paced at 10x real-time speed to avoid flooding the browser's jitter buffer.
+	if mode == "live" {
+		gopCache := stream.GOPCache()
+		var prevDTS int64
+		for _, frame := range gopCache {
+			if frame.MediaType.IsVideo() {
+				writeVideoSample(frame)
+			} else if frame.MediaType.IsAudio() {
+				writeAudioSample(frame)
+			}
+			if frame.DTS > 0 && prevDTS > 0 {
+				dtMs := frame.DTS - prevDTS
+				if dtMs > 0 {
+					sleep := time.Duration(dtMs) * time.Millisecond / 10
+					if sleep > 0 && sleep < 50*time.Millisecond {
+						time.Sleep(sleep)
+					}
+				}
+			}
+			if frame.DTS > 0 {
+				prevDTS = frame.DTS
+			}
 		}
 	}
 
-	// Live frame loop: start reading only NEW frames (after GOP cache snapshot).
+	// Live frame loop: start reading only NEW frames (after snapshot).
+	// In realtime mode, skip all frames until the first video keyframe
+	// arrives, then start sending from that keyframe onward.
+	gotKeyframe := mode == "live" // live mode already has GOP cache, no need to wait
 	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		frame, ok := reader.TryRead()
 		if ok {
+			// Realtime mode: discard frames until first keyframe.
+			if !gotKeyframe {
+				if frame.MediaType.IsVideo() && frame.FrameType == avframe.FrameTypeKeyframe {
+					gotKeyframe = true
+					log.Printf("[webrtc] realtime mode: got first keyframe, starting send")
+				} else {
+					continue
+				}
+			}
 			if frame.MediaType.IsVideo() {
 				writeVideoSample(frame)
 			} else if frame.MediaType.IsAudio() {
