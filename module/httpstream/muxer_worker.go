@@ -6,6 +6,7 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/codec/aac"
 	"github.com/im-pingo/liveforge/pkg/muxer/flv"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
@@ -174,9 +175,24 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 	muxer := fmp4.NewMuxer(videoCodec, audioCodec)
 
-	// Build init segment
-	// TODO: extract width/height/sampleRate/channels from sequence headers
-	initSeg := muxer.Init(videoSeqHeader, audioSeqHeader, 0, 0, 44100, 2)
+	// Extract video dimensions from the AVC sequence header (AVCDecoderConfigurationRecord).
+	// Chrome requires non-zero coded_size in the fMP4 init segment.
+	var videoWidth, videoHeight int
+	if videoSeqHeader != nil && videoCodec == avframe.CodecH264 {
+		videoWidth, videoHeight = fmp4.ParseAVCCDimensions(videoSeqHeader.Payload)
+	}
+
+	// Extract audio sample rate and channels from sequence header if available.
+	audioSampleRate := 44100
+	audioChannels := 2
+	if audioSeqHeader != nil {
+		if sr, ch := parseAudioSeqHeader(audioSeqHeader); sr > 0 {
+			audioSampleRate = sr
+			audioChannels = ch
+		}
+	}
+
+	initSeg := muxer.Init(videoSeqHeader, audioSeqHeader, videoWidth, videoHeight, audioSampleRate, audioChannels)
 	inst.SetInitData(initSeg)
 
 	// For FMP4, we buffer a GOP and emit as a segment
@@ -223,4 +239,14 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 		gopBuf = append(gopBuf, frame)
 	}
+}
+
+// parseAudioSeqHeader extracts sample rate and channel count from an AAC
+// audio sequence header frame. Returns (0, 0) on error.
+func parseAudioSeqHeader(frame *avframe.AVFrame) (sampleRate, channels int) {
+	info, err := aac.ParseAudioSpecificConfig(frame.Payload)
+	if err != nil {
+		return 0, 0
+	}
+	return info.SampleRate, info.Channels
 }

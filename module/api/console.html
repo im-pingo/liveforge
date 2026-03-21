@@ -78,7 +78,6 @@ header {
 .stat-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
 .stat-value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .stat-value.accent { color: var(--accent); }
-.stat-sub { font-size: 11px; color: var(--text2); margin-top: 2px; }
 
 /* Table */
 .table-wrap {
@@ -139,7 +138,6 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .state-publishing::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
 .state-idle { background: rgba(136,136,136,0.1); color: var(--text2); }
 .state-no_publisher { background: rgba(251,191,36,0.1); color: var(--yellow); }
-.state-waiting_pull { background: rgba(96,165,250,0.1); color: var(--blue); }
 
 /* Subscriber pills */
 .subs { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -167,9 +165,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-radius: 8px;
   font-size: 11px;
 }
-.sub-pill.active .count {
-  background: rgba(108,158,255,0.2);
-}
+.sub-pill.active .count { background: rgba(108,158,255,0.2); }
 
 /* Action buttons */
 .actions { display: flex; gap: 6px; }
@@ -189,12 +185,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .btn-danger:hover { background: rgba(248,113,113,0.1); border-color: var(--red); }
 .btn-warn { border-color: rgba(251,191,36,0.3); color: var(--yellow); }
 .btn-warn:hover { background: rgba(251,191,36,0.1); border-color: var(--yellow); }
+.btn-play { border-color: rgba(74,222,128,0.3); color: var(--green); }
+.btn-play:hover { background: rgba(74,222,128,0.1); border-color: var(--green); }
 
 /* Empty state */
-.empty-state {
-  padding: 80px 20px;
-  text-align: center;
-}
+.empty-state { padding: 80px 20px; text-align: center; }
 .empty-icon { font-size: 40px; margin-bottom: 16px; opacity: 0.3; }
 .empty-title { font-size: 15px; color: var(--text2); margin-bottom: 6px; }
 .empty-sub { font-size: 13px; color: #555; }
@@ -206,7 +201,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   color: var(--text2);
 }
 
-/* Modal */
+/* Modal (shared) */
 .modal-overlay {
   display: none;
   position: fixed;
@@ -229,6 +224,112 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .modal p { font-size: 14px; color: var(--text2); margin-bottom: 20px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal .btn { padding: 8px 20px; font-size: 13px; }
+
+/* Player modal */
+.player-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+.player-overlay.active { display: flex; }
+.player-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 820px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.player-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.player-header h3 { font-size: 15px; font-weight: 600; }
+.player-header .stream-label {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 13px;
+  color: var(--accent);
+  margin-left: 10px;
+}
+.player-close {
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.player-close:hover { color: var(--text); background: var(--surface2); }
+
+/* Protocol tabs */
+.proto-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  overflow-x: auto;
+}
+.proto-tab {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.proto-tab:hover { color: var(--text); }
+.proto-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Player area */
+.player-body {
+  padding: 20px;
+  flex: 1;
+  overflow: auto;
+}
+.player-video-wrap {
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  margin-bottom: 12px;
+}
+.player-video-wrap video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.player-status {
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+.player-status.error { color: var(--red); }
+.player-status.ok { color: var(--green); }
+.player-url {
+  font-size: 12px;
+  color: var(--text2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  word-break: break-all;
+  user-select: all;
+}
 </style>
 </head>
 <body>
@@ -281,7 +382,6 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <th>Codecs</th>
           <th>Bitrate</th>
           <th>FPS</th>
-          <th>GOP</th>
           <th>Subscribers</th>
           <th>Actions</th>
         </tr>
@@ -308,7 +408,31 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- Player modal -->
+<div class="player-overlay" id="player-overlay">
+  <div class="player-modal">
+    <div class="player-header">
+      <div><h3 style="display:inline">Preview</h3><span class="stream-label" id="player-stream-key"></span></div>
+      <button class="player-close" onclick="closePlayer()">&times;</button>
+    </div>
+    <div class="proto-tabs" id="proto-tabs"></div>
+    <div class="player-body">
+      <div class="player-video-wrap">
+        <video id="player-video" autoplay muted playsinline></video>
+      </div>
+      <div class="player-status" id="player-status">Select a protocol to start playback</div>
+      <div class="player-url" id="player-url" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
 <script>
+var endpoints = {};
+var currentPlayer = null;
+var currentPC = null;
+var currentMSEAbort = null;
+
 function esc(s) {
   if (!s) return "";
   var d = document.createElement("div");
@@ -330,39 +454,393 @@ function formatBitrate(kbps) {
   return kbps + " kbps";
 }
 
+/* --- Confirm modal --- */
 var pendingAction = null;
-
 function showModal(title, msg, onConfirm) {
   document.getElementById("modal-title").textContent = title;
   document.getElementById("modal-msg").textContent = msg;
   document.getElementById("modal").classList.add("active");
   pendingAction = onConfirm;
 }
-
 function closeModal() {
   document.getElementById("modal").classList.remove("active");
   pendingAction = null;
 }
-
 document.getElementById("modal-confirm").addEventListener("click", function() {
   if (pendingAction) pendingAction();
   closeModal();
 });
 
 function kickStream(key) {
-  showModal("Kick Publisher", "Disconnect the publisher from \"" + key + "\"?", function() {
+  showModal("Kick Publisher", 'Disconnect the publisher from "' + key + '"?', function() {
     fetch("/api/v1/streams/" + encodeURIComponent(key) + "/kick", { method: "POST" })
       .then(function() { refresh(); });
   });
 }
-
 function deleteStream(key) {
-  showModal("Delete Stream", "Remove stream \"" + key + "\" entirely?", function() {
+  showModal("Delete Stream", 'Remove stream "' + key + '" entirely?', function() {
     fetch("/api/v1/streams/" + encodeURIComponent(key), { method: "DELETE" })
       .then(function() { refresh(); });
   });
 }
 
+/* --- Build port from listen address --- */
+function portFromListen(listen) {
+  if (!listen) return "";
+  var i = listen.lastIndexOf(":");
+  return i >= 0 ? listen.substring(i + 1) : listen;
+}
+
+/* --- Player logic --- */
+function destroyCurrentPlayer() {
+  if (currentMSEAbort) {
+    try { currentMSEAbort.abort(); } catch(e) {}
+    currentMSEAbort = null;
+  }
+  if (currentPlayer) {
+    try { currentPlayer.destroy(); } catch(e) {}
+    currentPlayer = null;
+  }
+  if (currentPC) {
+    try { currentPC.close(); } catch(e) {}
+    currentPC = null;
+  }
+  var video = document.getElementById("player-video");
+  video.srcObject = null;
+  video.src = "";
+  video.load();
+}
+
+function setPlayerStatus(msg, cls) {
+  var el = document.getElementById("player-status");
+  el.textContent = msg;
+  el.className = "player-status" + (cls ? " " + cls : "");
+}
+
+function setPlayerURL(url) {
+  var el = document.getElementById("player-url");
+  el.textContent = url;
+  el.style.display = url ? "block" : "none";
+}
+
+function playHTTPFLV(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.http);
+  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".flv";
+  setPlayerURL(url);
+  setPlayerStatus("Connecting...");
+
+  if (typeof mpegts === "undefined" || !mpegts.isSupported()) {
+    setPlayerStatus("mpegts.js not supported in this browser", "error");
+    return;
+  }
+  var player = mpegts.createPlayer({
+    type: "flv",
+    url: url,
+    isLive: true
+  });
+  player.attachMediaElement(document.getElementById("player-video"));
+  player.load();
+  player.play().then(function() {
+    setPlayerStatus("Playing (HTTP-FLV)", "ok");
+  }).catch(function(e) {
+    setPlayerStatus("Play error: " + e.message, "error");
+  });
+  player.on(mpegts.Events.ERROR, function(t, d, e) {
+    setPlayerStatus("Error: " + (e || d || t), "error");
+  });
+  currentPlayer = player;
+}
+
+function playWSFLV(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.http);
+  var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  var url = proto + "//" + location.hostname + ":" + port + "/ws/" + streamKey + ".flv";
+  setPlayerURL(url);
+  setPlayerStatus("Connecting...");
+
+  if (typeof mpegts === "undefined" || !mpegts.isSupported()) {
+    setPlayerStatus("mpegts.js not supported in this browser", "error");
+    return;
+  }
+  var player = mpegts.createPlayer({
+    type: "flv",
+    url: url,
+    isLive: true
+  });
+  player.attachMediaElement(document.getElementById("player-video"));
+  player.load();
+  player.play().then(function() {
+    setPlayerStatus("Playing (WS-FLV)", "ok");
+  }).catch(function(e) {
+    setPlayerStatus("Play error: " + e.message, "error");
+  });
+  player.on(mpegts.Events.ERROR, function(t, d, e) {
+    setPlayerStatus("Error: " + (e || d || t), "error");
+  });
+  currentPlayer = player;
+}
+
+function playHTTPTS(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.http);
+  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".ts";
+  setPlayerURL(url);
+  setPlayerStatus("Connecting...");
+
+  if (typeof mpegts === "undefined" || !mpegts.isSupported()) {
+    setPlayerStatus("mpegts.js not supported in this browser", "error");
+    return;
+  }
+  var player = mpegts.createPlayer({
+    type: "mpegts",
+    url: url,
+    isLive: true
+  });
+  player.attachMediaElement(document.getElementById("player-video"));
+  player.load();
+  player.play().then(function() {
+    setPlayerStatus("Playing (HTTP-TS)", "ok");
+  }).catch(function(e) {
+    setPlayerStatus("Play error: " + e.message, "error");
+  });
+  player.on(mpegts.Events.ERROR, function(t, d, e) {
+    setPlayerStatus("Error: " + (e || d || t), "error");
+  });
+  currentPlayer = player;
+}
+
+function playFMP4(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.http);
+  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".mp4";
+  setPlayerURL(url);
+  setPlayerStatus("Connecting...");
+
+  if (!window.MediaSource) {
+    setPlayerStatus("MSE not supported in this browser", "error");
+    return;
+  }
+
+  var video = document.getElementById("player-video");
+  var ms = new MediaSource();
+  var abortCtrl = new AbortController();
+  currentMSEAbort = abortCtrl;
+
+  video.src = URL.createObjectURL(ms);
+
+  ms.addEventListener("sourceopen", function() {
+    // Try common H.264+AAC codec string first; fall back to bare video/mp4
+    var mimes = [
+      'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
+      'video/mp4; codecs="avc1.42E01E"',
+      'video/mp4'
+    ];
+    var mime = mimes.find(function(m) { return MediaSource.isTypeSupported(m); });
+    if (!mime) {
+      setPlayerStatus("FMP4 not supported by this browser", "error");
+      return;
+    }
+
+    var sb;
+    try {
+      sb = ms.addSourceBuffer(mime);
+    } catch(e) {
+      setPlayerStatus("MSE add buffer error: " + e.message, "error");
+      return;
+    }
+    sb.mode = "sequence";
+
+    var queue = [];
+    var appending = false;
+
+    function appendNext() {
+      if (appending || queue.length === 0 || sb.updating) return;
+      var chunk = queue.shift();
+      try {
+        appending = true;
+        sb.appendBuffer(chunk);
+      } catch(e) {
+        appending = false;
+        setPlayerStatus("Append error: " + e.message, "error");
+      }
+    }
+
+    sb.addEventListener("updateend", function() {
+      appending = false;
+      appendNext();
+      if (video.paused && video.readyState >= 2) {
+        video.play().then(function() {
+          setPlayerStatus("Playing (FMP4)", "ok");
+        }).catch(function(){});
+      }
+    });
+
+    sb.addEventListener("error", function() {
+      setPlayerStatus("SourceBuffer error", "error");
+    });
+
+    fetch(url, { signal: abortCtrl.signal })
+      .then(function(resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        setPlayerStatus("Buffering...");
+        var reader = resp.body.getReader();
+        function pump() {
+          return reader.read().then(function(result) {
+            if (result.done) {
+              try { ms.endOfStream(); } catch(e) {}
+              return;
+            }
+            queue.push(result.value.buffer);
+            appendNext();
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .catch(function(e) {
+        if (e.name !== "AbortError") {
+          setPlayerStatus("FMP4 error: " + e.message, "error");
+        }
+      });
+  });
+}
+
+function playWHEP(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.webrtc);
+  var url = "http://" + location.hostname + ":" + port + "/webrtc/whep/" + streamKey;
+  setPlayerURL(url);
+  setPlayerStatus("Negotiating WebRTC...");
+
+  var pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  });
+  currentPC = pc;
+
+  var remoteStream = new MediaStream();
+  document.getElementById("player-video").srcObject = remoteStream;
+
+  pc.ontrack = function(event) {
+    remoteStream.addTrack(event.track);
+    var video = document.getElementById("player-video");
+    if (video.paused) {
+      video.play().catch(function(){});
+    }
+    setPlayerStatus("Playing (WebRTC/WHEP)", "ok");
+  };
+
+  pc.oniceconnectionstatechange = function() {
+    if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+      setPlayerStatus("WebRTC disconnected: " + pc.iceConnectionState, "error");
+    }
+  };
+
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.addTransceiver("audio", { direction: "recvonly" });
+
+  pc.createOffer().then(function(offer) {
+    return pc.setLocalDescription(offer);
+  }).then(function() {
+    // Wait for ICE gathering
+    return new Promise(function(resolve) {
+      if (pc.iceGatheringState === "complete") { resolve(); return; }
+      pc.onicegatheringstatechange = function() {
+        if (pc.iceGatheringState === "complete") resolve();
+      };
+    });
+  }).then(function() {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: pc.localDescription.sdp
+    });
+  }).then(function(resp) {
+    if (resp.status !== 201) {
+      return resp.text().then(function(t) { throw new Error("WHEP " + resp.status + ": " + t); });
+    }
+    return resp.text();
+  }).then(function(sdp) {
+    return pc.setRemoteDescription({ type: "answer", sdp: sdp });
+  }).then(function() {
+    setPlayerStatus("WebRTC connected, waiting for media...");
+  }).catch(function(e) {
+    setPlayerStatus("WHEP error: " + e.message, "error");
+  });
+}
+
+function openPlayer(streamKey) {
+  destroyCurrentPlayer();
+  document.getElementById("player-stream-key").textContent = streamKey;
+  document.getElementById("player-overlay").classList.add("active");
+  setPlayerStatus("Select a protocol to start playback");
+  setPlayerURL("");
+
+  // Build protocol tabs based on available endpoints
+  var tabs = document.getElementById("proto-tabs");
+  tabs.innerHTML = "";
+  var protocols = [];
+
+  if (endpoints.http) {
+    protocols.push({ id: "http-flv", label: "HTTP-FLV", fn: playHTTPFLV });
+    protocols.push({ id: "ws-flv", label: "WS-FLV", fn: playWSFLV });
+    protocols.push({ id: "http-ts", label: "HTTP-TS", fn: playHTTPTS });
+    protocols.push({ id: "fmp4", label: "FMP4", fn: playFMP4 });
+  }
+  if (endpoints.webrtc) {
+    protocols.push({ id: "whep", label: "WebRTC", fn: playWHEP });
+  }
+
+  if (protocols.length === 0) {
+    setPlayerStatus("No streaming endpoints available", "error");
+    return;
+  }
+
+  for (var i = 0; i < protocols.length; i++) {
+    var tab = document.createElement("div");
+    tab.className = "proto-tab";
+    tab.textContent = protocols[i].label;
+    tab.setAttribute("data-proto", protocols[i].id);
+    (function(proto) {
+      tab.addEventListener("click", function() {
+        // Activate tab
+        var allTabs = tabs.querySelectorAll(".proto-tab");
+        for (var j = 0; j < allTabs.length; j++) allTabs[j].classList.remove("active");
+        this.classList.add("active");
+        // Play
+        proto.fn(streamKey);
+      });
+    })(protocols[i]);
+    tabs.appendChild(tab);
+  }
+
+  // Auto-play first protocol
+  tabs.children[0].click();
+}
+
+function closePlayer() {
+  destroyCurrentPlayer();
+  document.getElementById("player-overlay").classList.remove("active");
+}
+
+// Close player on Escape key
+document.addEventListener("keydown", function(e) {
+  if (e.key === "Escape") {
+    if (document.getElementById("player-overlay").classList.contains("active")) {
+      closePlayer();
+    } else if (document.getElementById("modal").classList.contains("active")) {
+      closeModal();
+    }
+  }
+});
+
+// Close player on overlay click
+document.getElementById("player-overlay").addEventListener("click", function(e) {
+  if (e.target === this) closePlayer();
+});
+
+/* --- Server info --- */
 function refreshServerInfo() {
   fetch("/api/v1/server/info")
     .then(function(r) { return r.json(); })
@@ -371,6 +849,7 @@ function refreshServerInfo() {
       if (!data) return;
       document.getElementById("server-version").textContent = "v" + (data.version || "?");
       document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
+      if (data.endpoints) endpoints = data.endpoints;
     })
     .catch(function() {});
 
@@ -384,6 +863,7 @@ function refreshServerInfo() {
     .catch(function() {});
 }
 
+/* --- Stream list --- */
 function refresh() {
   fetch("/api/v1/streams")
     .then(function(r) { return r.json(); })
@@ -418,13 +898,11 @@ function refresh() {
         var s = streams[i];
         var st = s.stats || {};
 
-        // Codecs
         var codecs = "";
         if (s.video_codec) codecs += '<span class="codec-tag video">' + esc(s.video_codec) + '</span> ';
         if (s.audio_codec) codecs += '<span class="codec-tag audio">' + esc(s.audio_codec) + '</span>';
         if (!codecs) codecs = '<span style="color:#555">-</span>';
 
-        // Subscribers
         var subHtml = "";
         var subKeys = Object.keys(s.subscribers || {}).sort();
         for (var j = 0; j < subKeys.length; j++) {
@@ -435,12 +913,15 @@ function refresh() {
         }
         if (!subHtml) subHtml = '<span style="color:#555;font-size:12px">-</span>';
 
-        // Actions
+        var safeKey = esc(s.key).replace(/'/g, "\\'");
         var acts = '<div class="actions">';
-        if (s.publisher) {
-          acts += '<button class="btn btn-warn" onclick="kickStream(\'' + esc(s.key).replace(/'/g, "\\'") + '\')">Kick</button>';
+        if (s.state === "publishing") {
+          acts += '<button class="btn btn-play" onclick="openPlayer(\'' + safeKey + '\')">Preview</button>';
         }
-        acts += '<button class="btn btn-danger" onclick="deleteStream(\'' + esc(s.key).replace(/'/g, "\\'") + '\')">Delete</button>';
+        if (s.publisher) {
+          acts += '<button class="btn btn-warn" onclick="kickStream(\'' + safeKey + '\')">Kick</button>';
+        }
+        acts += '<button class="btn btn-danger" onclick="deleteStream(\'' + safeKey + '\')">Delete</button>';
         acts += '</div>';
 
         html += "<tr>"
@@ -450,7 +931,6 @@ function refresh() {
           + "<td>" + codecs + "</td>"
           + '<td class="mono">' + formatBitrate(st.bitrate_kbps) + "</td>"
           + '<td class="mono">' + (st.fps ? st.fps.toFixed(1) : "-") + "</td>"
-          + '<td class="mono">' + s.gop_cache_len + "</td>"
           + '<td><div class="subs">' + subHtml + "</div></td>"
           + "<td>" + acts + "</td>"
           + "</tr>";
