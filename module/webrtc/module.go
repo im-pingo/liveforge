@@ -50,6 +50,10 @@ func (m *Module) Init(s *core.Server) error {
 		})
 	}
 
+	// Include loopback (127.0.0.1) as an ICE host candidate so same-host clients
+	// connect via loopback UDP instead of the LAN interface, avoiding packet loss.
+	se.SetIncludeLoopbackCandidate(true)
+
 	me := &webrtc.MediaEngine{}
 	if err := me.RegisterDefaultCodecs(); err != nil {
 		return err

@@ -122,7 +122,7 @@ func TestBuildMediaSegment(t *testing.T) {
 		},
 	}
 
-	data := BuildMediaSegment(frames, 1)
+	data := BuildMediaSegment(frames, 1, 44100)
 	if len(data) == 0 {
 		t.Fatal("empty media segment")
 	}
@@ -144,7 +144,7 @@ func TestBuildMediaSegment(t *testing.T) {
 }
 
 func TestBuildMediaSegmentEmpty(t *testing.T) {
-	data := BuildMediaSegment(nil, 1)
+	data := BuildMediaSegment(nil, 1, 44100)
 	if data != nil {
 		t.Error("empty frames should return nil")
 	}
@@ -200,7 +200,7 @@ func TestBuildMediaSegmentSkipsSequenceHeaders(t *testing.T) {
 		},
 	}
 
-	data := BuildMediaSegment(frames, 1)
+	data := BuildMediaSegment(frames, 1, 44100)
 	if len(data) == 0 {
 		t.Fatal("expected non-empty segment")
 	}
