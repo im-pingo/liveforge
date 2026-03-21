@@ -2,12 +2,14 @@ package core
 
 import (
 	"testing"
+
+	"github.com/im-pingo/liveforge/config"
 )
 
 func TestMuxerManagerGetOrCreate(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, bus)
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
 	mm := NewMuxerManager(stream, 256)
 
 	r1, inst1 := mm.GetOrCreateMuxer("flv")
@@ -27,7 +29,7 @@ func TestMuxerManagerGetOrCreate(t *testing.T) {
 func TestMuxerManagerRelease(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, bus)
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
 	mm := NewMuxerManager(stream, 256)
 
 	mm.GetOrCreateMuxer("flv")
@@ -47,7 +49,7 @@ func TestMuxerManagerRelease(t *testing.T) {
 func TestMuxerManagerStartCallback(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, bus)
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
 	mm := NewMuxerManager(stream, 256)
 
 	started := false
@@ -71,7 +73,7 @@ func TestMuxerManagerStartCallback(t *testing.T) {
 func TestMuxerInstanceDoneChannel(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, bus)
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
 	mm := NewMuxerManager(stream, 256)
 
 	var capturedInst *MuxerInstance
@@ -100,7 +102,7 @@ func TestMuxerInstanceDoneChannel(t *testing.T) {
 func TestMuxerInstanceInitData(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, bus)
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
 	mm := NewMuxerManager(stream, 256)
 
 	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
