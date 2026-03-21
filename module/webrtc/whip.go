@@ -195,19 +195,38 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 
 // readTrackLoop reads RTP packets from a WebRTC track, depacketizes them,
 // and writes AVFrames to the stream.
+//
+// Key invariant for H.264: SPS/PPS arrive as SequenceHeader frames and may
+// be interleaved with IDR NALs in the same Marker-delimited window. We handle
+// them as separate AVFrames so the ring buffer and GOP cache stay consistent:
+//   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
+//   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
 func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType) {
 	var (
-		accPayload []byte
-		accFrame   avframe.FrameType
-		accMedia   avframe.MediaType
-		tsBase     uint32
-		tsBaseSet  bool
+		accPayload    []byte
+		accFrame      avframe.FrameType
+		accMedia      avframe.MediaType
+		accSeqPayload []byte // accumulated SPS/PPS to write as SequenceHeader
+		tsBase        uint32
+		tsBaseSet     bool
 	)
 
 	if codec.IsVideo() {
 		accMedia = avframe.MediaTypeVideo
 	} else {
 		accMedia = avframe.MediaTypeAudio
+	}
+
+	computeDTS := func(ts uint32) int64 {
+		if !tsBaseSet {
+			tsBase = ts
+			tsBaseSet = true
+		}
+		clockRate := int64(90000)
+		if codec.IsAudio() {
+			clockRate = int64(track.Codec().ClockRate)
+		}
+		return int64(ts-tsBase) * 1000 / clockRate
 	}
 
 	buf := make([]byte, 1500)
@@ -229,30 +248,41 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 		}
 
 		if frame != nil {
-			accPayload = append(accPayload, frame.Payload...)
 			if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				accFrame = avframe.FrameTypeSequenceHeader
-			} else if frame.FrameType == avframe.FrameTypeKeyframe && accFrame != avframe.FrameTypeSequenceHeader {
-				accFrame = avframe.FrameTypeKeyframe
-			} else if accFrame == 0 {
-				accFrame = frame.FrameType
+				// SPS/PPS: accumulate separately. If there is already pending
+				// media data (unlikely but possible), flush it first.
+				if len(accPayload) > 0 {
+					dts := computeDTS(pkt.Timestamp)
+					avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
+					stream.WriteFrame(avF)
+					accPayload = nil
+					accFrame = 0
+				}
+				accSeqPayload = append(accSeqPayload, frame.Payload...)
+			} else {
+				// Media frame: if we have buffered SPS/PPS, flush them now as
+				// SequenceHeader before the IDR so the ring buffer sees the
+				// parameter sets first.
+				if len(accSeqPayload) > 0 {
+					dts := computeDTS(pkt.Timestamp)
+					seqF := avframe.NewAVFrame(accMedia, codec, avframe.FrameTypeSequenceHeader, dts, dts, accSeqPayload)
+					stream.WriteFrame(seqF)
+					accSeqPayload = nil
+				}
+				accPayload = append(accPayload, frame.Payload...)
+				if frame.FrameType == avframe.FrameTypeKeyframe {
+					accFrame = avframe.FrameTypeKeyframe
+				} else if accFrame == 0 {
+					accFrame = frame.FrameType
+				}
 			}
 		}
 
+		// Flush accumulated media payload on the Marker bit (end of access unit).
 		if pkt.Marker && len(accPayload) > 0 {
-			if !tsBaseSet {
-				tsBase = pkt.Timestamp
-				tsBaseSet = true
-			}
-			clockRate := uint32(90000)
-			if codec.IsAudio() {
-				clockRate = uint32(track.Codec().ClockRate)
-			}
-			dts := int64(pkt.Timestamp-tsBase) * 1000 / int64(clockRate)
-
+			dts := computeDTS(pkt.Timestamp)
 			avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
 			stream.WriteFrame(avF)
-
 			accPayload = nil
 			accFrame = 0
 		}
