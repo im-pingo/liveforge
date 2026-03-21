@@ -58,10 +58,13 @@ func TestPublishSubscribeFlow(t *testing.T) {
 		NoPublisherTimeout: 5 * time.Second,
 	}
 
-	hub := core.NewStreamHub(cfg, bus)
+	hub := core.NewStreamHub(cfg, config.LimitsConfig{}, bus)
 
 	// Create stream via hub
-	stream := hub.GetOrCreate("live/integration-test")
+	stream, err := hub.GetOrCreate("live/integration-test")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
 	if stream.State() != core.StreamStateIdle {
 		t.Fatalf("expected idle, got %v", stream.State())
 	}

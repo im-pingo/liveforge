@@ -44,7 +44,9 @@ type RTSPPublisher struct {
 var _ core.Publisher = (*RTSPPublisher)(nil)
 
 // NewRTSPPublisher creates a new RTSP publisher.
-func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream) (*RTSPPublisher, error) {
+// ptMap provides the SDP-declared payload type to codec mapping.
+// If ptMap is nil, default PT assignments are used as fallback.
+func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream, ptMap PTMap) (*RTSPPublisher, error) {
 	p := &RTSPPublisher{
 		id:            id,
 		mediaInfo:     info,
@@ -53,24 +55,34 @@ func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream) (
 		localSSRC:     rand.Uint32(),
 		done:          make(chan struct{}),
 	}
-	// Set up depacketizers based on MediaInfo codecs.
-	// Use conventional PT assignments matching pkg/sdp/builder.go codecRTPInfo.
-	if info.VideoCodec != 0 {
-		dp, err := pkgrtp.NewDepacketizer(info.VideoCodec)
-		if err != nil {
-			return nil, err
+
+	if len(ptMap) > 0 {
+		// Use SDP-declared PT mapping.
+		for pt, codec := range ptMap {
+			dp, err := pkgrtp.NewDepacketizer(codec)
+			if err != nil {
+				return nil, err
+			}
+			p.depacketizers[pt] = dp
 		}
-		pt := codecDefaultPT(info.VideoCodec)
-		p.depacketizers[pt] = dp
-	}
-	if info.AudioCodec != 0 {
-		dp, err := pkgrtp.NewDepacketizer(info.AudioCodec)
-		if err != nil {
-			return nil, err
+	} else {
+		// Fallback: use default PT assignments.
+		if info.VideoCodec != 0 {
+			dp, err := pkgrtp.NewDepacketizer(info.VideoCodec)
+			if err != nil {
+				return nil, err
+			}
+			p.depacketizers[codecDefaultPT(info.VideoCodec)] = dp
 		}
-		pt := codecDefaultPT(info.AudioCodec)
-		p.depacketizers[pt] = dp
+		if info.AudioCodec != 0 {
+			dp, err := pkgrtp.NewDepacketizer(info.AudioCodec)
+			if err != nil {
+				return nil, err
+			}
+			p.depacketizers[codecDefaultPT(info.AudioCodec)] = dp
+		}
 	}
+
 	return p, nil
 }
 
