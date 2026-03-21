@@ -8,8 +8,10 @@ import (
 )
 
 // BuildMediaSegment generates a moof+mdat segment from a slice of frames.
+// audioTimescale must match the audio mdhd timescale written in the init segment
+// (typically the audio sample rate, e.g. 44100). Pass 0 to fall back to raw ms values.
 // Returns the concatenated moof+mdat bytes.
-func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte {
+func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTimescale uint32) []byte {
 	if len(frames) == 0 {
 		return nil
 	}
@@ -48,9 +50,9 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32) []byte 
 		writeTraf(&moof, videoTrackID, videoFrames, timescaleVideo)
 	}
 
-	// Audio traf
+	// Audio traf — timescale must match the audio mdhd timescale (sample rate).
 	if len(audioFrames) > 0 {
-		writeTraf(&moof, audioTrackID, audioFrames, 0) // timescale handled in trun
+		writeTraf(&moof, audioTrackID, audioFrames, audioTimescale)
 	}
 
 	moofBytes := moof.Bytes()

@@ -6,9 +6,10 @@ import (
 
 // Muxer generates fragmented MP4 (CMAF/fMP4) output from AVFrames.
 type Muxer struct {
-	videoCodec     avframe.CodecType
-	audioCodec     avframe.CodecType
-	sequenceNumber uint32
+	videoCodec      avframe.CodecType
+	audioCodec      avframe.CodecType
+	audioSampleRate int
+	sequenceNumber  uint32
 }
 
 // NewMuxer creates a new FMP4 muxer.
@@ -20,6 +21,7 @@ func NewMuxer(videoCodec, audioCodec avframe.CodecType) *Muxer {
 }
 
 // Init generates the ftyp+moov init segment from sequence header frames.
+// It also records audioSampleRate for use in subsequent WriteSegment calls.
 func (m *Muxer) Init(videoSeqHeader, audioSeqHeader *avframe.AVFrame, width, height, sampleRate, channels int) []byte {
 	var videoData, audioData []byte
 	if videoSeqHeader != nil {
@@ -28,11 +30,14 @@ func (m *Muxer) Init(videoSeqHeader, audioSeqHeader *avframe.AVFrame, width, hei
 	if audioSeqHeader != nil {
 		audioData = audioSeqHeader.Payload
 	}
+	if sampleRate > 0 {
+		m.audioSampleRate = sampleRate
+	}
 	return BuildInitSegment(m.videoCodec, m.audioCodec, videoData, audioData, width, height, sampleRate, channels)
 }
 
 // WriteSegment generates a moof+mdat segment from a GOP or group of frames.
 func (m *Muxer) WriteSegment(frames []*avframe.AVFrame) []byte {
 	m.sequenceNumber++
-	return BuildMediaSegment(frames, m.sequenceNumber)
+	return BuildMediaSegment(frames, m.sequenceNumber, uint32(m.audioSampleRate))
 }
