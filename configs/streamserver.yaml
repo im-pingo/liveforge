@@ -34,7 +34,7 @@ websocket:
   path: "/ws/{stream}.{format}"
 
 webrtc:
-  enabled: false
+  enabled: true
   listen: ":8443"
   ice_servers:
     - urls: ["stun:stun.l.google.com:19302"]

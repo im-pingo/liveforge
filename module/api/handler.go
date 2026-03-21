@@ -205,16 +205,32 @@ func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 
 // ServerInfo is the response for GET /api/v1/server/info.
 type ServerInfo struct {
-	Version  string   `json:"version"`
-	Uptime   int64    `json:"uptime_sec"`
-	Modules  []string `json:"modules"`
+	Version   string            `json:"version"`
+	Uptime    int64             `json:"uptime_sec"`
+	Modules   []string          `json:"modules"`
+	Endpoints map[string]string `json:"endpoints,omitempty"`
 }
 
 func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
+	cfg := h.server.Config()
+	endpoints := make(map[string]string)
+	if cfg.HTTP.Enabled {
+		endpoints["http"] = cfg.HTTP.Listen
+	}
+	if cfg.WebRTC.Enabled {
+		endpoints["webrtc"] = cfg.WebRTC.Listen
+	}
+	if cfg.RTMP.Enabled {
+		endpoints["rtmp"] = cfg.RTMP.Listen
+	}
+	if cfg.RTSP.Enabled {
+		endpoints["rtsp"] = cfg.RTSP.Listen
+	}
 	writeJSON(w, http.StatusOK, ServerInfo{
-		Version: core.Version,
-		Uptime:  int64(time.Since(h.server.StartTime()).Seconds()),
-		Modules: h.server.ModuleNames(),
+		Version:   core.Version,
+		Uptime:    int64(time.Since(h.server.StartTime()).Seconds()),
+		Modules:   h.server.ModuleNames(),
+		Endpoints: endpoints,
 	})
 }
 

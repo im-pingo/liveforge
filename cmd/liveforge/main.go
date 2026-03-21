@@ -17,6 +17,7 @@ import (
 	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
+	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
 
 var version = "dev"
@@ -54,6 +55,10 @@ func main() {
 
 	if cfg.HTTP.Enabled {
 		s.RegisterModule(httpstream.NewModule())
+	}
+
+	if cfg.WebRTC.Enabled {
+		s.RegisterModule(webrtcmod.NewModule())
 	}
 
 	if cfg.API.Enabled {
