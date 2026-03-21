@@ -13,6 +13,8 @@ import (
 	"github.com/im-pingo/liveforge/module/api"
 	"github.com/im-pingo/liveforge/module/auth"
 	"github.com/im-pingo/liveforge/module/httpstream"
+	"github.com/im-pingo/liveforge/module/notify"
+	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
 )
@@ -56,6 +58,14 @@ func main() {
 
 	if cfg.API.Enabled {
 		s.RegisterModule(api.NewModule())
+	}
+
+	if cfg.Notify.HTTP.Enabled {
+		s.RegisterModule(notify.NewModule())
+	}
+
+	if cfg.Record.Enabled {
+		s.RegisterModule(record.NewModule())
 	}
 
 	if err := s.Init(); err != nil {
