@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -179,6 +181,126 @@ func TestSessionStore(t *testing.T) {
 	_, ok = m.findSession("test-id")
 	if ok {
 		t.Error("expected session to be removed after Close")
+	}
+}
+
+// TestTrackSenderPLIHandler verifies that TrackSender dispatches PLI/FIR
+// RTCP packets to the registered handler, independent of protocol code.
+func TestTrackSenderPLIHandler(t *testing.T) {
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterDefaultCodecs(); err != nil {
+		t.Fatal(err)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+
+	// Create sender PC (simulates server sending video).
+	senderPC, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderPC.Close()
+
+	// Create receiver PC (simulates browser receiving video).
+	receiverPC, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiverPC.Close()
+
+	// Add a video track to the sender.
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000},
+		"video", "test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtpSender, err := senderPC.AddTrack(track)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wrap in TrackSender and register PLI handler.
+	var pliCount atomic.Int32
+	ts := NewTrackSender("test-session", track, rtpSender)
+	ts.SetPLIHandler(func() { pliCount.Add(1) })
+	ts.Start()
+
+	// Perform SDP exchange to connect the two PCs.
+	offer, err := senderPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatherDone := webrtc.GatheringCompletePromise(senderPC)
+	if err := senderPC.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gatherDone
+	if err := receiverPC.SetRemoteDescription(*senderPC.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := receiverPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatherDone2 := webrtc.GatheringCompletePromise(receiverPC)
+	if err := receiverPC.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	<-gatherDone2
+	if err := senderPC.SetRemoteDescription(*receiverPC.LocalDescription()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for full connection (ICE + DTLS) on receiver side.
+	connected := make(chan struct{})
+	receiverPC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			select {
+			case <-connected:
+			default:
+				close(connected)
+			}
+		}
+	})
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("PeerConnection connection timed out")
+	}
+
+	// Find receiver's track SSRC to send a PLI.
+	var mediaSSRC uint32
+	for _, tr := range receiverPC.GetTransceivers() {
+		if tr.Receiver() != nil {
+			if track := tr.Receiver().Track(); track != nil {
+				mediaSSRC = uint32(track.SSRC())
+				break
+			}
+		}
+	}
+	if mediaSSRC == 0 {
+		t.Skip("could not determine SSRC for PLI test")
+	}
+
+	// Send PLI from receiver to sender.
+	if err := receiverPC.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC},
+	}); err != nil {
+		t.Fatalf("WriteRTCP PLI: %v", err)
+	}
+
+	// Give the RTCP goroutine time to process.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if pliCount.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if pliCount.Load() == 0 {
+		t.Error("PLI handler was not called after sending PLI RTCP packet")
 	}
 }
 

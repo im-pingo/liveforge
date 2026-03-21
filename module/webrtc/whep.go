@@ -12,7 +12,6 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
-	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
@@ -93,50 +92,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
 	m.storeSession(sess)
 
-	// Add local tracks for sending media using TrackLocalStaticSample.
-	// This delegates RTP packetization to pion, ensuring correct payload type,
-	// sequence numbers, timestamps, and RTP header extensions.
-	var videoTrack, audioTrack *webrtc.TrackLocalStaticSample
-
-	// pliCh signals the feed loop to immediately send a keyframe when the
-	// browser requests one via PLI or FIR. Buffered so drainRTCP never blocks.
-	pliCh := make(chan struct{}, 1)
-
-	// drainRTCP consumes RTCP packets from an RTPSender to prevent the
-	// sender's read buffer from filling up and blocking WriteSample.
-	drainRTCP := func(sender *webrtc.RTPSender) {
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buf); err != nil {
-					return
-				}
-			}
-		}()
-	}
-
-	// readVideoRTCP reads RTCP from the video sender and detects PLI/FIR
-	// requests. When detected, it signals the feed loop to send a keyframe.
-	readVideoRTCP := func(sender *webrtc.RTPSender) {
-		go func() {
-			for {
-				pkts, _, err := sender.ReadRTCP()
-				if err != nil {
-					return
-				}
-				for _, pkt := range pkts {
-					switch pkt.(type) {
-					case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-						log.Printf("[webrtc] WHEP session %s received PLI/FIR", sessionID)
-						select {
-						case pliCh <- struct{}{}:
-						default:
-						}
-					}
-				}
-			}
-		}()
-	}
+	// Create TrackSenders for video and audio. Each TrackSender owns its
+	// RTCP read loop, keeping RTCP dispatch independent of this handler.
+	var videoSender, audioSender *TrackSender
 
 	if info.HasVideo() {
 		mime := codecToMime(info.VideoCodec)
@@ -146,9 +104,8 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				"video", "liveforge",
 			)
 			if err == nil {
-				if sender, err := pc.AddTrack(vt); err == nil {
-					videoTrack = vt
-					readVideoRTCP(sender)
+				if s, err := pc.AddTrack(vt); err == nil {
+					videoSender = NewTrackSender(sessionID, vt, s)
 					restrictTransceiverCodec(pc, vt, mime)
 				}
 			}
@@ -171,21 +128,38 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				"audio", "liveforge",
 			)
 			if err == nil {
-				if sender, err := pc.AddTrack(at); err == nil {
-					audioTrack = at
-					drainRTCP(sender)
+				if s, err := pc.AddTrack(at); err == nil {
+					audioSender = NewTrackSender(sessionID, at, s)
 					restrictTransceiverCodec(pc, at, mime)
 				}
 			}
 		}
 	}
 
-	if videoTrack == nil && audioTrack == nil {
+	if videoSender == nil && audioSender == nil {
 		sess.Close()
 		stream.RemoveSubscriber("webrtc")
 		releaseConn()
 		http.Error(w, "no compatible tracks for WebRTC", http.StatusUnsupportedMediaType)
 		return
+	}
+
+	// Register PLI handler on video sender: immediately send a cached keyframe
+	// so the browser recovers from decoder corruption in <40ms instead of
+	// waiting up to 2 seconds for the next natural keyframe.
+	if videoSender != nil {
+		videoSender.SetPLIHandler(func() {
+			sendKeyframeFromGOP(stream, videoSender)
+		})
+	}
+
+	// Start RTCP read loops. Each sender's loop runs independently;
+	// audio sender has no PLI handler (audio has no concept of keyframes).
+	if videoSender != nil {
+		videoSender.Start()
+	}
+	if audioSender != nil {
+		audioSender.Start()
 	}
 
 	// Signal channel for when the peer connection is ready to send media.
@@ -251,9 +225,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		mode = "realtime"
 	}
 
-	// Start the feed goroutine. It will wait for the connection to be
-	// established before sending any media data.
-	go whepFeedLoop(stream, videoTrack, audioTrack, sess.done, connected, pliCh, mode)
+	// Start the feed goroutine. It waits for ICE+DTLS to complete before
+	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
+	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode)
 
 	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
@@ -269,17 +243,58 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[webrtc] WHEP session %s started for stream %s", sessionID, streamKey)
 }
 
+// sendKeyframeFromGOP responds to a PLI/FIR request by sending the most
+// recent cached keyframe from the stream's GOP cache. This function is
+// registered as the PLI handler on the video TrackSender and is called from
+// the TrackSender's RTCP goroutine — not from the feed loop goroutine.
+//
+// Using stream.VideoSeqHeader() ensures SPS/PPS are always current regardless
+// of whether the feed loop has processed the latest SequenceHeader frame.
+func sendKeyframeFromGOP(stream *core.Stream, ts *TrackSender) {
+	var spsppsBuf []byte
+	if sh := stream.VideoSeqHeader(); sh != nil {
+		spsppsBuf = pkgrtp.ToAnnexB(sh.Payload, true)
+	}
+
+	for _, frame := range stream.GOPCache() {
+		if !frame.MediaType.IsVideo() {
+			continue
+		}
+		if frame.FrameType != avframe.FrameTypeKeyframe {
+			continue
+		}
+
+		payload := pkgrtp.ToAnnexB(frame.Payload, false)
+		if len(payload) == 0 {
+			break
+		}
+		if len(spsppsBuf) > 0 {
+			combined := make([]byte, len(spsppsBuf)+len(payload))
+			copy(combined, spsppsBuf)
+			copy(combined[len(spsppsBuf):], payload)
+			payload = combined
+		}
+		if err := ts.WriteSample(media.Sample{
+			Data:     payload,
+			Duration: 40 * time.Millisecond,
+		}); err == nil {
+			log.Printf("[webrtc] PLI response: sent keyframe (%d bytes)", len(payload))
+		}
+		break
+	}
+}
+
 // whepFeedLoop reads AVFrames from the stream's RingBuffer and writes them
-// to the WebRTC tracks via pion's WriteSample API. It waits for the peer
-// connection to be established before sending any data.
+// to the WebRTC tracks via TrackSender. It waits for the peer connection to
+// be established before sending any data.
+//
+// PLI/FIR handling is NOT done here — it runs independently in each
+// TrackSender's RTCP goroutine, decoupled from this feed goroutine.
 //
 // mode controls startup behavior:
 //   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
 //   - "live": send GOP cache (paced at 10x speed), then live frames.
-//
-// pliCh is signaled when the browser sends a PLI or FIR RTCP request, asking
-// for an immediate keyframe to recover from decoder corruption.
-func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocalStaticSample, done <-chan struct{}, connected <-chan struct{}, pliCh <-chan struct{}, mode string) {
+func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
@@ -309,7 +324,7 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 	//   in the same access unit as the IDR slice.
 	// - Inter-frames are sent as-is.
 	writeVideoSample := func(frame *avframe.AVFrame) {
-		if videoTrack == nil {
+		if video == nil {
 			return
 		}
 
@@ -343,7 +358,7 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 			lastVideoDTS = frame.DTS
 		}
 
-		if err := videoTrack.WriteSample(media.Sample{
+		if err := video.WriteSample(media.Sample{
 			Data:     payload,
 			Duration: duration,
 		}); err != nil {
@@ -352,10 +367,10 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 	}
 
 	// writeAudioSample writes audio frames. AAC from RTMP is not WebRTC
-	// compatible (no codecToMime mapping), so audioTrack will be nil in
+	// compatible (no codecToMime mapping), so audioSender will be nil in
 	// that case and this is a no-op.
 	writeAudioSample := func(frame *avframe.AVFrame) {
-		if audioTrack == nil {
+		if audio == nil {
 			return
 		}
 
@@ -379,7 +394,7 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 			lastAudioDTS = frame.DTS
 		}
 
-		if err := audioTrack.WriteSample(media.Sample{
+		if err := audio.WriteSample(media.Sample{
 			Data:     payload,
 			Duration: duration,
 		}); err != nil {
@@ -413,46 +428,6 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 		}
 	}
 
-	// sendKeyframeNow sends the most recent keyframe from GOP cache in
-	// response to a PLI/FIR request. This lets the browser recover from
-	// decoder corruption without waiting for the next live keyframe (which
-	// could be 2 seconds away), dramatically reducing freeze duration.
-	sendKeyframeNow := func() {
-		if videoTrack == nil {
-			return
-		}
-		// Refresh SPS/PPS from current sequence header.
-		if sh := stream.VideoSeqHeader(); sh != nil {
-			spsppsBuf = pkgrtp.ToAnnexB(sh.Payload, true)
-		}
-		gopCache := stream.GOPCache()
-		for _, frame := range gopCache {
-			if !frame.MediaType.IsVideo() {
-				continue
-			}
-			if frame.FrameType != avframe.FrameTypeKeyframe {
-				continue
-			}
-			// Found the keyframe — build payload with SPS/PPS prepended.
-			payload := pkgrtp.ToAnnexB(frame.Payload, false)
-			if len(payload) == 0 {
-				break
-			}
-			if len(spsppsBuf) > 0 {
-				combined := make([]byte, len(spsppsBuf)+len(payload))
-				copy(combined, spsppsBuf)
-				copy(combined[len(spsppsBuf):], payload)
-				payload = combined
-			}
-			_ = videoTrack.WriteSample(media.Sample{
-				Data:     payload,
-				Duration: 40 * time.Millisecond,
-			})
-			log.Printf("[webrtc] PLI response: sent keyframe (%d bytes)", len(payload))
-			break
-		}
-	}
-
 	// Live frame loop: start reading only NEW frames (after snapshot).
 	// In realtime mode, skip all frames until the first video keyframe
 	// arrives, then start sending from that keyframe onward.
@@ -480,8 +455,6 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 		select {
 		case <-done:
 			return
-		case <-pliCh:
-			sendKeyframeNow()
 		case <-stream.RingBuffer().Signal():
 		}
 	}
