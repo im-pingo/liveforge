@@ -19,8 +19,8 @@ rtmp:
   chunk_size: 4096
 
 rtsp:
-  enabled: false
-  listen: ":554"
+  enabled: true
+  listen: ":8554"
   rtp_port_range: [10000, 20000]
 
 http_stream:

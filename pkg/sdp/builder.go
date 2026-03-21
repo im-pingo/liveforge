@@ -1,7 +1,9 @@
 package sdp
 
 import (
+	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -63,6 +65,19 @@ func BuildFromMediaInfo(info *avframe.MediaInfo, baseURL string, serverAddr stri
 
 	if info.HasVideo() {
 		md := buildMediaDesc("video", info.VideoCodec, 0, 0, trackIdx)
+		// Add sprop-parameter-sets for H.264 if VideoSequenceHeader is available
+		if info.VideoCodec == avframe.CodecH264 && len(info.VideoSequenceHeader) > 0 {
+			sprop := buildSPropParameterSets(info.VideoSequenceHeader)
+			if sprop != "" {
+				// Update the fmtp line to include sprop-parameter-sets
+				for i, a := range md.Attributes {
+					if a.Key == "fmtp" {
+						md.Attributes[i].Value += "; sprop-parameter-sets=" + sprop
+						break
+					}
+				}
+			}
+		}
 		sd.Media = append(sd.Media, md)
 		trackIdx++
 	}
@@ -106,6 +121,12 @@ func buildMediaDesc(mediaType string, codec avframe.CodecType, sampleRate, chann
 	}
 	md.Attributes = append(md.Attributes, Attribute{Key: "rtpmap", Value: rtpmapVal})
 
+	// Add fmtp for H264 (packetization-mode=1 enables FU-A and STAP-A)
+	if codec == avframe.CodecH264 {
+		fmtpVal := fmt.Sprintf("%d packetization-mode=1", rtpInfo.PT)
+		md.Attributes = append(md.Attributes, Attribute{Key: "fmtp", Value: fmtpVal})
+	}
+
 	// Add fmtp for AAC
 	if codec == avframe.CodecAAC {
 		fmtpVal := fmt.Sprintf("%d profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3", rtpInfo.PT)
@@ -116,4 +137,116 @@ func buildMediaDesc(mediaType string, codec avframe.CodecType, sampleRate, chann
 	md.Attributes = append(md.Attributes, Attribute{Key: "control", Value: fmt.Sprintf("trackID=%d", trackIdx)})
 
 	return md
+}
+
+// buildSPropParameterSets converts a VideoSequenceHeader (AVCDecoderConfigurationRecord
+// or Annex-B) into a comma-separated base64 string for SDP sprop-parameter-sets.
+func buildSPropParameterSets(seqHeader []byte) string {
+	if len(seqHeader) == 0 {
+		return ""
+	}
+
+	// Try AVCDecoderConfigurationRecord first (version byte = 1)
+	if len(seqHeader) >= 8 && seqHeader[0] == 1 {
+		return buildSPropFromAVCConfig(seqHeader)
+	}
+
+	// Fallback: Annex-B format
+	nals := splitAnnexBNALs(seqHeader)
+	var parts []string
+	for _, nal := range nals {
+		if len(nal) == 0 {
+			continue
+		}
+		nalType := nal[0] & 0x1F
+		if nalType == 7 || nalType == 8 {
+			parts = append(parts, base64.StdEncoding.EncodeToString(nal))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// buildSPropFromAVCConfig extracts SPS/PPS from AVCDecoderConfigurationRecord
+// and returns base64-encoded sprop-parameter-sets string.
+func buildSPropFromAVCConfig(config []byte) string {
+	var parts []string
+	offset := 5
+	if offset >= len(config) {
+		return ""
+	}
+	// SPS
+	numSPS := int(config[offset] & 0x1F)
+	offset++
+	for range numSPS {
+		if offset+2 > len(config) {
+			break
+		}
+		spsLen := int(config[offset])<<8 | int(config[offset+1])
+		offset += 2
+		if offset+spsLen > len(config) {
+			break
+		}
+		parts = append(parts, base64.StdEncoding.EncodeToString(config[offset:offset+spsLen]))
+		offset += spsLen
+	}
+	if offset >= len(config) {
+		return strings.Join(parts, ",")
+	}
+	// PPS
+	numPPS := int(config[offset])
+	offset++
+	for range numPPS {
+		if offset+2 > len(config) {
+			break
+		}
+		ppsLen := int(config[offset])<<8 | int(config[offset+1])
+		offset += 2
+		if offset+ppsLen > len(config) {
+			break
+		}
+		parts = append(parts, base64.StdEncoding.EncodeToString(config[offset:offset+ppsLen]))
+		offset += ppsLen
+	}
+	return strings.Join(parts, ",")
+}
+
+// splitAnnexBNALs splits Annex-B byte stream into individual NAL units.
+func splitAnnexBNALs(data []byte) [][]byte {
+	var positions []int
+	i := 0
+	for i < len(data) {
+		if i+3 <= len(data) && data[i] == 0 && data[i+1] == 0 {
+			if data[i+2] == 1 {
+				positions = append(positions, i)
+				i += 3
+				continue
+			}
+			if i+4 <= len(data) && data[i+2] == 0 && data[i+3] == 1 {
+				positions = append(positions, i)
+				i += 4
+				continue
+			}
+		}
+		i++
+	}
+	if len(positions) == 0 {
+		return [][]byte{data}
+	}
+	var nals [][]byte
+	for j, pos := range positions {
+		nalStart := pos + 3
+		if pos+3 < len(data) && data[pos+2] == 0 {
+			nalStart = pos + 4
+		}
+		var nalEnd int
+		if j+1 < len(positions) {
+			nalEnd = positions[j+1]
+		} else {
+			nalEnd = len(data)
+		}
+		if nalStart < nalEnd {
+			nals = append(nals, data[nalStart:nalEnd])
+		}
+	}
+	return nals
 }
