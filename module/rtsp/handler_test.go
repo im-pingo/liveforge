@@ -42,7 +42,7 @@ func TestHandleSetupTCPInterleaved(t *testing.T) {
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "3")
 	req.Headers.Set("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")
-	resp := h.HandleSetup(req, session)
+	resp := h.HandleSetup(req, session, "127.0.0.1:12345")
 	if resp.StatusCode != 200 {
 		t.Errorf("StatusCode = %d", resp.StatusCode)
 	}
@@ -63,7 +63,7 @@ func TestHandleSetupUDP(t *testing.T) {
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "4")
 	req.Headers.Set("Transport", "RTP/AVP;unicast;client_port=5000-5001")
-	resp := h.HandleSetup(req, session)
+	resp := h.HandleSetup(req, session, "127.0.0.1:12345")
 	if resp.StatusCode != 200 {
 		t.Errorf("StatusCode = %d", resp.StatusCode)
 	}
@@ -79,7 +79,7 @@ func TestHandleAnnounce(t *testing.T) {
 	sdpBody := "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=test\r\nt=0 0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
 	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/test", Headers: make(http.Header), Body: []byte(sdpBody)}
 	req.Headers.Set("CSeq", "1")
-	resp := h.HandleAnnounce(req, session)
+	resp := h.HandleAnnounce(req, session, "127.0.0.1:12345")
 	if resp.StatusCode != 200 {
 		t.Errorf("StatusCode = %d", resp.StatusCode)
 	}
@@ -93,7 +93,7 @@ func TestHandleAnnounceNoBody(t *testing.T) {
 	session := NewRTSPSession("test-id", "live/room1")
 	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/test", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "1")
-	resp := h.HandleAnnounce(req, session)
+	resp := h.HandleAnnounce(req, session, "127.0.0.1:12345")
 	if resp.StatusCode != 400 {
 		t.Errorf("StatusCode = %d, want 400", resp.StatusCode)
 	}
@@ -134,7 +134,7 @@ func TestHandlePlay(t *testing.T) {
 	session.Transition(StateReady)
 	req := &Request{Method: "PLAY", URL: "rtsp://host/live/test", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "6")
-	resp := h.HandlePlay(req, session)
+	resp := h.HandlePlay(req, session, "127.0.0.1:12345")
 	if resp.StatusCode != 200 {
 		t.Errorf("StatusCode = %d", resp.StatusCode)
 	}

@@ -1,8 +1,11 @@
 package rtsp
 
 import (
+	"io"
 	"log"
+	"math/rand"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -27,6 +30,14 @@ type RTSPPublisher struct {
 	accFrameType avframe.FrameType // best frame type seen in current access unit
 	accMediaType avframe.MediaType
 	accCodec     avframe.CodecType
+
+	// RTCP RR support
+	rtcpWriter    io.Writer // TCP conn for sending RTCP
+	rtcpChannel   uint8     // RTCP channel (odd, e.g. 1 for video)
+	localSSRC     uint32
+	receivedPkts  uint32
+	highestSeq    uint32
+	done          chan struct{}
 }
 
 // Verify interface compliance.
@@ -39,6 +50,8 @@ func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream) (
 		mediaInfo:     info,
 		stream:        stream,
 		depacketizers: make(map[uint8]pkgrtp.Depacketizer),
+		localSSRC:     rand.Uint32(),
+		done:          make(chan struct{}),
 	}
 	// Set up depacketizers based on MediaInfo codecs.
 	// Use conventional PT assignments matching pkg/sdp/builder.go codecRTPInfo.
@@ -67,8 +80,54 @@ func (p *RTSPPublisher) MediaInfo() *avframe.MediaInfo { return p.mediaInfo }
 func (p *RTSPPublisher) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.closed = true
+	if !p.closed {
+		p.closed = true
+		if p.done != nil {
+			close(p.done)
+		}
+	}
 	return nil
+}
+
+// SetRTCPWriter configures the writer and channel for sending RTCP RR to the client.
+func (p *RTSPPublisher) SetRTCPWriter(w io.Writer, rtcpChannel uint8) {
+	p.mu.Lock()
+	p.rtcpWriter = w
+	p.rtcpChannel = rtcpChannel
+	p.mu.Unlock()
+	go p.rtcpLoop()
+}
+
+// rtcpLoop sends periodic RTCP Receiver Reports to the pushing client.
+func (p *RTSPPublisher) rtcpLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.mu.Lock()
+			if p.closed || p.rtcpWriter == nil {
+				p.mu.Unlock()
+				return
+			}
+			w := p.rtcpWriter
+			ch := p.rtcpChannel
+			received := p.receivedPkts
+			highest := p.highestSeq
+			p.mu.Unlock()
+
+			rr := pkgrtp.BuildRR(p.localSSRC, []pkgrtp.ReceptionReport{
+				{
+					SSRC:       0, // remote SSRC (unknown until first packet)
+					HighestSeq: highest,
+				},
+			})
+			_ = received // tracked for future loss calculation
+			WriteInterleaved(w, ch, rr)
+		case <-p.done:
+			return
+		}
+	}
 }
 
 // FeedRTP processes an incoming RTP packet.
@@ -81,6 +140,11 @@ func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 		return nil
 	}
 	dp, ok := p.depacketizers[pkt.PayloadType]
+	p.receivedPkts++
+	seq := uint32(pkt.SequenceNumber)
+	if seq > p.highestSeq {
+		p.highestSeq = seq
+	}
 	p.mu.Unlock()
 	if !ok {
 		log.Printf("rtsp: FeedRTP unknown PT=%d, registered PTs: %v", pkt.PayloadType, p.registeredPTs())

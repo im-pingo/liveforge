@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -54,6 +55,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.listener = ln
 
 	go m.acceptLoop()
+	go m.sessionReaper()
 
 	log.Printf("rtsp: listening on %s", cfg.Listen)
 	return nil
@@ -67,6 +69,32 @@ func (m *Module) Close() error {
 		return m.listener.Close()
 	}
 	return nil
+}
+
+// sessionReaper periodically checks for expired sessions and cleans them up.
+func (m *Module) sessionReaper() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.mu.Lock()
+			var expired []*RTSPSession
+			for id, s := range m.sessions {
+				if s.IsExpired() {
+					expired = append(expired, s)
+					delete(m.sessions, id)
+				}
+			}
+			m.mu.Unlock()
+			for _, s := range expired {
+				log.Printf("rtsp: reaping expired session %s (stream=%s)", s.ID, s.StreamKey)
+				s.Close()
+			}
+		case <-m.done:
+			return
+		}
+	}
 }
 
 func (m *Module) acceptLoop() {
@@ -92,6 +120,21 @@ func (m *Module) handleConn(conn net.Conn) {
 
 	defer func() {
 		if session != nil {
+			// Emit stop events before cleanup.
+			if session.Publisher != nil {
+				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
+					StreamKey:  session.StreamKey,
+					Protocol:   "rtsp",
+					RemoteAddr: conn.RemoteAddr().String(),
+				})
+			}
+			if session.Subscriber != nil {
+				m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
+					StreamKey:  session.StreamKey,
+					Protocol:   "rtsp",
+					RemoteAddr: conn.RemoteAddr().String(),
+				})
+			}
 			session.Close()
 			m.mu.Lock()
 			delete(m.sessions, session.ID)
@@ -111,7 +154,7 @@ func (m *Module) handleConn(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				// Skip RTCP channels (odd numbers are RTCP per RFC 2326)
+				// Odd channels carry RTCP — skip for now.
 				if ch%2 != 0 {
 					continue
 				}
@@ -151,9 +194,9 @@ func (m *Module) handleConn(conn net.Conn) {
 		case "DESCRIBE":
 			resp = m.handler.HandleDescribe(req, session)
 		case "SETUP":
-			resp = m.handler.HandleSetup(req, session)
+			resp = m.handler.HandleSetup(req, session, conn.RemoteAddr().String())
 		case "PLAY":
-			resp = m.handler.HandlePlay(req, session)
+			resp = m.handler.HandlePlay(req, session, conn.RemoteAddr().String())
 			if resp.StatusCode == 200 {
 				if err := WriteResponse(conn, resp); err != nil {
 					return
@@ -164,9 +207,27 @@ func (m *Module) handleConn(conn net.Conn) {
 		case "PAUSE":
 			resp = m.handler.HandlePause(req, session)
 		case "ANNOUNCE":
-			resp = m.handler.HandleAnnounce(req, session)
+			resp = m.handler.HandleAnnounce(req, session, conn.RemoteAddr().String())
 		case "RECORD":
 			resp = m.handler.HandleRecord(req, session)
+			if resp.StatusCode == 200 && session != nil && session.Publisher != nil {
+				// Start RTCP RR loop for TCP interleaved publisher.
+				var rtcpCh uint8 = 1
+				for _, t := range session.Tracks {
+					if t.Codec.IsVideo() && t.Transport.IsTCP {
+						rtcpCh = uint8(t.Transport.Interleaved[1])
+						break
+					}
+				}
+				session.Publisher.SetRTCPWriter(conn, rtcpCh)
+
+				// Start UDP read loops for tracks using UDP transport.
+				for _, t := range session.Tracks {
+					if t.UDP != nil {
+						go m.udpPublishLoop(t.UDP, session)
+					}
+				}
+			}
 		case "TEARDOWN":
 			resp = m.handler.HandleTeardown(req, session)
 			if err := WriteResponse(conn, resp); err != nil {
@@ -196,14 +257,23 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		return
 	}
 
-	// Determine video/audio channels from track setup.
+	// Determine video/audio channels and optional UDP transports from track setup.
 	var videoChannel, audioChannel uint8
+	var videoUDP, audioUDP *UDPTransport
 	for _, t := range session.Tracks {
-		if t.Codec.IsVideo() && t.Transport.IsTCP {
-			videoChannel = uint8(t.Transport.Interleaved[0])
+		if t.Codec.IsVideo() {
+			if t.Transport.IsTCP {
+				videoChannel = uint8(t.Transport.Interleaved[0])
+			} else {
+				videoUDP = t.UDP
+			}
 		}
-		if t.Codec.IsAudio() && t.Transport.IsTCP {
-			audioChannel = uint8(t.Transport.Interleaved[0])
+		if t.Codec.IsAudio() {
+			if t.Transport.IsTCP {
+				audioChannel = uint8(t.Transport.Interleaved[0])
+			} else {
+				audioUDP = t.UDP
+			}
 		}
 	}
 
@@ -212,6 +282,8 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		log.Printf("rtsp: failed to create subscriber for session %s: %v", session.ID, err)
 		return
 	}
+	sub.videoUDP = videoUDP
+	sub.audioUDP = audioUDP
 	session.Subscriber = sub
 	session.Stream.AddSubscriber("rtsp")
 
@@ -221,22 +293,23 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		session.Subscriber = nil
 	}()
 
-	// Send video sequence header (SPS/PPS) for decoder initialization.
-	if seqHeader := session.Stream.VideoSeqHeader(); seqHeader != nil {
-		if err := sub.SendFrame(seqHeader); err != nil {
-			return
-		}
-	}
+	// Note: SPS/PPS are delivered via SDP sprop-parameter-sets.
+	// Sending VideoSeqHeader as a separate RTP frame causes duplicate
+	// timestamps with the first keyframe. Skip it for RTSP.
 
 	// Send GOP cache for instant playback.
+	// Skip SequenceHeader frames — SPS/PPS is delivered via SDP sprop-parameter-sets.
 	for _, frame := range session.Stream.GOPCache() {
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
 		if err := sub.SendFrame(frame); err != nil {
 			return
 		}
 	}
 
-	// Read from ring buffer and send frames.
-	ringReader := session.Stream.RingBuffer().NewReader()
+	// Start reading from the current write position to avoid duplicating GOP frames.
+	ringReader := session.Stream.RingBuffer().NewReaderAt(session.Stream.RingBuffer().WriteCursor())
 	for {
 		frame, ok := ringReader.Read()
 		if !ok {
@@ -247,8 +320,34 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 			return
 		default:
 		}
+		// Skip SequenceHeader — delivered via SDP.
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
 		if err := sub.SendFrame(frame); err != nil {
 			return
+		}
+	}
+}
+
+// udpPublishLoop reads RTP packets from a UDP transport and feeds them to the publisher.
+func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
+	buf := make([]byte, 2048)
+	for {
+		select {
+		case <-ut.done:
+			return
+		default:
+		}
+		n, _, err := ut.ReadRTP(buf)
+		if err != nil {
+			return
+		}
+		if session.Publisher != nil {
+			pkt := &pionrtp.Packet{}
+			if err := pkt.Unmarshal(buf[:n]); err == nil {
+				session.Publisher.FeedRTP(pkt)
+			}
 		}
 	}
 }
