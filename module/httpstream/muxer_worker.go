@@ -195,9 +195,6 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	initSeg := muxer.Init(videoSeqHeader, audioSeqHeader, videoWidth, videoHeight, audioSampleRate, audioChannels)
 	inst.SetInitData(initSeg)
 
-	// For FMP4, we buffer a GOP and emit as a segment
-	var gopBuf []*avframe.AVFrame
-
 	// Snapshot write cursor before sending GOP cache
 	startPos := stream.RingBuffer().WriteCursor()
 
@@ -210,7 +207,9 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 		}
 	}
 
-	// Read live frames, buffer by GOP (only new frames)
+	// Read live frames and emit each as its own moof+mdat segment.
+	// Unlike GOP-based buffering, per-frame segments prevent the 2-second
+	// delivery gap that causes playback stutter in low-latency scenarios.
 	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		select {
@@ -228,16 +227,10 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 			continue
 		}
 
-		// On video keyframe, flush previous GOP as a segment
-		if frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && len(gopBuf) > 0 {
-			seg := muxer.WriteSegment(gopBuf)
-			if len(seg) > 0 {
-				inst.Buffer.Write(seg)
-			}
-			gopBuf = gopBuf[:0]
+		seg := muxer.WriteSegment([]*avframe.AVFrame{frame})
+		if len(seg) > 0 {
+			inst.Buffer.Write(seg)
 		}
-
-		gopBuf = append(gopBuf, frame)
 	}
 }
 

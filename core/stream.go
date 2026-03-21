@@ -199,6 +199,45 @@ func (s *Stream) GOPCacheLen() int {
 	return len(s.gopCache)
 }
 
+// GOPCacheDetail returns GOP cache statistics without copying the frames.
+type GOPCacheDetail struct {
+	TotalFrames int
+	VideoFrames int
+	AudioFrames int
+	DurationMs  int64
+}
+
+func (s *Stream) GOPCacheDetail() GOPCacheDetail {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	d := GOPCacheDetail{TotalFrames: len(s.gopCache)}
+	if len(s.gopCache) == 0 {
+		return d
+	}
+
+	var firstDTS, lastDTS int64
+	firstSet := false
+	for _, f := range s.gopCache {
+		if f.MediaType.IsVideo() {
+			d.VideoFrames++
+		} else if f.MediaType.IsAudio() {
+			d.AudioFrames++
+		}
+		if f.DTS > 0 {
+			if !firstSet {
+				firstDTS = f.DTS
+				firstSet = true
+			}
+			lastDTS = f.DTS
+		}
+	}
+	if firstSet {
+		d.DurationMs = lastDTS - firstDTS
+	}
+	return d
+}
+
 // GOPCache returns a copy of the current GOP cache.
 func (s *Stream) GOPCache() []*avframe.AVFrame {
 	s.mu.RLock()

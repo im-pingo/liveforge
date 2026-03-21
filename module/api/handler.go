@@ -46,8 +46,11 @@ type StreamInfo struct {
 	Publisher   string              `json:"publisher"`
 	VideoCodec  string              `json:"video_codec"`
 	AudioCodec  string              `json:"audio_codec"`
-	GOPCacheLen int                 `json:"gop_cache_len"`
-	Subscribers map[string]int      `json:"subscribers"`
+	GOPCacheLen    int              `json:"gop_cache_len"`
+	GOPVideoFrames int             `json:"gop_video_frames"`
+	GOPAudioFrames int             `json:"gop_audio_frames"`
+	GOPDurationMs  int64           `json:"gop_duration_ms"`
+	Subscribers    map[string]int  `json:"subscribers"`
 	Stats       *StreamStatsDetail  `json:"stats,omitempty"`
 }
 
@@ -80,10 +83,15 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 		subs[proto] = count
 	}
 
+	gopDetail := stream.GOPCacheDetail()
+
 	info := StreamInfo{
 		Key:         stream.Key(),
 		State:       state.String(),
-		GOPCacheLen: stream.GOPCacheLen(),
+		GOPCacheLen:    gopDetail.TotalFrames,
+		GOPVideoFrames: gopDetail.VideoFrames,
+		GOPAudioFrames: gopDetail.AudioFrames,
+		GOPDurationMs:  gopDetail.DurationMs,
 		Subscribers: subs,
 	}
 

@@ -342,31 +342,11 @@ func whepFeedLoop(stream *core.Stream, videoTrack, audioTrack *webrtc.TrackLocal
 		}
 	}
 
-	// Real-time pacing anchor: tie first live video frame's DTS to wall clock.
-	// This prevents bursts when multiple frames accumulate in the ring buffer
-	// (e.g., after a goroutine scheduling delay). Frames arriving on time
-	// are sent immediately; overdue frames are sent immediately without extra
-	// delay.
-	var anchorWall time.Time
-	var anchorDTS int64
-
 	// Live frame loop: start reading only NEW frames (after GOP cache snapshot).
 	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		frame, ok := reader.TryRead()
 		if ok {
-			// Pace video frames to wall-clock time to prevent UDP bursts.
-			if frame.MediaType.IsVideo() && frame.FrameType != avframe.FrameTypeSequenceHeader && frame.DTS > 0 {
-				if anchorDTS == 0 {
-					anchorWall = time.Now()
-					anchorDTS = frame.DTS
-				} else {
-					expectedAt := anchorWall.Add(time.Duration(frame.DTS-anchorDTS) * time.Millisecond)
-					if sleep := time.Until(expectedAt); sleep > 0 && sleep < 500*time.Millisecond {
-						time.Sleep(sleep)
-					}
-				}
-			}
 			if frame.MediaType.IsVideo() {
 				writeVideoSample(frame)
 			} else if frame.MediaType.IsAudio() {

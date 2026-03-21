@@ -124,6 +124,30 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
 .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 
+/* GOP cache bar */
+.gop-cell { min-width: 100px; }
+.gop-bar-wrap {
+  width: 100%;
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.gop-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--blue));
+  transition: width 0.4s ease;
+}
+.gop-label {
+  font-size: 11px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+.gop-label b { color: var(--text); font-weight: 600; }
+
 /* State badge */
 .state {
   display: inline-flex;
@@ -382,6 +406,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <th>Codecs</th>
           <th>Bitrate</th>
           <th>FPS</th>
+          <th>GOP Cache</th>
           <th>Subscribers</th>
           <th>Actions</th>
         </tr>
@@ -418,7 +443,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div class="proto-tabs" id="proto-tabs"></div>
     <div class="player-body">
       <div class="player-video-wrap">
-        <video id="player-video" autoplay muted playsinline></video>
+        <video id="player-video" autoplay playsinline></video>
       </div>
       <div class="player-status" id="player-status">Select a protocol to start playback</div>
       <div class="player-url" id="player-url" style="display:none"></div>
@@ -924,6 +949,20 @@ function refresh() {
         acts += '<button class="btn btn-danger" onclick="deleteStream(\'' + safeKey + '\')">Delete</button>';
         acts += '</div>';
 
+        // GOP cache cell
+        var gopLen = s.gop_cache_len || 0;
+        var gopV = s.gop_video_frames || 0;
+        var gopA = s.gop_audio_frames || 0;
+        var gopMs = s.gop_duration_ms || 0;
+        var gopSec = (gopMs / 1000).toFixed(1);
+        // Bar width: assume max ~120 frames in a GOP (2s @60fps), cap at 100%
+        var gopPct = Math.min(gopLen / 120 * 100, 100);
+        var gopHtml = '<div class="gop-cell">'
+          + '<div class="gop-bar-wrap"><div class="gop-bar" style="width:' + gopPct.toFixed(0) + '%"></div></div>'
+          + '<div class="gop-label"><b>' + gopLen + '</b> frames &middot; ' + gopSec + 's'
+          + ' <span style="color:var(--blue)">V' + gopV + '</span>'
+          + ' <span style="color:#c084fc">A' + gopA + '</span></div></div>';
+
         html += "<tr>"
           + '<td class="stream-key">' + esc(s.key) + "</td>"
           + '<td><span class="state state-' + esc(s.state) + '">' + esc(s.state.replace("_", " ")) + '</span></td>'
@@ -931,6 +970,7 @@ function refresh() {
           + "<td>" + codecs + "</td>"
           + '<td class="mono">' + formatBitrate(st.bitrate_kbps) + "</td>"
           + '<td class="mono">' + (st.fps ? st.fps.toFixed(1) : "-") + "</td>"
+          + "<td>" + gopHtml + "</td>"
           + '<td><div class="subs">' + subHtml + "</div></td>"
           + "<td>" + acts + "</td>"
           + "</tr>";
