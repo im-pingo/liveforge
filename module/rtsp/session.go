@@ -40,6 +40,7 @@ type TrackSetup struct {
 	TrackID   int
 	Codec     avframe.CodecType
 	Transport TransportConfig
+	UDP       *UDPTransport // non-nil for UDP transport
 }
 
 // RTSPSession represents an RTSP session with state management.
@@ -101,7 +102,7 @@ func (s *RTSPSession) IsExpired() bool {
 	return time.Since(s.lastTouch) > s.Timeout
 }
 
-// Close cleans up publisher and subscriber resources.
+// Close cleans up publisher, subscriber, and UDP transport resources.
 func (s *RTSPSession) Close() {
 	if s.Publisher != nil {
 		if err := s.Publisher.Close(); err != nil {
@@ -120,5 +121,12 @@ func (s *RTSPSession) Close() {
 			s.Stream.RemoveSubscriber("rtsp")
 		}
 		s.Subscriber = nil
+	}
+	// Close any UDP transports.
+	for i := range s.Tracks {
+		if s.Tracks[i].UDP != nil {
+			s.Tracks[i].UDP.Close()
+			s.Tracks[i].UDP = nil
+		}
 	}
 }

@@ -2,7 +2,9 @@ package rtsp
 
 import (
 	"io"
+	"math/rand"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -11,11 +13,11 @@ import (
 	pioncodecs "github.com/pion/rtp/v2/codecs"
 )
 
-// RTSPSubscriber implements RTSP playback via TCP interleaved transport.
+// RTSPSubscriber implements RTSP playback via TCP interleaved or UDP transport.
 type RTSPSubscriber struct {
 	id      string
 	options core.SubscribeOptions
-	writer  io.Writer // TCP conn for interleaved mode
+	writer  io.Writer // TCP conn for interleaved mode (nil in UDP mode)
 
 	videoPacketizer pionrtp.Packetizer
 	audioPacketizer pionrtp.Packetizer
@@ -26,9 +28,21 @@ type RTSPSubscriber struct {
 	videoChannel uint8 // TCP interleaved channel for video RTP
 	audioChannel uint8 // TCP interleaved channel for audio RTP
 
-	prevVideoDTS int64
-	prevAudioDTS int64
+	// UDP transport (non-nil when client negotiated UDP transport)
+	videoUDP *UDPTransport
+	audioUDP *UDPTransport
+
+	prevVideoDTS    int64
+	prevAudioDTS    int64
+	videoDTSInitialized bool
+	audioDTSInitialized bool
 	sendCount    int
+
+	// RTCP SR tracking
+	videoSSRC    uint32
+	packetCount  uint32
+	octetCount   uint32
+	lastRTPTime  uint32
 
 	mu     sync.Mutex
 	closed bool
@@ -45,6 +59,7 @@ func NewRTSPSubscriber(id string, info *avframe.MediaInfo, writer io.Writer, vid
 		writer:       writer,
 		videoChannel: videoChannel,
 		audioChannel: audioChannel,
+		videoSSRC:    rand.Uint32(),
 		done:         make(chan struct{}),
 	}
 
@@ -87,6 +102,7 @@ func NewRTSPSubscriber(id string, info *avframe.MediaInfo, writer io.Writer, vid
 		}
 	}
 
+	go sub.rtcpLoop()
 	return sub, nil
 }
 
@@ -149,30 +165,38 @@ func (s *RTSPSubscriber) sendVideo(frame *avframe.AVFrame) error {
 		return nil
 	}
 
+	// Sequence header (SPS/PPS) is metadata, not a displayable frame.
+	// Skip DTS tracking for it — its RTP timestamp shares with the next keyframe.
+	isSeqHeader := frame.FrameType == avframe.FrameTypeSequenceHeader
+
 	// Convert payload to Annex-B for pion's H264Payloader
-	payload := pkgrtp.ToAnnexB(frame.Payload, frame.FrameType == avframe.FrameTypeSequenceHeader)
+	payload := pkgrtp.ToAnnexB(frame.Payload, isSeqHeader)
 
 	// Compute sample delta (90kHz clock)
 	var samples uint32
-	if s.prevVideoDTS > 0 && frame.DTS > s.prevVideoDTS {
+	if !isSeqHeader && s.videoDTSInitialized && frame.DTS > s.prevVideoDTS {
 		samples = uint32((frame.DTS - s.prevVideoDTS) * 90)
 	}
-	s.prevVideoDTS = frame.DTS
+	if !isSeqHeader {
+		s.prevVideoDTS = frame.DTS
+		s.videoDTSInitialized = true
+	}
 
 	pkts := s.videoPacketizer.Packetize(payload, samples)
-	return s.sendPackets(pkts, s.videoChannel)
+	return s.sendPackets(pkts, s.videoChannel, s.videoUDP)
 }
 
 func (s *RTSPSubscriber) sendAudio(frame *avframe.AVFrame) error {
 	if s.audioPacketizer != nil {
 		var samples uint32
-		if s.prevAudioDTS > 0 && frame.DTS > s.prevAudioDTS {
+		if s.audioDTSInitialized && frame.DTS > s.prevAudioDTS {
 			clockRate := uint32(44100) // default
 			samples = uint32(frame.DTS-s.prevAudioDTS) * clockRate / 1000
 		}
 		s.prevAudioDTS = frame.DTS
+		s.audioDTSInitialized = true
 		pkts := s.audioPacketizer.Packetize(frame.Payload, samples)
-		return s.sendPackets(pkts, s.audioChannel)
+		return s.sendPackets(pkts, s.audioChannel, s.audioUDP)
 	}
 
 	// Fallback to custom packetizer
@@ -184,22 +208,74 @@ func (s *RTSPSubscriber) sendAudio(frame *avframe.AVFrame) error {
 		return err
 	}
 	wrapped := s.customAudioSes.WrapPackets(pkts, frame.DTS)
-	return s.sendPackets(wrapped, s.audioChannel)
+	return s.sendPackets(wrapped, s.audioChannel, s.audioUDP)
 }
 
-func (s *RTSPSubscriber) sendPackets(pkts []*pionrtp.Packet, channel uint8) error {
+func (s *RTSPSubscriber) sendPackets(pkts []*pionrtp.Packet, channel uint8, udp *UDPTransport) error {
 	for _, pkt := range pkts {
 		data, err := pkt.Marshal()
 		if err != nil {
 			return err
 		}
+		s.mu.Lock()
 		s.sendCount++
-		if err := WriteInterleaved(s.writer, channel, data); err != nil {
-			return err
+		s.packetCount++
+		s.octetCount += uint32(len(pkt.Payload))
+		s.lastRTPTime = pkt.Timestamp
+		s.mu.Unlock()
+		if udp != nil {
+			if err := udp.SendRTP(data); err != nil {
+				return err
+			}
+		} else {
+			if err := WriteInterleaved(s.writer, channel, data); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
+
+// rtcpLoop sends periodic RTCP Sender Reports on the video RTCP channel.
+func (s *RTSPSubscriber) rtcpLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				return
+			}
+			pktCount := s.packetCount
+			octCount := s.octetCount
+			rtpTime := s.lastRTPTime
+			s.mu.Unlock()
+
+			ntpTime := toNTP(time.Now())
+			sr := pkgrtp.BuildSR(s.videoSSRC, ntpTime, rtpTime, pktCount, octCount)
+			if s.videoUDP != nil {
+				s.videoUDP.SendRTCP(sr)
+			} else {
+				rtcpChannel := s.videoChannel + 1 // odd channel = RTCP
+				WriteInterleaved(s.writer, rtcpChannel, sr)
+			}
+		case <-s.done:
+			return
+		}
+	}
+}
+
+// toNTP converts a time.Time to NTP timestamp (RFC 3550 format).
+func toNTP(t time.Time) uint64 {
+	// NTP epoch is Jan 1, 1900. Unix epoch is Jan 1, 1970.
+	const ntpEpochOffset = 2208988800
+	secs := uint64(t.Unix()) + ntpEpochOffset
+	frac := uint64(t.Nanosecond()) * (1 << 32) / 1e9
+	return secs<<32 | frac
+}
+
 
 // Done returns a channel that is closed when the subscriber is closed.
 func (s *RTSPSubscriber) Done() <-chan struct{} {

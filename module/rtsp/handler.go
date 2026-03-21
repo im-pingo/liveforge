@@ -3,6 +3,7 @@ package rtsp
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 
@@ -86,16 +87,26 @@ type TransportConfig struct {
 }
 
 // HandleSetup negotiates transport for a track.
-func (h *Handler) HandleSetup(req *Request, session *RTSPSession) *Response {
+func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr string) *Response {
 	transport := req.Headers.Get("Transport")
 	tc := parseTransportHeader(transport)
 
+	var udpTransport *UDPTransport
 	if !tc.IsTCP && h.portManager != nil {
-		rtp, rtcp, err := h.portManager.Allocate()
+		ut, err := NewUDPTransport(h.portManager)
 		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}
-		tc.ServerPorts = [2]int{rtp, rtcp}
+		rtpPort, rtcpPort := ut.ServerPorts()
+		tc.ServerPorts = [2]int{rtpPort, rtcpPort}
+		udpTransport = ut
+
+		// Set client address from client_port and remote IP.
+		host, _, _ := net.SplitHostPort(remoteAddr)
+		clientIP := net.ParseIP(host)
+		if clientIP != nil {
+			ut.SetClientAddr(clientIP, tc.ClientPorts[0], tc.ClientPorts[1])
+		}
 	}
 
 	// Store transport config per track on the session.
@@ -104,6 +115,7 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession) *Response {
 		ts := TrackSetup{
 			TrackID:   trackID,
 			Transport: tc,
+			UDP:       udpTransport,
 		}
 		// Assign codec from MediaInfo based on track order.
 		if session.MediaInfo != nil {
@@ -132,7 +144,7 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession) *Response {
 }
 
 // HandleAnnounce processes ANNOUNCE request with SDP body.
-func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession) *Response {
+func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr string) *Response {
 	if len(req.Body) == 0 {
 		return newResponse(400, "Bad Request", req)
 	}
@@ -142,6 +154,15 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession) *Response {
 	}
 
 	if session != nil && h.server != nil {
+		// Emit publish event — auth hooks can reject.
+		if err := h.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
+			StreamKey:  session.StreamKey,
+			Protocol:   "rtsp",
+			RemoteAddr: remoteAddr,
+		}); err != nil {
+			return newResponse(401, "Unauthorized", req)
+		}
+
 		mediaInfo := sdpToMediaInfo(sd)
 		session.MediaInfo = mediaInfo
 
@@ -190,7 +211,17 @@ func (h *Handler) HandleRecord(req *Request, session *RTSPSession) *Response {
 }
 
 // HandlePlay starts playback (subscribing) on the stream.
-func (h *Handler) HandlePlay(req *Request, session *RTSPSession) *Response {
+func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr string) *Response {
+	if session != nil && h.server != nil {
+		// Emit subscribe event — auth hooks can reject.
+		if err := h.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+			StreamKey:  session.StreamKey,
+			Protocol:   "rtsp",
+			RemoteAddr: remoteAddr,
+		}); err != nil {
+			return newResponse(401, "Unauthorized", req)
+		}
+	}
 	if session != nil {
 		if err := session.Transition(StatePlaying); err != nil {
 			return newResponse(455, "Method Not Valid in This State", req)
