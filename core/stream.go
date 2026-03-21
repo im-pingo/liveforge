@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ func (s StreamState) String() string {
 type Stream struct {
 	key    string
 	config config.StreamConfig
+	limits config.LimitsConfig
 
 	mu        sync.RWMutex
 	state     StreamState
@@ -55,15 +57,17 @@ type Stream struct {
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
 
+	stats            StreamStats
 	eventBus         *EventBus
 	noPublisherTimer *time.Timer
 }
 
 // NewStream creates a new Stream in idle state.
-func NewStream(key string, cfg config.StreamConfig, bus *EventBus) *Stream {
+func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *Stream {
 	s := &Stream{
 		key:         key,
 		config:      cfg,
+		limits:      limits,
 		state:       StreamStateIdle,
 		ringBuffer:  util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
 		eventBus:    bus,
@@ -102,6 +106,7 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 
 	s.publisher = pub
 	s.state = StreamStatePublishing
+	s.stats.initStats()
 
 	return nil
 }
@@ -123,6 +128,30 @@ func (s *Stream) RemovePublisher() {
 			}
 		})
 	}
+}
+
+// Close force-closes the stream: closes the ring buffer, removes the publisher,
+// and transitions to destroying state.
+func (s *Stream) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state == StreamStateDestroying {
+		return
+	}
+
+	if s.noPublisherTimer != nil {
+		s.noPublisherTimer.Stop()
+		s.noPublisherTimer = nil
+	}
+
+	if s.publisher != nil {
+		s.publisher.Close() //nolint:errcheck
+		s.publisher = nil
+	}
+
+	s.state = StreamStateDestroying
+	s.ringBuffer.Close()
 }
 
 // Publisher returns the current publisher, if any.
@@ -159,6 +188,7 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
 		s.gopCache = append(s.gopCache, frame)
 	}
 
+	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
 }
 
@@ -193,6 +223,11 @@ func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
 	return s.audioSeqHeader
 }
 
+// Stats returns a point-in-time snapshot of stream statistics.
+func (s *Stream) Stats() StreamStatsSnapshot {
+	return s.stats.snapshot()
+}
+
 // RingBuffer returns the stream's ring buffer for reader creation.
 func (s *Stream) RingBuffer() *util.RingBuffer[*avframe.AVFrame] {
 	return s.ringBuffer
@@ -204,10 +239,23 @@ func (s *Stream) MuxerManager() *MuxerManager {
 }
 
 // AddSubscriber increments the subscriber count for a protocol (e.g. "rtmp").
-func (s *Stream) AddSubscriber(protocol string) {
+// Returns an error if max_subscribers_per_stream limit is reached.
+func (s *Stream) AddSubscriber(protocol string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if max := s.limits.MaxSubscribersPerStream; max > 0 {
+		total := 0
+		for _, n := range s.subscribers {
+			total += n
+		}
+		if total >= max {
+			return fmt.Errorf("max subscribers per stream limit reached (%d)", max)
+		}
+	}
+
 	s.subscribers[protocol]++
+	return nil
 }
 
 // RemoveSubscriber decrements the subscriber count for a protocol.

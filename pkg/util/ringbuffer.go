@@ -58,6 +58,12 @@ func (rb *RingBuffer[T]) IsClosed() bool {
 	return rb.closed.Load()
 }
 
+// Signal returns the notification channel that is signaled on each Write.
+// Useful for select-based consumers that need to multiplex with other channels.
+func (rb *RingBuffer[T]) Signal() <-chan struct{} {
+	return rb.signal
+}
+
 // WriteCursor returns the current write position (number of items written).
 func (rb *RingBuffer[T]) WriteCursor() int64 {
 	return rb.writeCursor.Load()

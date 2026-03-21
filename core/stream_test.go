@@ -30,7 +30,7 @@ func (p *testPublisher) Close() error                  { return nil }
 
 func TestStreamStateTransitions(t *testing.T) {
 	bus := NewEventBus()
-	s := NewStream("live/test", newTestStreamConfig(), bus)
+	s := NewStream("live/test", newTestStreamConfig(), config.LimitsConfig{}, bus)
 
 	if s.State() != StreamStateIdle {
 		t.Fatalf("expected idle, got %v", s.State())
@@ -56,7 +56,7 @@ func TestStreamStateTransitions(t *testing.T) {
 
 func TestStreamRejectDuplicatePublisher(t *testing.T) {
 	bus := NewEventBus()
-	s := NewStream("live/test", newTestStreamConfig(), bus)
+	s := NewStream("live/test", newTestStreamConfig(), config.LimitsConfig{}, bus)
 
 	pub1 := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
 	pub2 := &testPublisher{id: "pub2", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
@@ -70,7 +70,7 @@ func TestStreamRejectDuplicatePublisher(t *testing.T) {
 
 func TestStreamWriteAndReadFrames(t *testing.T) {
 	bus := NewEventBus()
-	s := NewStream("live/test", newTestStreamConfig(), bus)
+	s := NewStream("live/test", newTestStreamConfig(), config.LimitsConfig{}, bus)
 
 	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC}}
 	_ = s.SetPublisher(pub)
@@ -99,7 +99,7 @@ func TestStreamNoPublisherTimeout(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
 	cfg.NoPublisherTimeout = 100 * time.Millisecond // short timeout for test
-	s := NewStream("live/timeout", cfg, bus)
+	s := NewStream("live/timeout", cfg, config.LimitsConfig{}, bus)
 
 	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
 	_ = s.SetPublisher(pub)
@@ -120,7 +120,7 @@ func TestStreamRepublishBeforeTimeout(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
 	cfg.NoPublisherTimeout = 500 * time.Millisecond
-	s := NewStream("live/republish", cfg, bus)
+	s := NewStream("live/republish", cfg, config.LimitsConfig{}, bus)
 
 	pub1 := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
 	_ = s.SetPublisher(pub1)

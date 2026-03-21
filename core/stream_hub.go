@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/im-pingo/liveforge/config"
@@ -8,38 +9,47 @@ import (
 
 // StreamHub manages all active streams.
 type StreamHub struct {
-	mu       sync.RWMutex
-	streams  map[string]*Stream
-	config   config.StreamConfig
-	eventBus *EventBus
+	mu         sync.RWMutex
+	streams    map[string]*Stream
+	config     config.StreamConfig
+	limits     config.LimitsConfig
+	eventBus   *EventBus
 }
 
 // NewStreamHub creates a new StreamHub.
-func NewStreamHub(cfg config.StreamConfig, bus *EventBus) *StreamHub {
+func NewStreamHub(cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *StreamHub {
 	return &StreamHub{
 		streams:  make(map[string]*Stream),
 		config:   cfg,
+		limits:   limits,
 		eventBus: bus,
 	}
 }
 
 // GetOrCreate returns an existing stream or creates a new one.
-// If the existing stream is in the destroying state, it is replaced with a fresh stream.
-func (h *StreamHub) GetOrCreate(key string) *Stream {
+// Returns an error if max_streams limit is reached and the stream does not already exist.
+func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if s, ok := h.streams[key]; ok {
 		if s.State() != StreamStateDestroying {
-			return s
+			return s, nil
 		}
 		// Stream is being destroyed; replace it with a fresh one.
 		delete(h.streams, key)
 	}
 
-	s := NewStream(key, h.config, h.eventBus)
+	if max := h.limits.MaxStreams; max > 0 && len(h.streams) >= max {
+		return nil, fmt.Errorf("max streams limit reached (%d)", max)
+	}
+
+	s := NewStream(key, h.config, h.limits, h.eventBus)
 	h.streams[key] = s
-	return s
+
+	h.eventBus.Emit(EventStreamCreate, &EventContext{StreamKey: key}) //nolint:errcheck
+
+	return s, nil
 }
 
 // Find returns a stream by key, or nil if not found.
@@ -50,11 +60,14 @@ func (h *StreamHub) Find(key string) (*Stream, bool) {
 	return s, ok
 }
 
-// Remove deletes a stream from the hub.
+// Remove deletes a stream from the hub and emits EventStreamDestroy.
 func (h *StreamHub) Remove(key string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.streams, key)
+	if _, ok := h.streams[key]; ok {
+		delete(h.streams, key)
+		h.eventBus.Emit(EventStreamDestroy, &EventContext{StreamKey: key}) //nolint:errcheck
+	}
 }
 
 // Count returns the number of active streams.
