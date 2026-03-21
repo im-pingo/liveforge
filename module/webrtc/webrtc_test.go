@@ -184,30 +184,29 @@ func TestSessionStore(t *testing.T) {
 	}
 }
 
-// TestTrackSenderPLIHandler verifies that TrackSender dispatches PLI/FIR
-// RTCP packets to the registered handler, independent of protocol code.
-func TestTrackSenderPLIHandler(t *testing.T) {
+// testPCPair creates a connected sender/receiver PeerConnection pair with a
+// video track. Returns the TrackSender, receiver PC, media SSRC, and cleanup func.
+func testPCPair(t *testing.T) (*TrackSender, *webrtc.PeerConnection, uint32) {
+	t.Helper()
+
 	me := &webrtc.MediaEngine{}
 	if err := me.RegisterDefaultCodecs(); err != nil {
 		t.Fatal(err)
 	}
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
 
-	// Create sender PC (simulates server sending video).
 	senderPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer senderPC.Close()
+	t.Cleanup(func() { senderPC.Close() })
 
-	// Create receiver PC (simulates browser receiving video).
 	receiverPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer receiverPC.Close()
+	t.Cleanup(func() { receiverPC.Close() })
 
-	// Add a video track to the sender.
 	track, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000},
 		"video", "test",
@@ -220,13 +219,9 @@ func TestTrackSenderPLIHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wrap in TrackSender and register PLI handler.
-	var pliCount atomic.Int32
 	ts := NewTrackSender("test-session", track, rtpSender)
-	ts.SetPLIHandler(func() { pliCount.Add(1) })
-	ts.Start()
 
-	// Perform SDP exchange to connect the two PCs.
+	// SDP exchange.
 	offer, err := senderPC.CreateOffer(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +247,7 @@ func TestTrackSenderPLIHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for full connection (ICE + DTLS) on receiver side.
+	// Wait for full connection.
 	connected := make(chan struct{})
 	receiverPC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if state == webrtc.PeerConnectionStateConnected {
@@ -269,38 +264,100 @@ func TestTrackSenderPLIHandler(t *testing.T) {
 		t.Fatal("PeerConnection connection timed out")
 	}
 
-	// Find receiver's track SSRC to send a PLI.
+	// Find media SSRC.
 	var mediaSSRC uint32
 	for _, tr := range receiverPC.GetTransceivers() {
 		if tr.Receiver() != nil {
-			if track := tr.Receiver().Track(); track != nil {
-				mediaSSRC = uint32(track.SSRC())
+			if rTrack := tr.Receiver().Track(); rTrack != nil {
+				mediaSSRC = uint32(rTrack.SSRC())
 				break
 			}
 		}
 	}
 	if mediaSSRC == 0 {
-		t.Skip("could not determine SSRC for PLI test")
+		t.Skip("could not determine SSRC")
 	}
 
-	// Send PLI from receiver to sender.
+	return ts, receiverPC, mediaSSRC
+}
+
+// waitForCondition polls until cond returns true or timeout expires.
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error(msg)
+}
+
+// TestTrackSenderPLIHandler verifies that TrackSender dispatches PLI/FIR
+// RTCP packets to the registered handler, independent of protocol code.
+func TestTrackSenderPLIHandler(t *testing.T) {
+	ts, receiverPC, mediaSSRC := testPCPair(t)
+
+	var pliCount atomic.Int32
+	ts.SetPLIHandler(func() { pliCount.Add(1) })
+	ts.Start()
+
 	if err := receiverPC.WriteRTCP([]rtcp.Packet{
 		&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC},
 	}); err != nil {
 		t.Fatalf("WriteRTCP PLI: %v", err)
 	}
 
-	// Give the RTCP goroutine time to process.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if pliCount.Load() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitForCondition(t, 3*time.Second, func() bool {
+		return pliCount.Load() > 0
+	}, "PLI handler was not called after sending PLI RTCP packet")
+
+	if ts.Stats.PLICount.Load() == 0 {
+		t.Error("Stats.PLICount should be > 0 after PLI")
+	}
+}
+
+// TestTrackSenderStats verifies that ReceiverReport updates Stats fields.
+func TestTrackSenderStats(t *testing.T) {
+	ts, receiverPC, mediaSSRC := testPCPair(t)
+
+	var rrReceived atomic.Int32
+	ts.SetReceiverReportHandler(func(report *rtcp.ReceiverReport) {
+		rrReceived.Add(1)
+	})
+	ts.Start()
+
+	// Send a ReceiverReport from receiver to sender.
+	if err := receiverPC.WriteRTCP([]rtcp.Packet{
+		&rtcp.ReceiverReport{
+			SSRC: 12345,
+			Reports: []rtcp.ReceptionReport{
+				{
+					SSRC:               mediaSSRC,
+					FractionLost:       25,
+					TotalLost:          100,
+					Jitter:             300,
+					LastSequenceNumber: 5000,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("WriteRTCP ReceiverReport: %v", err)
 	}
 
-	if pliCount.Load() == 0 {
-		t.Error("PLI handler was not called after sending PLI RTCP packet")
+	waitForCondition(t, 3*time.Second, func() bool {
+		return rrReceived.Load() > 0
+	}, "ReceiverReport handler was not called")
+
+	if ts.Stats.PacketsLost.Load() != 100 {
+		t.Errorf("expected PacketsLost=100, got %d", ts.Stats.PacketsLost.Load())
+	}
+	if ts.Stats.FractionLost.Load() != 25 {
+		t.Errorf("expected FractionLost=25, got %d", ts.Stats.FractionLost.Load())
+	}
+	if ts.Stats.Jitter.Load() != 300 {
+		t.Errorf("expected Jitter=300, got %d", ts.Stats.Jitter.Load())
 	}
 }
 
