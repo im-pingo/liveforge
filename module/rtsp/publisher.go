@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"log"
 	"sync"
 
 	"github.com/im-pingo/liveforge/core"
@@ -17,6 +18,15 @@ type RTSPPublisher struct {
 	depacketizers map[uint8]pkgrtp.Depacketizer // payloadType → depacketizer
 	mu            sync.Mutex
 	closed        bool
+	frameCount    int
+	tsBase        uint32 // first RTP timestamp for normalization
+	tsBaseSet     bool
+
+	// Access unit accumulation: collect NALs until RTP marker bit
+	accPayload   []byte           // accumulated AVCC payload for current access unit
+	accFrameType avframe.FrameType // best frame type seen in current access unit
+	accMediaType avframe.MediaType
+	accCodec     avframe.CodecType
 }
 
 // Verify interface compliance.
@@ -62,6 +72,8 @@ func (p *RTSPPublisher) Close() error {
 }
 
 // FeedRTP processes an incoming RTP packet.
+// NALs are accumulated until the RTP marker bit indicates end of access unit,
+// then emitted as a single AVFrame with all NALs in AVCC format.
 func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 	p.mu.Lock()
 	if p.closed {
@@ -71,16 +83,60 @@ func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 	dp, ok := p.depacketizers[pkt.PayloadType]
 	p.mu.Unlock()
 	if !ok {
+		log.Printf("rtsp: FeedRTP unknown PT=%d, registered PTs: %v", pkt.PayloadType, p.registeredPTs())
 		return nil // Unknown PT, skip
 	}
 	frame, err := dp.Depacketize(pkt)
 	if err != nil {
+		log.Printf("rtsp: FeedRTP depacketize error: %v", err)
 		return err
 	}
 	if frame != nil {
-		p.stream.WriteFrame(frame)
+		// Accumulate NAL data for the current access unit.
+		p.accPayload = append(p.accPayload, frame.Payload...)
+		p.accMediaType = frame.MediaType
+		p.accCodec = frame.Codec
+		// Track best frame type: SequenceHeader > Keyframe > Interframe
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			p.accFrameType = avframe.FrameTypeSequenceHeader
+		} else if frame.FrameType == avframe.FrameTypeKeyframe && p.accFrameType != avframe.FrameTypeSequenceHeader {
+			p.accFrameType = avframe.FrameTypeKeyframe
+		} else if p.accFrameType == 0 {
+			p.accFrameType = frame.FrameType
+		}
 	}
+
+	// Emit accumulated access unit when marker bit is set (end of frame)
+	if pkt.Marker && len(p.accPayload) > 0 {
+		if !p.tsBaseSet {
+			p.tsBase = pkt.Timestamp
+			p.tsBaseSet = true
+		}
+		dts := int64(pkt.Timestamp-p.tsBase) / 90 // 90kHz → ms
+		auFrame := avframe.NewAVFrame(
+			p.accMediaType,
+			p.accCodec,
+			p.accFrameType,
+			dts, dts,
+			p.accPayload,
+		)
+		p.frameCount++
+		p.stream.WriteFrame(auFrame)
+
+		// Reset accumulation buffer
+		p.accPayload = nil
+		p.accFrameType = 0
+	}
+
 	return nil
+}
+
+func (p *RTSPPublisher) registeredPTs() []uint8 {
+	pts := make([]uint8, 0, len(p.depacketizers))
+	for pt := range p.depacketizers {
+		pts = append(pts, pt)
+	}
+	return pts
 }
 
 // codecDefaultPT returns the default payload type for a codec.

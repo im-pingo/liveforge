@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
+	pionrtp "github.com/pion/rtp/v2"
 )
 
 // Module implements core.Module for RTSP.
@@ -88,19 +90,37 @@ func (m *Module) handleConn(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	var session *RTSPSession
 
+	defer func() {
+		if session != nil {
+			session.Close()
+			m.mu.Lock()
+			delete(m.sessions, session.ID)
+			m.mu.Unlock()
+		}
+	}()
+
 	for {
-		// Check if interleaved data ($ prefix) when in Playing/Recording state
-		if session != nil && (session.State == StatePlaying || session.State == StateRecording) {
+		// Check if interleaved data ($ prefix) when in Recording state
+		if session != nil && session.State == StateRecording {
 			b, err := reader.Peek(1)
 			if err != nil {
 				return
 			}
 			if b[0] == '$' {
-				_, _, err := ReadInterleaved(reader)
+				ch, data, err := ReadInterleaved(reader)
 				if err != nil {
 					return
 				}
-				// TODO: route interleaved data to publisher.FeedRTP
+				// Skip RTCP channels (odd numbers are RTCP per RFC 2326)
+				if ch%2 != 0 {
+					continue
+				}
+				if session.Publisher != nil {
+					pkt := &pionrtp.Packet{}
+					if err := pkt.Unmarshal(data); err == nil {
+						session.Publisher.FeedRTP(pkt)
+					}
+				}
 				continue
 			}
 		}
@@ -109,6 +129,7 @@ func (m *Module) handleConn(conn net.Conn) {
 		if err != nil {
 			return
 		}
+		log.Printf("rtsp: %s %s", req.Method, req.URL)
 
 		// Create or find session
 		if session == nil && req.Method != "OPTIONS" {
@@ -133,6 +154,13 @@ func (m *Module) handleConn(conn net.Conn) {
 			resp = m.handler.HandleSetup(req, session)
 		case "PLAY":
 			resp = m.handler.HandlePlay(req, session)
+			if resp.StatusCode == 200 {
+				if err := WriteResponse(conn, resp); err != nil {
+					return
+				}
+				m.runSubscriberLoop(conn, session)
+				return
+			}
 		case "PAUSE":
 			resp = m.handler.HandlePause(req, session)
 		case "ANNOUNCE":
@@ -144,12 +172,11 @@ func (m *Module) handleConn(conn net.Conn) {
 			if err := WriteResponse(conn, resp); err != nil {
 				return
 			}
-			// Clean up session
-			if session != nil {
-				m.mu.Lock()
-				delete(m.sessions, session.ID)
-				m.mu.Unlock()
-			}
+			session.Close()
+			m.mu.Lock()
+			delete(m.sessions, session.ID)
+			m.mu.Unlock()
+			session = nil
 			return
 		case "GET_PARAMETER":
 			resp = m.handler.HandleGetParameter(req)
@@ -161,6 +188,83 @@ func (m *Module) handleConn(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// runSubscriberLoop creates a subscriber and feeds frames from the stream to the RTSP client.
+func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
+	if session.Stream == nil || session.MediaInfo == nil {
+		return
+	}
+
+	// Determine video/audio channels from track setup.
+	var videoChannel, audioChannel uint8
+	for _, t := range session.Tracks {
+		if t.Codec.IsVideo() && t.Transport.IsTCP {
+			videoChannel = uint8(t.Transport.Interleaved[0])
+		}
+		if t.Codec.IsAudio() && t.Transport.IsTCP {
+			audioChannel = uint8(t.Transport.Interleaved[0])
+		}
+	}
+
+	sub, err := NewRTSPSubscriber(session.ID, session.MediaInfo, conn, videoChannel, audioChannel)
+	if err != nil {
+		log.Printf("rtsp: failed to create subscriber for session %s: %v", session.ID, err)
+		return
+	}
+	session.Subscriber = sub
+	session.Stream.AddSubscriber("rtsp")
+
+	defer func() {
+		sub.Close()
+		session.Stream.RemoveSubscriber("rtsp")
+		session.Subscriber = nil
+	}()
+
+	// Send video sequence header (SPS/PPS) for decoder initialization.
+	if seqHeader := session.Stream.VideoSeqHeader(); seqHeader != nil {
+		if err := sub.SendFrame(seqHeader); err != nil {
+			return
+		}
+	}
+
+	// Send GOP cache for instant playback.
+	for _, frame := range session.Stream.GOPCache() {
+		if err := sub.SendFrame(frame); err != nil {
+			return
+		}
+	}
+
+	// Read from ring buffer and send frames.
+	ringReader := session.Stream.RingBuffer().NewReader()
+	for {
+		frame, ok := ringReader.Read()
+		if !ok {
+			return
+		}
+		select {
+		case <-sub.Done():
+			return
+		default:
+		}
+		if err := sub.SendFrame(frame); err != nil {
+			return
+		}
+	}
+}
+
+// interleavedChannelToMediaType maps an interleaved channel to a media type
+// based on the session's track setup.
+func interleavedChannelToMediaType(session *RTSPSession, channel uint8) avframe.MediaType {
+	for _, t := range session.Tracks {
+		if t.Transport.IsTCP && uint8(t.Transport.Interleaved[0]) == channel {
+			if t.Codec.IsVideo() {
+				return avframe.MediaTypeVideo
+			}
+			return avframe.MediaTypeAudio
+		}
+	}
+	return 0
 }
 
 // generateSessionID creates a random session ID.

@@ -2,10 +2,12 @@ package rtsp
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 )
 
@@ -61,11 +63,15 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	mediaInfo := stream.Publisher().MediaInfo()
 	sd := sdp.BuildFromMediaInfo(mediaInfo, req.URL, "0.0.0.0")
 	body := sd.Marshal()
+	log.Printf("rtsp: DESCRIBE SDP:\n%s", string(body))
 	resp := newResponse(200, "OK", req)
 	resp.Headers.Set("Content-Type", "application/sdp")
+	resp.Headers.Set("Content-Base", req.URL+"/")
 	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Body = body
 	if session != nil {
+		session.MediaInfo = mediaInfo
+		session.Stream = stream
 		session.Transition(StateDescribed)
 	}
 	return resp
@@ -92,6 +98,25 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession) *Response {
 		tc.ServerPorts = [2]int{rtp, rtcp}
 	}
 
+	// Store transport config per track on the session.
+	if session != nil {
+		trackID, _ := extractTrackID(req.URL)
+		ts := TrackSetup{
+			TrackID:   trackID,
+			Transport: tc,
+		}
+		// Assign codec from MediaInfo based on track order.
+		if session.MediaInfo != nil {
+			idx := len(session.Tracks)
+			if idx == 0 && session.MediaInfo.HasVideo() {
+				ts.Codec = session.MediaInfo.VideoCodec
+			} else if (idx == 0 && !session.MediaInfo.HasVideo()) || idx == 1 {
+				ts.Codec = session.MediaInfo.AudioCodec
+			}
+		}
+		session.Tracks = append(session.Tracks, ts)
+	}
+
 	resp := newResponse(200, "OK", req)
 	if tc.IsTCP {
 		resp.Headers.Set("Transport", fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", tc.Interleaved[0], tc.Interleaved[1]))
@@ -111,10 +136,43 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession) *Response {
 	if len(req.Body) == 0 {
 		return newResponse(400, "Bad Request", req)
 	}
-	_, err := sdp.Parse(req.Body)
+	sd, err := sdp.Parse(req.Body)
 	if err != nil {
 		return newResponse(400, "Bad Request", req)
 	}
+
+	if session != nil && h.server != nil {
+		mediaInfo := sdpToMediaInfo(sd)
+		session.MediaInfo = mediaInfo
+
+		stream := h.server.StreamHub().GetOrCreate(session.StreamKey)
+		session.Stream = stream
+
+		pub, err := NewRTSPPublisher(session.ID, mediaInfo, stream)
+		if err != nil {
+			return newResponse(500, "Internal Server Error", req)
+		}
+		session.Publisher = pub
+
+		if err := stream.SetPublisher(pub); err != nil {
+			return newResponse(500, "Internal Server Error", req)
+		}
+
+		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
+		// SequenceHeader frame so the stream caches it for late-joining subscribers.
+		if len(mediaInfo.VideoSequenceHeader) > 0 {
+			seqFrame := avframe.NewAVFrame(
+				avframe.MediaTypeVideo,
+				avframe.CodecH264,
+				avframe.FrameTypeSequenceHeader,
+				0, 0,
+				mediaInfo.VideoSequenceHeader,
+			)
+			stream.WriteFrame(seqFrame)
+			log.Printf("rtsp: injected SPS/PPS sequence header from SDP (%d bytes)", len(mediaInfo.VideoSequenceHeader))
+		}
+	}
+
 	if session != nil {
 		session.Transition(StateAnnounced)
 	}

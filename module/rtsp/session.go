@@ -2,8 +2,12 @@ package rtsp
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
+
+	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // SessionState represents the RTSP session state.
@@ -31,12 +35,26 @@ var allowedTransitions = map[SessionState][]SessionState{
 
 const DefaultTimeout = 60 * time.Second
 
+// TrackSetup holds the transport configuration for a single track.
+type TrackSetup struct {
+	TrackID   int
+	Codec     avframe.CodecType
+	Transport TransportConfig
+}
+
 // RTSPSession represents an RTSP session with state management.
 type RTSPSession struct {
 	ID        string
 	StreamKey string
 	State     SessionState
 	Timeout   time.Duration
+
+	Publisher  *RTSPPublisher
+	Subscriber *RTSPSubscriber
+	MediaInfo  *avframe.MediaInfo
+	Tracks     []TrackSetup
+	Stream     *core.Stream
+
 	lastTouch time.Time
 	mu        sync.Mutex
 }
@@ -81,4 +99,26 @@ func (s *RTSPSession) IsExpired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return time.Since(s.lastTouch) > s.Timeout
+}
+
+// Close cleans up publisher and subscriber resources.
+func (s *RTSPSession) Close() {
+	if s.Publisher != nil {
+		if err := s.Publisher.Close(); err != nil {
+			log.Printf("rtsp: error closing publisher for session %s: %v", s.ID, err)
+		}
+		if s.Stream != nil {
+			s.Stream.RemovePublisher()
+		}
+		s.Publisher = nil
+	}
+	if s.Subscriber != nil {
+		if err := s.Subscriber.Close(); err != nil {
+			log.Printf("rtsp: error closing subscriber for session %s: %v", s.ID, err)
+		}
+		if s.Stream != nil {
+			s.Stream.RemoveSubscriber("rtsp")
+		}
+		s.Subscriber = nil
+	}
 }

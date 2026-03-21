@@ -31,6 +31,7 @@ func NewSession(pt uint8, clockRate uint32) *Session {
 func (s *Session) WrapPackets(pkts []*pionrtp.Packet, dtsMsec int64) []*pionrtp.Packet {
 	ts := uint32(dtsMsec * int64(s.ClockRate) / 1000)
 	for _, pkt := range pkts {
+		pkt.Version = 2
 		pkt.SSRC = s.SSRC
 		pkt.PayloadType = s.PayloadType
 		pkt.Timestamp = ts
