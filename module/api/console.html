@@ -26,7 +26,7 @@ body {
   color: var(--text);
   min-height: 100vh;
 }
-.container { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
+.container { max-width: 1400px; margin: 0 auto; padding: 32px 24px; }
 
 /* Header */
 header {
@@ -65,7 +65,7 @@ header {
 /* Stats cards */
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
   margin-bottom: 28px;
 }
@@ -78,18 +78,19 @@ header {
 .stat-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
 .stat-value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .stat-value.accent { color: var(--accent); }
+.stat-sub { font-size: 11px; color: var(--text2); margin-top: 2px; }
 
 /* Table */
 .table-wrap {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
 }
 table { width: 100%; border-collapse: collapse; }
 th {
   text-align: left;
-  padding: 12px 20px;
+  padding: 12px 16px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -97,9 +98,10 @@ th {
   color: var(--text2);
   background: var(--surface2);
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 td {
-  padding: 14px 20px;
+  padding: 12px 16px;
   font-size: 14px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
@@ -121,7 +123,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 }
 .codec-tag.video { color: var(--blue); border-color: rgba(96,165,250,0.2); background: rgba(96,165,250,0.08); }
 .codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
-.gop-val { font-variant-numeric: tabular-nums; font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; }
+.mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 
 /* State badge */
 .state {
@@ -169,6 +171,25 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   background: rgba(108,158,255,0.2);
 }
 
+/* Action buttons */
+.actions { display: flex; gap: 6px; }
+.btn {
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn:hover { border-color: #444; color: var(--text); }
+.btn-danger { border-color: rgba(248,113,113,0.3); color: var(--red); }
+.btn-danger:hover { background: rgba(248,113,113,0.1); border-color: var(--red); }
+.btn-warn { border-color: rgba(251,191,36,0.3); color: var(--yellow); }
+.btn-warn:hover { background: rgba(251,191,36,0.1); border-color: var(--yellow); }
+
 /* Empty state */
 .empty-state {
   padding: 80px 20px;
@@ -184,6 +205,30 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   font-size: 12px;
   color: var(--text2);
 }
+
+/* Modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  min-width: 320px;
+  max-width: 400px;
+}
+.modal h3 { font-size: 16px; margin-bottom: 12px; }
+.modal p { font-size: 14px; color: var(--text2); margin-bottom: 20px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal .btn { padding: 8px 20px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -198,6 +243,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     </div>
     <div class="status-bar">
       <span><span class="dot"></span></span>
+      <span id="server-version"></span>
       <span id="updated"></span>
     </div>
   </header>
@@ -215,6 +261,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div class="stat-label">Total Subscribers</div>
       <div class="stat-value" id="stat-subs">0</div>
     </div>
+    <div class="stat-card">
+      <div class="stat-label">Connections</div>
+      <div class="stat-value" id="stat-conns">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Uptime</div>
+      <div class="stat-value" id="stat-uptime" style="font-size:20px">-</div>
+    </div>
   </div>
 
   <div class="table-wrap">
@@ -225,8 +279,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <th>State</th>
           <th>Publisher</th>
           <th>Codecs</th>
+          <th>Bitrate</th>
+          <th>FPS</th>
           <th>GOP</th>
           <th>Subscribers</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
@@ -239,6 +296,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- Confirm modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">Confirm</h3>
+    <p id="modal-msg"></p>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
 function esc(s) {
   if (!s) return "";
@@ -247,11 +316,79 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function formatUptime(sec) {
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  var h = Math.floor(sec / 3600);
+  var m = Math.floor((sec % 3600) / 60);
+  return h + "h " + m + "m";
+}
+
+function formatBitrate(kbps) {
+  if (!kbps || kbps === 0) return "-";
+  if (kbps >= 1000) return (kbps / 1000).toFixed(1) + " Mbps";
+  return kbps + " kbps";
+}
+
+var pendingAction = null;
+
+function showModal(title, msg, onConfirm) {
+  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-msg").textContent = msg;
+  document.getElementById("modal").classList.add("active");
+  pendingAction = onConfirm;
+}
+
+function closeModal() {
+  document.getElementById("modal").classList.remove("active");
+  pendingAction = null;
+}
+
+document.getElementById("modal-confirm").addEventListener("click", function() {
+  if (pendingAction) pendingAction();
+  closeModal();
+});
+
+function kickStream(key) {
+  showModal("Kick Publisher", "Disconnect the publisher from \"" + key + "\"?", function() {
+    fetch("/api/v1/streams/" + encodeURIComponent(key) + "/kick", { method: "POST" })
+      .then(function() { refresh(); });
+  });
+}
+
+function deleteStream(key) {
+  showModal("Delete Stream", "Remove stream \"" + key + "\" entirely?", function() {
+    fetch("/api/v1/streams/" + encodeURIComponent(key), { method: "DELETE" })
+      .then(function() { refresh(); });
+  });
+}
+
+function refreshServerInfo() {
+  fetch("/api/v1/server/info")
+    .then(function(r) { return r.json(); })
+    .then(function(resp) {
+      var data = resp.data;
+      if (!data) return;
+      document.getElementById("server-version").textContent = "v" + (data.version || "?");
+      document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
+    })
+    .catch(function() {});
+
+  fetch("/api/v1/server/stats")
+    .then(function(r) { return r.json(); })
+    .then(function(resp) {
+      var data = resp.data;
+      if (!data) return;
+      document.getElementById("stat-conns").textContent = data.connections || 0;
+    })
+    .catch(function() {});
+}
+
 function refresh() {
   fetch("/api/v1/streams")
     .then(function(r) { return r.json(); })
-    .then(function(data) {
-      var streams = data.streams || [];
+    .then(function(resp) {
+      var streams = (resp.data && resp.data.streams) || [];
       var tbody = document.getElementById("tbody");
       var empty = document.getElementById("empty");
       var totalSubs = 0;
@@ -279,12 +416,13 @@ function refresh() {
       var html = "";
       for (var i = 0; i < streams.length; i++) {
         var s = streams[i];
+        var st = s.stats || {};
 
         // Codecs
         var codecs = "";
         if (s.video_codec) codecs += '<span class="codec-tag video">' + esc(s.video_codec) + '</span> ';
         if (s.audio_codec) codecs += '<span class="codec-tag audio">' + esc(s.audio_codec) + '</span>';
-        if (!codecs) codecs = '<span style="color:#555">—</span>';
+        if (!codecs) codecs = '<span style="color:#555">-</span>';
 
         // Subscribers
         var subHtml = "";
@@ -295,23 +433,37 @@ function refresh() {
           var cls = cnt > 0 ? "sub-pill active" : "sub-pill";
           subHtml += '<span class="' + cls + '">' + esc(fmt.toUpperCase()) + ' <span class="count">' + cnt + '</span></span>';
         }
-        if (!subHtml) subHtml = '<span style="color:#555;font-size:12px">—</span>';
+        if (!subHtml) subHtml = '<span style="color:#555;font-size:12px">-</span>';
+
+        // Actions
+        var acts = '<div class="actions">';
+        if (s.publisher) {
+          acts += '<button class="btn btn-warn" onclick="kickStream(\'' + esc(s.key).replace(/'/g, "\\'") + '\')">Kick</button>';
+        }
+        acts += '<button class="btn btn-danger" onclick="deleteStream(\'' + esc(s.key).replace(/'/g, "\\'") + '\')">Delete</button>';
+        acts += '</div>';
 
         html += "<tr>"
           + '<td class="stream-key">' + esc(s.key) + "</td>"
           + '<td><span class="state state-' + esc(s.state) + '">' + esc(s.state.replace("_", " ")) + '</span></td>'
-          + '<td class="publisher-id">' + (s.publisher ? esc(s.publisher) : '<span style="color:#555">—</span>') + "</td>"
+          + '<td class="publisher-id">' + (s.publisher ? esc(s.publisher) : '<span style="color:#555">-</span>') + "</td>"
           + "<td>" + codecs + "</td>"
-          + '<td class="gop-val">' + s.gop_cache_len + "</td>"
+          + '<td class="mono">' + formatBitrate(st.bitrate_kbps) + "</td>"
+          + '<td class="mono">' + (st.fps ? st.fps.toFixed(1) : "-") + "</td>"
+          + '<td class="mono">' + s.gop_cache_len + "</td>"
           + '<td><div class="subs">' + subHtml + "</div></td>"
+          + "<td>" + acts + "</td>"
           + "</tr>";
       }
       tbody.innerHTML = html;
     })
     .catch(function() {});
 }
+
+refreshServerInfo();
 refresh();
 setInterval(refresh, 2000);
+setInterval(refreshServerInfo, 5000);
 </script>
 </body>
 </html>

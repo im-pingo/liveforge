@@ -247,7 +247,14 @@ type FileCompleteConfig struct {
 
 // APIConfig holds the management API settings.
 type APIConfig struct {
-	Enabled bool          `yaml:"enabled"`
-	Listen  string        `yaml:"listen"`
-	Auth    APIAuthConfig `yaml:"auth"`
+	Enabled bool            `yaml:"enabled"`
+	Listen  string          `yaml:"listen"`
+	Auth    APIAuthConfig   `yaml:"auth"`
+	Console ConsoleConfig   `yaml:"console"`
+}
+
+// ConsoleConfig holds console login credentials.
+type ConsoleConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
