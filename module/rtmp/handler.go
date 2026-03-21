@@ -233,7 +233,11 @@ func (h *Handler) onPublish(vals []any) error {
 		return fmt.Errorf("publish: missing stream name")
 	}
 
-	stream := h.hub.GetOrCreate(h.streamKey)
+	stream, err := h.hub.GetOrCreate(h.streamKey)
+	if err != nil {
+		_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
+		return fmt.Errorf("publish %s: %w", h.streamKey, err)
+	}
 	pub := NewPublisher(h.streamKey, h.conn)
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
@@ -279,11 +283,25 @@ func (h *Handler) onPlay(vals []any) error {
 	}
 
 	// Start subscriber write loop
-	stream := h.hub.GetOrCreate(h.streamKey)
-	stream.AddSubscriber("rtmp")
+	stream, err := h.hub.GetOrCreate(h.streamKey)
+	if err != nil {
+		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
+		return fmt.Errorf("play %s: %w", h.streamKey, err)
+	}
+	if err := stream.AddSubscriber("rtmp"); err != nil {
+		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
+		return fmt.Errorf("play %s: %w", h.streamKey, err)
+	}
 	sub := NewSubscriber(h.streamKey, h.conn, h.cw, stream)
 	go func() {
-		defer stream.RemoveSubscriber("rtmp")
+		defer func() {
+			stream.RemoveSubscriber("rtmp")
+			h.eventBus.Emit(core.EventSubscribeStop, &core.EventContext{
+				StreamKey:  h.streamKey,
+				Protocol:   "rtmp",
+				RemoteAddr: h.conn.RemoteAddr().String(),
+			})
+		}()
 		sub.WriteLoop()
 	}()
 

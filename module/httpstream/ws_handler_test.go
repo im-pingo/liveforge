@@ -62,7 +62,10 @@ func TestWebSocketUpgrade(t *testing.T) {
 	_, srv, addr := newTestServer(t)
 
 	// Create a publishing stream
-	stream := srv.StreamHub().GetOrCreate("live/test")
+	stream, err := srv.StreamHub().GetOrCreate("live/test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +115,10 @@ func TestWebSocketBinaryFrames(t *testing.T) {
 	m, srv, addr := newTestServer(t)
 
 	// Create a publishing stream with muxer callback that writes test data
-	stream := srv.StreamHub().GetOrCreate("live/frames")
+	stream, err := srv.StreamHub().GetOrCreate("live/frames")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
 		t.Fatal(err)
 	}

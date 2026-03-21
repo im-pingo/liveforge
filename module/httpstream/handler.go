@@ -54,6 +54,12 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !m.server.AcquireConn() {
+		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.server.ReleaseConn()
+
 	app, key, format, ok := parseStreamPath(r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid path, expected /app/key.{flv,ts,mp4}", http.StatusBadRequest)
@@ -90,6 +96,12 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[httpstream] %s subscriber for %s from %s", format, streamKey, r.RemoteAddr)
 	m.serveStream(w, r, format, stream)
+
+	m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "http-" + format,
+		RemoteAddr: r.RemoteAddr,
+	}) //nolint:errcheck
 }
 
 // queryToMap converts url.Values to a flat map (first value wins).

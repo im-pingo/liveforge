@@ -19,7 +19,7 @@ func newTestHub() (*core.StreamHub, *core.EventBus) {
 		RingBufferSize:     256,
 		NoPublisherTimeout: 5 * time.Second,
 	}
-	hub := core.NewStreamHub(cfg, bus)
+	hub := core.NewStreamHub(cfg, config.LimitsConfig{}, bus)
 	return hub, bus
 }
 

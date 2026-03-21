@@ -82,6 +82,11 @@ func (m *Module) acceptLoop(chunkSize int) {
 			}
 		}
 
+		if !m.server.AcquireConn() {
+			log.Printf("RTMP: max connections reached, rejecting %s", conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
 		m.wg.Add(1)
 		go m.handleConn(conn, chunkSize)
 	}
@@ -89,6 +94,7 @@ func (m *Module) acceptLoop(chunkSize int) {
 
 func (m *Module) handleConn(conn net.Conn, chunkSize int) {
 	defer m.wg.Done()
+	defer m.server.ReleaseConn()
 
 	if err := ServerHandshake(conn); err != nil {
 		log.Printf("RTMP handshake failed: %v", err)

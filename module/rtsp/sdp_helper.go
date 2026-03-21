@@ -29,7 +29,17 @@ var encodingNameToCodec = map[string]avframe.CodecType{
 
 // sdpToMediaInfo extracts MediaInfo from a parsed SDP SessionDescription.
 func sdpToMediaInfo(sd *sdp.SessionDescription) *avframe.MediaInfo {
+	info, _ := sdpToMediaInfoWithPT(sd)
+	return info
+}
+
+// PTMap maps RTP payload types to codec types, as declared in the SDP.
+type PTMap map[uint8]avframe.CodecType
+
+// sdpToMediaInfoWithPT extracts MediaInfo and a PT-to-codec mapping from SDP.
+func sdpToMediaInfoWithPT(sd *sdp.SessionDescription) (*avframe.MediaInfo, PTMap) {
 	info := &avframe.MediaInfo{}
+	ptMap := make(PTMap)
 
 	for _, md := range sd.Media {
 		if len(md.Formats) == 0 {
@@ -44,6 +54,11 @@ func sdpToMediaInfo(sd *sdp.SessionDescription) *avframe.MediaInfo {
 		codec, ok := encodingNameToCodec[strings.ToUpper(rtpMap.EncodingName)]
 		if !ok {
 			continue
+		}
+
+		// Record the SDP-declared PT for this codec.
+		if pt >= 0 && pt <= 127 {
+			ptMap[uint8(pt)] = codec
 		}
 
 		switch md.Type {
@@ -70,7 +85,7 @@ func sdpToMediaInfo(sd *sdp.SessionDescription) *avframe.MediaInfo {
 		}
 	}
 
-	return info
+	return info, ptMap
 }
 
 // parseSPropParameterSets extracts SPS/PPS from the fmtp sprop-parameter-sets

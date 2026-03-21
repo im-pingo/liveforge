@@ -163,13 +163,16 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 			return newResponse(401, "Unauthorized", req)
 		}
 
-		mediaInfo := sdpToMediaInfo(sd)
+		mediaInfo, ptMap := sdpToMediaInfoWithPT(sd)
 		session.MediaInfo = mediaInfo
 
-		stream := h.server.StreamHub().GetOrCreate(session.StreamKey)
+		stream, err := h.server.StreamHub().GetOrCreate(session.StreamKey)
+		if err != nil {
+			return newResponse(503, "Service Unavailable", req)
+		}
 		session.Stream = stream
 
-		pub, err := NewRTSPPublisher(session.ID, mediaInfo, stream)
+		pub, err := NewRTSPPublisher(session.ID, mediaInfo, stream, ptMap)
 		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}

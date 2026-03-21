@@ -12,6 +12,12 @@ import (
 )
 
 func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !m.server.AcquireConn() {
+		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.server.ReleaseConn()
+
 	// Strip the "/ws/" prefix so parseStreamPath sees "app/key.format"
 	wsPath := strings.TrimPrefix(r.URL.Path, "/ws")
 	app, key, format, ok := parseStreamPath(wsPath)
@@ -57,6 +63,12 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[httpstream] ws-%s subscriber for %s from %s", format, streamKey, r.RemoteAddr)
 	m.serveWebSocket(r.Context(), conn, format, stream)
+
+	m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "ws-" + format,
+		RemoteAddr: r.RemoteAddr,
+	}) //nolint:errcheck
 }
 
 func (m *Module) serveWebSocket(ctx context.Context, conn *websocket.Conn, format string, stream *core.Stream) {

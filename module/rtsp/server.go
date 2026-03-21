@@ -109,12 +109,18 @@ func (m *Module) acceptLoop() {
 				continue
 			}
 		}
+		if !m.server.AcquireConn() {
+			log.Printf("rtsp: max connections reached, rejecting %s", conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
 		go m.handleConn(conn)
 	}
 }
 
 func (m *Module) handleConn(conn net.Conn) {
 	defer conn.Close()
+	defer m.server.ReleaseConn()
 	reader := bufio.NewReader(conn)
 	var session *RTSPSession
 
@@ -285,7 +291,11 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	sub.videoUDP = videoUDP
 	sub.audioUDP = audioUDP
 	session.Subscriber = sub
-	session.Stream.AddSubscriber("rtsp")
+	if err := session.Stream.AddSubscriber("rtsp"); err != nil {
+		log.Printf("rtsp: subscriber limit reached for session %s: %v", session.ID, err)
+		sub.Close()
+		return
+	}
 
 	defer func() {
 		sub.Close()
