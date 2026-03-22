@@ -354,6 +354,55 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   word-break: break-all;
   user-select: all;
 }
+
+/* WebRTC stats overlay */
+.webrtc-stats-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0,0,0,0.78);
+  color: #e0e0e0;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 8px 12px;
+  pointer-events: none;
+  z-index: 10;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+.webrtc-stats-overlay .stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+.webrtc-stats-overlay .stat-item {
+  white-space: nowrap;
+}
+.webrtc-stats-overlay .stat-label-s {
+  color: #888;
+}
+.webrtc-stats-overlay .stat-val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.webrtc-stats-overlay .stat-val.warn { color: var(--yellow); }
+.webrtc-stats-overlay .stat-val.bad { color: var(--red); }
+.webrtc-stats-overlay .stat-val.good { color: var(--green); }
+.btn-stats {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text2);
+  cursor: pointer;
+  margin-right: 8px;
+  transition: all 0.15s;
+}
+.btn-stats:hover { border-color: #444; color: var(--text); }
+.btn-stats.active { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -438,7 +487,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="player-modal">
     <div class="player-header">
       <div><h3 style="display:inline">Preview</h3><span class="stream-label" id="player-stream-key"></span></div>
-      <button class="player-close" onclick="closePlayer()">&times;</button>
+      <div style="display:flex;align-items:center">
+        <button class="btn-stats" id="btn-stats" onclick="toggleStatsOverlay()">Stats</button>
+        <button class="player-close" onclick="closePlayer()">&times;</button>
+      </div>
     </div>
     <div class="proto-tabs" id="proto-tabs"></div>
     <div class="player-body">
@@ -457,6 +509,9 @@ var endpoints = {};
 var currentPlayer = null;
 var currentPC = null;
 var currentMSEAbort = null;
+var statsInterval = null;
+var statsPrev = null;
+var statsVisible = false;
 
 function esc(s) {
   if (!s) return "";
@@ -516,8 +571,137 @@ function portFromListen(listen) {
   return i >= 0 ? listen.substring(i + 1) : listen;
 }
 
+/* --- WebRTC Stats Overlay --- */
+function toggleStatsOverlay() {
+  statsVisible = !statsVisible;
+  var btn = document.getElementById('btn-stats');
+  var overlay = document.getElementById('webrtc-stats-overlay');
+  if (btn) btn.classList.toggle('active', statsVisible);
+  if (overlay) overlay.style.display = statsVisible ? 'block' : 'none';
+}
+
+function startStatsOverlay(pc) {
+  stopStatsOverlay();
+  // Ensure overlay element exists inside video wrap
+  var wrap = document.querySelector('.player-video-wrap');
+  if (!wrap) return;
+  var overlay = document.getElementById('webrtc-stats-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'webrtc-stats-overlay';
+    overlay.className = 'webrtc-stats-overlay';
+    overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for stats...</span></span></div>';
+    wrap.appendChild(overlay);
+  }
+  overlay.style.display = statsVisible ? 'block' : 'none';
+
+  statsPrev = null;
+  statsInterval = setInterval(async function() {
+    if (!pc || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+      stopStatsOverlay();
+      return;
+    }
+    try {
+      var report = await pc.getStats();
+      var v = null, a = null;
+      report.forEach(function(s) {
+        if (s.type !== 'inbound-rtp') return;
+        if (s.kind === 'video') v = s;
+        if (s.kind === 'audio') a = s;
+      });
+      renderStatsOverlay(v, a);
+    } catch(e) {}
+  }, 1000);
+}
+
+function stopStatsOverlay() {
+  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+  statsPrev = null;
+  var overlay = document.getElementById('webrtc-stats-overlay');
+  if (overlay) overlay.remove();
+}
+
+function val(v, cls) {
+  return '<span class="stat-val' + (cls ? ' ' + cls : '') + '">' + v + '</span>';
+}
+
+function renderStatsOverlay(v, a) {
+  var overlay = document.getElementById('webrtc-stats-overlay');
+  if (!overlay) return;
+
+  if (!v) {
+    overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">No video stats yet</span></span></div>';
+    statsPrev = { v: v, a: a };
+    return;
+  }
+
+  var pv = statsPrev && statsPrev.v;
+  var pa = statsPrev && statsPrev.a;
+
+  // Compute deltas
+  var dDecoded   = pv ? v.framesDecoded - pv.framesDecoded : '-';
+  var dDropped   = pv ? v.framesDropped - pv.framesDropped : '-';
+  var dKeyFr     = pv ? v.keyFramesDecoded - pv.keyFramesDecoded : '-';
+  var dPktLost   = pv ? v.packetsLost - pv.packetsLost : '-';
+  var dBytes     = pv ? v.bytesReceived - pv.bytesReceived : 0;
+  var bitrate    = pv ? ((dBytes * 8) / 1e6).toFixed(2) + ' Mbps' : '-';
+  var dPLI       = pv ? v.pliCount - pv.pliCount : '-';
+  var dNACK      = pv ? (v.nackCount || 0) - (pv.nackCount || 0) : '-';
+  var dFreeze    = pv ? (v.freezeCount || 0) - (pv.freezeCount || 0) : '-';
+  var jitterMs   = v.jitter ? (v.jitter * 1000).toFixed(0) + 'ms' : '-';
+
+  // Jitter buffer (avg over last interval)
+  var jitBufMs = '-';
+  if (pv) {
+    var dJBDelay = v.jitterBufferDelay - pv.jitterBufferDelay;
+    var dJBCount = v.jitterBufferEmittedCount - pv.jitterBufferEmittedCount;
+    if (dJBCount > 0) jitBufMs = ((dJBDelay / dJBCount) * 1000).toFixed(0) + 'ms';
+  }
+
+  var aLost = (a && pa) ? a.packetsLost - pa.packetsLost : '-';
+  var aJit  = a ? (a.jitter * 1000).toFixed(0) + 'ms' : '-';
+
+  // Color classes
+  var dropCls   = (dDropped > 0)  ? 'bad'  : 'good';
+  var lostCls   = (dPktLost > 0)  ? 'bad'  : 'good';
+  var jbCls     = (parseInt(jitBufMs) > 200) ? 'warn' : '';
+  var pliCls    = (dPLI > 0) ? 'warn' : '';
+  var freezeCls = (dFreeze > 0) ? 'bad' : '';
+
+  var L = '<span class="stat-label-s">';
+  var E = '</span>';
+
+  overlay.innerHTML =
+    '<div class="stat-row">' +
+    '<span class="stat-item">' + L + 'FPS' + E + val(dDecoded) + '</span>' +
+    '<span class="stat-item">' + L + 'Drop' + E + val(dDropped, dropCls) + '</span>' +
+    '<span class="stat-item">' + L + 'KF' + E + val(dKeyFr) + '</span>' +
+    '<span class="stat-item">' + L + 'Lost' + E + val(dPktLost, lostCls) + '</span>' +
+    '<span class="stat-item">' + L + 'Bitrate' + E + val(bitrate) + '</span>' +
+    '<span class="stat-item">' + L + 'JitBuf' + E + val(jitBufMs, jbCls) + '</span>' +
+    '<span class="stat-item">' + L + 'Freeze' + E + val(dFreeze, freezeCls) + '</span>' +
+    '<span class="stat-item">' + L + 'PLI' + E + val(dPLI, pliCls) + '</span>' +
+    '<span class="stat-item">' + L + 'NACK' + E + val(dNACK) + '</span>' +
+    '<span class="stat-item">' + L + 'Jit' + E + val(jitterMs) + '</span>' +
+    '<span class="stat-item">' + L + 'A.Lost' + E + val(aLost) + '</span>' +
+    '<span class="stat-item">' + L + 'A.Jit' + E + val(aJit) + '</span>' +
+    '</div>' +
+    '<div class="stat-row" style="margin-top:2px;color:#666;font-size:10px">' +
+    'Total: ' +
+    'dec=' + v.framesDecoded + ' ' +
+    'drop=' + v.framesDropped + ' ' +
+    'kf=' + v.keyFramesDecoded + ' ' +
+    'lost=' + v.packetsLost + '/' + v.packetsReceived + ' ' +
+    'freeze=' + (v.freezeCount || 0) + ' (' + ((v.totalFreezesDuration || 0) * 1000).toFixed(0) + 'ms) ' +
+    'pli=' + (v.pliCount || 0) +
+    '</div>';
+
+  statsPrev = { v: v, a: a };
+}
+
 /* --- Player logic --- */
 function destroyCurrentPlayer() {
+  stopStatsOverlay();
   if (currentMSEAbort) {
     try { currentMSEAbort.abort(); } catch(e) {}
     currentMSEAbort = null;
@@ -790,6 +974,7 @@ function playWHEP(streamKey, mode) {
     return pc.setRemoteDescription({ type: "answer", sdp: sdp });
   }).then(function() {
     setPlayerStatus("WebRTC connected, waiting for media...");
+    startStatsOverlay(pc);
   }).catch(function(e) {
     setPlayerStatus("WHEP error: " + e.message, "error");
   });
@@ -797,6 +982,9 @@ function playWHEP(streamKey, mode) {
 
 function openPlayer(streamKey) {
   destroyCurrentPlayer();
+  statsVisible = false;
+  var btnStats = document.getElementById('btn-stats');
+  if (btnStats) btnStats.classList.remove('active');
   document.getElementById("player-stream-key").textContent = streamKey;
   document.getElementById("player-overlay").classList.add("active");
   setPlayerStatus("Select a protocol to start playback");
