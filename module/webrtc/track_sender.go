@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"log"
+	"sync"
 	"sync/atomic"
 
 	"github.com/pion/rtcp"
@@ -28,9 +29,15 @@ type TrackSenderStats struct {
 // from application-layer protocol code (WHEP, future SIP, etc.).
 //
 // Supported RTCP types:
-//   - PLI / FIR  → onPLI callback (keyframe request)
+//   - PLI / FIR  → sets needsKeyframe flag + onPLI callback
 //   - NACK       → onNACK callback + stats (retransmission request)
 //   - ReceiverReport → onReceiverReport callback + stats (quality metrics)
+//
+// PLI/FIR handling: Instead of writing media directly from the RTCP goroutine,
+// TrackSender sets an atomic needsKeyframe flag. The feed loop checks this flag
+// and skips inter-frames until the next keyframe arrives, ensuring only one
+// goroutine ever writes media samples. This eliminates timestamp interleaving
+// between the RTCP goroutine and the feed loop.
 //
 // Note: pion's default interceptors handle NACK retransmission and TWCC
 // automatically. TrackSender monitors these for observability; it does NOT
@@ -39,7 +46,7 @@ type TrackSenderStats struct {
 // Usage:
 //
 //	ts := NewTrackSender(sessionID, track, sender)
-//	ts.SetPLIHandler(func() { /* send keyframe */ })
+//	ts.SetPLIHandler(func() { /* log/stats */ })
 //	ts.SetNACKHandler(func(nack *rtcp.TransportLayerNack) { /* log/stats */ })
 //	ts.Start()
 //	ts.WriteSample(media.Sample{...})
@@ -47,7 +54,9 @@ type TrackSender struct {
 	sessionID        string
 	track            *webrtc.TrackLocalStaticSample
 	sender           *webrtc.RTPSender
-	onPLI            func()                                    // called on PLI or FIR
+	mu               sync.Mutex                                // serializes WriteSample calls across goroutines
+	needsKeyframe    atomic.Bool                               // set by RTCP loop on PLI/FIR, cleared by feed loop on keyframe
+	onPLI            func()                                    // called on PLI or FIR (for logging/stats only)
 	onNACK           func(nack *rtcp.TransportLayerNack)       // called on NACK
 	onReceiverReport func(report *rtcp.ReceiverReport)         // called on ReceiverReport
 	onREMB           func(bitrate uint64, ssrcs []uint32)      // called on REMB
@@ -65,12 +74,24 @@ func NewTrackSender(sessionID string, track *webrtc.TrackLocalStaticSample, send
 
 // SetPLIHandler registers a callback invoked when the remote peer sends a
 // PLI (Picture Loss Indication) or FIR (Full Intra Request) RTCP packet.
-// The callback should respond by sending an IDR keyframe so the decoder
-// can recover from corruption without waiting for the next natural keyframe.
+// The callback is for logging/monitoring only — keyframe recovery is handled
+// automatically via the needsKeyframe flag: the feed loop skips inter-frames
+// until the next keyframe arrives, ensuring a clean decoder resync.
 //
 // The callback is invoked from the RTCP goroutine; it must be goroutine-safe.
 func (ts *TrackSender) SetPLIHandler(fn func()) {
 	ts.onPLI = fn
+}
+
+// NeedsKeyframe returns true if a PLI/FIR has been received and the feed loop
+// should skip inter-frames until the next keyframe.
+func (ts *TrackSender) NeedsKeyframe() bool {
+	return ts.needsKeyframe.Load()
+}
+
+// ClearNeedsKeyframe resets the flag after the feed loop has sent a keyframe.
+func (ts *TrackSender) ClearNeedsKeyframe() {
+	ts.needsKeyframe.Store(false)
 }
 
 // SetNACKHandler registers a callback invoked when a NACK packet is received.
@@ -93,7 +114,11 @@ func (ts *TrackSender) SetREMBHandler(fn func(bitrate uint64, ssrcs []uint32)) {
 }
 
 // WriteSample encodes a raw media sample as RTP packets and sends them to the peer.
+// It serializes concurrent callers (feed loop + PLI handler) so that all RTP packets
+// for a single sample are sent contiguously, preventing interleaved packet corruption.
 func (ts *TrackSender) WriteSample(s media.Sample) error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	return ts.track.WriteSample(s)
 }
 
@@ -122,14 +147,16 @@ func (ts *TrackSender) rtcpLoop() {
 			switch p := pkt.(type) {
 			case *rtcp.PictureLossIndication:
 				ts.Stats.PLICount.Add(1)
-				log.Printf("[webrtc] session %s: PLI received, requesting keyframe", ts.sessionID)
+				ts.needsKeyframe.Store(true)
+				log.Printf("[webrtc] session %s: PLI received, flagging for keyframe resync", ts.sessionID)
 				if ts.onPLI != nil {
 					ts.onPLI()
 				}
 
 			case *rtcp.FullIntraRequest:
 				ts.Stats.PLICount.Add(1)
-				log.Printf("[webrtc] session %s: FIR received, requesting keyframe", ts.sessionID)
+				ts.needsKeyframe.Store(true)
+				log.Printf("[webrtc] session %s: FIR received, flagging for keyframe resync", ts.sessionID)
 				if ts.onPLI != nil {
 					ts.onPLI()
 				}

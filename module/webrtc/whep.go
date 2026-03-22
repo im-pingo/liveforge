@@ -144,14 +144,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register PLI handler on video sender: immediately send a cached keyframe
-	// so the browser recovers from decoder corruption in <40ms instead of
-	// waiting up to 2 seconds for the next natural keyframe.
-	if videoSender != nil {
-		videoSender.SetPLIHandler(func() {
-			sendKeyframeFromGOP(stream, videoSender)
-		})
-	}
+	// PLI/FIR handling: TrackSender sets needsKeyframe flag automatically.
+	// The feed loop checks this flag and skips inter-frames until the next
+	// keyframe, so only one goroutine (the feed loop) writes media samples.
 
 	// Start RTCP read loops. Each sender's loop runs independently;
 	// audio sender has no PLI handler (audio has no concept of keyframes).
@@ -243,47 +238,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[webrtc] WHEP session %s started for stream %s", sessionID, streamKey)
 }
 
-// sendKeyframeFromGOP responds to a PLI/FIR request by sending the most
-// recent cached keyframe from the stream's GOP cache. This function is
-// registered as the PLI handler on the video TrackSender and is called from
-// the TrackSender's RTCP goroutine — not from the feed loop goroutine.
-//
-// Using stream.VideoSeqHeader() ensures SPS/PPS are always current regardless
-// of whether the feed loop has processed the latest SequenceHeader frame.
-func sendKeyframeFromGOP(stream *core.Stream, ts *TrackSender) {
-	var spsppsBuf []byte
-	if sh := stream.VideoSeqHeader(); sh != nil {
-		spsppsBuf = pkgrtp.ToAnnexB(sh.Payload, true)
-	}
-
-	for _, frame := range stream.GOPCache() {
-		if !frame.MediaType.IsVideo() {
-			continue
-		}
-		if frame.FrameType != avframe.FrameTypeKeyframe {
-			continue
-		}
-
-		payload := pkgrtp.ToAnnexB(frame.Payload, false)
-		if len(payload) == 0 {
-			break
-		}
-		if len(spsppsBuf) > 0 {
-			combined := make([]byte, len(spsppsBuf)+len(payload))
-			copy(combined, spsppsBuf)
-			copy(combined[len(spsppsBuf):], payload)
-			payload = combined
-		}
-		if err := ts.WriteSample(media.Sample{
-			Data:     payload,
-			Duration: 40 * time.Millisecond,
-		}); err == nil {
-			log.Printf("[webrtc] PLI response: sent keyframe (%d bytes)", len(payload))
-		}
-		break
-	}
-}
-
 // whepFeedLoop reads AVFrames from the stream's RingBuffer and writes them
 // to the WebRTC tracks via TrackSender. It waits for the peer connection to
 // be established before sending any data.
@@ -303,9 +257,6 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		return
 	}
 
-	// Snapshot write position so the live reader starts from here.
-	startPos := stream.RingBuffer().WriteCursor()
-
 	// Track the last DTS to compute sample durations.
 	var lastVideoDTS, lastAudioDTS int64
 
@@ -323,6 +274,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	// - Keyframes get SPS/PPS prepended so the decoder sees parameter sets
 	//   in the same access unit as the IDR slice.
 	// - Inter-frames are sent as-is.
+	// - When needsKeyframe is set (PLI/FIR received), inter-frames are
+	//   skipped until the next keyframe arrives, giving the decoder a clean
+	//   resync point without dual-goroutine media writes.
 	writeVideoSample := func(frame *avframe.AVFrame) {
 		if video == nil {
 			return
@@ -332,6 +286,22 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			spsppsBuf = pkgrtp.ToAnnexB(frame.Payload, true)
 			return
+		}
+
+		// PLI/FIR resync: skip inter-frames until the next keyframe.
+		// This ensures the decoder gets a clean IDR to recover from.
+		// IMPORTANT: always advance lastVideoDTS even for skipped frames so
+		// the first keyframe after resync gets a normal ~40ms duration instead
+		// of a multi-second gap that corrupts Chrome's jitter buffer timing.
+		if video.NeedsKeyframe() {
+			if frame.FrameType != avframe.FrameTypeKeyframe {
+				if frame.DTS > 0 {
+					lastVideoDTS = frame.DTS
+				}
+				return
+			}
+			video.ClearNeedsKeyframe()
+			log.Printf("[webrtc] PLI resync: sending keyframe from feed loop (%d bytes payload)", len(frame.Payload))
 		}
 
 		payload := pkgrtp.ToAnnexB(frame.Payload, false)
@@ -418,7 +388,13 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 				if dtMs > 0 {
 					sleep := time.Duration(dtMs) * time.Millisecond / 10
 					if sleep > 0 && sleep < 50*time.Millisecond {
-						time.Sleep(sleep)
+						timer := time.NewTimer(sleep)
+						select {
+						case <-timer.C:
+						case <-done:
+							timer.Stop()
+							return
+						}
 					}
 				}
 			}
@@ -426,6 +402,32 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 				prevDTS = frame.DTS
 			}
 		}
+		// Preserve last DTS from GOP cache so the first live frame gets a
+		// proper duration delta instead of falling back to the default.
+		// (lastVideoDTS / lastAudioDTS are already set by writeVideoSample /
+		// writeAudioSample during cache playback.)
+	}
+
+	// Capture write position AFTER GOP cache so the live reader starts at
+	// the current position, not where we were before the cache was sent.
+	// This avoids DTS discontinuities between cached and live frames.
+	startPos := stream.RingBuffer().WriteCursor()
+
+	// DTS-based pacer: track wall-clock reference point to prevent bursting.
+	// pion's WriteSample sends RTP packets immediately (no internal pacing).
+	// Without pacing, the feed loop sends all buffered frames in a burst
+	// whenever the ring buffer signals, causing extreme jitter (437ms stdev)
+	// and browser jitter buffer inflation (3+ seconds).
+	//
+	// In live mode, initialize the pacer base NOW so that frames which
+	// accumulated in the ring buffer during GOP cache playback are paced
+	// from this moment rather than burst-sent. This bridges the GOP→live
+	// transition smoothly and prevents initial freezes.
+	var paceBaseWall time.Time
+	var paceBaseDTS int64
+	if mode == "live" && lastVideoDTS > 0 {
+		paceBaseWall = time.Now()
+		paceBaseDTS = lastVideoDTS
 	}
 
 	// Live frame loop: start reading only NEW frames (after snapshot).
@@ -445,6 +447,36 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 					continue
 				}
 			}
+
+			// DTS-based pacing: sleep if we're sending faster than real-time.
+			if frame.DTS > 0 {
+				if paceBaseWall.IsZero() {
+					paceBaseWall = time.Now()
+					paceBaseDTS = frame.DTS
+				} else {
+					dtsDelta := time.Duration(frame.DTS-paceBaseDTS) * time.Millisecond
+					targetTime := paceBaseWall.Add(dtsDelta)
+					sleepDur := time.Until(targetTime)
+
+					if sleepDur > 0 && sleepDur < time.Second {
+						// Ahead of schedule: wait to match real-time rate.
+						timer := time.NewTimer(sleepDur)
+						select {
+						case <-timer.C:
+						case <-done:
+							timer.Stop()
+							return
+						}
+					} else if sleepDur < -500*time.Millisecond {
+						// Too far behind (>500ms): reset base to prevent permanent lag.
+						// This happens after a CPU stall or ring buffer overrun.
+						paceBaseWall = time.Now()
+						paceBaseDTS = frame.DTS
+					}
+					// If -500ms < sleepDur <= 0: slightly behind, send immediately (catch up).
+				}
+			}
+
 			if frame.MediaType.IsVideo() {
 				writeVideoSample(frame)
 			} else if frame.MediaType.IsAudio() {

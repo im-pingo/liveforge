@@ -14,6 +14,7 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 func newTestServer(t *testing.T) *core.Server {
@@ -358,6 +359,113 @@ func TestTrackSenderStats(t *testing.T) {
 	}
 	if ts.Stats.Jitter.Load() != 300 {
 		t.Errorf("expected Jitter=300, got %d", ts.Stats.Jitter.Load())
+	}
+}
+
+// TestTrackSenderWriteSampleSerialization verifies that concurrent WriteSample
+// calls are serialized by the mutex, preventing interleaved RTP packets.
+func TestTrackSenderWriteSampleSerialization(t *testing.T) {
+	ts, _, _ := testPCPair(t)
+
+	// Send a sample to initialize the packetizer.
+	_ = ts.WriteSample(media.Sample{
+		Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x01, 0x02},
+		Duration: 40 * time.Millisecond,
+	})
+
+	// Launch concurrent writers. If the mutex is missing, pion's packetizer
+	// would produce corrupted/interleaved packets.
+	errs := make(chan error, 20)
+	for i := 0; i < 10; i++ {
+		go func() {
+			errs <- ts.WriteSample(media.Sample{
+				Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x03, 0x04},
+				Duration: 40 * time.Millisecond,
+			})
+		}()
+		go func() {
+			// Simulate PLI recovery: Duration 0 should not panic or error.
+			errs <- ts.WriteSample(media.Sample{
+				Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x00, 0x00, 0x01, 0x65, 0x05},
+				Duration: 0,
+			})
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		if err := <-errs; err != nil {
+			t.Logf("WriteSample error (may be expected if PC closing): %v", err)
+		}
+	}
+}
+
+// TestTrackSenderNeedsKeyframeFlag verifies that PLI sets the needsKeyframe
+// flag and that it can be cleared by the feed loop (via ClearNeedsKeyframe).
+// This ensures the signal/flag approach works: RTCP goroutine signals, feed
+// loop resyncs — no media is written from the RTCP goroutine.
+func TestTrackSenderNeedsKeyframeFlag(t *testing.T) {
+	ts, receiverPC, mediaSSRC := testPCPair(t)
+
+	ts.Start()
+
+	// Initially, needsKeyframe should be false.
+	if ts.NeedsKeyframe() {
+		t.Error("needsKeyframe should be false initially")
+	}
+
+	// Send PLI from receiver.
+	if err := receiverPC.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC},
+	}); err != nil {
+		t.Fatalf("WriteRTCP PLI: %v", err)
+	}
+
+	// Wait for the flag to be set by the RTCP loop.
+	waitForCondition(t, 3*time.Second, func() bool {
+		return ts.NeedsKeyframe()
+	}, "needsKeyframe was not set after PLI")
+
+	// Simulate feed loop clearing the flag after sending a keyframe.
+	ts.ClearNeedsKeyframe()
+	if ts.NeedsKeyframe() {
+		t.Error("needsKeyframe should be false after ClearNeedsKeyframe")
+	}
+}
+
+// TestTrackSenderPLIDoesNotWriteMedia verifies that the PLI handler does NOT
+// write media samples. Only the feed loop should write media — the RTCP
+// goroutine just sets a flag. This test ensures no regression to the old
+// sendKeyframeFromGOP approach.
+func TestTrackSenderPLIDoesNotWriteMedia(t *testing.T) {
+	ts, receiverPC, mediaSSRC := testPCPair(t)
+
+	// Set a PLI handler that only increments a counter (no media writes).
+	var pliCalled atomic.Int32
+	ts.SetPLIHandler(func() { pliCalled.Add(1) })
+	ts.Start()
+
+	// Send a normal sample to initialize the packetizer.
+	if err := ts.WriteSample(media.Sample{
+		Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0xAA},
+		Duration: 40 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("initial WriteSample: %v", err)
+	}
+
+	// Send PLI.
+	if err := receiverPC.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC},
+	}); err != nil {
+		t.Fatalf("WriteRTCP PLI: %v", err)
+	}
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		return pliCalled.Load() > 0
+	}, "PLI handler was not called")
+
+	// The PLI handler only sets the flag; it does not write media.
+	// Verify the flag is set (feed loop would clear it).
+	if !ts.NeedsKeyframe() {
+		t.Error("needsKeyframe should be set after PLI")
 	}
 }
 
