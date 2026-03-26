@@ -113,6 +113,7 @@
 |--------|------|-------------|
 | Notify module | `module/notify/module.go` | Async hooks (priority 90) for all 9 lifecycle events |
 | HTTP webhook sender | `module/notify/http_sender.go` | Buffered queue, HMAC-SHA256 signature, retry with backoff |
+| WebSocket notification sender | `module/notify/ws_sender.go` | Real-time event stream via WebSocket, event filtering, multi-client broadcast |
 | Record module | `module/record/module.go` | Async hooks for publish/publish_stop (priority 50) |
 | Record session | `module/record/session.go` | RingBuffer reader with select-based cancellation |
 | File writer | `module/record/file_writer.go` | FLV muxer, duration segmentation, path templates |
@@ -141,7 +142,6 @@
 | **SIP** | `sip:` | Large |
 | **Cluster forwarding** | `cluster.forward:` | Medium |
 | **Cluster origin pull** | `cluster.origin:` | Medium |
-| **WS notifications** | `notify.websocket` | Small |
 
 ### Config stubs (field exists, not enforced)
 
