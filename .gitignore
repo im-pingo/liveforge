@@ -33,3 +33,9 @@ configs/streamserver.local.yaml
 
 # Recordings
 /data/
+/recordings/
+
+# Node (Playwright test tooling)
+node_modules/
+package.json
+package-lock.json

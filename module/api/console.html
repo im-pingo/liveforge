@@ -403,6 +403,147 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 }
 .btn-stats:hover { border-color: #444; color: var(--text); }
 .btn-stats.active { border-color: var(--accent); color: var(--accent); }
+
+/* Publish button in header */
+.btn-publish {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid rgba(74,222,128,0.3);
+  background: rgba(74,222,128,0.08);
+  color: var(--green);
+  cursor: pointer;
+  transition: all 0.15s;
+  display: none;
+}
+.btn-publish:hover { background: rgba(74,222,128,0.15); border-color: var(--green); }
+
+/* Publish modal */
+.publish-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+.publish-overlay.active { display: flex; }
+.publish-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 640px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.publish-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.publish-header h3 { font-size: 15px; font-weight: 600; }
+.publish-body { padding: 20px; flex: 1; overflow: auto; }
+.publish-form-row {
+  margin-bottom: 14px;
+}
+.publish-form-row label {
+  display: block;
+  font-size: 12px;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.publish-form-row input,
+.publish-form-row select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  outline: none;
+}
+.publish-form-row input:focus,
+.publish-form-row select:focus { border-color: var(--accent); }
+.publish-preview-wrap {
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  margin-bottom: 14px;
+}
+.publish-preview-wrap video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: scaleX(-1);
+}
+.publish-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.btn-start-publish {
+  padding: 8px 24px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  background: var(--green);
+  color: #000;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-start-publish:hover { opacity: 0.9; }
+.btn-start-publish:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-stop-publish {
+  padding: 8px 24px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  background: var(--red);
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: none;
+}
+.btn-stop-publish:hover { opacity: 0.9; }
+.publish-status {
+  font-size: 12px;
+  color: var(--text2);
+  margin-left: 12px;
+}
+.publish-status.ok { color: var(--green); }
+.publish-status.error { color: var(--red); }
+.publish-stats-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0,0,0,0.78);
+  color: #e0e0e0;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 8px 12px;
+  pointer-events: none;
+  z-index: 10;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  display: none;
+}
 </style>
 </head>
 <body>
@@ -416,6 +557,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <h1>LiveForge <span>Console</span></h1>
     </div>
     <div class="status-bar">
+      <button class="btn-publish" id="btn-publish" onclick="openPublishModal()">+ WebRTC Publish</button>
       <span><span class="dot"></span></span>
       <span id="server-version"></span>
       <span id="updated"></span>
@@ -499,6 +641,42 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
       <div class="player-status" id="player-status">Select a protocol to start playback</div>
       <div class="player-url" id="player-url" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Publish modal -->
+<div class="publish-overlay" id="publish-overlay">
+  <div class="publish-modal">
+    <div class="publish-header">
+      <h3>WebRTC Publish</h3>
+      <button class="player-close" onclick="closePublishModal()">&times;</button>
+    </div>
+    <div class="publish-body">
+      <div class="publish-form-row">
+        <label>Stream Key</label>
+        <input type="text" id="publish-stream-key" placeholder="live/test" value="live/test">
+      </div>
+      <div class="publish-form-row">
+        <label>Camera</label>
+        <select id="publish-video-device"></select>
+      </div>
+      <div class="publish-form-row">
+        <label>Microphone</label>
+        <select id="publish-audio-device"></select>
+      </div>
+      <div class="publish-preview-wrap">
+        <video id="publish-preview" autoplay playsinline muted></video>
+        <div class="publish-stats-overlay" id="publish-stats-overlay">
+          <div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for stats...</span></span></div>
+        </div>
+      </div>
+      <div class="publish-actions">
+        <button class="btn-start-publish" id="btn-start-publish" onclick="startPublish()">Start Publishing</button>
+        <button class="btn-stop-publish" id="btn-stop-publish" onclick="stopPublish()">Stop</button>
+        <button class="btn-stats" id="btn-publish-stats" onclick="togglePublishStats()" style="display:none">Stats</button>
+        <span class="publish-status" id="publish-status"></span>
+      </div>
     </div>
   </div>
 </div>
@@ -1038,10 +1216,12 @@ function closePlayer() {
   document.getElementById("player-overlay").classList.remove("active");
 }
 
-// Close player on Escape key
+// Close modals on Escape key
 document.addEventListener("keydown", function(e) {
   if (e.key === "Escape") {
-    if (document.getElementById("player-overlay").classList.contains("active")) {
+    if (document.getElementById("publish-overlay").classList.contains("active")) {
+      closePublishModal();
+    } else if (document.getElementById("player-overlay").classList.contains("active")) {
       closePlayer();
     } else if (document.getElementById("modal").classList.contains("active")) {
       closeModal();
@@ -1064,6 +1244,7 @@ function refreshServerInfo() {
       document.getElementById("server-version").textContent = "v" + (data.version || "?");
       document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
       if (data.endpoints) endpoints = data.endpoints;
+      updatePublishButton();
     })
     .catch(function() {});
 
@@ -1167,6 +1348,301 @@ function refresh() {
       tbody.innerHTML = html;
     })
     .catch(function() {});
+}
+
+/* --- WebRTC Publish --- */
+var publishPC = null;
+var publishStream = null;
+var publishSessionURL = null;
+var publishStatsInterval = null;
+var publishStatsPrev = null;
+var publishStatsVisible = false;
+
+function openPublishModal() {
+  document.getElementById("publish-overlay").classList.add("active");
+  setPublishStatus("");
+  enumerateDevices();
+  startPreview();
+}
+
+function closePublishModal() {
+  stopPublish();
+  stopPreview();
+  document.getElementById("publish-overlay").classList.remove("active");
+}
+
+// Close publish modal on overlay click
+document.getElementById("publish-overlay").addEventListener("click", function(e) {
+  if (e.target === this) closePublishModal();
+});
+
+function setPublishStatus(msg, cls) {
+  var el = document.getElementById("publish-status");
+  el.textContent = msg;
+  el.className = "publish-status" + (cls ? " " + cls : "");
+}
+
+function enumerateDevices() {
+  navigator.mediaDevices.enumerateDevices().then(function(devices) {
+    var videoSel = document.getElementById("publish-video-device");
+    var audioSel = document.getElementById("publish-audio-device");
+    videoSel.innerHTML = "";
+    audioSel.innerHTML = "";
+
+    devices.forEach(function(d) {
+      var opt = document.createElement("option");
+      opt.value = d.deviceId;
+      opt.textContent = d.label || (d.kind + " " + d.deviceId.substring(0, 8));
+      if (d.kind === "videoinput") videoSel.appendChild(opt);
+      if (d.kind === "audioinput") audioSel.appendChild(opt);
+    });
+  }).catch(function(e) {
+    setPublishStatus("Cannot enumerate devices: " + e.message, "error");
+  });
+}
+
+function startPreview() {
+  stopPreview();
+  var videoId = document.getElementById("publish-video-device").value;
+  var audioId = document.getElementById("publish-audio-device").value;
+  var constraints = {
+    video: videoId ? { deviceId: { exact: videoId } } : true,
+    audio: audioId ? { deviceId: { exact: audioId } } : true
+  };
+  navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+    publishStream = stream;
+    document.getElementById("publish-preview").srcObject = stream;
+    // Re-enumerate to get labels (labels become available after permission grant)
+    enumerateDevices();
+  }).catch(function(e) {
+    setPublishStatus("Camera/mic error: " + e.message, "error");
+  });
+}
+
+function stopPreview() {
+  if (publishStream) {
+    publishStream.getTracks().forEach(function(t) { t.stop(); });
+    publishStream = null;
+  }
+  var preview = document.getElementById("publish-preview");
+  if (preview) {
+    preview.srcObject = null;
+  }
+}
+
+// Re-acquire preview when device selection changes
+document.getElementById("publish-video-device").addEventListener("change", function() {
+  if (!publishPC) startPreview();
+});
+document.getElementById("publish-audio-device").addEventListener("change", function() {
+  if (!publishPC) startPreview();
+});
+
+function startPublish() {
+  var streamKey = document.getElementById("publish-stream-key").value.trim();
+  if (!streamKey) {
+    setPublishStatus("Enter a stream key", "error");
+    return;
+  }
+
+  if (!publishStream) {
+    setPublishStatus("No camera/mic available", "error");
+    return;
+  }
+
+  setPublishStatus("Negotiating...");
+  document.getElementById("btn-start-publish").disabled = true;
+
+  var pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  });
+  publishPC = pc;
+
+  publishStream.getTracks().forEach(function(track) {
+    pc.addTrack(track, publishStream);
+  });
+
+  pc.oniceconnectionstatechange = function() {
+    var state = pc.iceConnectionState;
+    if (state === "connected" || state === "completed") {
+      setPublishStatus("Publishing", "ok");
+      document.getElementById("btn-start-publish").style.display = "none";
+      document.getElementById("btn-stop-publish").style.display = "inline-block";
+      document.getElementById("btn-publish-stats").style.display = "inline-block";
+      startPublishStatsOverlay(pc);
+    } else if (state === "failed" || state === "disconnected" || state === "closed") {
+      setPublishStatus("Disconnected: " + state, "error");
+      cleanupPublishPC();
+    }
+  };
+
+  var port = portFromListen(endpoints.webrtc);
+  var url = "http://" + location.hostname + ":" + port + "/webrtc/whip/" + streamKey;
+
+  pc.createOffer().then(function(offer) {
+    return pc.setLocalDescription(offer);
+  }).then(function() {
+    return new Promise(function(resolve) {
+      if (pc.iceGatheringState === "complete") { resolve(); return; }
+      pc.onicegatheringstatechange = function() {
+        if (pc.iceGatheringState === "complete") resolve();
+      };
+    });
+  }).then(function() {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: pc.localDescription.sdp
+    });
+  }).then(function(resp) {
+    if (resp.status !== 201) {
+      return resp.text().then(function(t) { throw new Error("WHIP " + resp.status + ": " + t); });
+    }
+    var loc = resp.headers.get("Location");
+    if (loc) {
+      publishSessionURL = "http://" + location.hostname + ":" + port + loc;
+    }
+    return resp.text();
+  }).then(function(sdp) {
+    return pc.setRemoteDescription({ type: "answer", sdp: sdp });
+  }).then(function() {
+    setPublishStatus("WebRTC connected, waiting for ICE...");
+  }).catch(function(e) {
+    setPublishStatus("WHIP error: " + e.message, "error");
+    cleanupPublishPC();
+  });
+}
+
+function stopPublish() {
+  stopPublishStatsOverlay();
+  if (publishPC) {
+    publishPC.close();
+    publishPC = null;
+  }
+  if (publishSessionURL) {
+    fetch(publishSessionURL, { method: "DELETE" }).catch(function(){});
+    publishSessionURL = null;
+  }
+  document.getElementById("btn-start-publish").style.display = "inline-block";
+  document.getElementById("btn-start-publish").disabled = false;
+  document.getElementById("btn-stop-publish").style.display = "none";
+  document.getElementById("btn-publish-stats").style.display = "none";
+  publishStatsVisible = false;
+  var btn = document.getElementById("btn-publish-stats");
+  if (btn) btn.classList.remove("active");
+
+  // Restart preview
+  startPreview();
+}
+
+function cleanupPublishPC() {
+  publishPC = null;
+  publishSessionURL = null;
+  document.getElementById("btn-start-publish").style.display = "inline-block";
+  document.getElementById("btn-start-publish").disabled = false;
+  document.getElementById("btn-stop-publish").style.display = "none";
+  document.getElementById("btn-publish-stats").style.display = "none";
+  stopPublishStatsOverlay();
+}
+
+/* --- Publish Stats Overlay --- */
+function togglePublishStats() {
+  publishStatsVisible = !publishStatsVisible;
+  var btn = document.getElementById("btn-publish-stats");
+  var overlay = document.getElementById("publish-stats-overlay");
+  if (btn) btn.classList.toggle("active", publishStatsVisible);
+  if (overlay) overlay.style.display = publishStatsVisible ? "block" : "none";
+}
+
+function startPublishStatsOverlay(pc) {
+  stopPublishStatsOverlay();
+  publishStatsPrev = null;
+  var overlay = document.getElementById("publish-stats-overlay");
+  if (overlay) overlay.style.display = publishStatsVisible ? "block" : "none";
+
+  publishStatsInterval = setInterval(async function() {
+    if (!pc || pc.connectionState === "closed" || pc.connectionState === "failed") {
+      stopPublishStatsOverlay();
+      return;
+    }
+    try {
+      var report = await pc.getStats();
+      var vOut = null, aOut = null, vRemote = null;
+      report.forEach(function(s) {
+        if (s.type === "outbound-rtp" && s.kind === "video") vOut = s;
+        if (s.type === "outbound-rtp" && s.kind === "audio") aOut = s;
+        if (s.type === "remote-inbound-rtp" && s.kind === "video") vRemote = s;
+      });
+      renderPublishStats(vOut, aOut, vRemote);
+    } catch(e) {}
+  }, 1000);
+}
+
+function stopPublishStatsOverlay() {
+  if (publishStatsInterval) { clearInterval(publishStatsInterval); publishStatsInterval = null; }
+  publishStatsPrev = null;
+  var overlay = document.getElementById("publish-stats-overlay");
+  if (overlay) {
+    overlay.style.display = "none";
+    overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for stats...</span></span></div>';
+  }
+}
+
+function renderPublishStats(vOut, aOut, vRemote) {
+  var overlay = document.getElementById("publish-stats-overlay");
+  if (!overlay) return;
+  if (!vOut) {
+    overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">No video stats yet</span></span></div>';
+    publishStatsPrev = null;
+    return;
+  }
+
+  var pv = publishStatsPrev && publishStatsPrev.v;
+  var dEncoded = pv ? vOut.framesEncoded - pv.framesEncoded : "-";
+  var dSent    = pv ? vOut.framesSent - pv.framesSent : "-";
+  var dBytes   = pv ? vOut.bytesSent - pv.bytesSent : 0;
+  var bitrate  = pv ? ((dBytes * 8) / 1e6).toFixed(2) + " Mbps" : "-";
+  var dKeyFr   = pv ? vOut.keyFramesEncoded - pv.keyFramesEncoded : "-";
+  var qLimit   = vOut.qualityLimitationReason || "-";
+  var rtt      = vRemote && vRemote.roundTripTime != null ? (vRemote.roundTripTime * 1000).toFixed(0) + "ms" : "-";
+  var jitter   = vRemote && vRemote.jitter != null ? (vRemote.jitter * 1000).toFixed(0) + "ms" : "-";
+  var pktLost  = vRemote ? vRemote.packetsLost : "-";
+
+  var aBytesD = 0;
+  var pa = publishStatsPrev && publishStatsPrev.a;
+  if (pa && aOut) aBytesD = aOut.bytesSent - pa.bytesSent;
+  var aBitrate = pa && aOut ? ((aBytesD * 8) / 1e3).toFixed(0) + " kbps" : "-";
+
+  var rttCls = rtt !== "-" && parseInt(rtt) > 100 ? "warn" : "";
+  var qCls = qLimit !== "none" && qLimit !== "-" ? "warn" : "";
+
+  var L = '<span class="stat-label-s">';
+  var E = '</span>';
+
+  overlay.innerHTML =
+    '<div class="stat-row">' +
+    '<span class="stat-item">' + L + "FPS" + E + val(dEncoded) + "</span>" +
+    '<span class="stat-item">' + L + "Sent" + E + val(dSent) + "</span>" +
+    '<span class="stat-item">' + L + "KF" + E + val(dKeyFr) + "</span>" +
+    '<span class="stat-item">' + L + "Bitrate" + E + val(bitrate) + "</span>" +
+    '<span class="stat-item">' + L + "RTT" + E + val(rtt, rttCls) + "</span>" +
+    '<span class="stat-item">' + L + "Jitter" + E + val(jitter) + "</span>" +
+    '<span class="stat-item">' + L + "Lost" + E + val(pktLost) + "</span>" +
+    '<span class="stat-item">' + L + "Quality" + E + val(qLimit, qCls) + "</span>" +
+    '<span class="stat-item">' + L + "Audio" + E + val(aBitrate) + "</span>" +
+    "</div>" +
+    '<div class="stat-row" style="margin-top:2px;color:#666;font-size:10px">' +
+    "Total: enc=" + vOut.framesEncoded + " sent=" + vOut.framesSent +
+    " kf=" + vOut.keyFramesEncoded + " bytes=" + vOut.bytesSent +
+    "</div>";
+
+  publishStatsPrev = { v: vOut, a: aOut };
+}
+
+/* --- Show publish button when webrtc endpoint available --- */
+function updatePublishButton() {
+  var btn = document.getElementById("btn-publish");
+  if (btn) btn.style.display = endpoints.webrtc ? "inline-block" : "none";
 }
 
 refreshServerInfo();
