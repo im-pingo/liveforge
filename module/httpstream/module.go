@@ -1,10 +1,12 @@
 package httpstream
 
 import (
+	"context"
 	"log"
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 )
@@ -161,7 +163,11 @@ func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHMan
 // Close shuts down the HTTP server and all managers.
 func (m *Module) Close() error {
 	if m.httpSrv != nil {
-		m.httpSrv.Close()
+		// Shutdown gracefully cancels in-flight request contexts, unblocking
+		// handlers that poll with r.Context().Done() (e.g., DASH segment holds).
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		m.httpSrv.Shutdown(ctx) //nolint:errcheck
+		cancel()
 	}
 
 	// Stop all HLS managers
