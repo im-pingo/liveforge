@@ -16,12 +16,16 @@ type Module struct {
 	eventBus *core.EventBus
 	wg       sync.WaitGroup
 	closing  chan struct{}
+
+	connsMu sync.Mutex
+	conns   map[net.Conn]struct{}
 }
 
 // NewModule creates a new RTMP module.
 func NewModule() *Module {
 	return &Module{
 		closing: make(chan struct{}),
+		conns:   make(map[net.Conn]struct{}),
 	}
 }
 
@@ -59,6 +63,13 @@ func (m *Module) Close() error {
 	if m.listener != nil {
 		m.listener.Close()
 	}
+	// Close all active connections to unblock handlers blocked on Read.
+	m.connsMu.Lock()
+	for c := range m.conns {
+		c.Close()
+	}
+	m.connsMu.Unlock()
+
 	m.wg.Wait()
 	log.Println("RTMP module stopped")
 	return nil
@@ -95,6 +106,15 @@ func (m *Module) acceptLoop(chunkSize int) {
 func (m *Module) handleConn(conn net.Conn, chunkSize int) {
 	defer m.wg.Done()
 	defer m.server.ReleaseConn()
+
+	m.connsMu.Lock()
+	m.conns[conn] = struct{}{}
+	m.connsMu.Unlock()
+	defer func() {
+		m.connsMu.Lock()
+		delete(m.conns, conn)
+		m.connsMu.Unlock()
+	}()
 
 	if err := ServerHandshake(conn); err != nil {
 		log.Printf("RTMP handshake failed: %v", err)
