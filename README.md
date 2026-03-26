@@ -6,7 +6,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-25%20packages%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-24%20packages%20passing-brightgreen)](#testing)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -162,7 +162,7 @@ liveforge/
 
 ## Testing
 
-25 test packages, all passing:
+24 test packages, all passing:
 
 ```bash
 go test ./...

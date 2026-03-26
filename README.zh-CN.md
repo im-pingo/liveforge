@@ -6,7 +6,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-25%20packages%20passing-brightgreen)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-24%20packages%20passing-brightgreen)](#测试)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -162,7 +162,7 @@ liveforge/
 
 ## 测试
 
-25 个测试包，全部通过：
+24 个测试包，全部通过：
 
 ```bash
 go test ./...
@@ -189,12 +189,19 @@ go test -cover ./...    # 查看覆盖率
 | 单文件部署 | 是 | 是 | 是 | 否 |
 | 许可证 | MIT | MIT | MIT | MIT |
 
+## 文档
+
+完整文档涵盖所有功能、配置、使用场景和故障排查：
+
+- **[Wiki (GitHub)](../../wiki)** — GitHub Wiki 完整文档（English / 中文）
+- **[Wiki (English)](docs/wiki.md)** | **[Wiki (中文)](docs/wiki.zh-CN.md)** — 仓库内同步文档
+
 ## 路线图
 
-- [ ] TLS / HTTPS 支持
+- [x] TLS / HTTPS 支持
 - [ ] SIP 网关
 - [ ] 集群转发和回源
-- [ ] WebSocket 通知
+- [x] WebSocket 通知
 - [ ] Prometheus 指标
 - [ ] Simulcast 分层选择
 - [ ] 管理后台增强

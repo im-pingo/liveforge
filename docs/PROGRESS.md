@@ -3,7 +3,7 @@
 > This document tracks the overall development progress of the project.
 > It must be updated after every development session to prevent context loss.
 >
-> **Last updated: 2026-03-26**
+> **Last updated: 2026-03-27**
 
 ---
 
@@ -11,9 +11,9 @@
 
 **Liveforge** is a high-performance media streaming server written in Go, supporting multi-protocol ingest and playback.
 
-- **Code volume**: ~14,700 lines (excluding tests)
-- **Commits**: 90
-- **Test packages**: 25, all passing, 0 failures
+- **Code volume**: ~15,000 lines (excluding tests), ~23,000 total
+- **Commits**: 94
+- **Test packages**: 24 with tests, all passing, 0 failures
 - **Author**: im-pingo <cczjp89@gmail.com>
 
 ---
