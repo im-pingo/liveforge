@@ -107,19 +107,42 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			m.serveHLSSegment(w, r, app+"/"+key, seqNum)
 			return
 		case "m4s":
-			// DASH media segment: /app/key/$Number$.m4s
+			// DASH media segments:
+			//   /app/key/v$Number$.m4s (video)
+			//   /app/key/a$Number$.m4s (audio)
 			// MPD uses 1-based numbering; internal SeqNum is 0-based
-			num, err := strconv.Atoi(segName)
-			if err != nil {
-				http.Error(w, "invalid segment number", http.StatusBadRequest)
+			streamKey := app + "/" + key
+			if len(segName) > 1 && segName[0] == 'v' {
+				num, err := strconv.Atoi(segName[1:])
+				if err != nil {
+					http.Error(w, "invalid segment number", http.StatusBadRequest)
+					return
+				}
+				m.serveDASHSegment(w, r, streamKey, num-1)
 				return
 			}
-			m.serveDASHSegment(w, r, app+"/"+key, num-1)
+			if len(segName) > 1 && segName[0] == 'a' {
+				num, err := strconv.Atoi(segName[1:])
+				if err != nil {
+					http.Error(w, "invalid segment number", http.StatusBadRequest)
+					return
+				}
+				m.serveDASHAudioSegment(w, r, streamKey, num-1)
+				return
+			}
+			http.Error(w, "invalid segment path", http.StatusBadRequest)
 			return
 		case "mp4":
-			// DASH init segment: /app/key/init.mp4
+			// DASH init segments:
+			//   /app/key/init.mp4 (video)
+			//   /app/key/audio_init.mp4 (audio)
+			streamKey := app + "/" + key
 			if segName == "init" {
-				m.serveDASHInit(w, r, app+"/"+key)
+				m.serveDASHInit(w, r, streamKey)
+				return
+			}
+			if segName == "audio_init" {
+				m.serveDASHAudioInit(w, r, streamKey)
 				return
 			}
 		}
@@ -393,6 +416,83 @@ func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, stream
 	// 2. Availability hold — delay response until the wall-clock time that
 	// makes ffmpeg's next cur_seq_no calculation return seqNum+1.
 	// This prevents re-reading the same segment in a tight loop.
+	availTime := mgr.SegmentAvailabilityTime(seqNum)
+	if !availTime.IsZero() {
+		if wait := time.Until(availTime); wait > 0 && wait < 7*time.Second {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+	}
+
+	m.setCORSHeaders(w)
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "public, max-age=10")
+	w.Write(data)
+}
+
+// serveDASHAudioInit serves the audio-only fMP4 init segment.
+func (m *Module) serveDASHAudioInit(w http.ResponseWriter, r *http.Request, streamKey string) {
+	m.dashMu.Lock()
+	mgr, ok := m.dashManagers[streamKey]
+	m.dashMu.Unlock()
+
+	if !ok {
+		http.Error(w, "no DASH session for this stream", http.StatusNotFound)
+		return
+	}
+
+	data, found := mgr.GetAudioInitSegment()
+	if !found {
+		http.Error(w, "audio init segment not ready", http.StatusNotFound)
+		return
+	}
+
+	m.setCORSHeaders(w)
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Write(data)
+}
+
+// serveDASHAudioSegment serves a single audio-only fMP4 segment by sequence number.
+func (m *Module) serveDASHAudioSegment(w http.ResponseWriter, r *http.Request, streamKey string, seqNum int) {
+	m.dashMu.Lock()
+	mgr, ok := m.dashManagers[streamKey]
+	m.dashMu.Unlock()
+
+	if !ok {
+		http.Error(w, "no DASH session for this stream", http.StatusNotFound)
+		return
+	}
+
+	// Production hold — wait for the segment to be produced.
+	data, found := mgr.GetAudioSegment(seqNum)
+	if !found {
+		_, hi := mgr.SegmentRange()
+		if seqNum > hi {
+			for i := 0; i < 60; i++ {
+				select {
+				case <-r.Context().Done():
+					return
+				default:
+				}
+				time.Sleep(100 * time.Millisecond)
+				data, found = mgr.GetAudioSegment(seqNum)
+				if found {
+					break
+				}
+			}
+		}
+	}
+
+	if !found {
+		http.Error(w, "audio segment not found", http.StatusNotFound)
+		return
+	}
+
+	// Availability hold (same as video).
 	availTime := mgr.SegmentAvailabilityTime(seqNum)
 	if !availTime.IsZero() {
 		if wait := time.Until(availTime); wait > 0 && wait < 7*time.Second {
