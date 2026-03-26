@@ -189,9 +189,16 @@ go test -cover ./...    # with coverage
 | Single binary | Yes | Yes | Yes | No |
 | License | MIT | MIT | MIT | MIT |
 
+## Documentation
+
+For comprehensive documentation covering all features, configuration, usage scenarios, and troubleshooting:
+
+- **[Wiki (GitHub)](../../wiki)** — Full documentation on GitHub Wiki (English / 中文)
+- **[Wiki (English)](docs/wiki.md)** | **[Wiki (中文)](docs/wiki.zh-CN.md)** — Same content in the repository
+
 ## Roadmap
 
-- [ ] TLS / HTTPS
+- [x] TLS / HTTPS
 - [ ] SIP gateway
 - [ ] Cluster forwarding and origin pull
 - [ ] WebSocket notifications
