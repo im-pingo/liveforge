@@ -35,7 +35,7 @@ func (m *Module) Name() string { return "api" }
 func (m *Module) Init(s *core.Server) error {
 	cfg := s.Config()
 
-	ln, err := net.Listen("tcp", cfg.API.Listen)
+	ln, err := s.MakeListener(cfg.API.Listen, cfg.API.TLS)
 	if err != nil {
 		return err
 	}
@@ -47,7 +47,11 @@ func (m *Module) Init(s *core.Server) error {
 	handler := buildAuthHandler(mux, cfg.API)
 	m.httpSrv = &http.Server{Handler: handler}
 
-	log.Printf("[api] listening on %s", ln.Addr())
+	proto := "http"
+	if cfg.TLS.Configured() && (cfg.API.TLS == nil || *cfg.API.TLS) {
+		proto = "https"
+	}
+	log.Printf("[api] %s listening on %s", proto, ln.Addr())
 
 	m.wg.Add(1)
 	go func() {

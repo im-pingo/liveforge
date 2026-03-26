@@ -48,7 +48,7 @@ func (m *Module) Init(s *core.Server) error {
 
 	m.handler = NewHandler(s, m.portManager)
 
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ln, err := s.MakeListener(cfg.Listen, cfg.TLS)
 	if err != nil {
 		return fmt.Errorf("rtsp: listen %s: %w", cfg.Listen, err)
 	}
@@ -57,7 +57,11 @@ func (m *Module) Init(s *core.Server) error {
 	go m.acceptLoop()
 	go m.sessionReaper()
 
-	log.Printf("rtsp: listening on %s", cfg.Listen)
+	proto := "rtsp"
+	if s.Config().TLS.Configured() && (cfg.TLS == nil || *cfg.TLS) {
+		proto = "rtsps"
+	}
+	log.Printf("%s: listening on %s", proto, cfg.Listen)
 	return nil
 }
 

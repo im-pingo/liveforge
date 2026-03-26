@@ -75,7 +75,7 @@ func (m *Module) Init(s *core.Server) error {
 	)
 
 	// Start HTTP signaling server.
-	ln, err := net.Listen("tcp", cfg.WebRTC.Listen)
+	ln, err := s.MakeListener(cfg.WebRTC.Listen, cfg.WebRTC.TLS)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,11 @@ func (m *Module) Init(s *core.Server) error {
 
 	m.httpSrv = &http.Server{Handler: corsMiddleware(mux)}
 
-	log.Printf("[webrtc] listening on %s", ln.Addr())
+	proto := "http"
+	if cfg.TLS.Configured() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
+		proto = "https"
+	}
+	log.Printf("[webrtc] %s listening on %s", proto, ln.Addr())
 
 	m.wg.Add(1)
 	go func() {

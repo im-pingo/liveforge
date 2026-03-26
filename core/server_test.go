@@ -1,7 +1,19 @@
 package core
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 )
@@ -71,5 +83,175 @@ func TestServerStreamHub(t *testing.T) {
 	s := NewServer(cfg)
 	if s.StreamHub() == nil {
 		t.Fatal("expected StreamHub to be initialized")
+	}
+}
+
+// generateTestCert creates a self-signed certificate in tmpDir and returns cert/key paths.
+func generateTestCert(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "cert.pem")
+	keyFile = filepath.Join(dir, "key.pem")
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	certOut, _ := os.Create(certFile)
+	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	certOut.Close()
+
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyOut, _ := os.Create(keyFile)
+	pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	keyOut.Close()
+
+	return certFile, keyFile
+}
+
+// isTLSListener checks if the accepted connection from ln is a *tls.Conn.
+func isTLSListener(t *testing.T, ln net.Listener) bool {
+	t.Helper()
+
+	type result struct {
+		isTLS bool
+	}
+	ch := make(chan result, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			ch <- result{false}
+			return
+		}
+		_, ok := conn.(*tls.Conn)
+		conn.Close()
+		ch <- result{ok}
+	}()
+
+	// Plain TCP dial is enough — the listener wraps it in TLS on accept.
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.Close()
+
+	r := <-ch
+	return r.isTLS
+}
+
+func TestMakeListenerPlainTCP(t *testing.T) {
+	cfg := &config.Config{}
+	s := NewServer(cfg)
+
+	ln, err := s.MakeListener("127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatalf("MakeListener: %v", err)
+	}
+	defer ln.Close()
+
+	if isTLSListener(t, ln) {
+		t.Fatal("expected plain TCP listener, got TLS")
+	}
+}
+
+func TestMakeListenerGlobalTLS(t *testing.T) {
+	certFile, keyFile := generateTestCert(t)
+	cfg := &config.Config{}
+	cfg.TLS.CertFile = certFile
+	cfg.TLS.KeyFile = keyFile
+
+	s := NewServer(cfg)
+
+	ln, err := s.MakeListener("127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatalf("MakeListener: %v", err)
+	}
+	defer ln.Close()
+
+	if !isTLSListener(t, ln) {
+		t.Fatal("expected TLS listener")
+	}
+}
+
+func TestMakeListenerModuleOverrideFalse(t *testing.T) {
+	certFile, keyFile := generateTestCert(t)
+	cfg := &config.Config{}
+	cfg.TLS.CertFile = certFile
+	cfg.TLS.KeyFile = keyFile
+
+	s := NewServer(cfg)
+
+	off := false
+	ln, err := s.MakeListener("127.0.0.1:0", &off)
+	if err != nil {
+		t.Fatalf("MakeListener: %v", err)
+	}
+	defer ln.Close()
+
+	if isTLSListener(t, ln) {
+		t.Fatal("expected plain TCP listener when module TLS=false")
+	}
+}
+
+func TestMakeListenerModuleOverrideTrueNoCert(t *testing.T) {
+	cfg := &config.Config{} // no TLS cert configured
+	s := NewServer(cfg)
+
+	on := true
+	_, err := s.MakeListener("127.0.0.1:0", &on)
+	if err == nil {
+		t.Fatal("expected error when module TLS=true but no cert configured")
+	}
+}
+
+func TestMakeListenerModuleOverrideTrue(t *testing.T) {
+	certFile, keyFile := generateTestCert(t)
+	cfg := &config.Config{}
+	cfg.TLS.CertFile = certFile
+	cfg.TLS.KeyFile = keyFile
+
+	s := NewServer(cfg)
+
+	on := true
+	ln, err := s.MakeListener("127.0.0.1:0", &on)
+	if err != nil {
+		t.Fatalf("MakeListener: %v", err)
+	}
+	defer ln.Close()
+
+	if !isTLSListener(t, ln) {
+		t.Fatal("expected TLS listener")
+	}
+}
+
+func TestTLSConfigConfigured(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      config.TLSConfig
+		expected bool
+	}{
+		{"empty", config.TLSConfig{}, false},
+		{"cert only", config.TLSConfig{CertFile: "cert.pem"}, false},
+		{"key only", config.TLSConfig{KeyFile: "key.pem"}, false},
+		{"both", config.TLSConfig{CertFile: "cert.pem", KeyFile: "key.pem"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.Configured(); got != tt.expected {
+				t.Errorf("Configured() = %v, want %v", got, tt.expected)
+			}
+		})
 	}
 }

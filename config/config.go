@@ -34,6 +34,11 @@ type TLSConfig struct {
 	KeyFile  string `yaml:"key_file"`
 }
 
+// Configured returns true when both cert and key paths are set.
+func (t TLSConfig) Configured() bool {
+	return t.CertFile != "" && t.KeyFile != ""
+}
+
 // LimitsConfig holds resource limits.
 type LimitsConfig struct {
 	MaxStreams              int `yaml:"max_streams"`
@@ -47,6 +52,7 @@ type RTMPConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Listen    string `yaml:"listen"`
 	ChunkSize int    `yaml:"chunk_size"`
+	TLS       *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 }
 
 // RTSPConfig holds RTSP module settings.
@@ -54,6 +60,7 @@ type RTSPConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	Listen       string `yaml:"listen"`
 	RTPPortRange []int  `yaml:"rtp_port_range"`
+	TLS          *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 }
 
 // HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
@@ -61,6 +68,7 @@ type HTTPConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Listen  string `yaml:"listen"`
 	CORS    bool   `yaml:"cors"`
+	TLS     *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 	HLS     HLSConfig  `yaml:"hls"`
 	DASH    DASHConfig `yaml:"dash"`
 }
@@ -91,6 +99,7 @@ type WebRTCConfig struct {
 	ICEServers   []ICEServer `yaml:"ice_servers"`
 	UDPPortRange []int       `yaml:"udp_port_range"`
 	Candidates   []string    `yaml:"candidates"`
+	TLS          *bool       `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 }
 
 // ICEServer holds a STUN/TURN server configuration.
@@ -263,6 +272,7 @@ type FileCompleteConfig struct {
 type APIConfig struct {
 	Enabled bool            `yaml:"enabled"`
 	Listen  string          `yaml:"listen"`
+	TLS     *bool           `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 	Auth    APIAuthConfig   `yaml:"auth"`
 	Console ConsoleConfig   `yaml:"console"`
 }

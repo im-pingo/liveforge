@@ -40,13 +40,17 @@ func (m *Module) Init(s *core.Server) error {
 	cfg := s.Config()
 	m.hub = s.StreamHub()
 
-	ln, err := net.Listen("tcp", cfg.RTMP.Listen)
+	ln, err := s.MakeListener(cfg.RTMP.Listen, cfg.RTMP.TLS)
 	if err != nil {
 		return err
 	}
 	m.listener = ln
 
-	log.Printf("RTMP listening on %s", cfg.RTMP.Listen)
+	proto := "RTMP"
+	if cfg.TLS.Configured() && (cfg.RTMP.TLS == nil || *cfg.RTMP.TLS) {
+		proto = "RTMPS"
+	}
+	log.Printf("%s listening on %s", proto, cfg.RTMP.Listen)
 
 	m.wg.Add(1)
 	go m.acceptLoop(cfg.RTMP.ChunkSize)
