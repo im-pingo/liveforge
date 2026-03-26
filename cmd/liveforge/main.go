@@ -23,7 +23,7 @@ import (
 var version = "dev"
 
 func main() {
-	configPath := flag.String("c", "configs/streamserver.yaml", "config file path")
+	configPath := flag.String("c", "configs/liveforge.yaml", "config file path")
 	showVersion := flag.Bool("v", false, "show version")
 	flag.Parse()
 

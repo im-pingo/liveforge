@@ -29,7 +29,7 @@ Thumbs.db
 /dist/
 
 # Config with secrets
-configs/streamserver.local.yaml
+configs/liveforge.local.yaml
 
 # Recordings
 /data/
