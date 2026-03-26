@@ -257,6 +257,13 @@ func (m *Module) serveHLSPlaylist(w http.ResponseWriter, r *http.Request, stream
 	}
 
 	mgr := m.getOrCreateHLS(streamKey, stream)
+
+	// Wait for at least one segment before serving playlist.
+	// An empty playlist causes ffplay to give up immediately.
+	for i := 0; i < 100 && mgr.SegmentCount() == 0; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	playlist := mgr.GenerateM3U8()
 
 	m.setCORSHeaders(w)
@@ -298,15 +305,12 @@ func (m *Module) serveDASHManifest(w http.ResponseWriter, r *http.Request, strea
 
 	mgr := m.getOrCreateDASH(streamKey, stream)
 
-	// Wait for at least one segment before serving MPD.
-	// An empty SegmentTimeline causes ffplay to compute invalid segment numbers.
-	for i := 0; i < 50 && mgr.SegmentCount() == 0; i++ {
+	// Wait for at least 3 segments before serving MPD. FFmpeg's dashdec.c
+	// caches the SegmentTemplate @duration from the first MPD response and
+	// never updates it on refresh. With fewer than 3 segments the computed
+	// duration is wrong (dominated by short GOP-cache edge-case segments).
+	for i := 0; i < 150 && mgr.SegmentCount() < 3; i++ {
 		time.Sleep(100 * time.Millisecond)
-	}
-	if mgr.SegmentCount() == 0 {
-		w.Header().Set("Retry-After", "2")
-		http.Error(w, "segments not ready yet", http.StatusServiceUnavailable)
-		return
 	}
 
 	manifest := mgr.GenerateMPD()
@@ -341,6 +345,16 @@ func (m *Module) serveDASHInit(w http.ResponseWriter, r *http.Request, streamKey
 }
 
 // serveDASHSegment serves a single fMP4 media segment by sequence number.
+//
+// Two server-side holds ensure smooth playback with ffmpeg's dashdec.c:
+//
+//  1. Production hold: if the segment hasn't been produced yet (future segment),
+//     wait up to ~6s for it to appear. ffmpeg's dashdec.c has no backoff on 404.
+//
+//  2. Availability hold: after finding the segment, delay the response until
+//     the wall-clock time at which ffmpeg's next segment calculation will yield
+//     seqNum+1. Without this, ffmpeg reads cached segments faster than real-time,
+//     recalculates the same segment number, and enters a re-read loop.
 func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, streamKey string, seqNum int) {
 	m.dashMu.Lock()
 	mgr, ok := m.dashManagers[streamKey]
@@ -351,10 +365,43 @@ func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, stream
 		return
 	}
 
+	// 1. Production hold — wait for the segment to be produced.
 	data, found := mgr.GetSegment(seqNum)
+	if !found {
+		_, hi := mgr.SegmentRange()
+		if seqNum > hi {
+			for i := 0; i < 60; i++ {
+				select {
+				case <-r.Context().Done():
+					return
+				default:
+				}
+				time.Sleep(100 * time.Millisecond)
+				data, found = mgr.GetSegment(seqNum)
+				if found {
+					break
+				}
+			}
+		}
+	}
+
 	if !found {
 		http.Error(w, "segment not found", http.StatusNotFound)
 		return
+	}
+
+	// 2. Availability hold — delay response until the wall-clock time that
+	// makes ffmpeg's next cur_seq_no calculation return seqNum+1.
+	// This prevents re-reading the same segment in a tight loop.
+	availTime := mgr.SegmentAvailabilityTime(seqNum)
+	if !availTime.IsZero() {
+		if wait := time.Until(availTime); wait > 0 && wait < 7*time.Second {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(wait):
+			}
+		}
 	}
 
 	m.setCORSHeaders(w)

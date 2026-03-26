@@ -16,10 +16,9 @@ import (
 
 // DASHSegment holds a single fMP4 media segment (moof+mdat).
 type DASHSegment struct {
-	SeqNum    int     // sequential segment number
-	StartTime int64   // wall-clock offset from AST in ms (for SegmentTimeline t)
-	Duration  float64 // seconds
-	Data      []byte
+	SeqNum   int     // sequential segment number (0-based)
+	Duration float64 // seconds
+	Data     []byte
 }
 
 // DASHManager accumulates video-only fMP4 segments from a stream and serves
@@ -36,6 +35,7 @@ type DASHManager struct {
 	seqBase     int // sequence number of first segment in window
 
 	startTime time.Time // for MPD availabilityStartTime
+	dtsBase   int64     // DTS of first frame (ms); aligns timeline with segment data
 	streamKey string
 	basePath  string // e.g., "/live/stream1"
 	done      chan struct{}
@@ -124,7 +124,6 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 	var currentFrames []*avframe.AVFrame
 	var segStartDTS int64
-	segWallStart := time.Now()
 	hasData := false
 
 	// Helper: finalize current segment (video frames only)
@@ -136,36 +135,42 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		if dur <= 0 {
 			dur = d.targetDur
 		}
-		data := muxer.WriteSegment(currentFrames)
+
+		if d.dtsBase == 0 {
+			d.dtsBase = segStartDTS
+		}
+
+		// Rebase DTS/PTS so baseMediaDecodeTime starts from 0.
+		// This avoids the need for presentationTimeOffset in the MPD and
+		// aligns segment decode times with the MPD timeline (AST-relative).
+		rebasedFrames := make([]*avframe.AVFrame, len(currentFrames))
+		for i, f := range currentFrames {
+			rf := *f
+			rf.DTS -= d.dtsBase
+			rf.PTS -= d.dtsBase
+			rebasedFrames[i] = &rf
+		}
+
+		data := muxer.WriteSegment(rebasedFrames)
 		if len(data) == 0 {
 			currentFrames = currentFrames[:0]
 			return
 		}
 
-		// Wall-clock-aligned StartTime: first segment uses wall-clock offset
-		// from AST; subsequent segments chain from previous segment's end.
-		var startTimeMs int64
-		d.mu.RLock()
-		nSegs := len(d.segments)
-		if nSegs > 0 {
-			prev := d.segments[nSegs-1]
-			startTimeMs = prev.StartTime + int64(prev.Duration*1000)
-		} else {
-			startTimeMs = segWallStart.Sub(d.startTime).Milliseconds()
-		}
-		d.mu.RUnlock()
-
 		seg := &DASHSegment{
-			SeqNum:    d.nextSeqNum,
-			StartTime: startTimeMs,
-			Duration:  dur,
-			Data:      data,
+			SeqNum:   d.nextSeqNum,
+			Duration: dur,
+			Data:     data,
 		}
 		d.mu.Lock()
 		d.segments = append(d.segments, seg)
 		d.nextSeqNum++
-		if len(d.segments) > d.maxSegments {
-			excess := len(d.segments) - d.maxSegments
+		// Keep extra segments beyond maxSegments as a buffer so that
+		// segments referenced in a recently-served MPD are still available
+		// when ffplay requests them (race between MPD fetch and segment fetch).
+		keepCount := d.maxSegments + 5
+		if len(d.segments) > keepCount {
+			excess := len(d.segments) - keepCount
 			d.segments = d.segments[excess:]
 			d.seqBase += excess
 		}
@@ -173,9 +178,14 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		currentFrames = currentFrames[:0]
 	}
 
-	// Process GOP cache (video frames only)
+	// Process GOP cache (video frames only). Frames are accumulated but NOT
+	// finalized as a separate segment — they become part of the first live
+	// segment when the next keyframe arrives. This ensures all DASH segments
+	// have uniform duration (keyframe-to-keyframe) for simple-duration
+	// SegmentTemplate addressing compatibility with ffmpeg.
 	startPos := stream.RingBuffer().WriteCursor()
 	gopCache := stream.GOPCache()
+	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -185,9 +195,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		}
 		if !hasData {
 			segStartDTS = f.DTS
-			segWallStart = time.Now()
 			hasData = true
 		}
+		gopEndDTS = f.DTS
 		currentFrames = append(currentFrames, f)
 	}
 
@@ -213,17 +223,20 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		if !frame.MediaType.IsVideo() {
 			continue
 		}
+		// Skip frames already included in the GOP cache segment to avoid
+		// DTS overlap between the first two segments.
+		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
+			continue
+		}
 
 		// Split on video keyframes
 		if frame.FrameType.IsKeyframe() && hasData && len(currentFrames) > 0 {
 			finalize(frame.DTS)
 			segStartDTS = frame.DTS
-			segWallStart = time.Now()
 		}
 
 		if !hasData {
 			segStartDTS = frame.DTS
-			segWallStart = time.Now()
 			hasData = true
 		}
 
@@ -264,61 +277,61 @@ func (d *DASHManager) GetSegment(seqNum int) ([]byte, bool) {
 }
 
 // GenerateMPD returns the current DASH MPD manifest using $Number$ addressing
-// with a SegmentTimeline whose t values are wall-clock-aligned to AST.
+// with a fixed duration attribute. Segments use rebased DTS (baseMediaDecodeTime
+// starts from 0) so no presentationTimeOffset is needed. The player computes
+// segment numbers from wall-clock time: num = 1 + floor((now - AST) / duration).
 func (d *DASHManager) GenerateMPD() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	// Compute timeShiftBufferDepth from available segments
+	segs := d.segments
+
 	var totalDur float64
-	for _, seg := range d.segments {
+	for _, seg := range segs {
 		totalDur += seg.Duration
 	}
 
-	// Buffer depth: actual content duration, minimum 3 * targetDur
 	bufferDepth := totalDur
 	if bufferDepth < d.targetDur*3 {
 		bufferDepth = d.targetDur * 3
 	}
 
-	startNumber := 1
-	if len(d.segments) > 0 {
-		startNumber = d.segments[0].SeqNum + 1 // 1-based for ffplay compat
+	// Compute the stable segment duration (skip first 2 edge-case segments
+	// from GOP cache that may be shorter).
+	segDurMs := int(d.targetDur * 1000)
+	if len(segs) > 2 {
+		var stableDur float64
+		for _, seg := range segs[2:] {
+			stableDur += seg.Duration
+		}
+		segDurMs = int(math.Round(stableDur / float64(len(segs)-2) * 1000))
+	} else if len(segs) > 0 {
+		segDurMs = int(math.Round(segs[len(segs)-1].Duration * 1000))
+	}
+	if segDurMs <= 0 {
+		segDurMs = int(d.targetDur * 1000)
 	}
 
-	// suggestedPresentationDelay: 3 segments behind live edge
-	presentDelay := int(math.Ceil(d.targetDur * 3))
-	if presentDelay < 2 {
-		presentDelay = 2
-	}
+	ast := d.startTime
 
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	fmt.Fprintf(&sb, `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT%dS" availabilityStartTime="%s" publishTime="%s" timeShiftBufferDepth="PT%dS" suggestedPresentationDelay="PT%dS" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">`,
-		int(math.Ceil(d.targetDur)),
-		d.startTime.Format(time.RFC3339),
+	fmt.Fprintf(&sb, `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT%dS" availabilityStartTime="%s" publishTime="%s" timeShiftBufferDepth="PT%dS" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">`,
+		int(math.Ceil(float64(segDurMs)/1000.0)),
+		ast.Format(time.RFC3339),
 		time.Now().UTC().Format(time.RFC3339),
 		int(math.Ceil(bufferDepth)),
-		presentDelay,
 	)
 	sb.WriteString("\n")
 	sb.WriteString(`  <Period id="0" start="PT0S">` + "\n")
 
 	sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" initialization="%s/init.mp4" media="%s/$Number$.m4s" startNumber="%d">`,
-		d.basePath, d.basePath, startNumber)
+	// Simple duration addressing: startNumber=1 is constant. Segments use
+	// rebased DTS (baseMediaDecodeTime starts from 0), so no PTO is needed.
+	// Player computes: segNum = 1 + floor((now - AST) * 1000 / duration).
+	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/init.mp4" media="%s/$Number$.m4s"/>`,
+		segDurMs, d.basePath, d.basePath)
 	sb.WriteString("\n")
-	sb.WriteString("        <SegmentTimeline>\n")
-	for i, seg := range d.segments {
-		if i == 0 {
-			fmt.Fprintf(&sb, `          <S t="%d" d="%d"/>`, seg.StartTime, int(seg.Duration*1000))
-		} else {
-			fmt.Fprintf(&sb, `          <S d="%d"/>`, int(seg.Duration*1000))
-		}
-		sb.WriteString("\n")
-	}
-	sb.WriteString("        </SegmentTimeline>\n")
-	sb.WriteString("      </SegmentTemplate>\n")
 	sb.WriteString(`      <Representation id="0" bandwidth="2000000" codecs="avc1.640028" width="1920" height="1080"/>` + "\n")
 	sb.WriteString("    </AdaptationSet>\n")
 	sb.WriteString("  </Period>\n")
@@ -332,4 +345,49 @@ func (d *DASHManager) SegmentCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return len(d.segments)
+}
+
+// SegmentRange returns the SeqNum range [lo, hi] of segments in memory.
+func (d *DASHManager) SegmentRange() (lo, hi int) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if len(d.segments) == 0 {
+		return -1, -1
+	}
+	return d.segments[0].SeqNum, d.segments[len(d.segments)-1].SeqNum
+}
+
+// SegmentAvailabilityTime returns when the wall clock should have advanced past
+// segment seqNum (0-based internal SeqNum). This is the time at which
+// ffmpeg's next segment calculation will return seqNum+1 instead of seqNum.
+//
+// Formula: AST + (seqNum + 1) * segDur, where segDur is the stable segment
+// duration in the MPD. If no segments exist yet, returns the zero time.
+func (d *DASHManager) SegmentAvailabilityTime(seqNum int) time.Time {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(d.segments) == 0 {
+		return time.Time{}
+	}
+
+	// Compute segment duration the same way GenerateMPD does.
+	segDurMs := int(d.targetDur * 1000)
+	if len(d.segments) > 2 {
+		var stableDur float64
+		for _, seg := range d.segments[2:] {
+			stableDur += seg.Duration
+		}
+		segDurMs = int(math.Round(stableDur / float64(len(d.segments)-2) * 1000))
+	} else if len(d.segments) > 0 {
+		segDurMs = int(math.Round(d.segments[len(d.segments)-1].Duration * 1000))
+	}
+	if segDurMs <= 0 {
+		segDurMs = int(d.targetDur * 1000)
+	}
+
+	// URL segment number = seqNum + 1 (1-based startNumber).
+	// Next segment calc gives seqNum+1 when now >= AST + (seqNum+1)*segDur.
+	urlNum := seqNum + 1
+	return d.startTime.Add(time.Duration(urlNum*segDurMs) * time.Millisecond)
 }
