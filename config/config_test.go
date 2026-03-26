@@ -97,3 +97,59 @@ auth:
 		t.Errorf("expected expanded secret mysecret123, got %s", cfg.Auth.Publish.Token.Secret)
 	}
 }
+
+func TestLoadConfigSRT(t *testing.T) {
+	yaml := `
+srt:
+  enabled: true
+  listen: ":6001"
+  latency: 200
+  passphrase: "mysecretpass"
+  pbkeylen: 16
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if !cfg.SRT.Enabled {
+		t.Error("expected SRT enabled")
+	}
+	if cfg.SRT.Listen != ":6001" {
+		t.Errorf("expected SRT listen :6001, got %s", cfg.SRT.Listen)
+	}
+	if cfg.SRT.Latency != 200 {
+		t.Errorf("expected SRT latency 200, got %d", cfg.SRT.Latency)
+	}
+	if cfg.SRT.Passphrase != "mysecretpass" {
+		t.Errorf("expected SRT passphrase mysecretpass, got %s", cfg.SRT.Passphrase)
+	}
+	if cfg.SRT.PBKeyLen != 16 {
+		t.Errorf("expected SRT pbkeylen 16, got %d", cfg.SRT.PBKeyLen)
+	}
+}
+
+func TestLoadConfigSRTDefaults(t *testing.T) {
+	yaml := `{}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.SRT.Listen != ":6000" {
+		t.Errorf("expected default SRT listen :6000, got %s", cfg.SRT.Listen)
+	}
+	if cfg.SRT.Latency != 120 {
+		t.Errorf("expected default SRT latency 120, got %d", cfg.SRT.Latency)
+	}
+}

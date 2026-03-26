@@ -9,6 +9,8 @@ require (
 )
 
 require (
+	github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c // indirect
+	github.com/datarhei/gosrt v0.10.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.2 // indirect
