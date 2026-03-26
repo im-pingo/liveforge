@@ -46,6 +46,14 @@ type DASHManager struct {
 	hasAudio   bool   // whether audio track is present
 	audioCodec string // e.g., "mp4a.40.2" for MPD codecs attribute
 	done       chan struct{}
+
+	// Video metadata extracted from sequence header for MPD Representation.
+	videoCodecStr string // e.g., "avc1.640028"
+	videoWidth    int
+	videoHeight   int
+
+	// Audio metadata for MPD Representation.
+	audioSampleRate int
 }
 
 // NewDASHManager creates a new DASH manager for a stream.
@@ -110,6 +118,10 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 	d.audioInitSeg = audioInit
 	d.hasAudio = audioCodec != 0
 	d.audioCodec = dashAudioCodecString(audioCodec)
+	d.videoWidth = videoWidth
+	d.videoHeight = videoHeight
+	d.videoCodecStr = dashVideoCodecString(videoCodec, videoSeqHeader)
+	d.audioSampleRate = audioSampleRate
 	d.mu.Unlock()
 }
 
@@ -445,7 +457,19 @@ func (d *DASHManager) GenerateMPD() string {
 	}
 	sb.WriteString("        </SegmentTimeline>\n")
 	sb.WriteString("      </SegmentTemplate>\n")
-	sb.WriteString(`      <Representation id="0" bandwidth="2000000" codecs="avc1.640028" width="1920" height="1080"/>` + "\n")
+	videoCodecStr := d.videoCodecStr
+	if videoCodecStr == "" {
+		videoCodecStr = "avc1.640028"
+	}
+	vw, vh := d.videoWidth, d.videoHeight
+	if vw <= 0 {
+		vw = 1920
+	}
+	if vh <= 0 {
+		vh = 1080
+	}
+	fmt.Fprintf(&sb, "      <Representation id=\"0\" bandwidth=\"2000000\" codecs=\"%s\" width=\"%d\" height=\"%d\"/>\n",
+		videoCodecStr, vw, vh)
 	sb.WriteString("    </AdaptationSet>\n")
 
 	// Audio AdaptationSet with SegmentTimeline.
@@ -475,7 +499,11 @@ func (d *DASHManager) GenerateMPD() string {
 		}
 		sb.WriteString("        </SegmentTimeline>\n")
 		sb.WriteString("      </SegmentTemplate>\n")
-		fmt.Fprintf(&sb, `      <Representation id="1" bandwidth="128000" codecs="%s" audioSamplingRate="44100"/>`, audioCodecs)
+		asr := d.audioSampleRate
+		if asr <= 0 {
+			asr = 44100
+		}
+		fmt.Fprintf(&sb, `      <Representation id="1" bandwidth="128000" codecs="%s" audioSamplingRate="%d"/>`, audioCodecs, asr)
 		sb.WriteString("\n")
 		sb.WriteString("    </AdaptationSet>\n")
 	}
@@ -501,6 +529,25 @@ func (d *DASHManager) SegmentRange() (lo, hi int) {
 		return -1, -1
 	}
 	return d.videoSegments[0].SeqNum, d.videoSegments[len(d.videoSegments)-1].SeqNum
+}
+
+// dashVideoCodecString returns the DASH codecs string (e.g., "avc1.640028")
+// extracted from the video sequence header. Falls back to a sensible default
+// if the header is unavailable or the codec is not recognized.
+func dashVideoCodecString(codec avframe.CodecType, seqHeader *avframe.AVFrame) string {
+	if seqHeader != nil && codec == avframe.CodecH264 && len(seqHeader.Payload) >= 4 {
+		// AVCDecoderConfigurationRecord: [1]=profile, [2]=constraint, [3]=level
+		return fmt.Sprintf("avc1.%02x%02x%02x",
+			seqHeader.Payload[1], seqHeader.Payload[2], seqHeader.Payload[3])
+	}
+	switch codec {
+	case avframe.CodecH264:
+		return "avc1.640028" // fallback: High profile, level 4.0
+	case avframe.CodecH265:
+		return "hvc1.1.6.L120.B0" // fallback: Main profile, level 4.0
+	default:
+		return "avc1.640028"
+	}
 }
 
 // dashAudioCodecString returns the DASH codecs string for an audio codec.
