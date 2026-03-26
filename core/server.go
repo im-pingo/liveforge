@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,17 +24,21 @@ type Server struct {
 	startTime time.Time
 	connCount atomic.Int64
 	done      chan struct{}
+
+	apiMu       sync.RWMutex
+	apiHandlers map[string]http.Handler
 }
 
 // NewServer creates a new Server instance.
 func NewServer(cfg *config.Config) *Server {
 	bus := NewEventBus()
 	return &Server{
-		config:    cfg,
-		eventBus:  bus,
-		hub:       NewStreamHub(cfg.Stream, cfg.Limits, bus),
-		startTime: time.Now(),
-		done:      make(chan struct{}),
+		config:      cfg,
+		eventBus:    bus,
+		hub:         NewStreamHub(cfg.Stream, cfg.Limits, bus),
+		startTime:   time.Now(),
+		done:        make(chan struct{}),
+		apiHandlers: make(map[string]http.Handler),
 	}
 }
 
@@ -92,6 +98,25 @@ func (s *Server) ModuleNames() []string {
 		names[i] = m.Name()
 	}
 	return names
+}
+
+// RegisterAPIHandler registers an HTTP handler for the given pattern on the API mux.
+// Modules call this during Init to expose HTTP/WebSocket endpoints on the API server.
+func (s *Server) RegisterAPIHandler(pattern string, h http.Handler) {
+	s.apiMu.Lock()
+	defer s.apiMu.Unlock()
+	s.apiHandlers[pattern] = h
+}
+
+// APIHandlers returns a copy of all registered API handlers.
+func (s *Server) APIHandlers() map[string]http.Handler {
+	s.apiMu.RLock()
+	defer s.apiMu.RUnlock()
+	out := make(map[string]http.Handler, len(s.apiHandlers))
+	for k, v := range s.apiHandlers {
+		out[k] = v
+	}
+	return out
 }
 
 // AcquireConn increments the connection counter. Returns false if max_connections is exceeded.

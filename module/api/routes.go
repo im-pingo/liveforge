@@ -19,4 +19,9 @@ func RegisterRoutes(mux *http.ServeMux, s *core.Server) {
 	mux.HandleFunc("GET /api/v1/streams/", h.handleStreamDetail)
 	mux.HandleFunc("GET /console", h.handleConsole)
 	mux.Handle("GET /console/static/", staticHandler())
+
+	// Register cross-module API handlers (e.g., WebSocket notifications).
+	for pattern, handler := range s.APIHandlers() {
+		mux.Handle(pattern, handler)
+	}
 }
