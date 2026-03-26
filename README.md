@@ -201,7 +201,7 @@ For comprehensive documentation covering all features, configuration, usage scen
 - [x] TLS / HTTPS
 - [ ] SIP gateway
 - [ ] Cluster forwarding and origin pull
-- [ ] WebSocket notifications
+- [x] WebSocket notifications
 - [ ] Prometheus metrics
 - [ ] Simulcast layer selection
 - [ ] Admin UI enhancements
