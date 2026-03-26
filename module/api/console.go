@@ -1,12 +1,23 @@
 package api
 
 import (
-	_ "embed"
+	"embed"
+	"io/fs"
 	"net/http"
 )
 
 //go:embed console.html
 var consoleHTML []byte
+
+//go:embed static
+var staticFS embed.FS
+
+// staticHandler returns an http.Handler that serves embedded static files
+// under the /console/static/ URL prefix.
+func staticHandler() http.Handler {
+	sub, _ := fs.Sub(staticFS, "static")
+	return http.StripPrefix("/console/static/", http.FileServer(http.FS(sub)))
+}
 
 func (h *Handlers) handleConsole(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
