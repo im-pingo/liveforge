@@ -1,6 +1,9 @@
 package core
 
 import (
+	"crypto/tls"
+	"fmt"
+	"net"
 	"sync/atomic"
 	"time"
 
@@ -111,6 +114,36 @@ func (s *Server) ReleaseConn() {
 // ConnectionCount returns the current number of active connections.
 func (s *Server) ConnectionCount() int64 {
 	return s.connCount.Load()
+}
+
+// MakeListener creates a TCP listener on addr with optional TLS.
+//
+// The moduleTLS parameter is the per-module TLS override (*bool):
+//   - nil  → follow global TLS config (use TLS if cert/key are configured)
+//   - true → force TLS on (error if global cert/key not configured)
+//   - false → force TLS off (plain TCP even if global cert/key are configured)
+func (s *Server) MakeListener(addr string, moduleTLS *bool) (net.Listener, error) {
+	useTLS := s.config.TLS.Configured() // default: follow global
+	if moduleTLS != nil {
+		useTLS = *moduleTLS
+	}
+
+	if useTLS {
+		if !s.config.TLS.Configured() {
+			return nil, fmt.Errorf("TLS enabled but tls.cert_file and tls.key_file are not configured")
+		}
+		cert, err := tls.LoadX509KeyPair(s.config.TLS.CertFile, s.config.TLS.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		return tls.Listen("tcp", addr, tlsCfg)
+	}
+
+	return net.Listen("tcp", addr)
 }
 
 // aliveLoop periodically emits alive events for all active streams.

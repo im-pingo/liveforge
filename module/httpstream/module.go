@@ -48,7 +48,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.server = s
 	cfg := s.Config()
 
-	ln, err := net.Listen("tcp", cfg.HTTP.Listen)
+	ln, err := s.MakeListener(cfg.HTTP.Listen, cfg.HTTP.TLS)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,11 @@ func (m *Module) Init(s *core.Server) error {
 	mux.HandleFunc("/{path...}", m.handleStream)
 	m.httpSrv = &http.Server{Handler: mux}
 
-	log.Printf("[httpstream] listening on %s", ln.Addr())
+	proto := "http"
+	if cfg.TLS.Configured() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {
+		proto = "https"
+	}
+	log.Printf("[httpstream] %s listening on %s", proto, ln.Addr())
 
 	m.wg.Add(1)
 	go func() {
