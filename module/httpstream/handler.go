@@ -369,15 +369,12 @@ func (m *Module) serveDASHInit(w http.ResponseWriter, r *http.Request, streamKey
 
 // serveDASHSegment serves a single fMP4 media segment by sequence number.
 //
-// Two server-side holds ensure smooth playback with ffmpeg's dashdec.c:
+// Production hold: if the segment hasn't been produced yet (future segment),
+// wait up to ~6s for it to appear. ffmpeg's dashdec.c has no backoff on 404.
 //
-//  1. Production hold: if the segment hasn't been produced yet (future segment),
-//     wait up to ~6s for it to appear. ffmpeg's dashdec.c has no backoff on 404.
-//
-//  2. Availability hold: after finding the segment, delay the response until
-//     the wall-clock time at which ffmpeg's next segment calculation will yield
-//     seqNum+1. Without this, ffmpeg reads cached segments faster than real-time,
-//     recalculates the same segment number, and enters a re-read loop.
+// No availability hold is needed because the MPD uses SegmentTimeline with
+// explicit per-segment timing, so ffmpeg advances segment numbers from the
+// timeline rather than computing them from wall-clock time.
 func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, streamKey string, seqNum int) {
 	m.dashMu.Lock()
 	mgr, ok := m.dashManagers[streamKey]
@@ -388,7 +385,7 @@ func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, stream
 		return
 	}
 
-	// 1. Production hold — wait for the segment to be produced.
+	// Production hold — wait for the segment to be produced.
 	data, found := mgr.GetSegment(seqNum)
 	if !found {
 		_, hi := mgr.SegmentRange()
@@ -411,20 +408,6 @@ func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, stream
 	if !found {
 		http.Error(w, "segment not found", http.StatusNotFound)
 		return
-	}
-
-	// 2. Availability hold — delay response until the wall-clock time that
-	// makes ffmpeg's next cur_seq_no calculation return seqNum+1.
-	// This prevents re-reading the same segment in a tight loop.
-	availTime := mgr.SegmentAvailabilityTime(seqNum)
-	if !availTime.IsZero() {
-		if wait := time.Until(availTime); wait > 0 && wait < 7*time.Second {
-			select {
-			case <-r.Context().Done():
-				return
-			case <-time.After(wait):
-			}
-		}
 	}
 
 	m.setCORSHeaders(w)
@@ -490,18 +473,6 @@ func (m *Module) serveDASHAudioSegment(w http.ResponseWriter, r *http.Request, s
 	if !found {
 		http.Error(w, "audio segment not found", http.StatusNotFound)
 		return
-	}
-
-	// Availability hold (same as video).
-	availTime := mgr.SegmentAvailabilityTime(seqNum)
-	if !availTime.IsZero() {
-		if wait := time.Until(availTime); wait > 0 && wait < 7*time.Second {
-			select {
-			case <-r.Context().Done():
-				return
-			case <-time.After(wait):
-			}
-		}
 	}
 
 	m.setCORSHeaders(w)

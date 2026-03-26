@@ -40,6 +40,7 @@ type DASHManager struct {
 
 	startTime  time.Time // for MPD availabilityStartTime
 	dtsBase    int64     // DTS of first frame (ms); aligns timeline with segment data
+	timeBase   float64   // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
 	streamKey  string
 	basePath   string // e.g., "/live/stream1"
 	hasAudio   bool   // whether audio track is present
@@ -242,6 +243,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		keepCount := d.maxSegments + 5
 		if len(d.videoSegments) > keepCount {
 			excess := len(d.videoSegments) - keepCount
+			for _, seg := range d.videoSegments[:excess] {
+				d.timeBase += seg.Duration
+			}
 			d.videoSegments = d.videoSegments[excess:]
 			d.seqBase += excess
 		}
@@ -369,12 +373,15 @@ func (d *DASHManager) GetAudioSegment(seqNum int) ([]byte, bool) {
 }
 
 // GenerateMPD returns the current DASH MPD manifest with separate video and
-// audio AdaptationSets, each with its own init segment and segment URLs.
+// audio AdaptationSets using SegmentTimeline for explicit per-segment timing.
+// This avoids the wall-clock-based segment calculation in ffmpeg's dashdec.c
+// which, combined with server-side availability holds, caused playback stutters.
 func (d *DASHManager) GenerateMPD() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	segs := d.videoSegments
+	audioSegs := d.audioSegments
 
 	var totalDur float64
 	for _, seg := range segs {
@@ -386,18 +393,25 @@ func (d *DASHManager) GenerateMPD() string {
 		bufferDepth = d.targetDur * 3
 	}
 
-	segDurMs := int(d.targetDur * 1000)
+	// Compute average segment duration for minimumUpdatePeriod.
+	avgDurMs := int(d.targetDur * 1000)
 	if len(segs) > 2 {
 		var stableDur float64
 		for _, seg := range segs[2:] {
 			stableDur += seg.Duration
 		}
-		segDurMs = int(math.Round(stableDur / float64(len(segs)-2) * 1000))
+		avgDurMs = int(math.Round(stableDur / float64(len(segs)-2) * 1000))
 	} else if len(segs) > 0 {
-		segDurMs = int(math.Round(segs[len(segs)-1].Duration * 1000))
+		avgDurMs = int(math.Round(segs[len(segs)-1].Duration * 1000))
 	}
-	if segDurMs <= 0 {
-		segDurMs = int(d.targetDur * 1000)
+	if avgDurMs <= 0 {
+		avgDurMs = int(d.targetDur * 1000)
+	}
+
+	// startNumber corresponds to the first segment in the current window.
+	startNumber := 1
+	if len(segs) > 0 {
+		startNumber = segs[0].SeqNum + 1 // SeqNum is 0-based; URL numbers are 1-based
 	}
 
 	ast := d.startTime
@@ -405,7 +419,7 @@ func (d *DASHManager) GenerateMPD() string {
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	fmt.Fprintf(&sb, `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT%dS" availabilityStartTime="%s" publishTime="%s" timeShiftBufferDepth="PT%dS" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">`,
-		int(math.Ceil(float64(segDurMs)/1000.0)),
+		int(math.Ceil(float64(avgDurMs)/1000.0)),
 		ast.Format(time.RFC3339),
 		time.Now().UTC().Format(time.RFC3339),
 		int(math.Ceil(bufferDepth)),
@@ -413,24 +427,54 @@ func (d *DASHManager) GenerateMPD() string {
 	sb.WriteString("\n")
 	sb.WriteString(`  <Period id="0" start="PT0S">` + "\n")
 
-	// Video AdaptationSet with video-only segments.
+	// Video AdaptationSet with SegmentTimeline.
 	sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/init.mp4" media="%s/v$Number$.m4s"/>`,
-		segDurMs, d.basePath, d.basePath)
+	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s/init.mp4" media="%s/v$Number$.m4s">`,
+		startNumber, d.basePath, d.basePath)
 	sb.WriteString("\n")
+	sb.WriteString("        <SegmentTimeline>\n")
+	timeMs := int64(math.Round(d.timeBase * 1000))
+	for i, seg := range segs {
+		durMs := int64(math.Round(seg.Duration * 1000))
+		if i == 0 {
+			fmt.Fprintf(&sb, "          <S t=\"%d\" d=\"%d\"/>\n", timeMs, durMs)
+		} else {
+			fmt.Fprintf(&sb, "          <S d=\"%d\"/>\n", durMs)
+		}
+		timeMs += durMs
+	}
+	sb.WriteString("        </SegmentTimeline>\n")
+	sb.WriteString("      </SegmentTemplate>\n")
 	sb.WriteString(`      <Representation id="0" bandwidth="2000000" codecs="avc1.640028" width="1920" height="1080"/>` + "\n")
 	sb.WriteString("    </AdaptationSet>\n")
 
-	// Audio AdaptationSet with audio-only segments.
-	if d.hasAudio {
+	// Audio AdaptationSet with SegmentTimeline.
+	if d.hasAudio && len(audioSegs) > 0 {
 		audioCodecs := d.audioCodec
 		if audioCodecs == "" {
 			audioCodecs = "mp4a.40.2"
 		}
+		audioStartNumber := 1
+		if len(audioSegs) > 0 {
+			audioStartNumber = audioSegs[0].SeqNum + 1
+		}
 		sb.WriteString(`    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/audio_init.mp4" media="%s/a$Number$.m4s"/>`,
-			segDurMs, d.basePath, d.basePath)
+		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s/audio_init.mp4" media="%s/a$Number$.m4s">`,
+			audioStartNumber, d.basePath, d.basePath)
 		sb.WriteString("\n")
+		sb.WriteString("        <SegmentTimeline>\n")
+		audioTimeMs := int64(math.Round(d.timeBase * 1000))
+		for i, seg := range audioSegs {
+			durMs := int64(math.Round(seg.Duration * 1000))
+			if i == 0 {
+				fmt.Fprintf(&sb, "          <S t=\"%d\" d=\"%d\"/>\n", audioTimeMs, durMs)
+			} else {
+				fmt.Fprintf(&sb, "          <S d=\"%d\"/>\n", durMs)
+			}
+			audioTimeMs += durMs
+		}
+		sb.WriteString("        </SegmentTimeline>\n")
+		sb.WriteString("      </SegmentTemplate>\n")
 		fmt.Fprintf(&sb, `      <Representation id="1" bandwidth="128000" codecs="%s" audioSamplingRate="44100"/>`, audioCodecs)
 		sb.WriteString("\n")
 		sb.WriteString("    </AdaptationSet>\n")
@@ -457,34 +501,6 @@ func (d *DASHManager) SegmentRange() (lo, hi int) {
 		return -1, -1
 	}
 	return d.videoSegments[0].SeqNum, d.videoSegments[len(d.videoSegments)-1].SeqNum
-}
-
-// SegmentAvailabilityTime returns when the wall clock should have advanced past
-// segment seqNum (0-based internal SeqNum).
-func (d *DASHManager) SegmentAvailabilityTime(seqNum int) time.Time {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	if len(d.videoSegments) == 0 {
-		return time.Time{}
-	}
-
-	segDurMs := int(d.targetDur * 1000)
-	if len(d.videoSegments) > 2 {
-		var stableDur float64
-		for _, seg := range d.videoSegments[2:] {
-			stableDur += seg.Duration
-		}
-		segDurMs = int(math.Round(stableDur / float64(len(d.videoSegments)-2) * 1000))
-	} else if len(d.videoSegments) > 0 {
-		segDurMs = int(math.Round(d.videoSegments[len(d.videoSegments)-1].Duration * 1000))
-	}
-	if segDurMs <= 0 {
-		segDurMs = int(d.targetDur * 1000)
-	}
-
-	urlNum := seqNum + 1
-	return d.startTime.Add(time.Duration(urlNum*segDurMs) * time.Millisecond)
 }
 
 // dashAudioCodecString returns the DASH codecs string for an audio codec.
