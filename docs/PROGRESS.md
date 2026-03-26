@@ -3,7 +3,7 @@
 > This document tracks the overall development progress of the project.
 > It must be updated after every development session to prevent context loss.
 >
-> **Last updated: 2026-03-21**
+> **Last updated: 2026-03-26**
 
 ---
 
@@ -11,9 +11,9 @@
 
 **Liveforge** is a high-performance media streaming server written in Go, supporting multi-protocol ingest and playback.
 
-- **Code volume**: ~11,750 lines (excluding tests)
-- **Commits**: 68
-- **Test packages**: 23, all passing, 0 failures
+- **Code volume**: ~14,700 lines (excluding tests)
+- **Commits**: 90
+- **Test packages**: 25, all passing, 0 failures
 - **Author**: im-pingo <cczjp89@gmail.com>
 
 ---
@@ -119,26 +119,40 @@
 
 ---
 
+### Phase 6 — WebRTC + TLS
+
+| Module | Path | Description |
+|--------|------|-------------|
+| WebRTC module | `module/webrtc/` | WHIP publish, WHEP subscribe, session management, ICE trickle |
+| WHIP handler | `module/webrtc/whip.go` | SDP offer/answer, pion/webrtc PeerConnection, RTP depacketization → AVFrame |
+| WHEP handler | `module/webrtc/whep.go` | AVFrame → RTP packetization, GOP cache replay, realtime/live modes |
+| Track sender | `module/webrtc/track_sender.go` | Codec-aware RTP track writing |
+| Web console WHIP | `module/api/console.html` | Browser-based camera/mic publish via WHIP, outbound stats |
+| TLS support | `core/server.go` | Global TLS config, per-module `*bool` three-state override |
+
+---
+
 ## Not Yet Implemented ❌
 
 ### Entirely missing (config exists, no code)
 
 | Feature | Config key | Estimated effort |
 |---------|-----------|-----------------|
-| **WebRTC (WHIP/WHEP)** | `webrtc:` | Large (ICE/DTLS/SRTP required) |
 | **SIP** | `sip:` | Large |
 | **Cluster forwarding** | `cluster.forward:` | Medium |
 | **Cluster origin pull** | `cluster.origin:` | Medium |
-| **TLS** | `tls:` | Small (load cert/key, replace ListenAndServe) |
 | **WS notifications** | `notify.websocket` | Small |
 
-### Partially implemented (skeleton exists, logic missing)
+### Config stubs (field exists, not enforced)
 
-| Feature | Current state | Missing |
-|---------|--------------|---------|
-| **Simulcast** | Config has layer definitions | No transcoding/layer logic |
-| **Audio on demand** | Config has `audio_on_demand` | Stream pause/resume audio logic not implemented |
-| **Stream feedback** | Config has passthrough/aggregate modes | Not implemented |
+| Feature | Config key | Status |
+|---------|-----------|--------|
+| **max_bitrate_per_stream** | `limits.max_bitrate_per_stream` | Config parsed, not enforced in code |
+| **audio_cache_ms** | `stream.audio_cache_ms` | Config parsed, not used in stream logic |
+| **max_skip_count / max_skip_window** | `stream.max_skip_count` | Config parsed, not enforced in ring buffer |
+| **Simulcast** | `webrtc.simulcast` | Config has layer definitions, no layer selection logic |
+| **Audio on demand** | `stream.audio_on_demand` | Config exists, stream pause/resume audio not implemented |
+| **Stream feedback** | `stream.feedback` | Config exists, passthrough/aggregate not implemented |
 
 ---
 
@@ -152,11 +166,12 @@ liveforge/
 ├── module/
 │   ├── api/                # REST API + web console + login auth
 │   ├── auth/               # JWT/callback auth
-│   ├── httpstream/         # HLS/DASH/HTTP-FLV/WebSocket
+│   ├── httpstream/         # HLS/DASH/HTTP-FLV/HTTP-TS/FMP4/WebSocket
 │   ├── notify/             # HTTP webhook notifications
 │   ├── record/             # FLV stream recording
 │   ├── rtmp/               # RTMP ingest and playback
-│   └── rtsp/               # RTSP ingest and playback (TCP+UDP)
+│   ├── rtsp/               # RTSP ingest and playback (TCP+UDP)
+│   └── webrtc/             # WebRTC WHIP/WHEP (via pion/webrtc)
 ├── pkg/
 │   ├── avframe/            # Frame type definitions
 │   ├── codec/              # H264/H265/AAC/AV1/MP3/Opus parsing
