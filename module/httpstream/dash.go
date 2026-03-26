@@ -11,7 +11,6 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
-
 )
 
 // DASHSegment holds a single fMP4 media segment (moof+mdat).
@@ -21,12 +20,19 @@ type DASHSegment struct {
 	Data     []byte
 }
 
-// DASHManager accumulates fMP4 segments (video + audio) from a stream and
-// serves MPD manifests.
+// DASHManager accumulates separate video-only and audio-only fMP4 segments
+// from a stream and serves an MPD manifest with two AdaptationSets.
 type DASHManager struct {
-	mu          sync.RWMutex
-	initSeg     []byte // ftyp+moov, set once
-	segments    []*DASHSegment
+	mu sync.RWMutex
+
+	// Separate init segments for video and audio tracks.
+	videoInitSeg []byte
+	audioInitSeg []byte
+
+	// Separate segment stores for video and audio.
+	videoSegments []*DASHSegment
+	audioSegments []*DASHSegment
+
 	targetDur   float64
 	maxSegments int
 	nextSeqNum  int
@@ -36,7 +42,7 @@ type DASHManager struct {
 	dtsBase    int64     // DTS of first frame (ms); aligns timeline with segment data
 	streamKey  string
 	basePath   string // e.g., "/live/stream1"
-	hasAudio   bool   // whether audio track is present in init segment
+	hasAudio   bool   // whether audio track is present
 	audioCodec string // e.g., "mp4a.40.2" for MPD codecs attribute
 	done       chan struct{}
 }
@@ -59,8 +65,8 @@ func NewDASHManager(streamKey, basePath string, targetDur float64, maxSegments i
 	}
 }
 
-// InitFromStream computes the fMP4 init segment (video + audio) synchronously
-// so it is available immediately after the manager is created (before Run starts).
+// InitFromStream computes the fMP4 init segments synchronously so they are
+// available immediately after the manager is created (before Run starts).
 func (d *DASHManager) InitFromStream(stream *core.Stream) {
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
@@ -73,8 +79,6 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 		audioCodec = ash.Codec
 		audioSeqHeader = ash
 	}
-
-	muxer := fmp4.NewMuxer(videoCodec, audioCodec)
 
 	var videoWidth, videoHeight int
 	if videoSeqHeader != nil && videoCodec == avframe.CodecH264 {
@@ -90,17 +94,27 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 		}
 	}
 
-	initSeg := muxer.Init(videoSeqHeader, audioSeqHeader, videoWidth, videoHeight, audioSampleRate, audioChannels)
+	// Generate separate init segments: video-only and audio-only.
+	videoMuxer := fmp4.NewMuxer(videoCodec, 0)
+	videoInit := videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
+
+	var audioInit []byte
+	if audioCodec != 0 {
+		audioMuxer := fmp4.NewMuxer(0, audioCodec)
+		audioInit = audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
+	}
+
 	d.mu.Lock()
-	d.initSeg = initSeg
+	d.videoInitSeg = videoInit
+	d.audioInitSeg = audioInit
 	d.hasAudio = audioCodec != 0
 	d.audioCodec = dashAudioCodecString(audioCodec)
 	d.mu.Unlock()
 }
 
 // Run starts the segment accumulation loop. It reads frames from the stream's
-// RingBuffer, groups them keyframe-to-keyframe, and produces fMP4 segments
-// containing both video and audio.
+// RingBuffer, groups them keyframe-to-keyframe, and produces separate video
+// and audio fMP4 segments.
 func (d *DASHManager) Run(stream *core.Stream) {
 	log.Printf("[dash] manager started for %s", d.streamKey)
 	defer log.Printf("[dash] manager stopped for %s", d.streamKey)
@@ -117,7 +131,12 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		audioSeqHeader = ash
 	}
 
-	muxer := fmp4.NewMuxer(videoCodec, audioCodec)
+	// Create separate muxers for video-only and audio-only segments.
+	videoMuxer := fmp4.NewMuxer(videoCodec, 0)
+	var audioMuxer *fmp4.Muxer
+	if audioCodec != 0 {
+		audioMuxer = fmp4.NewMuxer(0, audioCodec)
+	}
 
 	var videoWidth, videoHeight int
 	if videoSeqHeader != nil && videoCodec == avframe.CodecH264 {
@@ -133,30 +152,39 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		}
 	}
 
-	// Init segment may have already been computed by InitFromStream.
+	// Init segments may have already been computed by InitFromStream.
 	d.mu.RLock()
-	hasInit := d.initSeg != nil
+	hasInit := d.videoInitSeg != nil
 	d.mu.RUnlock()
 	if !hasInit {
-		initSeg := muxer.Init(videoSeqHeader, audioSeqHeader, videoWidth, videoHeight, audioSampleRate, audioChannels)
+		videoInit := videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
+		var audioInit []byte
+		if audioMuxer != nil {
+			audioInit = audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
+		}
 		d.mu.Lock()
-		if d.initSeg == nil {
-			d.initSeg = initSeg
+		if d.videoInitSeg == nil {
+			d.videoInitSeg = videoInit
+			d.audioInitSeg = audioInit
 			d.hasAudio = audioCodec != 0
 			d.audioCodec = dashAudioCodecString(audioCodec)
 		}
 		d.mu.Unlock()
 	} else {
-		muxer.Init(videoSeqHeader, audioSeqHeader, videoWidth, videoHeight, audioSampleRate, audioChannels)
+		videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
+		if audioMuxer != nil {
+			audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
+		}
 	}
 
-	var currentFrames []*avframe.AVFrame
+	var currentVideoFrames []*avframe.AVFrame
+	var currentAudioFrames []*avframe.AVFrame
 	var segStartDTS int64
 	hasData := false
 
-	// Helper: finalize current segment
+	// Helper: finalize current segment into separate video and audio segments.
 	finalize := func(endDTS int64) {
-		if len(currentFrames) == 0 {
+		if len(currentVideoFrames) == 0 && len(currentAudioFrames) == 0 {
 			return
 		}
 		dur := float64(endDTS-segStartDTS) / 1000.0
@@ -168,48 +196,65 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			d.dtsBase = segStartDTS
 		}
 
-		// Rebase DTS/PTS so baseMediaDecodeTime starts from 0.
-		// This avoids the need for presentationTimeOffset in the MPD and
-		// aligns segment decode times with the MPD timeline (AST-relative).
-		rebasedFrames := make([]*avframe.AVFrame, len(currentFrames))
-		for i, f := range currentFrames {
-			rf := *f
-			rf.DTS -= d.dtsBase
-			rf.PTS -= d.dtsBase
-			rebasedFrames[i] = &rf
+		// Build video segment with rebased DTS.
+		var videoData []byte
+		if len(currentVideoFrames) > 0 {
+			rebased := make([]*avframe.AVFrame, len(currentVideoFrames))
+			for i, f := range currentVideoFrames {
+				rf := *f
+				rf.DTS -= d.dtsBase
+				rf.PTS -= d.dtsBase
+				rebased[i] = &rf
+			}
+			videoData = videoMuxer.WriteSegment(rebased)
 		}
 
-		data := muxer.WriteSegment(rebasedFrames)
-		if len(data) == 0 {
-			currentFrames = currentFrames[:0]
-			return
+		// Build audio segment with rebased DTS.
+		var audioData []byte
+		if audioMuxer != nil && len(currentAudioFrames) > 0 {
+			rebased := make([]*avframe.AVFrame, len(currentAudioFrames))
+			for i, f := range currentAudioFrames {
+				rf := *f
+				rf.DTS -= d.dtsBase
+				rf.PTS -= d.dtsBase
+				rebased[i] = &rf
+			}
+			audioData = audioMuxer.WriteSegment(rebased)
 		}
 
-		seg := &DASHSegment{
-			SeqNum:   d.nextSeqNum,
-			Duration: dur,
-			Data:     data,
-		}
 		d.mu.Lock()
-		d.segments = append(d.segments, seg)
+		if len(videoData) > 0 {
+			d.videoSegments = append(d.videoSegments, &DASHSegment{
+				SeqNum:   d.nextSeqNum,
+				Duration: dur,
+				Data:     videoData,
+			})
+		}
+		if len(audioData) > 0 {
+			d.audioSegments = append(d.audioSegments, &DASHSegment{
+				SeqNum:   d.nextSeqNum,
+				Duration: dur,
+				Data:     audioData,
+			})
+		}
 		d.nextSeqNum++
-		// Keep extra segments beyond maxSegments as a buffer so that
-		// segments referenced in a recently-served MPD are still available
-		// when ffplay requests them (race between MPD fetch and segment fetch).
+
 		keepCount := d.maxSegments + 5
-		if len(d.segments) > keepCount {
-			excess := len(d.segments) - keepCount
-			d.segments = d.segments[excess:]
+		if len(d.videoSegments) > keepCount {
+			excess := len(d.videoSegments) - keepCount
+			d.videoSegments = d.videoSegments[excess:]
 			d.seqBase += excess
 		}
+		if len(d.audioSegments) > keepCount {
+			d.audioSegments = d.audioSegments[len(d.audioSegments)-keepCount:]
+		}
 		d.mu.Unlock()
-		currentFrames = currentFrames[:0]
+
+		currentVideoFrames = currentVideoFrames[:0]
+		currentAudioFrames = currentAudioFrames[:0]
 	}
 
-	// Process GOP cache. Frames are accumulated but NOT finalized as a
-	// separate segment — they become part of the first live segment when the
-	// next keyframe arrives. This ensures all DASH segments have uniform
-	// duration (keyframe-to-keyframe) for SegmentTemplate addressing.
+	// Process GOP cache.
 	startPos := stream.RingBuffer().WriteCursor()
 	gopCache := stream.GOPCache()
 	var gopEndDTS int64
@@ -222,7 +267,11 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			hasData = true
 		}
 		gopEndDTS = f.DTS
-		currentFrames = append(currentFrames, f)
+		if f.MediaType.IsVideo() {
+			currentVideoFrames = append(currentVideoFrames, f)
+		} else if f.MediaType.IsAudio() {
+			currentAudioFrames = append(currentAudioFrames, f)
+		}
 	}
 
 	// Read live frames
@@ -243,14 +292,12 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
-		// Skip frames already included in the GOP cache segment to avoid
-		// DTS overlap between the first two segments.
 		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
 			continue
 		}
 
 		// Split on video keyframes
-		if frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && hasData && len(currentFrames) > 0 {
+		if frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && hasData && (len(currentVideoFrames) > 0 || len(currentAudioFrames) > 0) {
 			finalize(frame.DTS)
 			segStartDTS = frame.DTS
 		}
@@ -260,7 +307,11 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			hasData = true
 		}
 
-		currentFrames = append(currentFrames, frame)
+		if frame.MediaType.IsVideo() {
+			currentVideoFrames = append(currentVideoFrames, frame)
+		} else if frame.MediaType.IsAudio() {
+			currentAudioFrames = append(currentAudioFrames, frame)
+		}
 	}
 }
 
@@ -273,22 +324,31 @@ func (d *DASHManager) Stop() {
 	}
 }
 
-// GetInitSegment returns the fMP4 init segment (ftyp+moov).
+// GetInitSegment returns the video init segment (ftyp+moov).
 func (d *DASHManager) GetInitSegment() ([]byte, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if d.initSeg == nil {
+	if d.videoInitSeg == nil {
 		return nil, false
 	}
-	return d.initSeg, true
+	return d.videoInitSeg, true
 }
 
-// GetSegment returns the media segment by sequence number.
+// GetAudioInitSegment returns the audio init segment (ftyp+moov).
+func (d *DASHManager) GetAudioInitSegment() ([]byte, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.audioInitSeg == nil {
+		return nil, false
+	}
+	return d.audioInitSeg, true
+}
+
+// GetSegment returns the video media segment by sequence number.
 func (d *DASHManager) GetSegment(seqNum int) ([]byte, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-
-	for _, seg := range d.segments {
+	for _, seg := range d.videoSegments {
 		if seg.SeqNum == seqNum {
 			return seg.Data, true
 		}
@@ -296,15 +356,25 @@ func (d *DASHManager) GetSegment(seqNum int) ([]byte, bool) {
 	return nil, false
 }
 
-// GenerateMPD returns the current DASH MPD manifest using $Number$ addressing
-// with a fixed duration attribute. Segments use rebased DTS (baseMediaDecodeTime
-// starts from 0) so no presentationTimeOffset is needed. The player computes
-// segment numbers from wall-clock time: num = 1 + floor((now - AST) / duration).
+// GetAudioSegment returns the audio media segment by sequence number.
+func (d *DASHManager) GetAudioSegment(seqNum int) ([]byte, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, seg := range d.audioSegments {
+		if seg.SeqNum == seqNum {
+			return seg.Data, true
+		}
+	}
+	return nil, false
+}
+
+// GenerateMPD returns the current DASH MPD manifest with separate video and
+// audio AdaptationSets, each with its own init segment and segment URLs.
 func (d *DASHManager) GenerateMPD() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	segs := d.segments
+	segs := d.videoSegments
 
 	var totalDur float64
 	for _, seg := range segs {
@@ -316,8 +386,6 @@ func (d *DASHManager) GenerateMPD() string {
 		bufferDepth = d.targetDur * 3
 	}
 
-	// Compute the stable segment duration (skip first 2 edge-case segments
-	// from GOP cache that may be shorter).
 	segDurMs := int(d.targetDur * 1000)
 	if len(segs) > 2 {
 		var stableDur float64
@@ -345,23 +413,22 @@ func (d *DASHManager) GenerateMPD() string {
 	sb.WriteString("\n")
 	sb.WriteString(`  <Period id="0" start="PT0S">` + "\n")
 
+	// Video AdaptationSet with video-only segments.
 	sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-	// Simple duration addressing: startNumber=1 is constant. Segments use
-	// rebased DTS (baseMediaDecodeTime starts from 0), so no PTO is needed.
-	// Player computes: segNum = 1 + floor((now - AST) * 1000 / duration).
-	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/init.mp4" media="%s/$Number$.m4s"/>`,
+	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/init.mp4" media="%s/v$Number$.m4s"/>`,
 		segDurMs, d.basePath, d.basePath)
 	sb.WriteString("\n")
 	sb.WriteString(`      <Representation id="0" bandwidth="2000000" codecs="avc1.640028" width="1920" height="1080"/>` + "\n")
 	sb.WriteString("    </AdaptationSet>\n")
 
+	// Audio AdaptationSet with audio-only segments.
 	if d.hasAudio {
 		audioCodecs := d.audioCodec
 		if audioCodecs == "" {
 			audioCodecs = "mp4a.40.2"
 		}
 		sb.WriteString(`    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/init.mp4" media="%s/$Number$.m4s"/>`,
+		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" duration="%d" startNumber="1" initialization="%s/audio_init.mp4" media="%s/a$Number$.m4s"/>`,
 			segDurMs, d.basePath, d.basePath)
 		sb.WriteString("\n")
 		fmt.Fprintf(&sb, `      <Representation id="1" bandwidth="128000" codecs="%s" audioSamplingRate="44100"/>`, audioCodecs)
@@ -375,54 +442,47 @@ func (d *DASHManager) GenerateMPD() string {
 	return sb.String()
 }
 
-// SegmentCount returns the number of segments currently available.
+// SegmentCount returns the number of video segments currently available.
 func (d *DASHManager) SegmentCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return len(d.segments)
+	return len(d.videoSegments)
 }
 
-// SegmentRange returns the SeqNum range [lo, hi] of segments in memory.
+// SegmentRange returns the SeqNum range [lo, hi] of video segments in memory.
 func (d *DASHManager) SegmentRange() (lo, hi int) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if len(d.segments) == 0 {
+	if len(d.videoSegments) == 0 {
 		return -1, -1
 	}
-	return d.segments[0].SeqNum, d.segments[len(d.segments)-1].SeqNum
+	return d.videoSegments[0].SeqNum, d.videoSegments[len(d.videoSegments)-1].SeqNum
 }
 
 // SegmentAvailabilityTime returns when the wall clock should have advanced past
-// segment seqNum (0-based internal SeqNum). This is the time at which
-// ffmpeg's next segment calculation will return seqNum+1 instead of seqNum.
-//
-// Formula: AST + (seqNum + 1) * segDur, where segDur is the stable segment
-// duration in the MPD. If no segments exist yet, returns the zero time.
+// segment seqNum (0-based internal SeqNum).
 func (d *DASHManager) SegmentAvailabilityTime(seqNum int) time.Time {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	if len(d.segments) == 0 {
+	if len(d.videoSegments) == 0 {
 		return time.Time{}
 	}
 
-	// Compute segment duration the same way GenerateMPD does.
 	segDurMs := int(d.targetDur * 1000)
-	if len(d.segments) > 2 {
+	if len(d.videoSegments) > 2 {
 		var stableDur float64
-		for _, seg := range d.segments[2:] {
+		for _, seg := range d.videoSegments[2:] {
 			stableDur += seg.Duration
 		}
-		segDurMs = int(math.Round(stableDur / float64(len(d.segments)-2) * 1000))
-	} else if len(d.segments) > 0 {
-		segDurMs = int(math.Round(d.segments[len(d.segments)-1].Duration * 1000))
+		segDurMs = int(math.Round(stableDur / float64(len(d.videoSegments)-2) * 1000))
+	} else if len(d.videoSegments) > 0 {
+		segDurMs = int(math.Round(d.videoSegments[len(d.videoSegments)-1].Duration * 1000))
 	}
 	if segDurMs <= 0 {
 		segDurMs = int(d.targetDur * 1000)
 	}
 
-	// URL segment number = seqNum + 1 (1-based startNumber).
-	// Next segment calc gives seqNum+1 when now >= AST + (seqNum+1)*segDur.
 	urlNum := seqNum + 1
 	return d.startTime.Add(time.Duration(urlNum*segDurMs) * time.Millisecond)
 }
