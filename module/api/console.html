@@ -898,6 +898,14 @@ function destroyCurrentPlayer() {
   video.load();
 }
 
+function formatErr(e) {
+  if (!e) return "unknown error";
+  if (typeof e === "string") return e;
+  if (e.message) return e.message;
+  if (e.msg) return e.msg;
+  try { return JSON.stringify(e); } catch(ex) { return String(e); }
+}
+
 function setPlayerStatus(msg, cls) {
   var el = document.getElementById("player-status");
   el.textContent = msg;
@@ -934,7 +942,7 @@ function playHTTPFLV(streamKey) {
     setPlayerStatus("Play error: " + e.message, "error");
   });
   player.on(mpegts.Events.ERROR, function(t, d, e) {
-    setPlayerStatus("Error: " + (e || d || t), "error");
+    setPlayerStatus("Error: " + formatErr(e || d || t), "error");
   });
   currentPlayer = player;
 }
@@ -964,7 +972,7 @@ function playWSFLV(streamKey) {
     setPlayerStatus("Play error: " + e.message, "error");
   });
   player.on(mpegts.Events.ERROR, function(t, d, e) {
-    setPlayerStatus("Error: " + (e || d || t), "error");
+    setPlayerStatus("Error: " + formatErr(e || d || t), "error");
   });
   currentPlayer = player;
 }
@@ -993,7 +1001,7 @@ function playHTTPTS(streamKey) {
     setPlayerStatus("Play error: " + e.message, "error");
   });
   player.on(mpegts.Events.ERROR, function(t, d, e) {
-    setPlayerStatus("Error: " + (e || d || t), "error");
+    setPlayerStatus("Error: " + formatErr(e || d || t), "error");
   });
   currentPlayer = player;
 }

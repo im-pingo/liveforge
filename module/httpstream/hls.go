@@ -105,6 +105,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	// Process GOP cache into first segment
 	startPos := stream.RingBuffer().WriteCursor()
 	gopCache := stream.GOPCache()
+	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -113,9 +114,15 @@ func (h *HLSManager) Run(stream *core.Stream) {
 			segStartDTS = f.DTS
 			hasData = true
 		}
+		gopEndDTS = f.DTS
 		if data := muxer.WriteFrame(f); len(data) > 0 {
 			buf.Write(data)
 		}
+	}
+	// Finalize GOP cache immediately so first segment is available for instant playback.
+	if buf.Len() > 0 {
+		finalize(gopEndDTS)
+		hasData = false // force segStartDTS re-init for next segment
 	}
 
 	// Read live frames
@@ -134,6 +141,11 @@ func (h *HLSManager) Run(stream *core.Stream) {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		// Skip frames already included in the GOP cache segment to avoid
+		// DTS overlap between the first two segments.
+		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
 			continue
 		}
 
