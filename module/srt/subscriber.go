@@ -1,0 +1,141 @@
+package srt
+
+import (
+	"log"
+	"time"
+
+	gosrt "github.com/datarhei/gosrt"
+	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/ts"
+)
+
+// Subscriber reads AVFrames from a stream and muxes them into MPEG-TS,
+// writing the result to an SRT connection.
+type Subscriber struct {
+	conn      gosrt.Conn
+	streamKey string
+	hub       *core.StreamHub
+	eventBus  *core.EventBus
+	closed    chan struct{}
+}
+
+// NewSubscriber creates a new SRT subscriber.
+func NewSubscriber(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *core.EventBus) *Subscriber {
+	return &Subscriber{
+		conn:      conn,
+		streamKey: streamKey,
+		hub:       hub,
+		eventBus:  bus,
+		closed:    make(chan struct{}),
+	}
+}
+
+// Run reads frames from the stream ring buffer, muxes them to MPEG-TS,
+// and writes the result to the SRT connection. It blocks until the connection
+// is closed or the stream ends.
+func (s *Subscriber) Run() {
+	stream, ok := s.hub.Find(s.streamKey)
+	if !ok {
+		log.Printf("SRT subscriber %s: stream not found", s.streamKey)
+		return
+	}
+
+	if err := stream.AddSubscriber("srt"); err != nil {
+		log.Printf("SRT subscriber %s: %v", s.streamKey, err)
+		return
+	}
+	defer stream.RemoveSubscriber("srt")
+
+	s.eventBus.Emit(core.EventSubscribe, &core.EventContext{ //nolint:errcheck
+		StreamKey:  s.streamKey,
+		Protocol:   "srt",
+		RemoteAddr: s.conn.RemoteAddr().String(),
+	})
+	defer s.eventBus.Emit(core.EventSubscribeStop, &core.EventContext{ //nolint:errcheck
+		StreamKey: s.streamKey,
+		Protocol:  "srt",
+	})
+
+	// Wait for sequence headers to initialize the TS muxer.
+	if !s.waitForSequenceHeaders(stream) {
+		return
+	}
+
+	// Build TS muxer from publisher's codec info.
+	pub := stream.Publisher()
+	if pub == nil {
+		return
+	}
+
+	mi := pub.MediaInfo()
+	var videoSeqData, audioSeqData []byte
+	if vsh := stream.VideoSeqHeader(); vsh != nil {
+		videoSeqData = vsh.Payload
+	}
+	if ash := stream.AudioSeqHeader(); ash != nil {
+		audioSeqData = ash.Payload
+	}
+
+	muxer := ts.NewMuxer(mi.VideoCodec, mi.AudioCodec, videoSeqData, audioSeqData)
+
+	// Send GOP cache first for fast startup.
+	for _, frame := range stream.GOPCache() {
+		if err := s.sendFrame(muxer, frame); err != nil {
+			return
+		}
+	}
+
+	// Read live frames from ring buffer.
+	reader := stream.RingBuffer().NewReader()
+	for {
+		select {
+		case <-s.closed:
+			return
+		default:
+		}
+
+		frame, ok := reader.TryRead()
+		if !ok {
+			frame, ok = reader.Read()
+			if !ok {
+				return
+			}
+		}
+
+		if frame == nil || frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+
+		if err := s.sendFrame(muxer, frame); err != nil {
+			return
+		}
+	}
+}
+
+// sendFrame muxes a single AVFrame into TS packets and writes them to the SRT connection.
+func (s *Subscriber) sendFrame(muxer *ts.Muxer, frame *avframe.AVFrame) error {
+	data := muxer.WriteFrame(frame)
+	if len(data) == 0 {
+		return nil
+	}
+
+	// SRT expects complete TS-aligned chunks. Write all packets at once.
+	_, err := s.conn.Write(data)
+	return err
+}
+
+// waitForSequenceHeaders blocks until at least one sequence header is available.
+func (s *Subscriber) waitForSequenceHeaders(stream *core.Stream) bool {
+	for {
+		if stream.VideoSeqHeader() != nil || stream.AudioSeqHeader() != nil {
+			return true
+		}
+		select {
+		case <-s.closed:
+			return false
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}

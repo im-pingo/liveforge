@@ -133,6 +133,21 @@
 
 ---
 
+## In Progress 🚧
+
+### Phase 7 — SRT Protocol
+
+| Module | Path | Description |
+|--------|------|-------------|
+| SRT config | `config/config.go` | SRTConfig struct: listen, latency, passphrase, pbkeylen |
+| SRT module | `module/srt/module.go` | Listener, accept loop, connection routing via streamid |
+| SRT publisher | `module/srt/publisher.go` | MPEG-TS demux from SRT → AVFrame into StreamHub |
+| SRT subscriber | `module/srt/subscriber.go` | AVFrame → MPEG-TS mux, write to SRT connection |
+
+**Library**: `github.com/datarhei/gosrt` — pure Go SRT implementation (no CGo)
+
+---
+
 ## Not Yet Implemented ❌
 
 ### Entirely missing (config exists, no code)
@@ -171,6 +186,7 @@ liveforge/
 │   ├── record/             # FLV stream recording
 │   ├── rtmp/               # RTMP ingest and playback
 │   ├── rtsp/               # RTSP ingest and playback (TCP+UDP)
+│   ├── srt/                # SRT ingest and playback (via datarhei/gosrt)
 │   └── webrtc/             # WebRTC WHIP/WHEP (via pion/webrtc)
 ├── pkg/
 │   ├── avframe/            # Frame type definitions

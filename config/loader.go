@@ -52,6 +52,10 @@ func defaults() *Config {
 			Listen:       ":8443",
 			UDPPortRange: []int{20000, 30000},
 		},
+		SRT: SRTConfig{
+			Listen:  ":6000",
+			Latency: 120,
+		},
 		SIP: SIPConfig{
 			Listen:    ":5060",
 			Transport: []string{"udp", "tcp"},

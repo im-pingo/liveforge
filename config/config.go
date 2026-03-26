@@ -12,6 +12,7 @@ type Config struct {
 	HTTP   HTTPConfig   `yaml:"http_stream"`
 	WS     WSConfig     `yaml:"websocket"`
 	WebRTC WebRTCConfig `yaml:"webrtc"`
+	SRT    SRTConfig    `yaml:"srt"`
 	SIP    SIPConfig    `yaml:"sip"`
 	Stream StreamConfig `yaml:"stream"`
 	Auth   AuthConfig   `yaml:"auth"`
@@ -107,6 +108,15 @@ type ICEServer struct {
 	URLs       []string `yaml:"urls"`
 	Username   string   `yaml:"username,omitempty"`
 	Credential string   `yaml:"credential,omitempty"`
+}
+
+// SRTConfig holds SRT module settings.
+type SRTConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	Listen     string `yaml:"listen"`
+	Latency    int    `yaml:"latency"`     // ms, receiver latency (default 120)
+	Passphrase string `yaml:"passphrase"`  // AES encryption passphrase (empty = no encryption)
+	PBKeyLen   int    `yaml:"pbkeylen"`    // crypto key length: 0, 16, 24, or 32
 }
 
 // SIPConfig holds SIP module settings.

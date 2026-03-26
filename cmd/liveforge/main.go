@@ -17,6 +17,7 @@ import (
 	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
+	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
 
@@ -55,6 +56,10 @@ func main() {
 
 	if cfg.HTTP.Enabled {
 		s.RegisterModule(httpstream.NewModule())
+	}
+
+	if cfg.SRT.Enabled {
+		s.RegisterModule(srtmod.NewModule())
 	}
 
 	if cfg.WebRTC.Enabled {

@@ -199,6 +199,7 @@ For comprehensive documentation covering all features, configuration, usage scen
 ## Roadmap
 
 - [x] TLS / HTTPS
+- [ ] SRT protocol (in progress)
 - [ ] SIP gateway
 - [ ] Cluster forwarding and origin pull
 - [x] WebSocket notifications
