@@ -61,12 +61,14 @@ func main() {
 		s.RegisterModule(webrtcmod.NewModule())
 	}
 
-	if cfg.API.Enabled {
-		s.RegisterModule(api.NewModule())
+	// Notify must be registered before API so its WebSocket handler
+	// is available when the API module registers routes.
+	if cfg.Notify.HTTP.Enabled || cfg.Notify.WebSocket.Enabled {
+		s.RegisterModule(notify.NewModule())
 	}
 
-	if cfg.Notify.HTTP.Enabled {
-		s.RegisterModule(notify.NewModule())
+	if cfg.API.Enabled {
+		s.RegisterModule(api.NewModule())
 	}
 
 	if cfg.Record.Enabled {
