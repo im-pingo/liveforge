@@ -56,11 +56,25 @@ type RTSPConfig struct {
 	RTPPortRange []int  `yaml:"rtp_port_range"`
 }
 
-// HTTPConfig holds HTTP-FLV/TS/FMP4 module settings.
+// HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
 type HTTPConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Listen  string `yaml:"listen"`
 	CORS    bool   `yaml:"cors"`
+	HLS     HLSConfig  `yaml:"hls"`
+	DASH    DASHConfig `yaml:"dash"`
+}
+
+// HLSConfig holds HLS streaming settings.
+type HLSConfig struct {
+	SegmentDuration float64 `yaml:"segment_duration"` // seconds, default 6
+	PlaylistSize    int     `yaml:"playlist_size"`    // max segments in playlist, default 5
+}
+
+// DASHConfig holds DASH streaming settings.
+type DASHConfig struct {
+	SegmentDuration float64 `yaml:"segment_duration"` // seconds, default 6
+	PlaylistSize    int     `yaml:"playlist_size"`    // max segments in manifest, default 5
 }
 
 // WSConfig holds WebSocket module settings.

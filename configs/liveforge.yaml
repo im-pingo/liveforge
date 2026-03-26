@@ -27,6 +27,12 @@ http_stream:
   enabled: true
   listen: ":8080"
   cors: true
+  hls:
+    segment_duration: 6
+    playlist_size: 5
+  dash:
+    segment_duration: 6
+    playlist_size: 30
 
 websocket:
   enabled: false
