@@ -681,12 +681,16 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+<script src="/console/static/mpegts.min.js"></script>
+<script src="/console/static/hls.min.js"></script>
+<script src="/console/static/dash.all.min.js"></script>
 <script>
 var endpoints = {};
 var currentPlayer = null;
 var currentPC = null;
 var currentMSEAbort = null;
+var currentHls = null;
+var currentDash = null;
 var statsInterval = null;
 var statsPrev = null;
 var statsVisible = false;
@@ -883,6 +887,14 @@ function destroyCurrentPlayer() {
   if (currentMSEAbort) {
     try { currentMSEAbort.abort(); } catch(e) {}
     currentMSEAbort = null;
+  }
+  if (currentHls) {
+    try { currentHls.destroy(); } catch(e) {}
+    currentHls = null;
+  }
+  if (currentDash) {
+    try { currentDash.reset(); } catch(e) {}
+    currentDash = null;
   }
   if (currentPlayer) {
     try { currentPlayer.destroy(); } catch(e) {}
@@ -1102,6 +1114,98 @@ function playFMP4(streamKey) {
   });
 }
 
+function playHLS(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.http);
+  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".m3u8";
+  setPlayerURL(url);
+  setPlayerStatus("Connecting...");
+
+  var video = document.getElementById("player-video");
+
+  if (typeof Hls === "undefined") {
+    setPlayerStatus("hls.js not loaded", "error");
+    return;
+  }
+
+  if (Hls.isSupported()) {
+    var hls = new Hls({
+      liveDurationInfinity: true,
+      enableWorker: true,
+      lowLatencyMode: false
+    });
+    currentHls = hls;
+
+    hls.loadSource(url);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+      video.play().then(function() {
+        setPlayerStatus("Playing (HLS)", "ok");
+      }).catch(function(e) {
+        setPlayerStatus("Play error: " + e.message, "error");
+      });
+    });
+
+    hls.on(Hls.Events.ERROR, function(event, data) {
+      if (data.fatal) {
+        setPlayerStatus("HLS error: " + data.type + " - " + data.details, "error");
+      }
+    });
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    // Native HLS support (Safari)
+    video.src = url;
+    video.addEventListener("loadedmetadata", function() {
+      video.play().then(function() {
+        setPlayerStatus("Playing (HLS native)", "ok");
+      }).catch(function(e) {
+        setPlayerStatus("Play error: " + e.message, "error");
+      });
+    });
+  } else {
+    setPlayerStatus("HLS not supported in this browser", "error");
+  }
+}
+
+function playDASH(streamKey) {
+  destroyCurrentPlayer();
+  var port = portFromListen(endpoints.http);
+  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".mpd";
+  setPlayerURL(url);
+  setPlayerStatus("Connecting...");
+
+  var video = document.getElementById("player-video");
+
+  if (typeof dashjs === "undefined") {
+    setPlayerStatus("dash.js not loaded", "error");
+    return;
+  }
+
+  var player = dashjs.MediaPlayer().create();
+  currentDash = player;
+
+  player.updateSettings({
+    streaming: {
+      delay: {
+        liveDelay: 4
+      },
+      buffer: {
+        fastSwitchEnabled: true
+      }
+    }
+  });
+
+  player.initialize(video, url, true);
+
+  player.on(dashjs.MediaPlayer.events.PLAYBACK_PLAYING, function() {
+    setPlayerStatus("Playing (DASH)", "ok");
+  });
+
+  player.on(dashjs.MediaPlayer.events.ERROR, function(e) {
+    setPlayerStatus("DASH error: " + (e.error ? e.error.message : "unknown"), "error");
+  });
+}
+
 function playWHEP(streamKey, mode) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.webrtc);
@@ -1186,6 +1290,8 @@ function openPlayer(streamKey) {
     protocols.push({ id: "ws-flv", label: "WS-FLV", fn: playWSFLV });
     protocols.push({ id: "http-ts", label: "HTTP-TS", fn: playHTTPTS });
     protocols.push({ id: "fmp4", label: "FMP4", fn: playFMP4 });
+    protocols.push({ id: "hls", label: "HLS", fn: playHLS });
+    protocols.push({ id: "dash", label: "DASH", fn: playDASH });
   }
   if (endpoints.webrtc) {
     protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime"); } });

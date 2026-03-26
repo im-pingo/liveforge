@@ -18,4 +18,5 @@ func RegisterRoutes(mux *http.ServeMux, s *core.Server) {
 	mux.HandleFunc("POST /api/v1/streams/", h.handleKick)
 	mux.HandleFunc("GET /api/v1/streams/", h.handleStreamDetail)
 	mux.HandleFunc("GET /console", h.handleConsole)
+	mux.Handle("GET /console/static/", staticHandler())
 }
