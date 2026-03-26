@@ -215,15 +215,27 @@ stream:
   max_skip_window: 60s
   idle_timeout: 30s
   no_publisher_timeout: 15s
+  simulcast:
+    enabled: false
+  audio_on_demand:
+    enabled: false
+  feedback:
+    enabled: false
 ```
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `gop_cache` | `true` | 新订阅者立即接收最新的关键帧组，实现快速起播 |
 | `gop_cache_num` | `1` | 保留的 GOP 数量。较高的值会增加内存使用，但为订阅者提供更多追赶数据 |
+| `audio_cache_ms` | `1000` | 音频缓存时长（毫秒），与视频 GOP 缓存配合使用 |
 | `ring_buffer_size` | `1024` | 无锁环形缓冲区的槽位数。对于高码率或高帧率的流，建议增大此值 |
+| `max_skip_count` | `3` | 订阅者在窗口期内最大允许跳帧次数 |
+| `max_skip_window` | `60s` | 跳帧统计的滑动窗口时长 |
 | `idle_timeout` | `30s` | 如果在此时间内没有推流者和订阅者，流将被销毁 |
 | `no_publisher_timeout` | `15s` | 如果流已创建但在此时间内没有推流者连接，流将被关闭 |
+| `simulcast.enabled` | `false` | 启用 simulcast 多质量流支持 |
+| `audio_on_demand.enabled` | `false` | 启用音频按需模式。仅在订阅者请求时转发音频。 |
+| `feedback.enabled` | `false` | 启用订阅者反馈（如 NACK、PLI 请求） |
 
 ---
 
@@ -290,7 +302,7 @@ rtsp:
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `enabled` | `false` | 启用 RTSP 模块 |
-| `listen` | `:554` | 绑定的 TCP 地址 |
+| `listen` | `:8554` | 绑定的 TCP 地址 |
 | `rtp_port_range` | `[10000, 20000]` | RTP/RTCP 媒体传输的 UDP 端口范围 |
 | `tls` | _(null)_ | 模块级 TLS 覆盖（启用 RTSPS） |
 
@@ -334,6 +346,7 @@ http_stream:
   enabled: true
   listen: ":8080"
   cors: true
+  # tls: null
   hls:
     segment_duration: 6
     playlist_size: 5
@@ -341,6 +354,13 @@ http_stream:
     segment_duration: 6
     playlist_size: 30
 ```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | 是否启用 HTTP 流媒体模块 |
+| `listen` | `:8080` | 监听地址和端口 |
+| `cors` | `true` | 是否启用 CORS 跨域头 |
+| `tls` | _(null)_ | 模块级 TLS 覆盖 |
 
 **URL 格式：** `http://host:8080/{app}/{stream_key}.{format}`
 
@@ -495,12 +515,15 @@ auth:
     mode: "callback"
     token:
       secret: "${AUTH_JWT_SECRET}"
+      algorithm: HS256
     callback:
       url: "http://auth-service/verify"
       timeout: 3s
   api:
     bearer_token: "${API_TOKEN}"
 ```
+
+> **注意：** 目前仅支持 `HS256` 作为 JWT 签名算法。
 
 **认证模式：**
 
@@ -638,6 +661,9 @@ notify:
         retry: 1
         timeout: 3s
   alive_interval: 10s
+  websocket:
+    enabled: false
+    path: "/ws/notify"
 ```
 
 **事件：**
@@ -673,6 +699,23 @@ notify:
   }
 }
 ```
+
+**Alive 事件额外字段：**
+
+`on_publish_alive`、`on_subscribe_alive` 和 `on_stream_alive` 事件在 `extra` 对象中包含额外的统计信息：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `bytes_in` | int64 | 已接收的总字节数 |
+| `video_frames` | int64 | 已接收的总视频帧数 |
+| `audio_frames` | int64 | 已接收的总音频帧数 |
+| `bitrate_kbps` | float64 | 当前码率（kbps） |
+| `fps` | float64 | 当前视频帧率 |
+| `uptime_sec` | float64 | 流运行时长（秒） |
+
+**WebSocket 通知：**
+
+当 `websocket.enabled` 为 `true` 时，客户端可以连接到配置的 `path` WebSocket 端点，实时接收事件通知。事件以 JSON 消息格式发送，与 HTTP Webhook 载荷格式相同。
 
 **签名验证（HMAC-SHA256）：**
 
@@ -710,12 +753,22 @@ API 模块运行在独立端口上（默认 `:8090`），提供管理接口。
 api:
   enabled: true
   listen: ":8090"
+  # tls: null
   auth:
     bearer_token: "${API_TOKEN}"
   console:
     username: "admin"
     password: "admin"
 ```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | 是否启用 API 模块 |
+| `listen` | `:8090` | 监听地址和端口 |
+| `tls` | _(null)_ | 模块级 TLS 覆盖 |
+| `auth.bearer_token` | `""` | API Bearer Token（支持环境变量） |
+| `console.username` | `"admin"` | Web 控制台登录用户名 |
+| `console.password` | `"admin"` | Web 控制台登录密码 |
 
 **认证方式：**
 - **API 接口**（`/api/*`）：通过 Bearer 令牌或有效的控制台会话 Cookie 保护
@@ -814,6 +867,11 @@ type Module interface {
 
 模块在 `main.go` 中注册并按顺序初始化。关闭时按反向顺序（后进先出）关闭，以确保依赖模块先停止。
 
+```
+注册：auth -> rtmp -> rtsp -> http -> webrtc -> record -> notify -> api
+关闭：api -> notify -> record -> webrtc -> http -> rtsp -> rtmp -> auth
+```
+
 ### 事件总线
 
 事件总线提供跨模块通信的钩子系统。事件按优先级分发给已注册的处理程序（数字越小优先级越高）。
@@ -839,12 +897,40 @@ Publisher connects
 流具有状态机：
 
 ```
-Idle -> Publishing -> Idle -> Destroying
+         创建
+          |
+          v
+  +---------------+
+  |     Idle      |  <--- 流已创建，等待推流者
+  +-------+-------+
+          |  SetPublisher
+          v
+  +---------------+
+  |  Publishing   |  <--- 推流中，接收并分发媒体帧
+  +-------+-------+
+          |  RemovePublisher
+          v
+  +---------------+
+  | NoPublisher   |  <--- 推流者断开，等待重连
+  +-------+-------+
+          |
+    +-----+-----+
+    |           |
+重新推流     超时(no_publisher_timeout)
+    |           |
+    v           v
+Publishing  +---------------+
+            |  Destroying   |  <--- 销毁中，释放所有资源
+            +---------------+
 ```
 
-- **Idle（空闲）**：已创建但没有推流者。等待 `no_publisher_timeout` 后销毁。
-- **Publishing（推流中）**：活跃的推流者正在发送媒体数据。
-- **Destroying（销毁中）**：流正在被清理。
+| 状态 | 说明 |
+|------|------|
+| `idle` | 流已创建，等待推流者连接 |
+| `waiting_pull` | 回源拉流等待中 |
+| `publishing` | 推流中，正常接收和分发媒体数据 |
+| `no_publisher` | 推流者已断开，在 `no_publisher_timeout` 内等待重连 |
+| `destroying` | 超时或主动关闭，释放所有资源后销毁流 |
 
 ### GOP 缓存
 

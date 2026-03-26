@@ -215,15 +215,27 @@ stream:
   max_skip_window: 60s
   idle_timeout: 30s
   no_publisher_timeout: 15s
+  simulcast:
+    enabled: false
+  audio_on_demand:
+    enabled: false
+  feedback:
+    enabled: false
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `gop_cache` | `true` | New subscribers receive the latest keyframe group immediately for fast startup |
 | `gop_cache_num` | `1` | Number of GOPs to keep. Higher values increase memory but give subscribers more catch-up data |
+| `audio_cache_ms` | `1000` | Milliseconds of audio to cache alongside the video GOP |
 | `ring_buffer_size` | `1024` | Slots in the lock-free ring buffer. Increase for high-bitrate or high-FPS streams |
+| `max_skip_count` | `3` | Maximum number of times a slow subscriber can skip ahead before being disconnected |
+| `max_skip_window` | `60s` | Time window for counting subscriber skip events |
 | `idle_timeout` | `30s` | Stream is destroyed if no publisher and no subscribers for this duration |
 | `no_publisher_timeout` | `15s` | If a stream is created but no publisher connects within this time, the stream is closed |
+| `simulcast.enabled` | `false` | Enable simulcast support for multi-quality streams |
+| `audio_on_demand.enabled` | `false` | Enable audio-on-demand mode. Audio is only forwarded when a subscriber requests it. |
+| `feedback.enabled` | `false` | Enable subscriber feedback (e.g., NACK, PLI requests from viewers) |
 
 ---
 
@@ -290,7 +302,7 @@ rtsp:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Enable the RTSP module |
-| `listen` | `:554` | TCP address to bind |
+| `listen` | `:8554` | TCP address to bind |
 | `rtp_port_range` | `[10000, 20000]` | UDP port range for RTP/RTCP media transport |
 | `tls` | _(null)_ | Per-module TLS override (enables RTSPS) |
 
@@ -334,6 +346,7 @@ http_stream:
   enabled: true
   listen: ":8080"
   cors: true
+  # tls: null
   hls:
     segment_duration: 6
     playlist_size: 5
@@ -341,6 +354,13 @@ http_stream:
     segment_duration: 6
     playlist_size: 30
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Enable/disable the HTTP streaming module |
+| `listen` | `:8080` | HTTP listen address |
+| `cors` | `true` | Enable CORS headers |
+| `tls` | _(null)_ | Per-module TLS override |
 
 **URL format:** `http://host:8080/{app}/{stream_key}.{format}`
 
@@ -495,12 +515,15 @@ auth:
     mode: "callback"
     token:
       secret: "${AUTH_JWT_SECRET}"
+      algorithm: HS256
     callback:
       url: "http://auth-service/verify"
       timeout: 3s
   api:
     bearer_token: "${API_TOKEN}"
 ```
+
+> **Note:** Only `HS256` is currently implemented as a JWT signing algorithm.
 
 **Auth modes:**
 
@@ -638,6 +661,9 @@ notify:
         retry: 1
         timeout: 3s
   alive_interval: 10s
+  websocket:
+    enabled: false
+    path: "/ws/notify"
 ```
 
 **Events:**
@@ -673,6 +699,23 @@ notify:
   }
 }
 ```
+
+**Alive event extra fields:**
+
+The `on_publish_alive`, `on_subscribe_alive`, and `on_stream_alive` events include additional statistics in the `extra` object:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `bytes_in` | int64 | Total bytes received |
+| `video_frames` | int64 | Total video frames received |
+| `audio_frames` | int64 | Total audio frames received |
+| `bitrate_kbps` | float64 | Current bitrate in kbps |
+| `fps` | float64 | Current video frames per second |
+| `uptime_sec` | float64 | Stream uptime in seconds |
+
+**WebSocket notifications:**
+
+When `websocket.enabled` is `true`, clients can connect to the WebSocket endpoint at the configured `path` to receive real-time event notifications. Events are delivered as JSON messages with the same format as HTTP webhook payloads.
 
 **Signature verification (HMAC-SHA256):**
 
@@ -710,12 +753,22 @@ The API module runs on a separate port (default `:8090`) and provides management
 api:
   enabled: true
   listen: ":8090"
+  # tls: null
   auth:
     bearer_token: "${API_TOKEN}"
   console:
     username: "admin"
     password: "admin"
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Enable/disable the API module |
+| `listen` | `:8090` | HTTP listen address |
+| `tls` | _(null)_ | Per-module TLS override |
+| `auth.bearer_token` | `""` | Bearer token for API authentication. Supports `${ENV_VAR}` expansion. |
+| `console.username` | `"admin"` | Web console login username |
+| `console.password` | `"admin"` | Web console login password |
 
 **Authentication:**
 - **API endpoints** (`/api/*`): Protected by Bearer token OR valid console session cookie
@@ -814,6 +867,10 @@ type Module interface {
 
 Modules are registered in `main.go` and initialized in order. On shutdown, they are closed in reverse order (LIFO) to ensure dependent modules stop first.
 
+Built-in modules (registration order): `auth`, `rtmp`, `rtsp`, `httpstream`, `webrtc`, `api`, `notify`, `record`
+
+> **Note:** `auth` is registered first because sync hooks must be registered before protocol modules start accepting connections.
+
 ### Event Bus
 
 The event bus provides a hook system for cross-module communication. Events are dispatched to registered handlers by priority (lower number = higher priority).
@@ -821,6 +878,19 @@ The event bus provides a hook system for cross-module communication. Events are 
 **Hook types:**
 - **Sync hooks** — Execute in priority order. If any returns an error, subsequent hooks are skipped (used for auth rejection).
 - **Async hooks** — Fire in goroutines after all sync hooks succeed (used for notifications, recording).
+
+**Event types:**
+
+```
+EventStreamCreate    EventStreamDestroy
+EventPublish         EventPublishStop
+EventSubscribe       EventSubscribeStop
+EventRepublish       EventSubscriberSkip
+EventPublishAlive    EventSubscribeAlive    EventStreamAlive
+EventVideoKeyframe   EventAudioHeader
+EventForwardStart    EventForwardStop
+EventOriginPullStart EventOriginPullStop
+```
 
 **Event lifecycle:**
 
@@ -839,12 +909,18 @@ Publisher connects
 Streams have a state machine:
 
 ```
-Idle -> Publishing -> Idle -> Destroying
+ [Idle] ---(publish)---> [Publishing] ---(publisher stops)---> [Idle]
+   |                                                              |
+   +---------(idle_timeout expires / delete API)---------> [Destroying]
 ```
 
-- **Idle**: Created but no publisher. Waits for `no_publisher_timeout` before destroying.
-- **Publishing**: Active publisher is sending media.
-- **Destroying**: Stream is being cleaned up.
+| State | Description |
+|-------|-------------|
+| **Idle** | Stream exists but has no publisher. Waiting for `no_publisher_timeout`. |
+| **WaitingPull** | Stream is waiting for an origin pull to complete. |
+| **NoPublisher** | Stream has subscribers but no publisher. Waiting for `no_publisher_timeout`. |
+| **Publishing** | Active publisher writing frames. Subscribers can connect. |
+| **Destroying** | Stream is being torn down. Removed from the hub. |
 
 ### GOP Cache
 
