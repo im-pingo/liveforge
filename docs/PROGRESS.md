@@ -53,7 +53,7 @@
 | MP3 codec helper | `pkg/codec/mp3/` | Frame header parsing |
 | Opus codec helper | `pkg/codec/opus/` | Ogg header parsing |
 | AV1 codec helper | `pkg/codec/av1/` | OBU parsing |
-| HTTP streaming module | `module/httpstream/` | HLS (.m3u8/.ts), DASH (.mpd/.m4s), HTTP-FLV, WebSocket stream |
+| HTTP streaming module | `module/httpstream/` | HLS (.m3u8/.ts), LL-HLS (partial segments, blocking reload), DASH (.mpd/.m4s), HTTP-FLV, WebSocket stream |
 | Muxer worker | `module/httpstream/muxer_worker.go` | Per-format goroutine, SharedBuffer distribution |
 
 ---

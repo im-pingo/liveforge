@@ -85,10 +85,7 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 	skipCount := 0
 	startIdx := 0
 	if skip && len(segments) > 1 {
-		skipCount = len(segments) - 2
-		if skipCount < 0 {
-			skipCount = 0
-		}
+		skipCount = max(len(segments)-2, 0)
 		startIdx = skipCount
 		if skipCount > 0 {
 			fmt.Fprintf(&sb, "#EXT-X-SKIP:SKIPPED-SEGMENTS=%d\n", skipCount)

@@ -111,13 +111,10 @@ func (m *LLHLSManager) GeneratePlaylist(ctx context.Context, targetMSN, targetPa
 		defer close(cancelCh)
 
 		// Server-side max hold timeout
-		holdDuration := time.Duration(float64(m.segmentCount) * m.partDuration * 30 * float64(time.Second))
-		if holdDuration < 10*time.Second {
-			holdDuration = 10 * time.Second
-		}
-		if holdDuration > 30*time.Second {
-			holdDuration = 30 * time.Second
-		}
+		holdDuration := min(max(
+			time.Duration(float64(m.segmentCount)*m.partDuration*30*float64(time.Second)),
+			10*time.Second,
+		), 30*time.Second)
 		deadline := time.Now().Add(holdDuration)
 
 		for !m.hasContent(targetMSN, targetPart) {

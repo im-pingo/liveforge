@@ -359,6 +359,11 @@ http_stream:
   dash:
     segment_duration: 6
     playlist_size: 30
+  llhls:
+    enabled: false
+    part_duration: 0.2
+    segment_count: 4
+    container: fmp4
 ```
 
 | Field | Default | Description |
@@ -374,6 +379,9 @@ http_stream:
 |--------|-----|-------------|-------------|
 | **HLS** | `/live/stream1.m3u8` | `application/vnd.apple.mpegurl` | Apple HLS — widest device support |
 | **HLS segments** | `/live/stream1/{N}.ts` | `video/mp2t` | Individual TS segments |
+| **LL-HLS** | `/live/stream1.m3u8` | `application/vnd.apple.mpegurl` | Low-Latency HLS (when `llhls.enabled`) |
+| **LL-HLS partial** | `/live/stream1/{MSN}.{part}.m4s` | `video/mp4` | Partial segment (fMP4) |
+| **LL-HLS init** | `/live/stream1/init.mp4` | `video/mp4` | Init segment (fMP4) |
 | **DASH** | `/live/stream1.mpd` | `application/dash+xml` | MPEG-DASH with SegmentTimeline |
 | **DASH video** | `/live/stream1/v{N}.m4s` | `video/mp4` | fMP4 video segments |
 | **DASH audio** | `/live/stream1/a{N}.m4s` | `video/mp4` | fMP4 audio segments |
@@ -396,6 +404,31 @@ http_stream:
 - CDN-friendly delivery (cacheable segments)
 
 ```bash
+ffplay http://localhost:8080/live/stream1.m3u8
+```
+
+#### LL-HLS (Low-Latency HLS)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable LL-HLS mode (replaces regular HLS for `.m3u8` requests) |
+| `part_duration` | `0.2` | Target partial segment duration in seconds (PART-TARGET) |
+| `segment_count` | `4` | Number of completed segments in the sliding window |
+| `container` | `fmp4` | Container format: `fmp4` (recommended) or `ts` |
+
+When enabled, `.m3u8` requests serve an LL-HLS playlist (HLS version 9) with partial segments, blocking playlist reload, delta updates, and preload hints. Regular HLS and LL-HLS are mutually exclusive per server instance — set `llhls.enabled: true` to use LL-HLS, or `false` to use regular HLS.
+
+**LL-HLS features:**
+- `EXT-X-PART` — partial segments (~200ms) for sub-second latency
+- `CAN-BLOCK-RELOAD` — server holds response until new content is available
+- `EXT-X-PRELOAD-HINT` — client preloads next partial before it exists
+- `EXT-X-SKIP` — delta playlist updates reduce bandwidth
+- Target latency: ~2 seconds with default settings
+
+**Supported players:** Safari (native), hls.js 1.0+ (with `lowLatencyMode: true`)
+
+```bash
+# Enable LL-HLS in config, then:
 ffplay http://localhost:8080/live/stream1.m3u8
 ```
 
