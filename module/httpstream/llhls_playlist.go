@@ -50,12 +50,17 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 	sb.WriteString("#EXTM3U\n")
 	sb.WriteString("#EXT-X-VERSION:9\n")
 
-	// Compute EXT-X-TARGETDURATION from actual max segment duration
-	maxDur := 6.0
+	// Compute EXT-X-TARGETDURATION from actual max segment duration.
+	// No artificial floor — this must reflect the real segment durations so
+	// clients poll at the correct interval.
+	var maxDur float64
 	for _, seg := range segments {
 		if seg.Duration > maxDur {
 			maxDur = seg.Duration
 		}
+	}
+	if maxDur == 0 {
+		maxDur = 6.0 // fallback when no completed segments yet
 	}
 	targetDur := int(math.Ceil(maxDur))
 	fmt.Fprintf(&sb, "#EXT-X-TARGETDURATION:%d\n", targetDur)
