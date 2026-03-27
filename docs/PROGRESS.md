@@ -210,7 +210,7 @@ liveforge/
 | Issue | Description | Priority |
 |-------|-------------|----------|
 | RTMP pull initial stutter | GOP cache burst causes ffplay frame drops on join | Low (expected live stream behavior) |
-| ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start) |
+| ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start + 3-segment hold for legacy players) |
 | No Prometheus metrics | No metrics endpoint exposed | Low |
 
 ---
