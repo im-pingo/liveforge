@@ -199,6 +199,12 @@ func (m *Muxer) shouldInsertPCR(dts int64) bool {
 }
 
 
+// WritePATAndPMT generates fresh PAT and PMT packets.
+// Used by LL-HLS to insert PAT/PMT at partial segment boundaries.
+func (m *Muxer) WritePATAndPMT() []byte {
+	return m.rebuildPATandPMT()
+}
+
 func (m *Muxer) rebuildPATandPMT() []byte {
 	pat := BuildPAT(m.patContinuity)
 	m.patContinuity = (m.patContinuity + 1) & 0x0F
