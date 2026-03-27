@@ -74,6 +74,9 @@ ffmpeg -re -i input.mp4 -c copy -f flv rtmp://localhost:1935/live/stream1
 
 # RTSP
 ffmpeg -re -i input.mp4 -c copy -f rtsp rtsp://localhost:8554/live/stream1
+
+# SRT
+ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish:/live/stream1"
 ```
 
 ### 播放
@@ -99,6 +102,9 @@ ffplay http://localhost:8080/live/stream1.mp4
 
 # RTSP
 ffplay rtsp://localhost:8554/live/stream1
+
+# SRT
+ffplay "srt://localhost:6000?streamid=subscribe:/live/stream1"
 ```
 
 ### Web 控制台
@@ -491,6 +497,68 @@ curl -X POST http://host:8443/webrtc/whip/live/stream1 \
 - 无需插件的浏览器采集（摄像头/屏幕捕获）
 - 超低延迟监控面板
 - 跨协议：WebRTC 采集 -> HLS/DASH 分发给大量观众
+
+---
+
+### SRT（安全可靠传输）
+
+SRT 模块使用纯 Go 库 `datarhei/gosrt` 提供基于 UDP 的低延迟、可靠流媒体传输。SRT 承载 MPEG-TS 数据，支持 AES 加密以确保在不可靠网络上的安全传输。
+
+```yaml
+srt:
+  enabled: true
+  listen: ":6000"
+  latency: 120
+  # passphrase: "your_secret"
+  # pbkeylen: 16
+```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `false` | 启用 SRT 模块 |
+| `listen` | `:6000` | UDP 监听地址 |
+| `latency` | `120` | 接收端延迟（毫秒） |
+| `passphrase` | _(空)_ | AES 加密密码（空 = 不加密） |
+| `pbkeylen` | `0` | 加密密钥长度：0、16、24 或 32 字节 |
+
+**Stream ID 格式：**
+
+SRT Stream ID 决定连接是推流还是拉流，以及使用哪个流密钥。支持以下格式：
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| `publish:` 前缀 | `publish:/live/stream1` | 推流 |
+| `subscribe:` 前缀 | `subscribe:/live/stream1` | 拉流 |
+| SRT 访问控制 | `#!::r=/live/stream1,m=publish` | 标准 SRT ACL 语法 |
+| 裸路径 | `/live/stream1` | 默认为拉流 |
+
+**推流：**
+
+```bash
+# FFmpeg SRT 推流：
+ffmpeg -re -i input.mp4 -c copy -f mpegts \
+  "srt://host:6000?streamid=publish:/live/stream1"
+
+# 加密推流：
+ffmpeg -re -i input.mp4 -c copy -f mpegts \
+  "srt://host:6000?streamid=publish:/live/stream1&passphrase=your_secret"
+
+# OBS：输出设置为自定义，服务器填 srt://host:6000?streamid=publish:/live/stream1
+```
+
+**拉流：**
+
+```bash
+ffplay "srt://host:6000?streamid=subscribe:/live/stream1"
+
+# VLC：打开网络串流 → srt://host:6000?streamid=subscribe:/live/stream1
+```
+
+**使用场景：**
+- 公网低延迟贡献链路
+- 在丢包或高抖动网络上（蜂窝网络、卫星链路）实现可靠传输
+- 加密点对点媒体传输
+- 跨协议：SRT 采集 → HLS/DASH 分发给大量观众
 
 ---
 

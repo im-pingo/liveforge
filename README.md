@@ -6,7 +6,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-24%20packages%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-25%20packages%20passing-brightgreen)](#testing)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -14,12 +14,13 @@
 
 ---
 
-LiveForge is a modular live streaming media server that ingests, transmuxes, and delivers audio/video in real time. It supports RTMP, RTSP, WebRTC (WHIP/WHEP), HLS, DASH, HTTP-FLV, FMP4, and WebSocket streaming — all from a single binary with zero external dependencies.
+LiveForge is a modular live streaming media server that ingests, transmuxes, and delivers audio/video in real time. It supports RTMP, RTSP, SRT, WebRTC (WHIP/WHEP), HLS, DASH, HTTP-FLV, FMP4, and WebSocket streaming — all from a single binary with zero external dependencies.
 
 ## Features
 
-- **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP), or WebRTC WHIP from OBS, FFmpeg, GStreamer, or a browser
-- **Multi-protocol playback** — Pull via RTMP, RTSP, WebRTC WHEP, HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, or WebSocket
+- **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP), SRT, or WebRTC WHIP from OBS, FFmpeg, GStreamer, or a browser
+- **Multi-protocol playback** — Pull via RTMP, RTSP, SRT, WebRTC WHEP, HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, or WebSocket
+- **SRT support** — Secure Reliable Transport with AES encryption, low-latency MPEG-TS delivery (via pure Go `datarhei/gosrt`)
 - **WebRTC browser tools** — Built-in console with WHIP publish (camera/mic) and WHEP playback, real-time stats overlay
 - **Protocol bridge** — Push RTMP, pull via WebRTC; push WebRTC, pull via HLS — any combination works
 - **Codec support** — H.264, H.265/HEVC, VP8, VP9, AV1, AAC, Opus, G.711, MP3, and more
@@ -38,12 +39,14 @@ graph LR
     subgraph Ingest
         OBS[OBS / FFmpeg] -->|RTMP| RTMP_MOD[RTMP Module]
         CAM[IP Camera] -->|RTSP| RTSP_MOD[RTSP Module]
+        SRT_PUB[SRT Source] -->|SRT| SRT_MOD[SRT Module]
         BROWSER_PUB[Browser] -->|WHIP| WEBRTC_MOD[WebRTC Module]
     end
 
     subgraph Core
         RTMP_MOD --> STREAM[Stream + GOP Cache + Ring Buffer]
         RTSP_MOD --> STREAM
+        SRT_MOD --> STREAM
         WEBRTC_MOD --> STREAM
         STREAM --> MUXER[Muxer Manager]
     end
@@ -54,6 +57,7 @@ graph LR
         MUXER -->|WebSocket| HTTP_MOD
         STREAM -->|RTMP| RTMP_SUB[RTMP Subscriber]
         STREAM -->|RTSP| RTSP_SUB[RTSP Subscriber]
+        STREAM -->|SRT| SRT_SUB[SRT Subscriber]
         STREAM -->|WHEP| WEBRTC_SUB[WebRTC Subscriber]
     end
 
@@ -88,6 +92,11 @@ ffmpeg -re -i input.mp4 -c copy -f flv rtmp://localhost:1935/live/stream1
 ffmpeg -re -i input.mp4 -c copy -f rtsp rtsp://localhost:8554/live/stream1
 ```
 
+**SRT:**
+```bash
+ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish:/live/stream1"
+```
+
 **WebRTC (Browser):**
 Open `http://localhost:8090/console`, click **"+ WebRTC Publish"**, select camera/mic, and start streaming.
 
@@ -97,6 +106,7 @@ Open `http://localhost:8090/console`, click **"+ WebRTC Publish"**, select camer
 |----------|-----|
 | RTMP | `rtmp://localhost:1935/live/stream1` |
 | RTSP | `rtsp://localhost:8554/live/stream1` |
+| SRT | `srt://localhost:6000?streamid=subscribe:/live/stream1` |
 | HLS | `http://localhost:8080/live/stream1.m3u8` |
 | DASH | `http://localhost:8080/live/stream1.mpd` |
 | HTTP-FLV | `http://localhost:8080/live/stream1.flv` |
@@ -126,6 +136,7 @@ Key sections:
 | `rtsp` | RTSP ingest/playback with TCP + UDP (default `:8554`) |
 | `http_stream` | HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket (default `:8080`) |
 | `webrtc` | WHIP/WHEP with ICE servers and UDP port range (default `:8443`) |
+| `srt` | SRT ingest/playback with AES encryption (default `:6000`) |
 | `api` | REST API and web console (default `:8090`) |
 | `auth` | JWT and HTTP callback authentication |
 | `record` | FLV recording with segmentation |
@@ -149,6 +160,7 @@ liveforge/
 │   ├── record/          # FLV stream recording
 │   ├── rtmp/            # RTMP protocol (handshake, chunks, AMF0)
 │   ├── rtsp/            # RTSP protocol (TCP + UDP transport)
+│   ├── srt/             # SRT protocol (via datarhei/gosrt)
 │   └── webrtc/          # WebRTC WHIP/WHEP (via pion/webrtc)
 ├── pkg/
 │   ├── avframe/         # Audio/video frame types
@@ -162,7 +174,7 @@ liveforge/
 
 ## Testing
 
-24 test packages, all passing:
+25 test packages, all passing:
 
 ```bash
 go test ./...
@@ -177,6 +189,7 @@ go test -cover ./...    # with coverage
 | Language | Go | Go | C++ | Go |
 | RTMP | Yes | Yes | Yes | Yes |
 | RTSP | Yes (TCP+UDP) | Yes | Yes | Plugin |
+| SRT | Yes (pure Go) | Yes | Yes | Plugin |
 | WebRTC WHIP/WHEP | Yes | Yes | Yes | Plugin |
 | HLS/DASH | Yes | Yes | Yes | Plugin |
 | HTTP-FLV | Yes | No | Yes | Plugin |

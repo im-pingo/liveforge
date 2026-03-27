@@ -74,6 +74,9 @@ ffmpeg -re -i input.mp4 -c copy -f flv rtmp://localhost:1935/live/stream1
 
 # RTSP
 ffmpeg -re -i input.mp4 -c copy -f rtsp rtsp://localhost:8554/live/stream1
+
+# SRT
+ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish:/live/stream1"
 ```
 
 ### Play
@@ -99,6 +102,9 @@ ffplay http://localhost:8080/live/stream1.mp4
 
 # RTSP
 ffplay rtsp://localhost:8554/live/stream1
+
+# SRT
+ffplay "srt://localhost:6000?streamid=subscribe:/live/stream1"
 ```
 
 ### Web Console
@@ -491,6 +497,68 @@ curl -X POST http://host:8443/webrtc/whip/live/stream1 \
 - Browser ingest without plugins (camera/screen capture)
 - Ultra-low-latency monitoring dashboards
 - Cross-protocol: WebRTC ingest -> HLS/DASH delivery to large audiences
+
+---
+
+### SRT (Secure Reliable Transport)
+
+The SRT module provides low-latency, reliable streaming over UDP using the pure-Go `datarhei/gosrt` library. SRT carries MPEG-TS data and supports AES encryption for secure delivery over unreliable networks.
+
+```yaml
+srt:
+  enabled: true
+  listen: ":6000"
+  latency: 120
+  # passphrase: "your_secret"
+  # pbkeylen: 16
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable the SRT module |
+| `listen` | `:6000` | UDP address to bind |
+| `latency` | `120` | Receiver latency in milliseconds |
+| `passphrase` | _(empty)_ | AES encryption passphrase (empty = no encryption) |
+| `pbkeylen` | `0` | Crypto key length: 0, 16, 24, or 32 bytes |
+
+**Stream ID format:**
+
+The SRT stream ID determines whether the connection publishes or subscribes, and which stream key to use. Supported formats:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `publish:` prefix | `publish:/live/stream1` | Publish to stream |
+| `subscribe:` prefix | `subscribe:/live/stream1` | Subscribe to stream |
+| SRT Access Control | `#!::r=/live/stream1,m=publish` | Standard SRT ACL syntax |
+| Bare path | `/live/stream1` | Defaults to subscribe |
+
+**Publish (ingest):**
+
+```bash
+# FFmpeg push via SRT:
+ffmpeg -re -i input.mp4 -c copy -f mpegts \
+  "srt://host:6000?streamid=publish:/live/stream1"
+
+# With encryption:
+ffmpeg -re -i input.mp4 -c copy -f mpegts \
+  "srt://host:6000?streamid=publish:/live/stream1&passphrase=your_secret"
+
+# OBS: Set output to Custom, Server: srt://host:6000?streamid=publish:/live/stream1
+```
+
+**Play (subscribe):**
+
+```bash
+ffplay "srt://host:6000?streamid=subscribe:/live/stream1"
+
+# VLC: Open Network Stream → srt://host:6000?streamid=subscribe:/live/stream1
+```
+
+**Use cases:**
+- Low-latency contribution links over the public internet
+- Reliable streaming over lossy or high-jitter networks (cellular, satellite)
+- Encrypted point-to-point media transport
+- Cross-protocol: SRT ingest → HLS/DASH delivery to large audiences
 
 ---
 

@@ -47,6 +47,13 @@ webrtc:
   udp_port_range: [20000, 30000]
   candidates: []
 
+srt:
+  enabled: true
+  listen: ":6000"
+  latency: 120
+  # passphrase: ""
+  # pbkeylen: 0
+
 sip:
   enabled: false
   listen: ":5060"
