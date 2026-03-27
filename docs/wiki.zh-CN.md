@@ -414,9 +414,11 @@ ffplay http://localhost:8080/live/stream1.m3u8
 | `enabled` | `false` | 启用 LL-HLS 模式（替代普通 HLS 的 `.m3u8` 请求） |
 | `part_duration` | `0.2` | 目标部分分片时长（秒），对应 PART-TARGET |
 | `segment_count` | `4` | 滑动窗口中保留的完整分片数量 |
-| `container` | `fmp4` | 容器格式：`fmp4`（推荐）或 `ts` |
+| `container` | `fmp4` | 容器格式：`fmp4`（推荐）或 `ts`/`mpegts` |
 
 启用后，`.m3u8` 请求将返回 LL-HLS 播放列表（HLS 版本 9），包含部分分片、阻塞式播放列表重载、增量更新和预加载提示。普通 HLS 和 LL-HLS 互斥 — 设置 `llhls.enabled: true` 使用 LL-HLS，设置为 `false` 使用普通 HLS。
+
+> **容器别名：** `mpegts` 和 `mpeg-ts` 会自动规范化为 `ts`。
 
 **LL-HLS 特性：**
 - `EXT-X-PART` — 部分分片（约 200ms），实现亚秒级延迟
@@ -1165,6 +1167,10 @@ notify:
 - 减小 `segment_duration`（最小值 = 源的关键帧间隔）
 - 确保编码器每 2-4 秒发送一个关键帧
 - 如需最低延迟，使用 WebRTC (WHEP) 或 HTTP-FLV
+
+### ffplay LL-HLS 首次播放卡顿
+
+如果首次 LL-HLS 播放每隔约 2 秒卡顿一次，但后续播放正常，请确保 `stream` 配置中启用了 `gop_cache`（默认启用）。LL-HLS 分段器使用 GOP 缓存预填充首个分片，确保首个客户端连接时即有可用内容。如果没有 GOP 缓存，播放列表初始为空，播放器在分片积累之前会出现数据饥饿。
 
 ### ffplay DASH 卡顿
 

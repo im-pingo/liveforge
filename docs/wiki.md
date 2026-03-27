@@ -414,9 +414,11 @@ ffplay http://localhost:8080/live/stream1.m3u8
 | `enabled` | `false` | Enable LL-HLS mode (replaces regular HLS for `.m3u8` requests) |
 | `part_duration` | `0.2` | Target partial segment duration in seconds (PART-TARGET) |
 | `segment_count` | `4` | Number of completed segments in the sliding window |
-| `container` | `fmp4` | Container format: `fmp4` (recommended) or `ts` |
+| `container` | `fmp4` | Container format: `fmp4` (recommended) or `ts`/`mpegts` |
 
 When enabled, `.m3u8` requests serve an LL-HLS playlist (HLS version 9) with partial segments, blocking playlist reload, delta updates, and preload hints. Regular HLS and LL-HLS are mutually exclusive per server instance — set `llhls.enabled: true` to use LL-HLS, or `false` to use regular HLS.
+
+> **Container aliases:** `mpegts` and `mpeg-ts` are automatically normalized to `ts`.
 
 **LL-HLS features:**
 - `EXT-X-PART` — partial segments (~200ms) for sub-second latency
@@ -1155,6 +1157,10 @@ notify:
 - Reduce `segment_duration` (minimum = keyframe interval of the source)
 - Ensure the encoder sends keyframes every 2-4 seconds
 - For lowest latency, use WebRTC (WHEP) or HTTP-FLV instead
+
+### ffplay LL-HLS first play stutter
+
+If the first LL-HLS playback stutters every ~2 seconds but subsequent plays are smooth, ensure `gop_cache` is enabled in the `stream` config (it is by default). The LL-HLS segmenter uses the GOP cache to pre-populate the first segment so content is available immediately when the first client connects. Without the GOP cache, the playlist starts empty and the player starves for data until segments accumulate.
 
 ### ffplay DASH stuttering
 

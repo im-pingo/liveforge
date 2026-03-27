@@ -3,7 +3,7 @@
 > This document tracks the overall development progress of the project.
 > It must be updated after every development session to prevent context loss.
 >
-> **Last updated: 2026-03-27**
+> **Last updated: 2026-03-28**
 
 ---
 
@@ -53,7 +53,7 @@
 | MP3 codec helper | `pkg/codec/mp3/` | Frame header parsing |
 | Opus codec helper | `pkg/codec/opus/` | Ogg header parsing |
 | AV1 codec helper | `pkg/codec/av1/` | OBU parsing |
-| HTTP streaming module | `module/httpstream/` | HLS (.m3u8/.ts), LL-HLS (partial segments, blocking reload), DASH (.mpd/.m4s), HTTP-FLV, WebSocket stream |
+| HTTP streaming module | `module/httpstream/` | HLS (.m3u8/.ts), LL-HLS (partial segments, blocking reload, GOP cache warm-start), DASH (.mpd/.m4s), HTTP-FLV, WebSocket stream |
 | Muxer worker | `module/httpstream/muxer_worker.go` | Per-format goroutine, SharedBuffer distribution |
 
 ---
@@ -210,6 +210,7 @@ liveforge/
 | Issue | Description | Priority |
 |-------|-------------|----------|
 | RTMP pull initial stutter | GOP cache burst causes ffplay frame drops on join | Low (expected live stream behavior) |
+| ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start) |
 | No Prometheus metrics | No metrics endpoint exposed | Low |
 
 ---
