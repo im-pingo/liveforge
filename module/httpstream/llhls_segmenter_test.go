@@ -22,6 +22,7 @@ func TestLLHLSSegmenter_PartDurationSplit(t *testing.T) {
 	})
 
 	seg.tsMuxer = ts.NewMuxer(avframe.CodecH264, avframe.CodecAAC, nil, nil)
+	seg.hasVideo = true
 
 	// 30 frames, 33ms apart = ~1 second. partDuration=0.2s => ~5 parts
 	frames := makeTestFrames(30, 33)
@@ -62,6 +63,7 @@ func TestLLHLSSegmenter_KeyframeSplitsSegment(t *testing.T) {
 	})
 
 	seg.tsMuxer = ts.NewMuxer(avframe.CodecH264, avframe.CodecAAC, nil, nil)
+	seg.hasVideo = true
 
 	// First GOP: keyframe at DTS=0, 30 frames
 	frames1 := makeTestFrames(30, 33)
@@ -131,6 +133,63 @@ func TestLLHLSSegmenter_AudioOnlyTimeBasedSplit(t *testing.T) {
 
 	if len(parts) < 4 {
 		t.Errorf("expected at least 4 parts for audio-only stream, got %d", len(parts))
+	}
+}
+
+func TestLLHLSSegmenter_SkipsFramesBeforeFirstKeyframe(t *testing.T) {
+	var parts []*LLHLSPart
+	var mu sync.Mutex
+
+	seg := NewLLHLSSegmenter(0.2, "ts", LLHLSSegmenterCallbacks{
+		OnPart: func(p *LLHLSPart) {
+			mu.Lock()
+			parts = append(parts, p)
+			mu.Unlock()
+		},
+		OnSegment: func(s *LLHLSSegment) {},
+	})
+
+	seg.tsMuxer = ts.NewMuxer(avframe.CodecH264, avframe.CodecAAC, nil, nil)
+	seg.hasVideo = true
+
+	// 10 non-keyframe frames (should be skipped)
+	for i := range 10 {
+		seg.processFrame(&avframe.AVFrame{
+			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
+			FrameType: avframe.FrameTypeInterframe,
+			DTS:       int64(i * 33),
+			PTS:       int64(i * 33),
+			Payload:   []byte{0x41, 0x00, 0x00, 0x01},
+		})
+	}
+
+	mu.Lock()
+	skippedParts := len(parts)
+	mu.Unlock()
+	if skippedParts != 0 {
+		t.Errorf("expected 0 parts before first keyframe, got %d", skippedParts)
+	}
+
+	// Now send keyframe + more frames
+	frames := makeTestFrames(15, 33)
+	frames[0].FrameType = avframe.FrameTypeKeyframe
+	for i := range frames {
+		frames[i].DTS += 330 // offset past the skipped frames
+		frames[i].PTS += 330
+	}
+	for _, f := range frames {
+		seg.processFrame(f)
+	}
+	seg.flushCurrentPart(frames[len(frames)-1].DTS + 33)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(parts) == 0 {
+		t.Error("expected parts after keyframe arrived")
+	}
+	if len(parts) > 0 && !parts[0].Independent {
+		t.Error("first part should be independent (starts with keyframe)")
 	}
 }
 

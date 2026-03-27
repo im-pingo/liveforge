@@ -38,6 +38,9 @@ type LLHLSSegmenter struct {
 	segMSN      int
 	segHasData  bool
 
+	hasVideo         bool // stream contains video track
+	gotFirstKeyframe bool // first video keyframe received
+
 	done chan struct{}
 }
 
@@ -100,6 +103,7 @@ func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
 	if vsh := stream.VideoSeqHeader(); vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
+		s.hasVideo = true
 	}
 	if ash := stream.AudioSeqHeader(); ash != nil {
 		audioCodec = ash.Codec
@@ -142,6 +146,22 @@ func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
 
 func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 	isKeyframe := frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe()
+
+	// Wait for first video keyframe before producing any segments.
+	// Starting mid-GOP produces undecodable segments (no SPS/PPS for TS,
+	// no reference frames for fMP4).
+	if !s.gotFirstKeyframe {
+		if s.hasVideo {
+			if !isKeyframe {
+				return
+			}
+			s.gotFirstKeyframe = true
+		} else {
+			// Audio-only stream — no keyframe needed
+			s.gotFirstKeyframe = true
+		}
+	}
+
 	if isKeyframe && s.segHasData {
 		s.flushCurrentPart(frame.DTS)
 		s.flushCurrentSegment()
