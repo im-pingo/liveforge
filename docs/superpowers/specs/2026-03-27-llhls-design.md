@@ -192,10 +192,74 @@ To integrate `sync.Cond` with context cancellation:
 - Spawn a goroutine that waits on context, then does `cond.Broadcast()` to unblock
 - Main goroutine checks both content availability and context error after waking
 
+## Edge Cases and Design Decisions
+
+### Audio-Only Streams
+
+When no video track is present (no keyframes to split on), the segmenter uses time-based splitting:
+- Full segments split at `segment_count`-derived intervals (default ~6s)
+- Partial segments split at `partDuration` intervals (0.2s)
+- All partials are marked `INDEPENDENT=YES` since audio frames are independently decodable
+
+### Codec Change Mid-Stream
+
+If the publisher reconnects with different codec parameters:
+- The manager detects changed sequence headers
+- Regenerates the fMP4 init segment
+- Inserts `#EXT-X-DISCONTINUITY` tag in the playlist before the next segment
+- Resets the segmenter state
+
+### GOP Cache Handling
+
+LL-HLS skips the GOP cache entirely. Playing cached GOP frames would add latency that defeats the purpose of LL-HLS. The segmenter starts reading from the current RingBuffer write cursor and only serves live partials. Legacy HLS players will wait for the first full segment to complete before playback begins, which is expected behavior.
+
+### Memory Eviction
+
+When a full segment slides out of the playlist window, all its `LLHLSPart` entries and their `Data` slices are released. The sliding window is trimmed in `LLHLSManager` after each new full segment is finalized. With `partDuration=0.2s`, `segment_count=4`, and ~6s segments, peak memory is ~120 partials per stream (~3MB at 1Mbps).
+
+### Mutual Exclusivity with Regular HLS
+
+When `llhls.enabled=true`, the regular `HLSManager` is NOT created for any stream. The LL-HLS playlist already contains full segment references (`#EXTINF` + segment URI) for backward compatibility with legacy players. Running both managers simultaneously would waste memory and CPU. The `getOrCreateHLS()` path in `module.go` is gated by `!llhls.enabled`.
+
+### fMP4 Muxer Usage for Partial Segments
+
+The existing `fmp4.Muxer.WriteSegment()` is called once per partial segment (not once per full segment). Each call produces a moof+mdat fragment with an incrementing `sequenceNumber`. This is correct CMAF behavior — each partial is an independently addressable CMAF chunk. The full segment `Data` field is the byte concatenation of all its partials' `Data`.
+
+### TS Muxer PAT/PMT for Partial Segments
+
+For TS container mode, each partial segment must begin with PAT/PMT tables to be independently playable. The segmenter calls `ts.Muxer.WritePATAndPMT()` at the start of each partial (this method already exists in the TS muxer). Frames within the partial are muxed normally via `WriteFrame()`.
+
+### Server-Side Hold Timeout
+
+Blocking playlist requests have a server-side maximum hold duration of `3 * targetSegmentDuration` (default 18s). If the requested MSN/part is not produced within this time, the server returns the current playlist immediately. This prevents CDN intermediaries from holding connections indefinitely.
+
+### Caching Headers
+
+| Endpoint | Cache-Control |
+|----------|--------------|
+| `.m3u8` playlist | `no-cache, no-store` |
+| `init.mp4` | `public, max-age=3600` |
+| Full segment (`.m4s`/`.ts`) | `public, max-age=60` |
+| Partial segment (`.m4s`/`.ts`) | `no-cache` (may still be in-progress) |
+
+### Non-Blocking Plain Playlist Request
+
+When a client requests `/{app}/{key}.m3u8` without `_HLS_msn`/`_HLS_part` query params, the server returns the full current playlist immediately (non-blocking). This is the path legacy HLS players use.
+
+### Subscribe Event
+
+LL-HLS playlist and segment requests do NOT emit `EventSubscribe`, consistent with the existing HLS and DASH handler behavior. Auth hooks that gate subscribe events are not triggered for HTTP segment delivery.
+
+### Out of Scope (Future Work)
+
+- `_HLS_skip=v2` (date-range skipping) — not needed without EXT-X-DATERANGE usage
+- `EXT-X-RENDITION-REPORT` — deferred until multi-rendition/ABR support is added
+- Per-stream LL-HLS toggle — current implementation is global config only
+
 ## Error Handling
 
 - If stream not publishing: 404
-- If blocking request times out (client disconnects): handler returns, goroutine cleans up
+- If blocking request times out (server-side hold exceeded or client disconnects): return current playlist
 - If segment not found (expired from window): 404
 - If init segment not ready yet: brief poll (100ms x 50) then 404
 
