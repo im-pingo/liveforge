@@ -69,6 +69,53 @@ func SampleRateIndex(rate int) int {
 	return 0x0F
 }
 
+// ParseADTSHeader parses an ADTS header and returns the AACInfo and header length.
+// The header is either 7 bytes (no CRC) or 9 bytes (with CRC).
+func ParseADTSHeader(data []byte) (*AACInfo, int, error) {
+	if len(data) < 7 {
+		return nil, 0, errors.New("ADTS header too short")
+	}
+	// Sync word: 0xFFF
+	if data[0] != 0xFF || (data[1]&0xF0) != 0xF0 {
+		return nil, 0, errors.New("invalid ADTS sync word")
+	}
+
+	hasCRC := (data[1] & 0x01) == 0 // protection_absent=0 means CRC present
+	headerLen := 7
+	if hasCRC {
+		headerLen = 9
+	}
+	if len(data) < headerLen {
+		return nil, 0, errors.New("ADTS header too short for CRC")
+	}
+
+	profile := int((data[2]>>6)&0x03) + 1 // ADTS profile is objectType-1
+	freqIdx := int((data[2] >> 2) & 0x0F)
+	channels := int((data[2]&0x01)<<2) | int((data[3]>>6)&0x03)
+
+	sampleRate := 0
+	if freqIdx < len(sampleRates) {
+		sampleRate = sampleRates[freqIdx]
+	} else {
+		return nil, 0, fmt.Errorf("invalid ADTS frequency index: %d", freqIdx)
+	}
+
+	return &AACInfo{
+		ObjectType: profile,
+		SampleRate: sampleRate,
+		Channels:   channels,
+	}, headerLen, nil
+}
+
+// BuildAudioSpecificConfig builds a 2-byte AudioSpecificConfig from AACInfo.
+func BuildAudioSpecificConfig(info *AACInfo) []byte {
+	freqIdx := SampleRateIndex(info.SampleRate)
+	// audioObjectType(5) + frequencyIndex(4) + channelConfiguration(4) + padding(3)
+	b0 := byte(info.ObjectType<<3) | byte((freqIdx>>1)&0x07)
+	b1 := byte((freqIdx&0x01)<<7) | byte((info.Channels&0x0F)<<3)
+	return []byte{b0, b1}
+}
+
 // BuildADTSHeader builds a 7-byte ADTS header for an AAC frame.
 func BuildADTSHeader(info *AACInfo, frameLength int) []byte {
 	header := make([]byte, 7)

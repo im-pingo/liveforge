@@ -32,6 +32,116 @@ func HVCCToAnnexB(data []byte) []byte {
 	return result
 }
 
+// AnnexBToHVCC converts Annex-B format (start codes) to HVCC format (4-byte length prefix).
+func AnnexBToHVCC(data []byte) []byte {
+	var result []byte
+	nalus := extractNALUs(data)
+	for _, nal := range nalus {
+		if len(nal) == 0 {
+			continue
+		}
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(nal)))
+		result = append(result, lenBuf[:]...)
+		result = append(result, nal...)
+	}
+	return result
+}
+
+// BuildHVCCDecoderConfig builds an HEVCDecoderConfigurationRecord from Annex-B data
+// containing VPS, SPS, and PPS NAL units. Returns nil if SPS not found.
+func BuildHVCCDecoderConfig(annexB []byte) []byte {
+	var vps, sps, pps []byte
+	nalus := extractNALUs(annexB)
+	for _, nal := range nalus {
+		if len(nal) < 2 {
+			continue
+		}
+		nalType := (nal[0] >> 1) & 0x3F
+		switch nalType {
+		case NALTypeVPS:
+			if vps == nil {
+				vps = nal
+			}
+		case NALTypeSPS:
+			if sps == nil {
+				sps = nal
+			}
+		case NALTypePPS:
+			if pps == nil {
+				pps = nal
+			}
+		}
+	}
+	if sps == nil {
+		return nil
+	}
+	return buildHVCCFromNALs(vps, sps, pps)
+}
+
+// buildHVCCFromNALs builds an HEVCDecoderConfigurationRecord from raw NAL bytes.
+func buildHVCCFromNALs(vps, sps, pps []byte) []byte {
+	// 22-byte fixed header + arrays
+	config := make([]byte, 22)
+	config[0] = 1    // configurationVersion
+	config[21] = 0x03 // lengthSizeMinusOne=3 | 2 reserved bits
+
+	numArrays := byte(0)
+	var arrays []byte
+
+	addArray := func(nalType byte, nal []byte) {
+		if nal == nil {
+			return
+		}
+		numArrays++
+		arrays = append(arrays, nalType) // array_completeness=0 | nal_unit_type
+		var buf [2]byte
+		binary.BigEndian.PutUint16(buf[:], 1) // numNalus=1
+		arrays = append(arrays, buf[:]...)
+		binary.BigEndian.PutUint16(buf[:], uint16(len(nal)))
+		arrays = append(arrays, buf[:]...)
+		arrays = append(arrays, nal...)
+	}
+
+	addArray(NALTypeVPS, vps)
+	addArray(NALTypeSPS, sps)
+	addArray(NALTypePPS, pps)
+
+	config = append(config, numArrays)
+	config = append(config, arrays...)
+	return config
+}
+
+// extractNALUs splits Annex-B byte stream into individual NAL units.
+func extractNALUs(data []byte) [][]byte {
+	var nalus [][]byte
+	start := -1
+	i := 0
+	for i < len(data) {
+		if i+2 < len(data) && data[i] == 0x00 && data[i+1] == 0x00 {
+			scLen := 0
+			if data[i+2] == 0x01 {
+				scLen = 3
+			} else if i+3 < len(data) && data[i+2] == 0x00 && data[i+3] == 0x01 {
+				scLen = 4
+			}
+			if scLen > 0 {
+				if start >= 0 {
+					nalus = append(nalus, data[start:i])
+				}
+				start = i + scLen
+				i += scLen
+				continue
+			}
+		}
+		i++
+	}
+	if start >= 0 && start < len(data) {
+		nalus = append(nalus, data[start:])
+	}
+	return nalus
+}
+
 // ExtractVPSSPSPPSFromHVCRecord extracts VPS, SPS, PPS NALUs from HEVCDecoderConfigurationRecord.
 // Format per ISO 14496-15:
 // - 22 bytes of fixed config

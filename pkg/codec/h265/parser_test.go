@@ -93,6 +93,86 @@ func TestExtractVPSSPSPPSFromHVCRecord(t *testing.T) {
 	}
 }
 
+func TestAnnexBToHVCC(t *testing.T) {
+	// Build Annex-B with one NAL
+	nal := []byte{0x40, 0x01, 0x0C, 0x01}
+	annexB := append([]byte{0x00, 0x00, 0x00, 0x01}, nal...)
+
+	hvcc := AnnexBToHVCC(annexB)
+	// Expect 4-byte length + nal
+	if len(hvcc) != 4+len(nal) {
+		t.Fatalf("expected %d bytes, got %d", 4+len(nal), len(hvcc))
+	}
+	naluLen := int(binary.BigEndian.Uint32(hvcc[:4]))
+	if naluLen != len(nal) {
+		t.Errorf("expected NAL length %d, got %d", len(nal), naluLen)
+	}
+	if !bytes.Equal(hvcc[4:], nal) {
+		t.Error("NAL data mismatch")
+	}
+}
+
+func TestAnnexBToHVCCMultiNAL(t *testing.T) {
+	nal1 := []byte{0x40, 0x01, 0x0C, 0x01} // VPS-like
+	nal2 := []byte{0x42, 0x01, 0x01, 0x01} // SPS-like
+	var annexB []byte
+	annexB = append(annexB, 0x00, 0x00, 0x00, 0x01)
+	annexB = append(annexB, nal1...)
+	annexB = append(annexB, 0x00, 0x00, 0x00, 0x01)
+	annexB = append(annexB, nal2...)
+
+	hvcc := AnnexBToHVCC(annexB)
+	expected := 2*(4) + len(nal1) + len(nal2)
+	if len(hvcc) != expected {
+		t.Fatalf("expected %d bytes, got %d", expected, len(hvcc))
+	}
+}
+
+func TestBuildHVCCDecoderConfig(t *testing.T) {
+	vps := []byte{0x40, 0x01, 0x0C, 0x01, 0xFF}
+	sps := []byte{0x42, 0x01, 0x01, 0x01, 0x60}
+	pps := []byte{0x44, 0x01, 0xC0, 0xF7}
+
+	var annexB []byte
+	sc := []byte{0x00, 0x00, 0x00, 0x01}
+	annexB = append(annexB, sc...)
+	annexB = append(annexB, vps...)
+	annexB = append(annexB, sc...)
+	annexB = append(annexB, sps...)
+	annexB = append(annexB, sc...)
+	annexB = append(annexB, pps...)
+
+	config := BuildHVCCDecoderConfig(annexB)
+	if config == nil {
+		t.Fatal("expected non-nil config")
+	}
+
+	// Round-trip: extract from the config we just built
+	gotVPS, gotSPS, gotPPS, err := ExtractVPSSPSPPSFromHVCRecord(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotVPS, vps) {
+		t.Error("VPS round-trip mismatch")
+	}
+	if !bytes.Equal(gotSPS, sps) {
+		t.Error("SPS round-trip mismatch")
+	}
+	if !bytes.Equal(gotPPS, pps) {
+		t.Error("PPS round-trip mismatch")
+	}
+}
+
+func TestBuildHVCCDecoderConfigNoSPS(t *testing.T) {
+	// Only VPS, no SPS
+	vps := []byte{0x40, 0x01, 0x0C, 0x01}
+	annexB := append([]byte{0x00, 0x00, 0x00, 0x01}, vps...)
+	config := BuildHVCCDecoderConfig(annexB)
+	if config != nil {
+		t.Error("expected nil config without SPS")
+	}
+}
+
 func TestExtractVPSSPSPPSFromHVCRecordTooShort(t *testing.T) {
 	_, _, _, err := ExtractVPSSPSPPSFromHVCRecord([]byte{1, 2, 3})
 	if err == nil {

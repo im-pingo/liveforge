@@ -6,6 +6,7 @@ import (
 	gosrt "github.com/datarhei/gosrt"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
 // Publisher reads MPEG-TS data from an SRT connection and feeds AVFrames
@@ -61,22 +62,30 @@ func (p *Publisher) Run() {
 		})
 	}()
 
-	// Read MPEG-TS data from SRT connection.
+	// Demux MPEG-TS data from SRT connection into AVFrames.
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if frame.MediaType.IsVideo() {
+				p.info.VideoCodec = frame.Codec
+				p.info.VideoSequenceHeader = frame.Payload
+			} else if frame.MediaType.IsAudio() {
+				p.info.AudioCodec = frame.Codec
+				p.info.AudioSequenceHeader = frame.Payload
+			}
+		}
+		stream.WriteFrame(frame)
+	})
+
 	// SRT delivers data in message-mode chunks (typically 1316 bytes = 7 TS packets).
 	buf := make([]byte, 1500)
 	for {
 		n, err := p.conn.Read(buf)
 		if err != nil {
-			return
+			break
 		}
-		if n == 0 {
-			continue
+		if n > 0 {
+			demuxer.Feed(buf[:n])
 		}
-
-		// TODO: Feed buf[:n] into a TS demuxer to extract PES packets,
-		// decode them into AVFrames, and write to stream via stream.WriteFrame().
-		// This requires implementing a TS demuxer in pkg/muxer/ts/demuxer.go.
-		// For now, the raw TS data is received but not yet parsed.
-		_ = buf[:n]
 	}
+	demuxer.Flush()
 }
