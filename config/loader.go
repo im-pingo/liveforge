@@ -43,6 +43,11 @@ func defaults() *Config {
 		HTTP: HTTPConfig{
 			Listen: ":8080",
 			CORS:   true,
+			LLHLS: LLHLSConfig{
+				PartDuration: 0.2,
+				SegmentCount: 4,
+				Container:    "fmp4",
+			},
 		},
 		WS: WSConfig{
 			Listen: ":8080",
