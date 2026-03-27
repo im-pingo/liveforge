@@ -377,9 +377,14 @@ func (m *Module) serveLLHLSPlaylist(w http.ResponseWriter, r *http.Request, stre
 		skip = true
 	}
 
-	// For non-blocking requests, wait for at least one partial before serving
+	// For non-blocking requests (legacy players like ffplay that don't support
+	// LL-HLS blocking reload), wait for at least 3 completed segments.
+	// FFmpeg's HLS demuxer uses live_start_index=-3, meaning it starts
+	// playback from n_segments-3. With fewer than 3 segments, the player
+	// buffer drains before reloads complete, causing periodic stutter.
 	if targetMSN < 0 {
-		for i := 0; i < 100 && mgr.SegmentCount() == 0; i++ {
+		const minSegmentsForLegacy = 3
+		for i := 0; i < 300 && mgr.SegmentCount() < minSegmentsForLegacy; i++ {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
