@@ -90,7 +90,7 @@ func TestLLHLSManager_BlockingPlaylistTimeout(t *testing.T) {
 func TestLLHLSManager_SlidingWindow(t *testing.T) {
 	m := NewLLHLSManager("test/stream", "/test/stream", 0.2, 3, "fmp4")
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		m.mu.Lock()
 		m.segments = append(m.segments, &LLHLSSegment{
 			MSN: i, Duration: 6.0,

@@ -359,6 +359,11 @@ http_stream:
   dash:
     segment_duration: 6
     playlist_size: 30
+  llhls:
+    enabled: false
+    part_duration: 0.2
+    segment_count: 4
+    container: fmp4
 ```
 
 | 字段 | 默认值 | 说明 |
@@ -374,6 +379,9 @@ http_stream:
 |------|-----|-------------|------|
 | **HLS** | `/live/stream1.m3u8` | `application/vnd.apple.mpegurl` | Apple HLS — 设备兼容性最广 |
 | **HLS 分片** | `/live/stream1/{N}.ts` | `video/mp2t` | 单个 TS 分片 |
+| **LL-HLS** | `/live/stream1.m3u8` | `application/vnd.apple.mpegurl` | 低延迟 HLS（需开启 `llhls.enabled`） |
+| **LL-HLS 部分分片** | `/live/stream1/{MSN}.{part}.m4s` | `video/mp4` | 部分分片（fMP4） |
+| **LL-HLS 初始化** | `/live/stream1/init.mp4` | `video/mp4` | 初始化分片（fMP4） |
 | **DASH** | `/live/stream1.mpd` | `application/dash+xml` | MPEG-DASH，使用 SegmentTimeline |
 | **DASH 视频** | `/live/stream1/v{N}.m4s` | `video/mp4` | fMP4 视频分片 |
 | **DASH 音频** | `/live/stream1/a{N}.m4s` | `video/mp4` | fMP4 音频分片 |
@@ -396,6 +404,31 @@ http_stream:
 - CDN 友好分发（可缓存的分片）
 
 ```bash
+ffplay http://localhost:8080/live/stream1.m3u8
+```
+
+#### LL-HLS（低延迟 HLS）
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `false` | 启用 LL-HLS 模式（替代普通 HLS 的 `.m3u8` 请求） |
+| `part_duration` | `0.2` | 目标部分分片时长（秒），对应 PART-TARGET |
+| `segment_count` | `4` | 滑动窗口中保留的完整分片数量 |
+| `container` | `fmp4` | 容器格式：`fmp4`（推荐）或 `ts` |
+
+启用后，`.m3u8` 请求将返回 LL-HLS 播放列表（HLS 版本 9），包含部分分片、阻塞式播放列表重载、增量更新和预加载提示。普通 HLS 和 LL-HLS 互斥 — 设置 `llhls.enabled: true` 使用 LL-HLS，设置为 `false` 使用普通 HLS。
+
+**LL-HLS 特性：**
+- `EXT-X-PART` — 部分分片（约 200ms），实现亚秒级延迟
+- `CAN-BLOCK-RELOAD` — 服务端等待新内容可用后再返回响应
+- `EXT-X-PRELOAD-HINT` — 客户端预加载尚未生成的下一个部分分片
+- `EXT-X-SKIP` — 增量播放列表更新，减少带宽
+- 目标延迟：默认设置下约 2 秒
+
+**支持的播放器：** Safari（原生支持）、hls.js 1.0+（需启用 `lowLatencyMode: true`）
+
+```bash
+# 在配置中启用 LL-HLS 后：
 ffplay http://localhost:8080/live/stream1.m3u8
 ```
 

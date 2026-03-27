@@ -19,7 +19,7 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 ## Features
 
 - **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP), SRT, or WebRTC WHIP from OBS, FFmpeg, GStreamer, or a browser
-- **Multi-protocol playback** — Pull via RTMP, RTSP, SRT, WebRTC WHEP, HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, or WebSocket
+- **Multi-protocol playback** — Pull via RTMP, RTSP, SRT, WebRTC WHEP, HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, or WebSocket
 - **SRT support** — Secure Reliable Transport with AES encryption, low-latency MPEG-TS delivery (via pure Go `datarhei/gosrt`)
 - **WebRTC browser tools** — Built-in console with WHIP publish (camera/mic) and WHEP playback, real-time stats overlay
 - **Protocol bridge** — Push RTMP, pull via WebRTC; push WebRTC, pull via HLS — any combination works

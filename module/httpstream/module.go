@@ -29,14 +29,19 @@ type Module struct {
 	// DASH segment managers per stream key.
 	dashMu       sync.Mutex
 	dashManagers map[string]*DASHManager
+
+	// LL-HLS segment managers per stream key.
+	llhlsMu       sync.Mutex
+	llhlsManagers map[string]*LLHLSManager
 }
 
 // NewModule creates a new HTTP streaming module.
 func NewModule() *Module {
 	return &Module{
-		registered:   make(map[*core.Stream]bool),
-		hlsManagers:  make(map[string]*HLSManager),
-		dashManagers: make(map[string]*DASHManager),
+		registered:    make(map[*core.Stream]bool),
+		hlsManagers:   make(map[string]*HLSManager),
+		dashManagers:  make(map[string]*DASHManager),
+		llhlsManagers: make(map[string]*LLHLSManager),
 	}
 }
 
@@ -105,7 +110,7 @@ func (m *Module) onStreamDestroy(ctx *core.EventContext) error {
 	return nil
 }
 
-// cleanupManagers stops and removes HLS/DASH managers for a stream.
+// cleanupManagers stops and removes HLS/DASH/LL-HLS managers for a stream.
 func (m *Module) cleanupManagers(streamKey string) {
 	m.hlsMu.Lock()
 	if mgr, ok := m.hlsManagers[streamKey]; ok {
@@ -120,6 +125,13 @@ func (m *Module) cleanupManagers(streamKey string) {
 		delete(m.dashManagers, streamKey)
 	}
 	m.dashMu.Unlock()
+
+	m.llhlsMu.Lock()
+	if mgr, ok := m.llhlsManagers[streamKey]; ok {
+		mgr.Stop()
+		delete(m.llhlsManagers, streamKey)
+	}
+	m.llhlsMu.Unlock()
 }
 
 // getOrCreateHLS returns (or creates) an HLS manager for the given stream.
@@ -164,6 +176,23 @@ func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHMan
 	return mgr
 }
 
+// getOrCreateLLHLS returns (or creates) an LL-HLS manager for the given stream.
+func (m *Module) getOrCreateLLHLS(streamKey string, stream *core.Stream) *LLHLSManager {
+	m.llhlsMu.Lock()
+	defer m.llhlsMu.Unlock()
+
+	if mgr, ok := m.llhlsManagers[streamKey]; ok {
+		return mgr
+	}
+
+	cfg := m.server.Config().HTTP.LLHLS
+	basePath := "/" + streamKey
+	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentCount, cfg.Container)
+	m.llhlsManagers[streamKey] = mgr
+	go mgr.Run(stream)
+	return mgr
+}
+
 // Close shuts down the HTTP server and all managers.
 func (m *Module) Close() error {
 	if m.httpSrv != nil {
@@ -189,6 +218,14 @@ func (m *Module) Close() error {
 		delete(m.dashManagers, key)
 	}
 	m.dashMu.Unlock()
+
+	// Stop all LL-HLS managers
+	m.llhlsMu.Lock()
+	for key, mgr := range m.llhlsManagers {
+		mgr.Stop()
+		delete(m.llhlsManagers, key)
+	}
+	m.llhlsMu.Unlock()
 
 	m.wg.Wait()
 	log.Println("[httpstream] stopped")

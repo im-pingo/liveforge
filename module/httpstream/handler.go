@@ -98,20 +98,66 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 	if app, key, segName, ext, ok := parseSegmentPath(r.URL.Path); ok {
 		switch ext {
 		case "ts":
-			// HLS segment: /app/key/N.ts
+			streamKey := app + "/" + key
+			// LL-HLS TS partial segment: segName = "MSN.partIdx"
+			if m.server.Config().HTTP.LLHLS.Enabled && m.server.Config().HTTP.LLHLS.Container == "ts" {
+				if strings.Contains(segName, ".") {
+					tsParts := strings.SplitN(segName, ".", 2)
+					msn, err1 := strconv.Atoi(tsParts[0])
+					partIdx, err2 := strconv.Atoi(tsParts[1])
+					if err1 != nil || err2 != nil {
+						http.Error(w, "invalid partial segment path", http.StatusBadRequest)
+						return
+					}
+					m.serveLLHLSPartialSegment(w, r, streamKey, msn, partIdx)
+					return
+				}
+				if msn, err := strconv.Atoi(segName); err == nil {
+					m.llhlsMu.Lock()
+					_, hasLLHLS := m.llhlsManagers[streamKey]
+					m.llhlsMu.Unlock()
+					if hasLLHLS {
+						m.serveLLHLSFullSegment(w, r, streamKey, msn)
+						return
+					}
+				}
+			}
+			// Regular HLS segment: /app/key/N.ts
 			seqNum, err := strconv.Atoi(segName)
 			if err != nil {
 				http.Error(w, "invalid segment number", http.StatusBadRequest)
 				return
 			}
-			m.serveHLSSegment(w, r, app+"/"+key, seqNum)
+			m.serveHLSSegment(w, r, streamKey, seqNum)
 			return
 		case "m4s":
+			streamKey := app + "/" + key
+			// LL-HLS partial segment: segName = "MSN.partIdx"
+			if strings.Contains(segName, ".") {
+				m4sParts := strings.SplitN(segName, ".", 2)
+				msn, err1 := strconv.Atoi(m4sParts[0])
+				partIdx, err2 := strconv.Atoi(m4sParts[1])
+				if err1 != nil || err2 != nil {
+					http.Error(w, "invalid partial segment path", http.StatusBadRequest)
+					return
+				}
+				m.serveLLHLSPartialSegment(w, r, streamKey, msn, partIdx)
+				return
+			}
+			// LL-HLS full segment: segName is numeric with no prefix
+			m.llhlsMu.Lock()
+			_, hasLLHLS := m.llhlsManagers[streamKey]
+			m.llhlsMu.Unlock()
+			if hasLLHLS {
+				if msn, err := strconv.Atoi(segName); err == nil {
+					m.serveLLHLSFullSegment(w, r, streamKey, msn)
+					return
+				}
+			}
 			// DASH media segments:
 			//   /app/key/v$Number$.m4s (video)
 			//   /app/key/a$Number$.m4s (audio)
 			// MPD uses 1-based numbering; internal SeqNum is 0-based
-			streamKey := app + "/" + key
 			if len(segName) > 1 && segName[0] == 'v' {
 				num, err := strconv.Atoi(segName[1:])
 				if err != nil {
@@ -133,11 +179,18 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid segment path", http.StatusBadRequest)
 			return
 		case "mp4":
-			// DASH init segments:
-			//   /app/key/init.mp4 (video)
-			//   /app/key/audio_init.mp4 (audio)
+			// Init segments: /app/key/init.mp4 (LL-HLS or DASH)
+			// Audio init: /app/key/audio_init.mp4 (DASH)
 			streamKey := app + "/" + key
 			if segName == "init" {
+				// LL-HLS init segment takes precedence if manager exists
+				m.llhlsMu.Lock()
+				_, hasLLHLS := m.llhlsManagers[streamKey]
+				m.llhlsMu.Unlock()
+				if hasLLHLS && m.server.Config().HTTP.LLHLS.Container == "fmp4" {
+					m.serveLLHLSInit(w, r, streamKey)
+					return
+				}
 				m.serveDASHInit(w, r, streamKey)
 				return
 			}
@@ -279,6 +332,12 @@ func (m *Module) serveHLSPlaylist(w http.ResponseWriter, r *http.Request, stream
 		return
 	}
 
+	// LL-HLS takes precedence when enabled
+	if m.server.Config().HTTP.LLHLS.Enabled {
+		m.serveLLHLSPlaylist(w, r, streamKey, stream)
+		return
+	}
+
 	mgr := m.getOrCreateHLS(streamKey, stream)
 
 	// Wait for at least one segment before serving playlist.
@@ -288,6 +347,44 @@ func (m *Module) serveHLSPlaylist(w http.ResponseWriter, r *http.Request, stream
 	}
 
 	playlist := mgr.GenerateM3U8()
+
+	m.setCORSHeaders(w)
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Write([]byte(playlist))
+}
+
+// serveLLHLSPlaylist serves the LL-HLS m3u8 playlist with blocking reload support.
+func (m *Module) serveLLHLSPlaylist(w http.ResponseWriter, r *http.Request, streamKey string, stream *core.Stream) {
+	mgr := m.getOrCreateLLHLS(streamKey, stream)
+
+	// Parse blocking reload params
+	targetMSN := -1
+	targetPart := -1
+	skip := false
+
+	if msn := r.URL.Query().Get("_HLS_msn"); msn != "" {
+		if n, err := strconv.Atoi(msn); err == nil {
+			targetMSN = n
+		}
+	}
+	if part := r.URL.Query().Get("_HLS_part"); part != "" {
+		if n, err := strconv.Atoi(part); err == nil {
+			targetPart = n
+		}
+	}
+	if r.URL.Query().Get("_HLS_skip") == "YES" {
+		skip = true
+	}
+
+	// For non-blocking requests, wait for at least one partial before serving
+	if targetMSN < 0 {
+		for i := 0; i < 100 && mgr.SegmentCount() == 0; i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	playlist, _ := mgr.GeneratePlaylist(r.Context(), targetMSN, targetPart, skip)
 
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -478,6 +575,94 @@ func (m *Module) serveDASHAudioSegment(w http.ResponseWriter, r *http.Request, s
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "public, max-age=10")
+	w.Write(data)
+}
+
+// serveLLHLSPartialSegment serves a partial segment by MSN and part index.
+func (m *Module) serveLLHLSPartialSegment(w http.ResponseWriter, _ *http.Request, streamKey string, msn, partIdx int) {
+	m.llhlsMu.Lock()
+	mgr, ok := m.llhlsManagers[streamKey]
+	m.llhlsMu.Unlock()
+
+	if !ok {
+		http.Error(w, "no LL-HLS session for this stream", http.StatusNotFound)
+		return
+	}
+
+	data, found := mgr.GetPartialSegment(msn, partIdx)
+	if !found {
+		http.Error(w, "partial segment not found", http.StatusNotFound)
+		return
+	}
+
+	contentType := "video/mp4"
+	if m.server.Config().HTTP.LLHLS.Container == "ts" {
+		contentType = "video/mp2t"
+	}
+
+	m.setCORSHeaders(w)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
+}
+
+// serveLLHLSFullSegment serves a completed full segment by MSN.
+func (m *Module) serveLLHLSFullSegment(w http.ResponseWriter, _ *http.Request, streamKey string, msn int) {
+	m.llhlsMu.Lock()
+	mgr, ok := m.llhlsManagers[streamKey]
+	m.llhlsMu.Unlock()
+
+	if !ok {
+		http.Error(w, "no LL-HLS session for this stream", http.StatusNotFound)
+		return
+	}
+
+	data, found := mgr.GetFullSegment(msn)
+	if !found {
+		http.Error(w, "segment not found", http.StatusNotFound)
+		return
+	}
+
+	contentType := "video/mp4"
+	if m.server.Config().HTTP.LLHLS.Container == "ts" {
+		contentType = "video/mp2t"
+	}
+
+	m.setCORSHeaders(w)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.Write(data)
+}
+
+// serveLLHLSInit serves the fMP4 init segment from the LL-HLS manager.
+func (m *Module) serveLLHLSInit(w http.ResponseWriter, _ *http.Request, streamKey string) {
+	m.llhlsMu.Lock()
+	mgr, ok := m.llhlsManagers[streamKey]
+	m.llhlsMu.Unlock()
+
+	if !ok {
+		http.Error(w, "no LL-HLS session for this stream", http.StatusNotFound)
+		return
+	}
+
+	data, found := mgr.GetInitSegment()
+	if !found {
+		for range 50 {
+			time.Sleep(100 * time.Millisecond)
+			data, found = mgr.GetInitSegment()
+			if found {
+				break
+			}
+		}
+	}
+	if !found {
+		http.Error(w, "init segment not ready", http.StatusNotFound)
+		return
+	}
+
+	m.setCORSHeaders(w)
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Write(data)
 }
 
