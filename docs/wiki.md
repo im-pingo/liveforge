@@ -1160,7 +1160,9 @@ notify:
 
 ### ffplay LL-HLS first play stutter
 
-If the first LL-HLS playback stutters every ~2 seconds but subsequent plays are smooth, ensure `gop_cache` is enabled in the `stream` config (it is by default). The LL-HLS segmenter uses the GOP cache to pre-populate the first segment so content is available immediately when the first client connects. Without the GOP cache, the playlist starts empty and the player starves for data until segments accumulate.
+FFmpeg's HLS demuxer does not support LL-HLS extensions (`EXT-X-PART`, blocking reload). It treats the playlist as standard HLS and needs at least 3 completed segments for smooth playback (due to `live_start_index=-3`). LiveForge automatically detects legacy clients (no `_HLS_msn` query parameter) and holds the first playlist response until 3 segments are available. This adds ~4-6 seconds of initial latency for ffplay but ensures stutter-free playback. LL-HLS-aware clients (hls.js, Safari) are unaffected and get sub-second latency via blocking reload.
+
+If stutter persists, ensure `gop_cache` is enabled in the `stream` config (it is by default) — the segmenter uses the GOP cache to pre-populate the first segment.
 
 ### ffplay DASH stuttering
 
