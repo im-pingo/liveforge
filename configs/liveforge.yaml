@@ -37,7 +37,7 @@ http_stream:
     enabled: true
     part_duration: 0.2
     segment_count: 4
-    container: "mpegts"
+    container: "fmp4"
 
 websocket:
   enabled: false
