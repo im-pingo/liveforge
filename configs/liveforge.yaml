@@ -33,6 +33,11 @@ http_stream:
   dash:
     segment_duration: 6
     playlist_size: 30
+  llhls:
+    enabled: false
+    part_duration: 0.2
+    segment_count: 4
+    container: "fmp4"
 
 websocket:
   enabled: false

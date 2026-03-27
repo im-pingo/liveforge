@@ -134,6 +134,57 @@ srt:
 	}
 }
 
+func TestLLHLSConfigParsing(t *testing.T) {
+	yaml := `
+http_stream:
+  llhls:
+    enabled: true
+    part_duration: 0.3
+    segment_count: 5
+    container: "ts"
+`
+	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
+	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.HTTP.LLHLS.Enabled {
+		t.Error("expected llhls.enabled=true")
+	}
+	if cfg.HTTP.LLHLS.PartDuration != 0.3 {
+		t.Errorf("part_duration = %v, want 0.3", cfg.HTTP.LLHLS.PartDuration)
+	}
+	if cfg.HTTP.LLHLS.SegmentCount != 5 {
+		t.Errorf("segment_count = %v, want 5", cfg.HTTP.LLHLS.SegmentCount)
+	}
+	if cfg.HTTP.LLHLS.Container != "ts" {
+		t.Errorf("container = %q, want %q", cfg.HTTP.LLHLS.Container, "ts")
+	}
+}
+
+func TestLLHLSConfigDefaults(t *testing.T) {
+	yaml := `
+http_stream:
+  listen: ":8080"
+`
+	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
+	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTP.LLHLS.Enabled {
+		t.Error("expected llhls.enabled=false by default")
+	}
+	if cfg.HTTP.LLHLS.PartDuration != 0.2 {
+		t.Errorf("default part_duration = %v, want 0.2", cfg.HTTP.LLHLS.PartDuration)
+	}
+	if cfg.HTTP.LLHLS.Container != "fmp4" {
+		t.Errorf("default container = %q, want %q", cfg.HTTP.LLHLS.Container, "fmp4")
+	}
+}
+
 func TestLoadConfigSRTDefaults(t *testing.T) {
 	yaml := `{}`
 	dir := t.TempDir()

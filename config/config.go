@@ -70,8 +70,9 @@ type HTTPConfig struct {
 	Listen  string `yaml:"listen"`
 	CORS    bool   `yaml:"cors"`
 	TLS     *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
-	HLS     HLSConfig  `yaml:"hls"`
-	DASH    DASHConfig `yaml:"dash"`
+	HLS     HLSConfig   `yaml:"hls"`
+	DASH    DASHConfig  `yaml:"dash"`
+	LLHLS   LLHLSConfig `yaml:"llhls"`
 }
 
 // HLSConfig holds HLS streaming settings.
@@ -84,6 +85,14 @@ type HLSConfig struct {
 type DASHConfig struct {
 	SegmentDuration float64 `yaml:"segment_duration"` // seconds, default 6
 	PlaylistSize    int     `yaml:"playlist_size"`    // max segments in manifest, default 5
+}
+
+// LLHLSConfig holds Low-Latency HLS settings.
+type LLHLSConfig struct {
+	Enabled      bool    `yaml:"enabled"`
+	PartDuration float64 `yaml:"part_duration"` // partial segment target duration in seconds (default 0.2)
+	SegmentCount int     `yaml:"segment_count"` // full segments in playlist window (default 4)
+	Container    string  `yaml:"container"`     // "fmp4" or "ts" (default "fmp4")
 }
 
 // WSConfig holds WebSocket module settings.
