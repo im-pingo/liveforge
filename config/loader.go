@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +22,8 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+
+	normalize(cfg)
 
 	return cfg, nil
 }
@@ -82,5 +85,13 @@ func defaults() *Config {
 		API: APIConfig{
 			Listen: ":8090",
 		},
+	}
+}
+
+// normalize canonicalizes config values (e.g. container name aliases).
+func normalize(cfg *Config) {
+	switch strings.ToLower(cfg.HTTP.LLHLS.Container) {
+	case "mpegts", "mpeg-ts":
+		cfg.HTTP.LLHLS.Container = "ts"
 	}
 }
