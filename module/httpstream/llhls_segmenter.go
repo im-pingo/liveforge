@@ -62,8 +62,26 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 
 	s.initMuxer(stream)
 
-	// Start from current write position — skip GOP cache for low latency
-	reader := stream.RingBuffer().NewReaderAt(stream.RingBuffer().WriteCursor())
+	// Process GOP cache to pre-populate the first segment so the playlist
+	// has content immediately when the first client connects (avoids
+	// cold-start stutter).
+	startPos := stream.RingBuffer().WriteCursor()
+	gopCache := stream.GOPCache()
+	var gopEndDTS int64
+	for _, f := range gopCache {
+		if f.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		gopEndDTS = f.DTS
+		s.processFrame(f)
+	}
+	// Finalize the GOP-based segment so it appears in the playlist right away.
+	if s.segHasData {
+		s.flushCurrentPart(gopEndDTS)
+		s.flushCurrentSegment()
+	}
+
+	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		select {
 		case <-s.done:
@@ -80,6 +98,11 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		// Skip frames already included in the GOP cache segment to avoid
+		// DTS overlap between the first two segments.
+		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
 			continue
 		}
 
@@ -221,11 +244,21 @@ func (s *LLHLSSegmenter) flushCurrentPart(endDTS int64) {
 		}
 	case "ts":
 		if s.partBuf.Len() > 0 {
-			// Prepend PAT/PMT at the start of each partial for independent playback
-			patpmt := s.tsMuxer.WritePATAndPMT()
-			data = make([]byte, 0, len(patpmt)+s.partBuf.Len())
-			data = append(data, patpmt...)
-			data = append(data, s.partBuf.Bytes()...)
+			bufData := s.partBuf.Bytes()
+			// The first partial of each segment (partIdx==0) starts with a
+			// keyframe. writeVideoFrame already embeds PAT/PMT before
+			// keyframes, so we must NOT prepend again — that would create
+			// out-of-order continuity counters that break demuxers.
+			// Non-keyframe partials (and audio-only streams) need PAT/PMT.
+			if s.partIdx > 0 || !s.hasVideo {
+				patpmt := s.tsMuxer.WritePATAndPMT()
+				data = make([]byte, 0, len(patpmt)+len(bufData))
+				data = append(data, patpmt...)
+				data = append(data, bufData...)
+			} else {
+				data = make([]byte, len(bufData))
+				copy(data, bufData)
+			}
 			s.partBuf.Reset()
 		}
 	}
