@@ -79,15 +79,22 @@ func (s *Subscriber) Run() {
 
 	muxer := ts.NewMuxer(mi.VideoCodec, mi.AudioCodec, videoSeqData, audioSeqData)
 
-	// Send GOP cache first for fast startup.
+	// Send GOP cache first for fast startup; track the highest DTS sent
+	// so we can skip duplicate frames from the ring buffer.
+	var lastDTS int64
 	for _, frame := range stream.GOPCache() {
 		if err := s.sendFrame(muxer, frame); err != nil {
 			return
 		}
+		if frame.DTS > lastDTS {
+			lastDTS = frame.DTS
+		}
 	}
 
-	// Read live frames from ring buffer.
-	reader := stream.RingBuffer().NewReader()
+	// Start the ring buffer reader from the current write position to avoid
+	// reading the entire backlog. Combined with the DTS filter below, this
+	// prevents backward DTS jumps while tolerating small overlaps.
+	reader := stream.RingBuffer().NewReaderAt(stream.RingBuffer().WriteCursor())
 	for {
 		select {
 		case <-s.closed:
@@ -104,6 +111,11 @@ func (s *Subscriber) Run() {
 		}
 
 		if frame == nil || frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+
+		// Skip frames already covered by the GOP cache
+		if frame.DTS <= lastDTS {
 			continue
 		}
 
