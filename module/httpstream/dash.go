@@ -197,9 +197,10 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	hasData := false
 
 	// Helper: finalize current segment into separate video and audio segments.
-	finalize := func(endDTS int64) {
+	// Returns audio frames that belong to the next segment (DTS >= endDTS).
+	finalize := func(endDTS int64) []*avframe.AVFrame {
 		if len(currentVideoFrames) == 0 && len(currentAudioFrames) == 0 {
-			return
+			return nil
 		}
 		dur := float64(endDTS-segStartDTS) / 1000.0
 		if dur <= 0 {
@@ -208,6 +209,20 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 		if d.dtsBase == 0 {
 			d.dtsBase = segStartDTS
+		}
+
+		// Split audio frames at the segment boundary. Audio frames read
+		// from the ring buffer before the video keyframe may have DTS
+		// values >= endDTS. Including them in this segment would cause
+		// DTS overlap with the next segment, triggering ffplay's
+		// "DTS out of order" error.
+		var segAudio, carryOver []*avframe.AVFrame
+		for _, f := range currentAudioFrames {
+			if f.DTS >= endDTS {
+				carryOver = append(carryOver, f)
+			} else {
+				segAudio = append(segAudio, f)
+			}
 		}
 
 		// Build video segment with rebased DTS.
@@ -225,9 +240,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 		// Build audio segment with rebased DTS.
 		var audioData []byte
-		if audioMuxer != nil && len(currentAudioFrames) > 0 {
-			rebased := make([]*avframe.AVFrame, len(currentAudioFrames))
-			for i, f := range currentAudioFrames {
+		if audioMuxer != nil && len(segAudio) > 0 {
+			rebased := make([]*avframe.AVFrame, len(segAudio))
+			for i, f := range segAudio {
 				rf := *f
 				rf.DTS -= d.dtsBase
 				rf.PTS -= d.dtsBase
@@ -269,6 +284,8 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 		currentVideoFrames = currentVideoFrames[:0]
 		currentAudioFrames = currentAudioFrames[:0]
+
+		return carryOver
 	}
 
 	// Process GOP cache.
@@ -315,8 +332,12 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 		// Split on video keyframes
 		if frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && hasData && (len(currentVideoFrames) > 0 || len(currentAudioFrames) > 0) {
-			finalize(frame.DTS)
+			carryOver := finalize(frame.DTS)
 			segStartDTS = frame.DTS
+			// Carry over audio frames that belong to this new segment.
+			if len(carryOver) > 0 {
+				currentAudioFrames = append(currentAudioFrames, carryOver...)
+			}
 		}
 
 		if !hasData {
