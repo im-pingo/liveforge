@@ -1169,6 +1169,15 @@ If stutter persists, ensure `gop_cache` is enabled in the `stream` config (it is
 - LiveForge uses `SegmentTimeline` in the MPD. Ensure you're using a recent ffplay/ffmpeg build.
 - If playback gaps occur, the source encoder may have irregular keyframe intervals.
 
+### DASH audio error in browser
+
+If Chrome/Edge shows `CHUNK_DEMUXER_ERROR_APPEND_FAILED: audio object type 0x40 does not match what is specified in the mimetype`, the fMP4 init segment's ESDS descriptor format is incompatible with the browser's MSE parser. This was fixed by:
+
+- Using the ISO 14496-1 4-byte expandable descriptor length encoding in the ESDS box (required by Chrome MSE).
+- Parsing the actual `audioObjectType` from the AudioSpecificConfig so the DASH codec string (e.g. `mp4a.40.2` for AAC-LC, `mp4a.40.5` for HE-AAC) matches the ESDS.
+
+If you encounter this error on an older version, upgrade to the latest build.
+
 ### WebRTC connection failure
 
 - Check that the `udp_port_range` ports are open in the firewall

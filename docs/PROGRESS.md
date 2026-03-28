@@ -11,8 +11,8 @@
 
 **Liveforge** is a high-performance media streaming server written in Go, supporting multi-protocol ingest and playback.
 
-- **Code volume**: ~15,400 lines (excluding tests), ~23,500 total
-- **Commits**: 97
+- **Code volume**: ~17,000 lines (excluding tests), ~26,300 total
+- **Commits**: 114
 - **Test packages**: 25 with tests, all passing, 0 failures
 - **Author**: im-pingo <cczjp89@gmail.com>
 
@@ -211,6 +211,7 @@ liveforge/
 |-------|-------------|----------|
 | RTMP pull initial stutter | GOP cache burst causes ffplay frame drops on join | Low (expected live stream behavior) |
 | ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start + 3-segment hold for legacy players) |
+| ~~DASH audio in browser~~ | ~~Chrome MSE rejected audio: ESDS descriptor length encoding + hardcoded codec string~~ | **Fixed** (4-byte expandable ESDS lengths + dynamic audioObjectType in codec string) |
 | No Prometheus metrics | No metrics endpoint exposed | Low |
 
 ---
