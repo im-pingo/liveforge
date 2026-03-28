@@ -438,6 +438,10 @@ func (d *DASHManager) GenerateMPD() string {
 		int(math.Ceil(bufferDepth)),
 	)
 	sb.WriteString("\n")
+	// UTCTiming: embed the current server time directly so dash.js can
+	// synchronize its clock without a separate round-trip.
+	fmt.Fprintf(&sb, "  <UTCTiming schemeIdUri=\"urn:mpeg:dash:utc:direct:2014\" value=\"%s\"/>\n",
+		time.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
 	sb.WriteString(`  <Period id="0" start="PT0S">` + "\n")
 
 	// Video AdaptationSet with SegmentTimeline.
