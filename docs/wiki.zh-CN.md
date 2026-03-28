@@ -1179,6 +1179,15 @@ FFmpeg 的 HLS 解复用器不支持 LL-HLS 扩展（`EXT-X-PART`、阻塞式重
 - LiveForge 在 MPD 中使用 `SegmentTimeline`。请确保使用较新版本的 ffplay/ffmpeg。
 - 如果出现播放间隙，可能是源编码器的关键帧间隔不规则。
 
+### 浏览器 DASH 音频错误
+
+如果 Chrome/Edge 显示 `CHUNK_DEMUXER_ERROR_APPEND_FAILED: audio object type 0x40 does not match what is specified in the mimetype`，说明 fMP4 初始化段的 ESDS 描述符格式与浏览器的 MSE 解析器不兼容。修复方式：
+
+- 在 ESDS box 中使用 ISO 14496-1 4 字节可扩展描述符长度编码（Chrome MSE 要求此格式）。
+- 从 AudioSpecificConfig 解析实际的 `audioObjectType`，使 DASH 编解码器字符串（如 AAC-LC 为 `mp4a.40.2`，HE-AAC 为 `mp4a.40.5`）与 ESDS 匹配。
+
+如遇此错误，请升级到最新版本。
+
 ### WebRTC 连接失败
 
 - 检查防火墙是否开放了 `udp_port_range` 端口

@@ -10,6 +10,7 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/codec/aac"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 )
 
@@ -117,7 +118,7 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 	d.videoInitSeg = videoInit
 	d.audioInitSeg = audioInit
 	d.hasAudio = audioCodec != 0
-	d.audioCodec = dashAudioCodecString(audioCodec)
+	d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
 	d.videoWidth = videoWidth
 	d.videoHeight = videoHeight
 	d.videoCodecStr = dashVideoCodecString(videoCodec, videoSeqHeader)
@@ -180,7 +181,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			d.videoInitSeg = videoInit
 			d.audioInitSeg = audioInit
 			d.hasAudio = audioCodec != 0
-			d.audioCodec = dashAudioCodecString(audioCodec)
+			d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
 		}
 		d.mu.Unlock()
 	} else {
@@ -551,10 +552,19 @@ func dashVideoCodecString(codec avframe.CodecType, seqHeader *avframe.AVFrame) s
 }
 
 // dashAudioCodecString returns the DASH codecs string for an audio codec.
-func dashAudioCodecString(codec avframe.CodecType) string {
+// For AAC it parses the AudioSpecificConfig to extract the actual audioObjectType
+// so the codec string (e.g. "mp4a.40.2" for AAC-LC, "mp4a.40.5" for HE-AAC)
+// matches the ESDS in the init segment. Chrome MSE validates this match.
+func dashAudioCodecString(codec avframe.CodecType, audioSeqHeader *avframe.AVFrame) string {
 	switch codec {
 	case avframe.CodecAAC:
-		return "mp4a.40.2"
+		aot := 2 // default: AAC-LC
+		if audioSeqHeader != nil && len(audioSeqHeader.Payload) >= 2 {
+			if info, err := aac.ParseAudioSpecificConfig(audioSeqHeader.Payload); err == nil {
+				aot = info.ObjectType
+			}
+		}
+		return fmt.Sprintf("mp4a.40.%d", aot)
 	case avframe.CodecOpus:
 		return "opus"
 	case avframe.CodecMP3:

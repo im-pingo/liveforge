@@ -286,33 +286,64 @@ func writeAudioSampleEntry(w *bytes.Buffer, codec avframe.CodecType, seqHeader [
 }
 
 func writeEsds(w *bytes.Buffer, audioSpecificConfig []byte) {
-	// Simplified ESDS box containing the AudioSpecificConfig
+	// ESDS box containing the AudioSpecificConfig.
+	// Uses ISO 14496-1 expandable 4-byte descriptor length encoding
+	// for maximum compatibility (Chrome MSE requires this format).
 	ascLen := len(audioSpecificConfig)
-	payload := make([]byte, 0, 27+ascLen)
+
+	// Build from the innermost descriptors outward so sizes are exact.
+
+	// DecoderSpecificInfo tag=0x05: [tag(1)][size(4)][ASC(n)]
+	decSpecInfoLen := ascLen
+
+	// SLConfigDescriptor tag=0x06: [tag(1)][size(4)][predefined(1)]
+	slConfigLen := 1
+
+	// DecoderConfigDescriptor tag=0x04: [tag(1)][size(4)][OTI(1)][streamType(1)][bufSize(3)][maxBR(4)][avgBR(4)][DecoderSpecificInfo(5+n)][SLConfig: not nested here]
+	decConfPayloadLen := 13 + (1 + 4 + decSpecInfoLen) // 13 fixed bytes + DecoderSpecificInfo descriptor
+
+	// ES_Descriptor tag=0x03: [tag(1)][size(4)][ES_ID(2)][flags(1)][DecoderConfigDescriptor(5+...)][SLConfigDescriptor(5+1)]
+	esDescPayloadLen := 3 + (1 + 4 + decConfPayloadLen) + (1 + 4 + slConfigLen)
+
+	payload := make([]byte, 0, 1+4+esDescPayloadLen)
 
 	// ES_Descriptor tag=0x03
-	esDescLen := 23 + ascLen
-	payload = append(payload, 0x03, byte(esDescLen))
+	payload = append(payload, 0x03)
+	payload = appendDescriptorLength(payload, esDescPayloadLen)
 	payload = append(payload, 0x00, 0x01) // ES_ID = 1
 	payload = append(payload, 0x00)       // stream priority
 
 	// DecoderConfigDescriptor tag=0x04
-	decConfLen := 15 + ascLen
-	payload = append(payload, 0x04, byte(decConfLen))
-	payload = append(payload, 0x40) // objectTypeIndication = AAC
+	payload = append(payload, 0x04)
+	payload = appendDescriptorLength(payload, decConfPayloadLen)
+	payload = append(payload, 0x40) // objectTypeIndication = AAC (ISO 14496-3)
 	payload = append(payload, 0x15) // streamType = audio (5<<2 | 1)
 	payload = append(payload, 0x00, 0x00, 0x00) // bufferSizeDB
 	payload = append(payload, 0x00, 0x01, 0xF4, 0x00) // maxBitrate
 	payload = append(payload, 0x00, 0x01, 0xF4, 0x00) // avgBitrate
 
 	// DecoderSpecificInfo tag=0x05
-	payload = append(payload, 0x05, byte(ascLen))
+	payload = append(payload, 0x05)
+	payload = appendDescriptorLength(payload, decSpecInfoLen)
 	payload = append(payload, audioSpecificConfig...)
 
 	// SLConfigDescriptor tag=0x06
-	payload = append(payload, 0x06, 0x01, 0x02)
+	payload = append(payload, 0x06)
+	payload = appendDescriptorLength(payload, slConfigLen)
+	payload = append(payload, 0x02) // predefined = MP4
 
 	WriteFullBox(w, BoxEsds, 0, 0, payload)
+}
+
+// appendDescriptorLength appends a 4-byte ISO 14496-1 expandable size encoding.
+// This is the standard format expected by Chrome MSE and most MP4 parsers.
+func appendDescriptorLength(buf []byte, length int) []byte {
+	return append(buf,
+		byte((length>>21)&0x7F)|0x80,
+		byte((length>>14)&0x7F)|0x80,
+		byte((length>>7)&0x7F)|0x80,
+		byte(length&0x7F),
+	)
 }
 
 func writeMvex(w *bytes.Buffer, hasVideo, hasAudio bool) {
