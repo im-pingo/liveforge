@@ -6,7 +6,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-24%20packages%20passing-brightgreen)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-25%20packages%20passing-brightgreen)](#测试)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -14,12 +14,13 @@
 
 ---
 
-LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频的接入、转封装和分发。支持 RTMP、RTSP、WebRTC（WHIP/WHEP）、HLS、DASH、HTTP-FLV、FMP4 和 WebSocket 推拉流 —— 单一可执行文件，零外部依赖。
+LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频的接入、转封装和分发。支持 RTMP、RTSP、SRT、WebRTC（WHIP/WHEP）、HLS、DASH、HTTP-FLV、FMP4 和 WebSocket 推拉流 —— 单一可执行文件，零外部依赖。
 
 ## 特性
 
-- **多协议推流** — 支持 RTMP、RTSP（TCP + UDP）、WebRTC WHIP 推流，兼容 OBS、FFmpeg、GStreamer 及浏览器
-- **多协议拉流** — 支持 RTMP、RTSP、WebRTC WHEP、HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket 播放
+- **多协议推流** — 支持 RTMP、RTSP（TCP + UDP）、SRT、WebRTC WHIP 推流，兼容 OBS、FFmpeg、GStreamer 及浏览器
+- **多协议拉流** — 支持 RTMP、RTSP、SRT、WebRTC WHEP、HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket 播放
+- **SRT 支持** — 安全可靠传输协议，支持 AES 加密，低延迟 MPEG-TS 传输（基于纯 Go 实现 `datarhei/gosrt`）
 - **浏览器推拉流** — 内置 Web 控制台支持 WHIP 推流（摄像头/麦克风）和 WHEP 播放，实时统计覆盖层
 - **协议桥接** — RTMP 推流可用 WebRTC 拉取，WebRTC 推流可用 HLS 播放，任意协议组合互通
 - **编解码支持** — H.264、H.265/HEVC、VP8、VP9、AV1、AAC、Opus、G.711、MP3 等
@@ -38,12 +39,14 @@ graph LR
     subgraph 推流端
         OBS[OBS / FFmpeg] -->|RTMP| RTMP_MOD[RTMP 模块]
         CAM[IP 摄像头] -->|RTSP| RTSP_MOD[RTSP 模块]
+        SRT_PUB[SRT 源] -->|SRT| SRT_MOD[SRT 模块]
         BROWSER_PUB[浏览器] -->|WHIP| WEBRTC_MOD[WebRTC 模块]
     end
 
     subgraph 核心
         RTMP_MOD --> STREAM[Stream + GOP 缓存 + 环形缓冲区]
         RTSP_MOD --> STREAM
+        SRT_MOD --> STREAM
         WEBRTC_MOD --> STREAM
         STREAM --> MUXER[封装管理器]
     end
@@ -54,6 +57,7 @@ graph LR
         MUXER -->|WebSocket| HTTP_MOD
         STREAM -->|RTMP| RTMP_SUB[RTMP 订阅者]
         STREAM -->|RTSP| RTSP_SUB[RTSP 订阅者]
+        STREAM -->|SRT| SRT_SUB[SRT 订阅者]
         STREAM -->|WHEP| WEBRTC_SUB[WebRTC 订阅者]
     end
 
@@ -88,6 +92,11 @@ ffmpeg -re -i input.mp4 -c copy -f flv rtmp://localhost:1935/live/stream1
 ffmpeg -re -i input.mp4 -c copy -f rtsp rtsp://localhost:8554/live/stream1
 ```
 
+**SRT：**
+```bash
+ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish:/live/stream1"
+```
+
 **WebRTC（浏览器）：**
 打开 `http://localhost:8090/console`，点击 **"+ WebRTC Publish"**，选择摄像头/麦克风后开始推流。
 
@@ -97,6 +106,7 @@ ffmpeg -re -i input.mp4 -c copy -f rtsp rtsp://localhost:8554/live/stream1
 |------|------|
 | RTMP | `rtmp://localhost:1935/live/stream1` |
 | RTSP | `rtsp://localhost:8554/live/stream1` |
+| SRT | `srt://localhost:6000?streamid=subscribe:/live/stream1` |
 | HLS | `http://localhost:8080/live/stream1.m3u8` |
 | DASH | `http://localhost:8080/live/stream1.mpd` |
 | HTTP-FLV | `http://localhost:8080/live/stream1.flv` |
@@ -126,6 +136,7 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 | `rtsp` | RTSP 推拉流，TCP + UDP（默认 `:8554`） |
 | `http_stream` | HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket（默认 `:8080`） |
 | `webrtc` | WHIP/WHEP，ICE 服务器和 UDP 端口范围（默认 `:8443`） |
+| `srt` | SRT 推拉流，AES 加密（默认 `:6000`） |
 | `api` | REST API 和 Web 控制台（默认 `:8090`） |
 | `auth` | JWT 和 HTTP 回调鉴权 |
 | `record` | FLV 录制及分段 |
@@ -149,6 +160,7 @@ liveforge/
 │   ├── record/          # FLV 流录制
 │   ├── rtmp/            # RTMP 协议（握手、分块、AMF0）
 │   ├── rtsp/            # RTSP 协议（TCP + UDP 传输）
+│   ├── srt/             # SRT 协议（基于 datarhei/gosrt）
 │   └── webrtc/          # WebRTC WHIP/WHEP（基于 pion/webrtc）
 ├── pkg/
 │   ├── avframe/         # 音视频帧类型定义
@@ -162,7 +174,7 @@ liveforge/
 
 ## 测试
 
-24 个测试包，全部通过：
+25 个测试包，全部通过：
 
 ```bash
 go test ./...
@@ -177,6 +189,7 @@ go test -cover ./...    # 查看覆盖率
 | 语言 | Go | Go | C++ | Go |
 | RTMP | 支持 | 支持 | 支持 | 支持 |
 | RTSP | 支持（TCP+UDP） | 支持 | 支持 | 插件 |
+| SRT | 支持（纯 Go） | 支持 | 支持 | 插件 |
 | WebRTC WHIP/WHEP | 支持 | 支持 | 支持 | 插件 |
 | HLS/DASH | 支持 | 支持 | 支持 | 插件 |
 | HTTP-FLV | 支持 | 不支持 | 支持 | 插件 |
@@ -193,12 +206,12 @@ go test -cover ./...    # 查看覆盖率
 
 完整文档涵盖所有功能、配置、使用场景和故障排查：
 
-- **[Wiki (GitHub)](../../wiki)** — GitHub Wiki 完整文档（English / 中文）
-- **[Wiki (English)](docs/wiki.md)** | **[Wiki (中文)](docs/wiki.zh-CN.md)** — 仓库内同步文档
+- **[Wiki (English)](../../wiki)** | **[Wiki (中文)](../../wiki/Home-zh)** — GitHub Wiki 完整文档
 
 ## 路线图
 
 - [x] TLS / HTTPS 支持
+- [x] SRT 协议
 - [ ] SIP 网关
 - [ ] 集群转发和回源
 - [x] WebSocket 通知
