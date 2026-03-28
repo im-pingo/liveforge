@@ -211,7 +211,7 @@ liveforge/
 |-------|-------------|----------|
 | RTMP pull initial stutter | GOP cache burst causes ffplay frame drops on join | Low (expected live stream behavior) |
 | ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start + 3-segment hold for legacy players) |
-| ~~DASH audio in browser~~ | ~~Chrome MSE rejected audio: ESDS descriptor length encoding + hardcoded codec string~~ | **Fixed** (4-byte expandable ESDS lengths + dynamic audioObjectType in codec string) |
+| ~~DASH audio in browser~~ | ~~Chrome MSE rejected audio: LL-HLS/DASH init segment URL conflict + ESDS encoding~~ | **Fixed** (separate `vinit.mp4` for DASH + 4-byte ESDS lengths + dynamic codec string) |
 | No Prometheus metrics | No metrics endpoint exposed | Low |
 
 ---

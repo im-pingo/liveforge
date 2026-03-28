@@ -1181,10 +1181,13 @@ FFmpeg 的 HLS 解复用器不支持 LL-HLS 扩展（`EXT-X-PART`、阻塞式重
 
 ### 浏览器 DASH 音频错误
 
-如果 Chrome/Edge 显示 `CHUNK_DEMUXER_ERROR_APPEND_FAILED: audio object type 0x40 does not match what is specified in the mimetype`，说明 fMP4 初始化段的 ESDS 描述符格式与浏览器的 MSE 解析器不兼容。修复方式：
+如果 Chrome/Edge 显示 `CHUNK_DEMUXER_ERROR_APPEND_FAILED: audio object type 0x40 does not match what is specified in the mimetype`，原因是 LL-HLS 和 DASH 初始化段的 URL 冲突。当 LL-HLS（fmp4 模式）和 DASH 同时活跃时，`init.mp4` 被两个协议共用。dash.js 为音频和视频创建独立的 SourceBuffer，但 `init.mp4` 返回的是 LL-HLS 的合并（视频+音频）初始化段。Chrome 的 MSE 发现了意外的音频轨道并拒绝了它。
 
-- 在 ESDS box 中使用 ISO 14496-1 4 字节可扩展描述符长度编码（Chrome MSE 要求此格式）。
-- 从 AudioSpecificConfig 解析实际的 `audioObjectType`，使 DASH 编解码器字符串（如 AAC-LC 为 `mp4a.40.2`，HE-AAC 为 `mp4a.40.5`）与 ESDS 匹配。
+修复方式：
+
+- DASH 现在使用 `vinit.mp4` 作为视频初始化段 URL，避免与 LL-HLS 冲突。
+- ESDS 使用 ISO 14496-1 4 字节可扩展描述符长度编码（兼容 Chrome MSE）。
+- DASH 编解码器字符串现在从 AudioSpecificConfig 解析实际的 `audioObjectType`。
 
 如遇此错误，请升级到最新版本。
 

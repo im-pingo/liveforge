@@ -1171,10 +1171,13 @@ If stutter persists, ensure `gop_cache` is enabled in the `stream` config (it is
 
 ### DASH audio error in browser
 
-If Chrome/Edge shows `CHUNK_DEMUXER_ERROR_APPEND_FAILED: audio object type 0x40 does not match what is specified in the mimetype`, the fMP4 init segment's ESDS descriptor format is incompatible with the browser's MSE parser. This was fixed by:
+If Chrome/Edge shows `CHUNK_DEMUXER_ERROR_APPEND_FAILED: audio object type 0x40 does not match what is specified in the mimetype`, this is caused by a URL conflict between LL-HLS and DASH init segments. When both LL-HLS (fmp4 mode) and DASH are active, `init.mp4` was shared by both protocols. dash.js creates separate SourceBuffers for video and audio, but `init.mp4` returned the LL-HLS combined (video+audio) init segment. Chrome's MSE found an unexpected audio track and rejected it.
 
-- Using the ISO 14496-1 4-byte expandable descriptor length encoding in the ESDS box (required by Chrome MSE).
-- Parsing the actual `audioObjectType` from the AudioSpecificConfig so the DASH codec string (e.g. `mp4a.40.2` for AAC-LC, `mp4a.40.5` for HE-AAC) matches the ESDS.
+Fixed by:
+
+- DASH now uses `vinit.mp4` for its video init segment, avoiding the LL-HLS conflict.
+- ESDS uses the ISO 14496-1 4-byte expandable descriptor length encoding (Chrome MSE compatible).
+- The DASH codec string now parses the actual `audioObjectType` from the AudioSpecificConfig.
 
 If you encounter this error on an older version, upgrade to the latest build.
 
