@@ -206,13 +206,12 @@ go test -cover ./...    # with coverage
 
 For comprehensive documentation covering all features, configuration, usage scenarios, and troubleshooting:
 
-- **[Wiki (GitHub)](../../wiki)** — Full documentation on GitHub Wiki (English / 中文)
-- **[Wiki (English)](docs/wiki.md)** | **[Wiki (中文)](docs/wiki.zh-CN.md)** — Same content in the repository
+- **[Wiki (English)](../../wiki)** | **[Wiki (中文)](../../wiki/Home-zh)** — Full documentation on GitHub Wiki
 
 ## Roadmap
 
 - [x] TLS / HTTPS
-- [ ] SRT protocol (in progress)
+- [x] SRT protocol
 - [ ] SIP gateway
 - [ ] Cluster forwarding and origin pull
 - [x] WebSocket notifications
