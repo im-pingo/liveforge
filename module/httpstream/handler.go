@@ -179,9 +179,15 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid segment path", http.StatusBadRequest)
 			return
 		case "mp4":
-			// Init segments: /app/key/init.mp4 (LL-HLS or DASH)
-			// Audio init: /app/key/audio_init.mp4 (DASH)
+			// Init segments:
+			//   /app/key/init.mp4       — LL-HLS combined (video+audio) init, or DASH video-only fallback
+			//   /app/key/vinit.mp4      — DASH video-only init
+			//   /app/key/audio_init.mp4 — DASH audio-only init
 			streamKey := app + "/" + key
+			if segName == "vinit" {
+				m.serveDASHInit(w, r, streamKey)
+				return
+			}
 			if segName == "init" {
 				// LL-HLS init segment takes precedence if manager exists
 				m.llhlsMu.Lock()

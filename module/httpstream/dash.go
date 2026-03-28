@@ -442,7 +442,7 @@ func (d *DASHManager) GenerateMPD() string {
 
 	// Video AdaptationSet with SegmentTimeline.
 	sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s/init.mp4" media="%s/v$Number$.m4s">`,
+	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s/vinit.mp4" media="%s/v$Number$.m4s">`,
 		startNumber, d.basePath, d.basePath)
 	sb.WriteString("\n")
 	sb.WriteString("        <SegmentTimeline>\n")
