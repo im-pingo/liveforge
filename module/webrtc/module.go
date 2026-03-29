@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -56,13 +57,12 @@ func (m *Module) Init(s *core.Server) error {
 	se.SetIncludeLoopbackCandidate(true)
 
 	me := &webrtc.MediaEngine{}
-	if err := me.RegisterDefaultCodecs(); err != nil {
+	if err := registerCodecs(me); err != nil {
 		return err
 	}
 
-	// Register interceptors: NACK responder (retransmission), TWCC sender (congestion control),
-	// and RTCP report generation. Without these, browser NACK requests go unanswered,
-	// causing packet loss → decoder freeze → visible stutter.
+	// Register interceptors: NACK responder (retransmission), TWCC sender
+	// (congestion control), and RTCP report generation.
 	ir := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
 		return err
@@ -204,6 +204,71 @@ func (m *Module) handlePatch(w http.ResponseWriter, r *http.Request) {
 // handleOptions handles CORS preflight requests.
 func (m *Module) handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// registerCodecs registers the codecs we support. Each codec gets exactly one
+// entry (plus RTX) so the SDP answer stays compact and unambiguous.
+func registerCodecs(me *webrtc.MediaEngine) error {
+	// Audio: Opus.
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return err
+	}
+
+	videoFeedback := []webrtc.RTCPFeedback{
+		{Type: "goog-remb"},
+		{Type: "ccm", Parameter: "fir"},
+		{Type: "nack"},
+		{Type: "nack", Parameter: "pli"},
+	}
+
+	// Video codecs: one entry per codec + RTX.
+	videoCodecs := []struct {
+		mime    string
+		pt      webrtc.PayloadType
+		rtxPT   webrtc.PayloadType
+		fmtp    string
+	}{
+		{webrtc.MimeTypeVP8, 96, 97, ""},
+		{webrtc.MimeTypeVP9, 98, 99, "profile-id=0"},
+		{webrtc.MimeTypeH264, 106, 107, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
+		{webrtc.MimeTypeH265, 116, 117, ""},
+		{webrtc.MimeTypeAV1, 45, 46, ""},
+	}
+
+	for _, c := range videoCodecs {
+		if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:     c.mime,
+				ClockRate:    90000,
+				SDPFmtpLine:  c.fmtp,
+				RTCPFeedback: videoFeedback,
+			},
+			PayloadType: c.pt,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
+		}
+
+		if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:    webrtc.MimeTypeRTX,
+				ClockRate:   90000,
+				SDPFmtpLine: fmt.Sprintf("apt=%d", c.pt),
+			},
+			PayloadType: c.rtxPT,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // corsMiddleware adds CORS headers for browser-based WebRTC clients.

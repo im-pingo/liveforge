@@ -94,6 +94,14 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	// Create TrackSenders for video and audio. Each TrackSender owns its
 	// RTCP read loop, keeping RTCP dispatch independent of this handler.
+	//
+	// NOTE: We intentionally do NOT call SetCodecPreferences on the transceiver.
+	// pion's RTPSender.Send() resolves the payload type via codecParametersFuzzySearch
+	// against the MediaEngine's negotiated codec list (getRTPParametersByKind),
+	// which is NOT filtered by transceiver codec preferences. Calling
+	// SetCodecPreferences caused a PT mismatch: the SDP answer advertised one PT
+	// but pion's Bind resolved a different PT from the global negotiated list,
+	// resulting in Chrome receiving packets with an unexpected payload type.
 	var videoSender, audioSender *TrackSender
 
 	if info.HasVideo() {
@@ -106,7 +114,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				if s, err := pc.AddTrack(vt); err == nil {
 					videoSender = NewTrackSender(sessionID, vt, s)
-					restrictTransceiverCodec(pc, vt, mime)
 				}
 			}
 		}
@@ -130,7 +137,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				if s, err := pc.AddTrack(at); err == nil {
 					audioSender = NewTrackSender(sessionID, at, s)
-					restrictTransceiverCodec(pc, at, mime)
 				}
 			}
 		}
@@ -222,7 +228,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	// Start the feed goroutine. It waits for ICE+DTLS to complete before
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
-	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode)
+	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec)
 
 	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
@@ -248,7 +254,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 // mode controls startup behavior:
 //   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
 //   - "live": send GOP cache (paced at 10x speed), then live frames.
-func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string) {
+func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, videoCodec avframe.CodecType) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
@@ -260,36 +266,39 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	// Track the last DTS to compute sample durations.
 	var lastVideoDTS, lastAudioDTS int64
 
-	// Cache SPS/PPS in Annex-B format to prepend to keyframes.
-	// Chromium requires SPS/PPS to share the same RTP timestamp as the IDR
-	// NAL, so we cannot send them as separate WriteSample calls.
-	var spsppsBuf []byte
-	if sh := stream.VideoSeqHeader(); sh != nil {
-		spsppsBuf = pkgrtp.ToAnnexB(sh.Payload, true)
+	// For H264/H265: cache parameter sets (SPS/PPS or VPS/SPS/PPS) in Annex-B
+	// format to prepend to keyframes. Chromium requires parameter sets to share
+	// the same RTP timestamp as the IDR NAL.
+	var paramSetBuf []byte
+	needsAnnexB := videoCodec == avframe.CodecH264 || videoCodec == avframe.CodecH265
+	if needsAnnexB {
+		if sh := stream.VideoSeqHeader(); sh != nil {
+			paramSetBuf = pkgrtp.ToAnnexB(sh.Payload, true)
+		}
 	}
 
-	// writeVideoSample handles H264/H265 video frames:
-	// - SequenceHeader frames update the cached SPS/PPS but are NOT sent
-	//   as separate samples (they would get a different RTP timestamp).
-	// - Keyframes get SPS/PPS prepended so the decoder sees parameter sets
-	//   in the same access unit as the IDR slice.
-	// - Inter-frames are sent as-is.
-	// - When needsKeyframe is set (PLI/FIR received), inter-frames are
-	//   skipped until the next keyframe arrives, giving the decoder a clean
-	//   resync point without dual-goroutine media writes.
+	// writeVideoSample writes one video frame to the WebRTC track.
+	//
+	// Codec-specific handling:
+	//   H264/H265: AVCC/HVCC → Annex-B conversion; parameter sets prepended
+	//              to keyframes so the decoder sees them in the same access unit.
+	//   VP8/VP9/AV1: raw frame data passed directly to pion's packetizer.
+	//
+	// PLI/FIR resync: inter-frames are skipped until the next keyframe.
 	writeVideoSample := func(frame *avframe.AVFrame) {
 		if video == nil {
 			return
 		}
 
-		// SequenceHeader: cache the SPS/PPS, do not send as a sample.
+		// SequenceHeader: cache parameter sets, do not send as a sample.
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			spsppsBuf = pkgrtp.ToAnnexB(frame.Payload, true)
+			if needsAnnexB {
+				paramSetBuf = pkgrtp.ToAnnexB(frame.Payload, true)
+			}
 			return
 		}
 
 		// PLI/FIR resync: skip inter-frames until the next keyframe.
-		// This ensures the decoder gets a clean IDR to recover from.
 		// IMPORTANT: always advance lastVideoDTS even for skipped frames so
 		// the first keyframe after resync gets a normal ~40ms duration instead
 		// of a multi-second gap that corrupts Chrome's jitter buffer timing.
@@ -301,20 +310,29 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 				return
 			}
 			video.ClearNeedsKeyframe()
-			log.Printf("[webrtc] PLI resync: sending keyframe from feed loop (%d bytes payload)", len(frame.Payload))
+			log.Printf("[webrtc] PLI resync: sending keyframe (%d bytes)", len(frame.Payload))
 		}
 
-		payload := pkgrtp.ToAnnexB(frame.Payload, false)
-		if len(payload) == 0 {
-			return
-		}
-
-		// Prepend SPS/PPS to keyframes so they share the same RTP timestamp.
-		if frame.FrameType == avframe.FrameTypeKeyframe && len(spsppsBuf) > 0 {
-			combined := make([]byte, len(spsppsBuf)+len(payload))
-			copy(combined, spsppsBuf)
-			copy(combined[len(spsppsBuf):], payload)
-			payload = combined
+		var payload []byte
+		if needsAnnexB {
+			// H264/H265: convert AVCC/HVCC length-prefixed NALs to Annex-B.
+			payload = pkgrtp.ToAnnexB(frame.Payload, false)
+			if len(payload) == 0 {
+				return
+			}
+			// Prepend parameter sets to keyframes.
+			if frame.FrameType == avframe.FrameTypeKeyframe && len(paramSetBuf) > 0 {
+				combined := make([]byte, len(paramSetBuf)+len(payload))
+				copy(combined, paramSetBuf)
+				copy(combined[len(paramSetBuf):], payload)
+				payload = combined
+			}
+		} else {
+			// VP8/VP9/AV1: raw frame data, no conversion needed.
+			payload = frame.Payload
+			if len(payload) == 0 {
+				return
+			}
 		}
 
 		// Compute duration from DTS delta.
@@ -459,7 +477,6 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 					sleepDur := time.Until(targetTime)
 
 					if sleepDur > 0 && sleepDur < time.Second {
-						// Ahead of schedule: wait to match real-time rate.
 						timer := time.NewTimer(sleepDur)
 						select {
 						case <-timer.C:
@@ -469,11 +486,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 						}
 					} else if sleepDur < -500*time.Millisecond {
 						// Too far behind (>500ms): reset base to prevent permanent lag.
-						// This happens after a CPU stall or ring buffer overrun.
 						paceBaseWall = time.Now()
 						paceBaseDTS = frame.DTS
 					}
-					// If -500ms < sleepDur <= 0: slightly behind, send immediately (catch up).
 				}
 			}
 
@@ -489,32 +504,6 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			return
 		case <-stream.RingBuffer().Signal():
 		}
-	}
-}
-
-// restrictTransceiverCodec finds the transceiver for the given track and
-// restricts its codec preferences to only codecs matching the target MIME type.
-// This ensures the SDP answer only includes the codec we intend to send,
-// preventing payload type mismatches.
-func restrictTransceiverCodec(pc *webrtc.PeerConnection, track webrtc.TrackLocal, targetMime string) {
-	targetMimeLower := strings.ToLower(targetMime)
-	for _, tr := range pc.GetTransceivers() {
-		sender := tr.Sender()
-		if sender == nil || sender.Track() != track {
-			continue
-		}
-		// Get the sender's negotiated codec list and filter to matching MIME.
-		params := sender.GetParameters()
-		var filtered []webrtc.RTPCodecParameters
-		for _, c := range params.Codecs {
-			if strings.ToLower(c.MimeType) == targetMimeLower {
-				filtered = append(filtered, c)
-			}
-		}
-		if len(filtered) > 0 {
-			_ = tr.SetCodecPreferences(filtered)
-		}
-		return
 	}
 }
 
