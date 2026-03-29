@@ -237,6 +237,61 @@ func TestToAnnexBAVCC(t *testing.T) {
 	}
 }
 
+func TestToAnnexBAVCCLength256to511(t *testing.T) {
+	// Regression: AVCC NAL with length 256-511 produces a length prefix
+	// starting with 00 00 01 XX, which is a false positive for the 3-byte
+	// Annex-B start code. The converter must still treat this as AVCC.
+	for _, nalLen := range []int{256, 300, 400, 511} {
+		nal := make([]byte, nalLen)
+		nal[0] = 0x41 // non-IDR slice, NRI=2
+		for i := 1; i < nalLen; i++ {
+			nal[i] = byte(i)
+		}
+		avcc := make([]byte, 4+nalLen)
+		avcc[0] = 0
+		avcc[1] = 0
+		avcc[2] = byte(nalLen >> 8) // 0x01 for 256-511
+		avcc[3] = byte(nalLen)
+		copy(avcc[4:], nal)
+
+		result := ToAnnexB(avcc, false)
+		expected := append([]byte{0x00, 0x00, 0x00, 0x01}, nal...)
+		if !bytes.Equal(result, expected) {
+			t.Errorf("AVCC (NAL len=%d) → AnnexB failed: first bytes got %x, want %x",
+				nalLen, result[:min(8, len(result))], expected[:8])
+		}
+	}
+}
+
+func TestToAnnexBAVCCMultiNALWithSmallSlice(t *testing.T) {
+	// Regression: multi-NAL AVCC where one NAL is 256-511 bytes.
+	// This is the exact pattern from RTMP H264 with slice-based encoding.
+	nal1 := make([]byte, 300) // small slice (length prefix = 00 00 01 2C)
+	nal1[0] = 0x41            // non-IDR slice
+	nal2 := make([]byte, 3000)
+	nal2[0] = 0x41
+
+	avcc := make([]byte, 0, 4+len(nal1)+4+len(nal2))
+	// NAL1 length prefix
+	avcc = append(avcc, 0, 0, byte(len(nal1)>>8), byte(len(nal1)))
+	avcc = append(avcc, nal1...)
+	// NAL2 length prefix
+	avcc = append(avcc, 0, 0, byte(len(nal2)>>8), byte(len(nal2)))
+	avcc = append(avcc, nal2...)
+
+	result := ToAnnexB(avcc, false)
+
+	expected := make([]byte, 0, 4+len(nal1)+4+len(nal2))
+	expected = append(expected, 0, 0, 0, 1)
+	expected = append(expected, nal1...)
+	expected = append(expected, 0, 0, 0, 1)
+	expected = append(expected, nal2...)
+
+	if !bytes.Equal(result, expected) {
+		t.Errorf("multi-NAL AVCC conversion failed: result len=%d, expected len=%d", len(result), len(expected))
+	}
+}
+
 func TestToAnnexBAVCDecoderConfig(t *testing.T) {
 	// Minimal AVCDecoderConfigurationRecord
 	sps := []byte{0x67, 0x42, 0xC0, 0x0D}

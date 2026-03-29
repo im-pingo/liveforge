@@ -55,14 +55,16 @@ func ToAnnexB(data []byte, isSequenceHeader bool) []byte {
 		return avcDecoderConfigToAnnexB(data)
 	}
 
+	// Try AVCC first (4-byte big-endian length + NAL). AVCC lengths in the
+	// range 256–511 produce a prefix 00 00 01 XX which is a false positive
+	// for the 3-byte Annex-B start code, so AVCC must be checked first.
+	if result := avccToAnnexB(data); result != nil {
+		return result
+	}
+
 	// Check if already Annex-B (starts with 00 00 00 01 or 00 00 01)
 	if hasAnnexBStartCode(data) {
 		return data
-	}
-
-	// Try AVCC (4-byte big-endian length + NAL)
-	if result := avccToAnnexB(data); result != nil {
-		return result
 	}
 
 	// Fallback: treat as single raw NAL, prepend start code
