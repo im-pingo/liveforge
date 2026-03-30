@@ -135,6 +135,17 @@ type SIPConfig struct {
 	Transport []string `yaml:"transport"`
 }
 
+// SlowConsumerConfig holds slow consumer frame dropping settings.
+type SlowConsumerConfig struct {
+	Enabled          bool    `yaml:"enabled"`
+	LagWarnRatio     float64 `yaml:"lag_warn_ratio"`
+	LagDropRatio     float64 `yaml:"lag_drop_ratio"`
+	LagCriticalRatio float64 `yaml:"lag_critical_ratio"`
+	LagRecoverRatio  float64 `yaml:"lag_recover_ratio"`
+	EWMAAlpha        float64 `yaml:"ewma_alpha"`
+	SendTimeRatio    float64 `yaml:"send_time_ratio"`
+}
+
 // StreamConfig holds stream-level settings.
 type StreamConfig struct {
 	GOPCache         bool              `yaml:"gop_cache"`
@@ -145,9 +156,10 @@ type StreamConfig struct {
 	MaxSkipWindow    time.Duration     `yaml:"max_skip_window"`
 	IdleTimeout      time.Duration     `yaml:"idle_timeout"`
 	NoPublisherTimeout time.Duration   `yaml:"no_publisher_timeout"`
-	Simulcast        SimulcastConfig   `yaml:"simulcast"`
+	SlowConsumer     SlowConsumerConfig  `yaml:"slow_consumer"`
+	Simulcast        SimulcastConfig     `yaml:"simulcast"`
 	AudioOnDemand    AudioOnDemandConfig `yaml:"audio_on_demand"`
-	Feedback         FeedbackConfig    `yaml:"feedback"`
+	Feedback         FeedbackConfig      `yaml:"feedback"`
 }
 
 // SimulcastConfig holds simulcast layer settings.

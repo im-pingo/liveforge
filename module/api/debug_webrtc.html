@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebRTC Debug - LiveForge</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 16px; }
+h1 { font-size: 18px; margin-bottom: 12px; color: #00d4ff; }
+.controls { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+.controls input { flex: 1; padding: 6px 10px; background: #16213e; border: 1px solid #0f3460; color: #e0e0e0; font-family: monospace; font-size: 13px; }
+.controls button { padding: 6px 16px; background: #0f3460; border: 1px solid #00d4ff; color: #00d4ff; cursor: pointer; font-family: monospace; }
+.controls button:hover { background: #00d4ff; color: #1a1a2e; }
+.controls select { padding: 6px; background: #16213e; border: 1px solid #0f3460; color: #e0e0e0; font-family: monospace; }
+.main { display: flex; gap: 16px; }
+.left { flex: 0 0 480px; }
+video { width: 480px; height: 270px; background: #000; display: block; margin-bottom: 8px; }
+.status { font-size: 12px; padding: 4px 8px; margin-bottom: 8px; }
+.status.connected { color: #00ff88; }
+.status.disconnected { color: #ff4444; }
+.status.connecting { color: #ffaa00; }
+.right { flex: 1; min-width: 0; }
+.section { margin-bottom: 12px; }
+.section h2 { font-size: 14px; color: #00d4ff; margin-bottom: 4px; border-bottom: 1px solid #0f3460; padding-bottom: 2px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px; font-size: 12px; }
+.grid .label { color: #888; }
+.grid .value { color: #e0e0e0; text-align: right; }
+.grid .value.warn { color: #ffaa00; }
+.grid .value.bad { color: #ff4444; }
+.grid .value.good { color: #00ff88; }
+.log-area { margin-top: 12px; }
+.log-area h2 { font-size: 14px; color: #00d4ff; margin-bottom: 4px; border-bottom: 1px solid #0f3460; padding-bottom: 2px; }
+#logbox { height: 180px; overflow-y: auto; background: #0d1117; padding: 6px; font-size: 11px; line-height: 1.5; border: 1px solid #0f3460; }
+#logbox div { white-space: pre; }
+.log-ts { color: #666; }
+.log-info { color: #58a6ff; }
+.log-warn { color: #ffaa00; }
+.log-err { color: #ff4444; }
+.log-data { color: #00ff88; }
+.chart-container { margin-top: 8px; }
+canvas { width: 100%; height: 80px; background: #0d1117; border: 1px solid #0f3460; display: block; margin-bottom: 4px; }
+.chart-label { font-size: 11px; color: #888; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<h1>WebRTC Debug</h1>
+
+<div class="controls">
+  <label>Stream:</label>
+  <input id="streamKey" type="text" value="live/test" placeholder="stream key">
+  <label>Mode:</label>
+  <select id="mode">
+    <option value="realtime">realtime</option>
+    <option value="live">live</option>
+  </select>
+  <button id="btnConnect" onclick="toggleConnect()">Connect</button>
+</div>
+
+<div class="main">
+  <div class="left">
+    <video id="video" autoplay muted playsinline></video>
+    <div id="status" class="status disconnected">Disconnected</div>
+
+    <div class="chart-container">
+      <div class="chart-label">Jitter Buffer (ms)</div>
+      <canvas id="chartJitter"></canvas>
+      <div class="chart-label">Inter-frame Arrival Gap (ms)</div>
+      <canvas id="chartArrival"></canvas>
+      <div class="chart-label">Frames Dropped / sec</div>
+      <canvas id="chartDropped"></canvas>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="section">
+      <h2>Inbound Video (RTP)</h2>
+      <div class="grid" id="videoStats"></div>
+    </div>
+    <div class="section">
+      <h2>Inbound Audio (RTP)</h2>
+      <div class="grid" id="audioStats"></div>
+    </div>
+    <div class="section">
+      <h2>ICE / Transport</h2>
+      <div class="grid" id="iceStats"></div>
+    </div>
+
+    <div class="log-area">
+      <h2>Event Log</h2>
+      <div id="logbox"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let pc = null;
+let statsTimer = null;
+let prevVideoStats = null;
+let prevAudioStats = null;
+let prevTimestamp = 0;
+let lastFrameArrivalTime = 0;
+
+// Ring buffers for charts (last 120 samples = 2 minutes at 1/sec)
+const CHART_SIZE = 120;
+const jitterHistory = new Float64Array(CHART_SIZE);
+const arrivalHistory = new Float64Array(CHART_SIZE);
+const droppedHistory = new Float64Array(CHART_SIZE);
+let chartIdx = 0;
+
+function setStatus(text, cls) {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'status ' + cls;
+}
+
+function logMsg(msg, cls) {
+  const box = document.getElementById('logbox');
+  const div = document.createElement('div');
+  const ts = new Date().toISOString().substr(11, 12);
+  div.innerHTML = '<span class="log-ts">' + ts + '</span> <span class="' + (cls||'log-info') + '">' + escapeHtml(msg) + '</span>';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  // Keep last 200 lines
+  while (box.children.length > 200) box.removeChild(box.firstChild);
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function toggleConnect() {
+  if (pc) {
+    disconnect();
+    return;
+  }
+  await connect();
+}
+
+async function connect() {
+  const streamKey = document.getElementById('streamKey').value.trim();
+  const mode = document.getElementById('mode').value;
+  if (!streamKey) return;
+
+  // Determine WHEP URL: same host, port from webrtc config.
+  // The debug page is served from the API port; WHEP is on the WebRTC port.
+  // Use the webrtc listen port from the page's known config.
+  const whepBase = detectWhepBase();
+  const whepUrl = whepBase + '/webrtc/whep/' + streamKey + '?mode=' + mode;
+
+  logMsg('Connecting to ' + whepUrl, 'log-info');
+  setStatus('Connecting...', 'connecting');
+
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  pc.ontrack = (ev) => {
+    logMsg('Track received: ' + ev.track.kind + ' (mid=' + (ev.transceiver.mid||'?') + ')', 'log-data');
+    if (ev.streams[0]) {
+      document.getElementById('video').srcObject = ev.streams[0];
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    const state = pc.iceConnectionState;
+    logMsg('ICE state: ' + state, state === 'connected' || state === 'completed' ? 'log-data' : 'log-warn');
+    if (state === 'connected' || state === 'completed') {
+      setStatus('Connected (' + state + ')', 'connected');
+    } else if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+      setStatus('Disconnected (' + state + ')', 'disconnected');
+    }
+  };
+
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate) {
+      logMsg('ICE candidate: ' + ev.candidate.candidate.substr(0, 60) + '...', 'log-info');
+    }
+  };
+
+  // Add receive-only transceivers.
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const resp = await fetch(whepUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: offer.sdp,
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      logMsg('WHEP error: ' + resp.status + ' ' + errText, 'log-err');
+      setStatus('Error: ' + resp.status, 'disconnected');
+      pc.close();
+      pc = null;
+      return;
+    }
+
+    const answerSdp = await resp.text();
+    logMsg('Got SDP answer (' + answerSdp.length + ' bytes)', 'log-info');
+    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+    document.getElementById('btnConnect').textContent = 'Disconnect';
+    startStatsCollection();
+  } catch (err) {
+    logMsg('Connection failed: ' + err.message, 'log-err');
+    setStatus('Error', 'disconnected');
+    if (pc) { pc.close(); pc = null; }
+  }
+}
+
+function disconnect() {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (pc) { pc.close(); pc = null; }
+  document.getElementById('video').srcObject = null;
+  document.getElementById('btnConnect').textContent = 'Connect';
+  setStatus('Disconnected', 'disconnected');
+  prevVideoStats = null;
+  prevAudioStats = null;
+  logMsg('Disconnected', 'log-warn');
+}
+
+function detectWhepBase() {
+  // Assume WHEP is on the same host. Try common ports.
+  // User can override by editing the stream key field with full URL.
+  const loc = window.location;
+  const proto = loc.protocol === 'https:' ? 'https' : 'http';
+  // Default WebRTC port from config: 8443
+  return proto + '://' + loc.hostname + ':8443';
+}
+
+function startStatsCollection() {
+  prevVideoStats = null;
+  prevAudioStats = null;
+  prevTimestamp = 0;
+  chartIdx = 0;
+  jitterHistory.fill(0);
+  arrivalHistory.fill(0);
+  droppedHistory.fill(0);
+
+  statsTimer = setInterval(collectStats, 1000);
+}
+
+async function collectStats() {
+  if (!pc) return;
+  const stats = await pc.getStats();
+  let videoInbound = null;
+  let audioInbound = null;
+  let candidatePair = null;
+
+  stats.forEach(report => {
+    if (report.type === 'inbound-rtp' && report.kind === 'video') videoInbound = report;
+    if (report.type === 'inbound-rtp' && report.kind === 'audio') audioInbound = report;
+    if (report.type === 'candidate-pair' && report.state === 'succeeded') candidatePair = report;
+  });
+
+  const now = performance.now();
+
+  if (videoInbound) {
+    renderVideoStats(videoInbound, now);
+    prevVideoStats = { ...videoInbound, _wallTime: now };
+  }
+
+  if (audioInbound) {
+    renderAudioStats(audioInbound, now);
+    prevAudioStats = { ...audioInbound, _wallTime: now };
+  }
+
+  if (candidatePair) {
+    renderIceStats(candidatePair, stats);
+  }
+
+  prevTimestamp = now;
+  chartIdx++;
+  drawAllCharts();
+}
+
+function renderVideoStats(s, now) {
+  const el = document.getElementById('videoStats');
+  const prev = prevVideoStats;
+  const dt = prev ? (now - prev._wallTime) / 1000 : 1;
+
+  // Compute deltas
+  const packetsRecvD = prev ? s.packetsReceived - prev.packetsReceived : 0;
+  const packetsLostD = prev ? s.packetsLost - prev.packetsLost : 0;
+  const bytesRecvD = prev ? s.bytesReceived - prev.bytesReceived : 0;
+  const framesRecvD = prev ? (s.framesReceived || 0) - (prev.framesReceived || 0) : 0;
+  const framesDecodedD = prev ? (s.framesDecoded || 0) - (prev.framesDecoded || 0) : 0;
+  const framesDroppedD = prev ? (s.framesDropped || 0) - (prev.framesDropped || 0) : 0;
+  const nackD = prev ? (s.nackCount || 0) - (prev.nackCount || 0) : 0;
+  const pliD = prev ? (s.pliCount || 0) - (prev.pliCount || 0) : 0;
+  const firD = prev ? (s.firCount || 0) - (prev.firCount || 0) : 0;
+
+  // Jitter buffer
+  const jbDelay = s.jitterBufferDelay || 0;
+  const jbEmitted = s.jitterBufferEmittedCount || 0;
+  const prevJbDelay = prev ? (prev.jitterBufferDelay || 0) : 0;
+  const prevJbEmitted = prev ? (prev.jitterBufferEmittedCount || 0) : 0;
+  const jbDelta = jbEmitted - prevJbEmitted;
+  const jbAvgMs = jbDelta > 0 ? ((jbDelay - prevJbDelay) / jbDelta * 1000) : 0;
+
+  // Freeze info
+  const freezeCount = s.freezeCount || 0;
+  const totalFreezeMs = (s.totalFreezesDuration || 0) * 1000;
+  const prevFreezeCount = prev ? (prev.freezeCount || 0) : 0;
+  const freezeDelta = freezeCount - prevFreezeCount;
+
+  // Bitrate
+  const bitrate = dt > 0 ? (bytesRecvD * 8 / dt / 1000) : 0;
+
+  // FPS
+  const fps = dt > 0 ? framesDecodedD / dt : 0;
+
+  // Update chart data
+  const idx = chartIdx % CHART_SIZE;
+  jitterHistory[idx] = jbAvgMs;
+  droppedHistory[idx] = framesDroppedD;
+
+  // Classify values
+  const jbClass = jbAvgMs > 200 ? 'bad' : jbAvgMs > 100 ? 'warn' : 'good';
+  const fpsClass = fps < 15 ? 'bad' : fps < 22 ? 'warn' : 'good';
+  const dropClass = framesDroppedD > 0 ? 'bad' : 'good';
+  const freezeClass = freezeDelta > 0 ? 'bad' : 'good';
+  const lossClass = packetsLostD > 5 ? 'bad' : packetsLostD > 0 ? 'warn' : 'good';
+
+  el.innerHTML = row('Bitrate', bitrate.toFixed(0) + ' kbps') +
+    row('FPS (decoded)', fps.toFixed(1), fpsClass) +
+    row('Frames recv/dec/drop', framesRecvD + ' / ' + framesDecodedD + ' / ' + framesDroppedD, dropClass) +
+    row('Jitter buffer avg', jbAvgMs.toFixed(1) + ' ms', jbClass) +
+    row('Jitter (RTP)', ((s.jitter || 0) * 1000).toFixed(1) + ' ms') +
+    row('Packets recv/lost (/s)', packetsRecvD + ' / ' + packetsLostD, lossClass) +
+    row('NACK/PLI/FIR (/s)', nackD + ' / ' + pliD + ' / ' + firD) +
+    row('Freeze count (total)', freezeCount, freezeClass) +
+    row('Total freeze duration', totalFreezeMs.toFixed(0) + ' ms') +
+    row('Packets lost (cum)', s.packetsLost || 0) +
+    row('NACK total', s.nackCount || 0) +
+    row('PLI total', s.pliCount || 0) +
+    row('Key frames decoded', s.keyFramesDecoded || 0);
+
+  // Log significant events
+  if (freezeDelta > 0) {
+    logMsg('FREEZE detected! count=' + freezeCount + ' total=' + totalFreezeMs.toFixed(0) + 'ms', 'log-err');
+  }
+  if (framesDroppedD > 2) {
+    logMsg('Frames dropped: ' + framesDroppedD + ' in last second', 'log-warn');
+  }
+  if (pliD > 0) {
+    logMsg('PLI sent: ' + pliD, 'log-warn');
+  }
+  if (jbAvgMs > 200) {
+    logMsg('Jitter buffer high: ' + jbAvgMs.toFixed(0) + 'ms', 'log-warn');
+  }
+}
+
+function renderAudioStats(s, now) {
+  const el = document.getElementById('audioStats');
+  const prev = prevAudioStats;
+  const dt = prev ? (now - prev._wallTime) / 1000 : 1;
+
+  const packetsRecvD = prev ? s.packetsReceived - prev.packetsReceived : 0;
+  const packetsLostD = prev ? s.packetsLost - prev.packetsLost : 0;
+  const bytesRecvD = prev ? s.bytesReceived - prev.bytesReceived : 0;
+  const bitrate = dt > 0 ? (bytesRecvD * 8 / dt / 1000) : 0;
+
+  const jbDelay = s.jitterBufferDelay || 0;
+  const jbEmitted = s.jitterBufferEmittedCount || 0;
+  const prevJbDelay = prev ? (prev.jitterBufferDelay || 0) : 0;
+  const prevJbEmitted = prev ? (prev.jitterBufferEmittedCount || 0) : 0;
+  const jbDelta = jbEmitted - prevJbEmitted;
+  const jbAvgMs = jbDelta > 0 ? ((jbDelay - prevJbDelay) / jbDelta * 1000) : 0;
+
+  const concealedD = prev ? (s.concealedSamples || 0) - (prev.concealedSamples || 0) : 0;
+
+  el.innerHTML = row('Bitrate', bitrate.toFixed(0) + ' kbps') +
+    row('Jitter buffer avg', jbAvgMs.toFixed(1) + ' ms') +
+    row('Jitter (RTP)', ((s.jitter || 0) * 1000).toFixed(1) + ' ms') +
+    row('Packets recv/lost (/s)', packetsRecvD + ' / ' + packetsLostD) +
+    row('Concealed samples (/s)', concealedD) +
+    row('Packets lost (cum)', s.packetsLost || 0);
+}
+
+function renderIceStats(pair, allStats) {
+  const el = document.getElementById('iceStats');
+  const rtt = pair.currentRoundTripTime ? (pair.currentRoundTripTime * 1000).toFixed(0) : '?';
+  const rttClass = pair.currentRoundTripTime > 0.1 ? 'warn' : 'good';
+
+  let localType = '?', remoteType = '?';
+  if (pair.localCandidateId) {
+    const lc = allStats.get(pair.localCandidateId);
+    if (lc) localType = lc.candidateType + ' ' + (lc.protocol||'') + ' ' + (lc.address||'');
+  }
+  if (pair.remoteCandidateId) {
+    const rc = allStats.get(pair.remoteCandidateId);
+    if (rc) remoteType = rc.candidateType + ' ' + (rc.protocol||'') + ' ' + (rc.address||'');
+  }
+
+  el.innerHTML = row('RTT', rtt + ' ms', rttClass) +
+    row('State', pair.state) +
+    row('Local', localType) +
+    row('Remote', remoteType) +
+    row('Bytes sent/recv', (pair.bytesSent||0) + ' / ' + (pair.bytesReceived||0));
+}
+
+function row(label, value, cls) {
+  return '<div class="label">' + label + '</div><div class="value ' + (cls||'') + '">' + value + '</div>';
+}
+
+// --- Charts ---
+function drawAllCharts() {
+  drawChart('chartJitter', jitterHistory, chartIdx, '#00d4ff', 500);
+  drawChart('chartArrival', arrivalHistory, chartIdx, '#ffaa00', 200);
+  drawChart('chartDropped', droppedHistory, chartIdx, '#ff4444', 10);
+}
+
+function drawChart(canvasId, data, idx, color, maxVal) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.clientWidth * (window.devicePixelRatio || 1);
+  const h = canvas.height = canvas.clientHeight * (window.devicePixelRatio || 1);
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Draw grid lines
+  ctx.strokeStyle = '#1a2744';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = h * i / 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+
+  // Draw data
+  const count = Math.min(idx, CHART_SIZE);
+  if (count < 2) return;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+
+  for (let i = 0; i < count; i++) {
+    const di = (idx - count + i) % CHART_SIZE;
+    const x = (i / (CHART_SIZE - 1)) * w;
+    const v = Math.min(data[di], maxVal);
+    const y = h - (v / maxVal) * h;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Draw latest value label
+  const latest = data[(idx - 1) % CHART_SIZE];
+  ctx.fillStyle = color;
+  ctx.font = (10 * (window.devicePixelRatio || 1)) + 'px monospace';
+  ctx.fillText(latest.toFixed(1), 4, 14 * (window.devicePixelRatio || 1));
+}
+
+// Track inter-frame arrival from video element events
+document.getElementById('video').addEventListener('timeupdate', () => {
+  const now = performance.now();
+  if (lastFrameArrivalTime > 0) {
+    const gap = now - lastFrameArrivalTime;
+    const idx2 = chartIdx % CHART_SIZE;
+    arrivalHistory[idx2] = gap;
+  }
+  lastFrameArrivalTime = now;
+});
+</script>
+</body>
+</html>

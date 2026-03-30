@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -74,6 +75,16 @@ func defaults() *Config {
 			AudioCacheMs:   1000,
 			RingBufferSize: 1024,
 			MaxSkipCount:   3,
+			MaxSkipWindow:  60 * time.Second,
+			SlowConsumer: SlowConsumerConfig{
+				Enabled:          true,
+				LagWarnRatio:     0.5,
+				LagDropRatio:     0.75,
+				LagCriticalRatio: 0.9,
+				LagRecoverRatio:  0.5,
+				EWMAAlpha:        0.3,
+				SendTimeRatio:    2.0,
+			},
 			Feedback: FeedbackConfig{
 				DefaultMode: "auto",
 				AutoThresholds: AutoThresholdsConfig{

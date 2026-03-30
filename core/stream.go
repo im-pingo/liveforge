@@ -39,6 +39,45 @@ func (s StreamState) String() string {
 	}
 }
 
+// SkipTracker tracks ring buffer skip events and determines when a subscriber
+// has exceeded the allowed skip threshold within a sliding time window.
+type SkipTracker struct {
+	maxCount int
+	window   time.Duration
+	events   []time.Time
+}
+
+// NewSkipTracker creates a new SkipTracker. If maxCount <= 0, tracking is disabled.
+func NewSkipTracker(maxCount int, window time.Duration) *SkipTracker {
+	return &SkipTracker{
+		maxCount: maxCount,
+		window:   window,
+	}
+}
+
+// RecordSkip records a skip event and returns true if the threshold has been exceeded.
+// Always returns false when tracking is disabled (maxCount <= 0).
+func (st *SkipTracker) RecordSkip() bool {
+	if st.maxCount <= 0 {
+		return false
+	}
+
+	now := time.Now()
+
+	// Trim events outside the window
+	cutoff := now.Add(-st.window)
+	trimIdx := 0
+	for trimIdx < len(st.events) && st.events[trimIdx].Before(cutoff) {
+		trimIdx++
+	}
+	if trimIdx > 0 {
+		st.events = st.events[trimIdx:]
+	}
+
+	st.events = append(st.events, now)
+	return len(st.events) > st.maxCount
+}
+
 // Stream manages the lifecycle, publisher, subscribers, and frame distribution for a stream key.
 type Stream struct {
 	key    string
@@ -51,7 +90,8 @@ type Stream struct {
 
 	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
 	muxerManager *MuxerManager
-	gopCache     []*avframe.AVFrame
+	gopCache     [][]*avframe.AVFrame
+	audioCache   []*avframe.AVFrame
 	subscribers  map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 
 	videoSeqHeader *avframe.AVFrame
@@ -60,6 +100,7 @@ type Stream struct {
 	stats            StreamStats
 	eventBus         *EventBus
 	noPublisherTimer *time.Timer
+	idleTimer        *time.Timer
 }
 
 // NewStream creates a new Stream in idle state.
@@ -82,6 +123,11 @@ func (s *Stream) Key() string {
 	return s.key
 }
 
+// Config returns the stream configuration.
+func (s *Stream) Config() config.StreamConfig {
+	return s.config
+}
+
 // State returns the current stream state.
 func (s *Stream) State() StreamState {
 	s.mu.RLock()
@@ -102,6 +148,12 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	if s.noPublisherTimer != nil {
 		s.noPublisherTimer.Stop()
 		s.noPublisherTimer = nil
+	}
+
+	// Cancel idle timer — we have a publisher now
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
 	}
 
 	s.publisher = pub
@@ -128,6 +180,8 @@ func (s *Stream) RemovePublisher() {
 			}
 		})
 	}
+
+	s.checkIdleTimeout()
 }
 
 // Close force-closes the stream: closes the ring buffer, removes the publisher,
@@ -143,6 +197,11 @@ func (s *Stream) Close() {
 	if s.noPublisherTimer != nil {
 		s.noPublisherTimer.Stop()
 		s.noPublisherTimer = nil
+	}
+
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
 	}
 
 	if s.publisher != nil {
@@ -176,27 +235,49 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
 	}
 
 	// Update GOP cache for video frames
-	if frame.MediaType.IsVideo() {
-		if frame.FrameType.IsKeyframe() {
-			// Start new GOP
-			s.gopCache = []*avframe.AVFrame{frame}
-		} else if frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
-			s.gopCache = append(s.gopCache, frame)
+	if s.config.GOPCache {
+		if frame.MediaType.IsVideo() {
+			if frame.FrameType.IsKeyframe() {
+				// Start new GOP
+				s.gopCache = append(s.gopCache, []*avframe.AVFrame{frame})
+				if len(s.gopCache) > s.config.GOPCacheNum {
+					s.gopCache = s.gopCache[len(s.gopCache)-s.config.GOPCacheNum:]
+				}
+			} else if frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
+				s.gopCache[len(s.gopCache)-1] = append(s.gopCache[len(s.gopCache)-1], frame)
+			}
+		} else if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
+			// Interleave audio into GOP cache for DTS ordering
+			s.gopCache[len(s.gopCache)-1] = append(s.gopCache[len(s.gopCache)-1], frame)
 		}
-	} else if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
-		// Interleave audio into GOP cache for DTS ordering
-		s.gopCache = append(s.gopCache, frame)
+	}
+
+	// Update audio cache for late-joining subscribers
+	if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && s.config.AudioCacheMs > 0 {
+		s.audioCache = append(s.audioCache, frame)
+		minDTS := frame.DTS - int64(s.config.AudioCacheMs)
+		trimIdx := 0
+		for trimIdx < len(s.audioCache) && s.audioCache[trimIdx].DTS < minDTS {
+			trimIdx++
+		}
+		if trimIdx > 0 {
+			s.audioCache = s.audioCache[trimIdx:]
+		}
 	}
 
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
 }
 
-// GOPCacheLen returns the number of frames in the current GOP cache.
+// GOPCacheLen returns the total number of frames across all cached GOPs.
 func (s *Stream) GOPCacheLen() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.gopCache)
+	total := 0
+	for _, gop := range s.gopCache {
+		total += len(gop)
+	}
+	return total
 }
 
 // GOPCacheDetail returns GOP cache statistics without copying the frames.
@@ -211,25 +292,30 @@ func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	d := GOPCacheDetail{TotalFrames: len(s.gopCache)}
-	if len(s.gopCache) == 0 {
+	var d GOPCacheDetail
+	for _, gop := range s.gopCache {
+		d.TotalFrames += len(gop)
+	}
+	if d.TotalFrames == 0 {
 		return d
 	}
 
 	var firstDTS, lastDTS int64
 	firstSet := false
-	for _, f := range s.gopCache {
-		if f.MediaType.IsVideo() {
-			d.VideoFrames++
-		} else if f.MediaType.IsAudio() {
-			d.AudioFrames++
-		}
-		if f.DTS > 0 {
-			if !firstSet {
-				firstDTS = f.DTS
-				firstSet = true
+	for _, gop := range s.gopCache {
+		for _, f := range gop {
+			if f.MediaType.IsVideo() {
+				d.VideoFrames++
+			} else if f.MediaType.IsAudio() {
+				d.AudioFrames++
 			}
-			lastDTS = f.DTS
+			if f.DTS > 0 {
+				if !firstSet {
+					firstDTS = f.DTS
+					firstSet = true
+				}
+				lastDTS = f.DTS
+			}
 		}
 	}
 	if firstSet {
@@ -238,13 +324,25 @@ func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 	return d
 }
 
-// GOPCache returns a copy of the current GOP cache.
+// GOPCache returns a flattened copy of all cached GOPs.
 func (s *Stream) GOPCache() []*avframe.AVFrame {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]*avframe.AVFrame, len(s.gopCache))
-	copy(result, s.gopCache)
+	var result []*avframe.AVFrame
+	for _, gop := range s.gopCache {
+		result = append(result, gop...)
+	}
+	return result
+}
+
+// AudioCache returns a copy of the current audio cache.
+func (s *Stream) AudioCache() []*avframe.AVFrame {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]*avframe.AVFrame, len(s.audioCache))
+	copy(result, s.audioCache)
 	return result
 }
 
@@ -294,6 +392,13 @@ func (s *Stream) AddSubscriber(protocol string) error {
 	}
 
 	s.subscribers[protocol]++
+
+	// Cancel idle timer — we have a subscriber now
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+
 	return nil
 }
 
@@ -305,6 +410,7 @@ func (s *Stream) RemoveSubscriber(protocol string) {
 	if s.subscribers[protocol] <= 0 {
 		delete(s.subscribers, protocol)
 	}
+	s.checkIdleTimeout()
 }
 
 // Subscribers returns a snapshot of protocol-level subscriber counts.
@@ -316,4 +422,37 @@ func (s *Stream) Subscribers() map[string]int {
 		result[k] = v
 	}
 	return result
+}
+
+// totalSubscribers returns the sum of all subscriber counts. Must hold mu.
+func (s *Stream) totalSubscribers() int {
+	total := 0
+	for _, n := range s.subscribers {
+		total += n
+	}
+	return total
+}
+
+// checkIdleTimeout starts or cancels the idle timer based on current state.
+// Must hold mu.
+func (s *Stream) checkIdleTimeout() {
+	if s.config.IdleTimeout <= 0 {
+		return
+	}
+	if s.publisher == nil && s.totalSubscribers() == 0 {
+		if s.idleTimer == nil {
+			s.idleTimer = time.AfterFunc(s.config.IdleTimeout, func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if s.publisher == nil && s.totalSubscribers() == 0 {
+					s.state = StreamStateDestroying
+				}
+			})
+		}
+	} else {
+		if s.idleTimer != nil {
+			s.idleTimer.Stop()
+			s.idleTimer = nil
+		}
+	}
 }

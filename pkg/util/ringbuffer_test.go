@@ -98,6 +98,50 @@ func TestRingBufferClose(t *testing.T) {
 	}
 }
 
+func TestRingReaderLag(t *testing.T) {
+	rb := NewRingBuffer[int](10)
+
+	// Write 8 items into buffer of size 10
+	for i := range 8 {
+		rb.Write(i)
+	}
+
+	// Reader at position 0, writer at 8 → lag = 8/10 = 0.8
+	reader := rb.NewReaderAt(0)
+	lag := reader.Lag()
+	if lag < 0.79 || lag > 0.81 {
+		t.Errorf("expected lag ~0.8, got %f", lag)
+	}
+
+	// Read 3 items → reader at 3, writer at 8 → lag = 5/10 = 0.5
+	for range 3 {
+		reader.TryRead()
+	}
+	lag = reader.Lag()
+	if lag < 0.49 || lag > 0.51 {
+		t.Errorf("expected lag ~0.5, got %f", lag)
+	}
+
+	// Reader caught up to writer → lag = 0
+	for range 5 {
+		reader.TryRead()
+	}
+	lag = reader.Lag()
+	if lag != 0.0 {
+		t.Errorf("expected lag 0.0, got %f", lag)
+	}
+
+	// Write enough to overflow: writer at 18, oldest at 8, reader still at 8
+	// lag should be clamped to 1.0
+	for range 10 {
+		rb.Write(99)
+	}
+	lag = reader.Lag()
+	if lag != 1.0 {
+		t.Errorf("expected lag 1.0 (clamped), got %f", lag)
+	}
+}
+
 func TestRingBufferCloseStopsWrite(t *testing.T) {
 	rb := NewRingBuffer[int](4)
 	rb.Write(1)

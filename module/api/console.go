@@ -9,6 +9,9 @@ import (
 //go:embed console.html
 var consoleHTML []byte
 
+//go:embed debug_webrtc.html
+var debugWebRTCHTML []byte
+
 //go:embed static
 var staticFS embed.FS
 
@@ -22,4 +25,9 @@ func staticHandler() http.Handler {
 func (h *Handlers) handleConsole(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(consoleHTML)
+}
+
+func (h *Handlers) handleDebugWebRTC(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(debugWebRTCHTML)
 }
