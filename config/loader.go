@@ -93,6 +93,12 @@ func defaults() *Config {
 				},
 			},
 		},
+		Limits: LimitsConfig{
+			RateLimit: RateLimitConfig{
+				Rate:  50,
+				Burst: 100,
+			},
+		},
 		API: APIConfig{
 			Listen: ":8090",
 		},

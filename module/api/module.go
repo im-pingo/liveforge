@@ -14,12 +14,14 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/ratelimit"
 )
 
 // Module implements the management API as a standalone HTTP server.
 type Module struct {
 	listener net.Listener
 	httpSrv  *http.Server
+	limiter  *ratelimit.Limiter
 	wg       sync.WaitGroup
 }
 
@@ -44,7 +46,11 @@ func (m *Module) Init(s *core.Server) error {
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, s)
 
-	handler := buildAuthHandler(mux, cfg.API)
+	var handler http.Handler = buildAuthHandler(mux, cfg.API)
+	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		handler = m.limiter.Wrap(handler)
+	}
 	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
@@ -71,6 +77,9 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 func (m *Module) Close() error {
 	if m.httpSrv != nil {
 		m.httpSrv.Close()
+	}
+	if m.limiter != nil {
+		m.limiter.Close()
 	}
 	m.wg.Wait()
 	slog.Info("stopped", "module", "api")

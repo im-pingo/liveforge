@@ -43,10 +43,18 @@ func (t TLSConfig) Configured() bool {
 
 // LimitsConfig holds resource limits.
 type LimitsConfig struct {
-	MaxStreams              int `yaml:"max_streams"`
-	MaxSubscribersPerStream int `yaml:"max_subscribers_per_stream"`
-	MaxConnections          int `yaml:"max_connections"`
-	MaxBitratePerStream     int `yaml:"max_bitrate_per_stream"`
+	MaxStreams              int            `yaml:"max_streams"`
+	MaxSubscribersPerStream int            `yaml:"max_subscribers_per_stream"`
+	MaxConnections          int            `yaml:"max_connections"`
+	MaxBitratePerStream     int            `yaml:"max_bitrate_per_stream"`
+	RateLimit               RateLimitConfig `yaml:"rate_limit"`
+}
+
+// RateLimitConfig holds per-IP HTTP rate limiting settings.
+type RateLimitConfig struct {
+	Enabled bool    `yaml:"enabled"`
+	Rate    float64 `yaml:"rate"`  // requests per second per IP
+	Burst   int     `yaml:"burst"` // max burst size per IP
 }
 
 // RTMPConfig holds RTMP module settings.
