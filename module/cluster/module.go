@@ -44,16 +44,23 @@ func (m *Module) Init(s *core.Server) error {
 			"schedule_url", cfg.Forward.ScheduleURL)
 	}
 
-	if cfg.Origin.Enabled && len(cfg.Origin.Servers) > 0 {
+	if cfg.Origin.Enabled && (len(cfg.Origin.Servers) > 0 || cfg.Origin.ScheduleURL != "") {
+		origScheduler := NewScheduler(
+			cfg.Origin.ScheduleURL,
+			cfg.Origin.Servers,
+			cfg.Origin.SchedulePriority,
+			cfg.Origin.ScheduleTimeout,
+		)
 		m.origin = NewOriginManager(
 			hub, bus,
-			cfg.Origin.Servers,
+			origScheduler,
 			cfg.Origin.RetryMax,
 			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
 		)
 		slog.Info("cluster origin pull enabled", "module", "cluster",
-			"servers", len(cfg.Origin.Servers))
+			"static_servers", len(cfg.Origin.Servers),
+			"schedule_url", cfg.Origin.ScheduleURL)
 	}
 
 	return nil

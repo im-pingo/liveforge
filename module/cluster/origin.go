@@ -231,7 +231,7 @@ func (p *originPublisher) Close() error                  { return nil }
 type OriginManager struct {
 	hub         *core.StreamHub
 	eventBus    *core.EventBus
-	servers     []string
+	scheduler   *Scheduler
 	retryMax    int
 	retryDelay  time.Duration
 	idleTimeout time.Duration
@@ -242,7 +242,7 @@ type OriginManager struct {
 }
 
 // NewOriginManager creates a new origin manager.
-func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, servers []string, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
+func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
@@ -255,7 +255,7 @@ func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, servers []string,
 	return &OriginManager{
 		hub:         hub,
 		eventBus:    bus,
-		servers:     servers,
+		scheduler:   scheduler,
 		retryMax:    retryMax,
 		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
@@ -295,7 +295,14 @@ func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {
 		return nil
 	}
 
-	op := NewOriginPull(ctx.StreamKey, om.servers, stream, om.retryMax, om.retryDelay, om.idleTimeout)
+	servers, err := om.scheduler.Resolve("origin", ctx.StreamKey)
+	if err != nil {
+		slog.Warn("origin schedule resolve failed", "module", "cluster",
+			"stream", ctx.StreamKey, "error", err)
+		return nil
+	}
+
+	op := NewOriginPull(ctx.StreamKey, servers, stream, om.retryMax, om.retryDelay, om.idleTimeout)
 	om.active[ctx.StreamKey] = op
 
 	om.eventBus.Emit(core.EventOriginPullStart, &core.EventContext{ //nolint:errcheck
