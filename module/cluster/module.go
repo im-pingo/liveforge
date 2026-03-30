@@ -1,0 +1,85 @@
+package cluster
+
+import (
+	"log/slog"
+
+	"github.com/im-pingo/liveforge/core"
+)
+
+// Module implements core.Module for cluster forwarding and origin pull.
+type Module struct {
+	forward *ForwardManager
+	origin  *OriginManager
+}
+
+// NewModule creates a new cluster module.
+func NewModule() *Module {
+	return &Module{}
+}
+
+// Name returns the module name.
+func (m *Module) Name() string { return "cluster" }
+
+// Init initializes the cluster module based on configuration.
+func (m *Module) Init(s *core.Server) error {
+	cfg := s.Config().Cluster
+	hub := s.StreamHub()
+	bus := s.GetEventBus()
+
+	if cfg.Forward.Enabled && len(cfg.Forward.Targets) > 0 {
+		m.forward = NewForwardManager(
+			hub, bus,
+			cfg.Forward.Targets,
+			cfg.Forward.RetryMax,
+			cfg.Forward.RetryInterval,
+		)
+		slog.Info("cluster forward enabled", "module", "cluster",
+			"targets", len(cfg.Forward.Targets))
+	}
+
+	if cfg.Origin.Enabled && len(cfg.Origin.Servers) > 0 {
+		m.origin = NewOriginManager(
+			hub, bus,
+			cfg.Origin.Servers,
+			cfg.Origin.RetryMax,
+			cfg.Origin.IdleTimeout,
+		)
+		slog.Info("cluster origin pull enabled", "module", "cluster",
+			"servers", len(cfg.Origin.Servers))
+	}
+
+	return nil
+}
+
+// Hooks returns event hooks for both forward and origin managers.
+func (m *Module) Hooks() []core.HookRegistration {
+	var hooks []core.HookRegistration
+	if m.forward != nil {
+		hooks = append(hooks, m.forward.Hooks()...)
+	}
+	if m.origin != nil {
+		hooks = append(hooks, m.origin.Hooks()...)
+	}
+	return hooks
+}
+
+// Close shuts down both forward and origin managers.
+func (m *Module) Close() error {
+	if m.forward != nil {
+		m.forward.Close()
+	}
+	if m.origin != nil {
+		m.origin.Close()
+	}
+	return nil
+}
+
+// ForwardManager returns the forward manager, if enabled.
+func (m *Module) ForwardManager() *ForwardManager {
+	return m.forward
+}
+
+// OriginManager returns the origin manager, if enabled.
+func (m *Module) OriginManager() *OriginManager {
+	return m.origin
+}

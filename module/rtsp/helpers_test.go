@@ -336,20 +336,33 @@ func TestHandleConnDescribeTeardown(t *testing.T) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
+	// Use bufio.Scanner for line-based reading to handle TCP buffering
+	reader := bufio.NewReader(conn)
+
 	// Send DESCRIBE (stream doesn't exist, should get 404)
 	_, err = conn.Write([]byte("DESCRIBE rtsp://localhost/live/test RTSP/1.0\r\nCSeq: 1\r\n\r\n"))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
+	// Read until we find the status line
+	descResp, err := reader.ReadString('\n')
 	if err != nil {
-		t.Fatalf("Read: %v", err)
+		t.Fatalf("Read DESCRIBE: %v", err)
 	}
-	resp := string(buf[:n])
-	if !bytes.Contains([]byte(resp), []byte("404")) {
-		t.Errorf("expected 404 for non-existent stream: %s", resp)
+	if !bytes.Contains([]byte(descResp), []byte("404")) {
+		t.Errorf("expected 404 for non-existent stream: %s", descResp)
+	}
+
+	// Drain remaining DESCRIBE response headers until blank line
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("Read DESCRIBE header: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
 	}
 
 	// Send TEARDOWN
@@ -358,13 +371,12 @@ func TestHandleConnDescribeTeardown(t *testing.T) {
 		t.Fatalf("Write TEARDOWN: %v", err)
 	}
 
-	n, err = conn.Read(buf)
+	teardownResp, err := reader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("Read TEARDOWN: %v", err)
 	}
-	resp = string(buf[:n])
-	if !bytes.Contains([]byte(resp), []byte("200")) {
-		t.Errorf("expected 200 for TEARDOWN: %s", resp)
+	if !bytes.Contains([]byte(teardownResp), []byte("200")) {
+		t.Errorf("expected 200 for TEARDOWN: %s", teardownResp)
 	}
 }
 
