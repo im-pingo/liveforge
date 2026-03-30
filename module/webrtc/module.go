@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/ratelimit"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 )
@@ -20,6 +21,7 @@ type Module struct {
 	sessions sync.Map // sessionID -> *Session
 	listener net.Listener
 	httpSrv  *http.Server
+	limiter  *ratelimit.Limiter
 	wg       sync.WaitGroup
 }
 
@@ -88,7 +90,12 @@ func (m *Module) Init(s *core.Server) error {
 	mux.HandleFunc("PATCH /webrtc/session/{id}", m.handlePatch)
 	mux.HandleFunc("OPTIONS /{path...}", m.handleOptions)
 
-	m.httpSrv = &http.Server{Handler: corsMiddleware(mux)}
+	var handler http.Handler = corsMiddleware(mux)
+	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		handler = m.limiter.Wrap(handler)
+	}
+	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
 	if cfg.TLS.Configured() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
@@ -122,6 +129,9 @@ func (m *Module) Close() error {
 
 	if m.httpSrv != nil {
 		m.httpSrv.Close()
+	}
+	if m.limiter != nil {
+		m.limiter.Close()
 	}
 	m.wg.Wait()
 	slog.Info("stopped", "module", "webrtc")

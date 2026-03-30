@@ -12,6 +12,10 @@ limits:
   max_subscribers_per_stream: 0
   max_connections: 0
   max_bitrate_per_stream: 0
+  rate_limit:
+    enabled: false
+    rate: 50      # requests per second per IP
+    burst: 100    # max burst per IP
 
 rtmp:
   enabled: true

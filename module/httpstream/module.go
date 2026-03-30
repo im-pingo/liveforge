@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/ratelimit"
 )
 
 // Module implements the HTTP streaming module for FLV, TS, FMP4, HLS, and DASH.
@@ -16,6 +17,7 @@ type Module struct {
 	server   *core.Server
 	listener net.Listener
 	httpSrv  *http.Server
+	limiter  *ratelimit.Limiter
 	wg       sync.WaitGroup
 
 	// Track which stream instances have muxer callbacks registered.
@@ -62,7 +64,12 @@ func (m *Module) Init(s *core.Server) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/{path...}", m.handleWebSocket)
 	mux.HandleFunc("/{path...}", m.handleStream)
-	m.httpSrv = &http.Server{Handler: mux}
+	var handler http.Handler = mux
+	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		handler = m.limiter.Wrap(handler)
+	}
+	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
 	if cfg.TLS.Configured() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {
@@ -201,6 +208,10 @@ func (m *Module) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		m.httpSrv.Shutdown(ctx) //nolint:errcheck
 		cancel()
+	}
+
+	if m.limiter != nil {
+		m.limiter.Close()
 	}
 
 	// Stop all HLS managers
