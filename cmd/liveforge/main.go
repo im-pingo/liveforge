@@ -19,6 +19,7 @@ import (
 	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
+	"github.com/im-pingo/liveforge/module/cluster"
 	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
@@ -83,6 +84,10 @@ func main() {
 
 	if cfg.Record.Enabled {
 		s.RegisterModule(record.NewModule())
+	}
+
+	if cfg.Cluster.Forward.Enabled || cfg.Cluster.Origin.Enabled {
+		s.RegisterModule(cluster.NewModule())
 	}
 
 	if cfg.Metrics.Enabled {

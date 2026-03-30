@@ -17,6 +17,7 @@ type OriginPull struct {
 	servers     []string
 	stream      *core.Stream
 	retryMax    int
+	retryDelay  time.Duration
 	idleTimeout time.Duration
 
 	mu     sync.Mutex
@@ -24,12 +25,13 @@ type OriginPull struct {
 }
 
 // NewOriginPull creates a new origin pull instance.
-func NewOriginPull(streamKey string, servers []string, stream *core.Stream, retryMax int, idleTimeout time.Duration) *OriginPull {
+func NewOriginPull(streamKey string, servers []string, stream *core.Stream, retryMax int, retryDelay, idleTimeout time.Duration) *OriginPull {
 	return &OriginPull{
 		streamKey:   streamKey,
 		servers:     servers,
 		stream:      stream,
 		retryMax:    retryMax,
+		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
 		closed:      make(chan struct{}),
 	}
@@ -54,10 +56,14 @@ func (op *OriginPull) Run() {
 		}
 
 		if attempt > 0 {
+			delay := op.retryDelay * time.Duration(1<<min(attempt-1, 4)) // cap at 16x base
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
 			select {
 			case <-op.closed:
 				return
-			case <-time.After(2 * time.Second):
+			case <-time.After(delay):
 			}
 		}
 
@@ -227,6 +233,7 @@ type OriginManager struct {
 	eventBus    *core.EventBus
 	servers     []string
 	retryMax    int
+	retryDelay  time.Duration
 	idleTimeout time.Duration
 
 	mu     sync.Mutex
@@ -235,9 +242,12 @@ type OriginManager struct {
 }
 
 // NewOriginManager creates a new origin manager.
-func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, servers []string, retryMax int, idleTimeout time.Duration) *OriginManager {
+func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, servers []string, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
 	if retryMax <= 0 {
 		retryMax = 3
+	}
+	if retryDelay <= 0 {
+		retryDelay = 2 * time.Second
 	}
 	if idleTimeout <= 0 {
 		idleTimeout = 30 * time.Second
@@ -247,6 +257,7 @@ func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, servers []string,
 		eventBus:    bus,
 		servers:     servers,
 		retryMax:    retryMax,
+		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
 		active:      make(map[string]*OriginPull),
 		closed:      make(chan struct{}),
@@ -284,7 +295,7 @@ func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {
 		return nil
 	}
 
-	op := NewOriginPull(ctx.StreamKey, om.servers, stream, om.retryMax, om.idleTimeout)
+	op := NewOriginPull(ctx.StreamKey, om.servers, stream, om.retryMax, om.retryDelay, om.idleTimeout)
 	om.active[ctx.StreamKey] = op
 
 	om.eventBus.Emit(core.EventOriginPullStart, &core.EventContext{ //nolint:errcheck
