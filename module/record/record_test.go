@@ -226,6 +226,206 @@ func TestFileWriterMaxSizeSegmentation(t *testing.T) {
 	}
 }
 
+func TestNewFrameWriterFLV(t *testing.T) {
+	w := newFrameWriter("flv")
+	if _, ok := w.(*flvFrameWriter); !ok {
+		t.Errorf("expected flvFrameWriter, got %T", w)
+	}
+
+	// Default should also be FLV
+	w = newFrameWriter("")
+	if _, ok := w.(*flvFrameWriter); !ok {
+		t.Errorf("default should be flvFrameWriter, got %T", w)
+	}
+}
+
+func TestNewFrameWriterFMP4(t *testing.T) {
+	w := newFrameWriter("fmp4")
+	if _, ok := w.(*fmp4FrameWriter); !ok {
+		t.Errorf("expected fmp4FrameWriter, got %T", w)
+	}
+
+	w = newFrameWriter("mp4")
+	if _, ok := w.(*fmp4FrameWriter); !ok {
+		t.Errorf("mp4 should map to fmp4FrameWriter, got %T", w)
+	}
+}
+
+func TestFileWriterFormat(t *testing.T) {
+	dir := t.TempDir()
+
+	// FLV
+	cfg := config.RecordConfig{
+		Format: "flv",
+		Path:   filepath.Join(dir, "flv_{time}.flv"),
+	}
+	w, err := NewFileWriter("live/test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Format() != "flv" {
+		t.Errorf("Format = %q, want flv", w.Format())
+	}
+	w.Close()
+
+	// fMP4
+	cfg.Format = "fmp4"
+	cfg.Path = filepath.Join(dir, "fmp4_{time}.mp4")
+	w, err = NewFileWriter("live/test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Format() != "fmp4" {
+		t.Errorf("Format = %q, want fmp4", w.Format())
+	}
+	w.Close()
+}
+
+func TestFMP4FileWriterCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.RecordConfig{
+		Format: "fmp4",
+		Path:   filepath.Join(dir, "{stream_key}", "{date}_{time}.mp4"),
+	}
+
+	w, err := NewFileWriter("live/test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write sequence header first (required for fMP4 init segment)
+	seqHeader := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+	)
+	if err := w.WriteFrame(seqHeader); err != nil {
+		t.Fatalf("write seq header: %v", err)
+	}
+
+	// Write keyframe
+	keyframe := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x88, 0x00, 0x01},
+	)
+	if err := w.WriteFrame(keyframe); err != nil {
+		t.Fatalf("write keyframe: %v", err)
+	}
+
+	// Write interframes
+	for i := 1; i <= 3; i++ {
+		interframe := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			int64(i*33), int64(i*33), []byte{0x41, 0x9A, 0x00, 0x01},
+		)
+		if err := w.WriteFrame(interframe); err != nil {
+			t.Fatalf("write interframe %d: %v", i, err)
+		}
+	}
+
+	// Write another keyframe to trigger segment flush
+	keyframe2 := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		132, 132, []byte{0x65, 0x88, 0x00, 0x02},
+	)
+	if err := w.WriteFrame(keyframe2); err != nil {
+		t.Fatalf("write keyframe2: %v", err)
+	}
+
+	w.Close()
+
+	// Verify file exists and has content (init segment + at least one media segment)
+	info, err := os.Stat(w.FilePath())
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("expected non-empty fMP4 file")
+	}
+	t.Logf("fMP4 recorded %d bytes to %s", info.Size(), w.FilePath())
+}
+
+func TestFMP4RecordSessionEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Record: config.RecordConfig{
+			Enabled:       true,
+			StreamPattern: "*",
+			Format:        "fmp4",
+			Path:          filepath.Join(dir, "{stream_key}", "{date}_{time}.mp4"),
+		},
+		Stream: config.StreamConfig{
+			GOPCache:           true,
+			GOPCacheNum:        1,
+			AudioCacheMs:       1000,
+			RingBufferSize:     256,
+			IdleTimeout:        5 * time.Second,
+			NoPublisherTimeout: 3 * time.Second,
+		},
+	}
+
+	s := core.NewServer(cfg)
+	hub := s.StreamHub()
+	stream, err := hub.GetOrCreate("live/fmp4rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &testPublisher{
+		id:   "pub-fmp4",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}
+	if err := stream.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewRecordSession("live/fmp4rec", stream, cfg.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		session.Run()
+		close(done)
+	}()
+
+	// Write sequence header + keyframes + interframes
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x88, 0x00, 0x01},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		33, 33, []byte{0x41, 0x9A, 0x00, 0x01},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		66, 66, []byte{0x65, 0x88, 0x00, 0x02},
+	))
+
+	time.Sleep(100 * time.Millisecond)
+	session.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not stop in time")
+	}
+
+	filePath := session.writer.FilePath()
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("expected non-empty fMP4 recording file")
+	}
+	t.Logf("fMP4 recorded %d bytes to %s", info.Size(), filePath)
+}
+
 func TestModuleHooks(t *testing.T) {
 	dir := t.TempDir()
 	cfg := newTestConfig(dir)
