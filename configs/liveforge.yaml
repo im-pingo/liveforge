@@ -93,9 +93,6 @@ stream:
         max_bitrate: 2500000
       - rid: l
         max_bitrate: 500000
-  audio_on_demand:
-    enabled: false
-    pause_delay: 3s
   feedback:
     default_mode: auto
     auto_thresholds:
@@ -133,14 +130,19 @@ cluster:
     enabled: false
     targets: []
     schedule_url: ""
+    schedule_priority: schedule_first
+    schedule_timeout: 3s
     retry_max: 5
     retry_interval: 3s
   origin:
     enabled: false
     servers: []
     schedule_url: ""
+    schedule_priority: schedule_first
+    schedule_timeout: 3s
     idle_timeout: 30s
     retry_max: 3
+    retry_delay: 2s
 
 record:
   enabled: false

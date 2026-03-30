@@ -167,7 +167,6 @@ type StreamConfig struct {
 	NoPublisherTimeout time.Duration   `yaml:"no_publisher_timeout"`
 	SlowConsumer     SlowConsumerConfig  `yaml:"slow_consumer"`
 	Simulcast        SimulcastConfig     `yaml:"simulcast"`
-	AudioOnDemand    AudioOnDemandConfig `yaml:"audio_on_demand"`
 	Feedback         FeedbackConfig      `yaml:"feedback"`
 }
 
@@ -182,12 +181,6 @@ type SimulcastConfig struct {
 type LayerConfig struct {
 	RID        string `yaml:"rid"`
 	MaxBitrate int    `yaml:"max_bitrate"`
-}
-
-// AudioOnDemandConfig holds audio on-demand settings.
-type AudioOnDemandConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	PauseDelay time.Duration `yaml:"pause_delay"`
 }
 
 // FeedbackConfig holds feedback routing settings.
@@ -270,20 +263,25 @@ type ClusterConfig struct {
 
 // ForwardConfig holds forward push settings.
 type ForwardConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	Targets       []string      `yaml:"targets"`
-	ScheduleURL   string        `yaml:"schedule_url"`
-	RetryMax      int           `yaml:"retry_max"`
-	RetryInterval time.Duration `yaml:"retry_interval"`
+	Enabled          bool          `yaml:"enabled"`
+	Targets          []string      `yaml:"targets"`
+	ScheduleURL      string        `yaml:"schedule_url"`
+	SchedulePriority string        `yaml:"schedule_priority"`
+	ScheduleTimeout  time.Duration `yaml:"schedule_timeout"`
+	RetryMax         int           `yaml:"retry_max"`
+	RetryInterval    time.Duration `yaml:"retry_interval"`
 }
 
 // OriginConfig holds origin pull settings.
 type OriginConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	Servers     []string      `yaml:"servers"`
-	ScheduleURL string        `yaml:"schedule_url"`
-	IdleTimeout time.Duration `yaml:"idle_timeout"`
-	RetryMax    int           `yaml:"retry_max"`
+	Enabled          bool          `yaml:"enabled"`
+	Servers          []string      `yaml:"servers"`
+	ScheduleURL      string        `yaml:"schedule_url"`
+	SchedulePriority string        `yaml:"schedule_priority"`
+	ScheduleTimeout  time.Duration `yaml:"schedule_timeout"`
+	IdleTimeout      time.Duration `yaml:"idle_timeout"`
+	RetryMax         int           `yaml:"retry_max"`
+	RetryDelay       time.Duration `yaml:"retry_delay"`
 }
 
 // RecordConfig holds recording settings.
