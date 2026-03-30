@@ -116,12 +116,16 @@ func TestHTTPSenderDelivery(t *testing.T) {
 
 func TestHTTPSenderHMACSignature(t *testing.T) {
 	secret := "my-webhook-secret"
+	var mu sync.Mutex
 	var receivedSig string
 	var receivedBody []byte
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		receivedSig = r.Header.Get("X-Signature")
-		receivedBody, _ = io.ReadAll(r.Body)
+		receivedBody = body
+		mu.Unlock()
 		w.WriteHeader(200)
 	}))
 	defer ts.Close()
@@ -141,13 +145,18 @@ func TestHTTPSenderHMACSignature(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	sender.Stop()
 
-	if receivedSig == "" {
+	mu.Lock()
+	sig := receivedSig
+	body := receivedBody
+	mu.Unlock()
+
+	if sig == "" {
 		t.Fatal("expected X-Signature header")
 	}
 
-	expected := computeHMAC(receivedBody, secret)
-	if receivedSig != expected {
-		t.Errorf("signature mismatch: got %s, want %s", receivedSig, expected)
+	expected := computeHMAC(body, secret)
+	if sig != expected {
+		t.Errorf("signature mismatch: got %s, want %s", sig, expected)
 	}
 }
 
