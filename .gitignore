@@ -5,6 +5,10 @@
 *.so
 *.dylib
 /liveforge
+/liveforge-debug
+
+# Scripts (test tooling with local deps)
+/scripts/
 
 # Test binary
 *.test
