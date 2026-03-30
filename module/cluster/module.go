@@ -26,15 +26,22 @@ func (m *Module) Init(s *core.Server) error {
 	hub := s.StreamHub()
 	bus := s.GetEventBus()
 
-	if cfg.Forward.Enabled && len(cfg.Forward.Targets) > 0 {
+	if cfg.Forward.Enabled && (len(cfg.Forward.Targets) > 0 || cfg.Forward.ScheduleURL != "") {
+		fwdScheduler := NewScheduler(
+			cfg.Forward.ScheduleURL,
+			cfg.Forward.Targets,
+			cfg.Forward.SchedulePriority,
+			cfg.Forward.ScheduleTimeout,
+		)
 		m.forward = NewForwardManager(
 			hub, bus,
-			cfg.Forward.Targets,
+			fwdScheduler,
 			cfg.Forward.RetryMax,
 			cfg.Forward.RetryInterval,
 		)
 		slog.Info("cluster forward enabled", "module", "cluster",
-			"targets", len(cfg.Forward.Targets))
+			"static_targets", len(cfg.Forward.Targets),
+			"schedule_url", cfg.Forward.ScheduleURL)
 	}
 
 	if cfg.Origin.Enabled && len(cfg.Origin.Servers) > 0 {
@@ -42,6 +49,7 @@ func (m *Module) Init(s *core.Server) error {
 			hub, bus,
 			cfg.Origin.Servers,
 			cfg.Origin.RetryMax,
+			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
 		)
 		slog.Info("cluster origin pull enabled", "module", "cluster",
