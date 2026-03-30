@@ -123,6 +123,8 @@ func TestMimeToCodecType(t *testing.T) {
 		want avframe.CodecType
 	}{
 		{"video/H264", avframe.CodecH264},
+		{"video/H265", avframe.CodecH265},
+		{"video/HEVC", avframe.CodecH265},
 		{"video/VP8", avframe.CodecVP8},
 		{"video/VP9", avframe.CodecVP9},
 		{"video/AV1", avframe.CodecAV1},
@@ -146,10 +148,15 @@ func TestCodecToMime(t *testing.T) {
 		want  string
 	}{
 		{avframe.CodecH264, webrtc.MimeTypeH264},
-		{avframe.CodecOpus, webrtc.MimeTypeOpus},
+		{avframe.CodecH265, webrtc.MimeTypeH265},
 		{avframe.CodecVP8, webrtc.MimeTypeVP8},
+		{avframe.CodecVP9, webrtc.MimeTypeVP9},
+		{avframe.CodecAV1, webrtc.MimeTypeAV1},
+		{avframe.CodecOpus, webrtc.MimeTypeOpus},
 		{avframe.CodecG711U, webrtc.MimeTypePCMU},
+		{avframe.CodecG711A, webrtc.MimeTypePCMA},
 		{0, ""},
+		{avframe.CodecAAC, ""},
 	}
 
 	for _, tt := range tests {
