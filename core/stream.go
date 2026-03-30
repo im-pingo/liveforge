@@ -101,6 +101,7 @@ type Stream struct {
 	eventBus         *EventBus
 	noPublisherTimer *time.Timer
 	idleTimer        *time.Timer
+	feedbackRouter   *FeedbackRouter
 }
 
 // NewStream creates a new Stream in idle state.
@@ -115,6 +116,7 @@ func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, 
 		subscribers: make(map[string]int),
 	}
 	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
+	s.feedbackRouter = NewFeedbackRouter(cfg.Feedback)
 	return s
 }
 
@@ -387,6 +389,11 @@ func (s *Stream) MuxerManager() *MuxerManager {
 	return s.muxerManager
 }
 
+// FeedbackRouter returns the stream's feedback router.
+func (s *Stream) FeedbackRouter() *FeedbackRouter {
+	return s.feedbackRouter
+}
+
 // AddSubscriber increments the subscriber count for a protocol (e.g. "rtmp").
 // Returns an error if max_subscribers_per_stream limit is reached.
 func (s *Stream) AddSubscriber(protocol string) error {
@@ -405,6 +412,9 @@ func (s *Stream) AddSubscriber(protocol string) error {
 
 	s.subscribers[protocol]++
 
+	// Update feedback router with new subscriber count
+	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
+
 	// Cancel idle timer — we have a subscriber now
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
@@ -422,6 +432,7 @@ func (s *Stream) RemoveSubscriber(protocol string) {
 	if s.subscribers[protocol] <= 0 {
 		delete(s.subscribers, protocol)
 	}
+	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
 	s.checkIdleTimeout()
 }
 
