@@ -55,6 +55,30 @@ func TestSharedBufferOverflow(t *testing.T) {
 	}
 }
 
+func TestSharedBufferTryRead(t *testing.T) {
+	sb := NewSharedBuffer(64)
+	r := sb.NewReader()
+
+	// TryRead on empty buffer should return false (non-blocking)
+	_, ok := r.TryRead()
+	if ok {
+		t.Error("TryRead should return false on empty buffer")
+	}
+
+	// Write data, then TryRead should succeed
+	sb.Write([]byte{42})
+	data, ok := r.TryRead()
+	if !ok || !bytes.Equal(data, []byte{42}) {
+		t.Errorf("expected [42], got %v (ok=%v)", data, ok)
+	}
+
+	// TryRead again should return false (no more data)
+	_, ok = r.TryRead()
+	if ok {
+		t.Error("TryRead should return false when caught up")
+	}
+}
+
 func TestSharedBufferClose(t *testing.T) {
 	sb := NewSharedBuffer(64)
 	sb.Write([]byte{1})

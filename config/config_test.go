@@ -203,6 +203,76 @@ func TestMaxSkipWindowDefault(t *testing.T) {
 	}
 }
 
+func TestTLSConfigured(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  TLSConfig
+		want bool
+	}{
+		{"empty", TLSConfig{}, false},
+		{"cert_only", TLSConfig{CertFile: "cert.pem"}, false},
+		{"key_only", TLSConfig{KeyFile: "key.pem"}, false},
+		{"both", TLSConfig{CertFile: "cert.pem", KeyFile: "key.pem"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.Configured(); got != tt.want {
+				t.Errorf("Configured() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeMPEGTS(t *testing.T) {
+	yaml := `
+http_stream:
+  llhls:
+    container: "mpegts"
+`
+	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
+	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTP.LLHLS.Container != "ts" {
+		t.Errorf("expected container 'ts' after normalize, got %q", cfg.HTTP.LLHLS.Container)
+	}
+}
+
+func TestNormalizeMPEGDash(t *testing.T) {
+	yaml := `
+http_stream:
+  llhls:
+    container: "mpeg-ts"
+`
+	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
+	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTP.LLHLS.Container != "ts" {
+		t.Errorf("expected container 'ts' after normalize, got %q", cfg.HTTP.LLHLS.Container)
+	}
+}
+
+func TestLoadConfigInvalidPath(t *testing.T) {
+	_, err := Load("/nonexistent/path/config.yaml")
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+}
+
+func TestLoadConfigInvalidYAML(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "bad.yaml")
+	os.WriteFile(tmpFile, []byte("{{invalid yaml"), 0644)
+	_, err := Load(tmpFile)
+	if err == nil {
+		t.Error("expected error for invalid YAML")
+	}
+}
+
 func TestLoadConfigSRTDefaults(t *testing.T) {
 	yaml := `{}`
 	dir := t.TempDir()

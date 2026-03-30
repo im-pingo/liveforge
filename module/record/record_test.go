@@ -426,6 +426,173 @@ func TestFMP4RecordSessionEndToEnd(t *testing.T) {
 	t.Logf("fMP4 recorded %d bytes to %s", info.Size(), filePath)
 }
 
+func TestModuleName(t *testing.T) {
+	m := NewModule()
+	if m.Name() != "record" {
+		t.Errorf("expected name 'record', got %q", m.Name())
+	}
+}
+
+func TestModuleOnPublishAndStop(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Record: config.RecordConfig{
+			Enabled:       true,
+			StreamPattern: "live/*",
+			Format:        "flv",
+			Path:          filepath.Join(dir, "{stream_key}", "{date}_{time}.flv"),
+		},
+		Stream: config.StreamConfig{
+			GOPCache:       true,
+			GOPCacheNum:    1,
+			RingBufferSize: 256,
+		},
+	}
+	s := core.NewServer(cfg)
+
+	// Create a stream and set publisher
+	stream, _ := s.StreamHub().GetOrCreate("live/rec-hook")
+	pub := &testPublisher{id: "pub-hook", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	_ = stream.SetPublisher(pub)
+
+	// Write a frame so the recorder has data to read
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x01},
+	))
+
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger onPublish
+	ctx := &core.EventContext{StreamKey: "live/rec-hook"}
+	hooks := m.Hooks()
+	// First hook is EventPublish
+	if err := hooks[0].Handler(ctx); err != nil {
+		t.Fatalf("onPublish: %v", err)
+	}
+
+	// Verify session exists
+	m.mu.Lock()
+	_, exists := m.sessions["live/rec-hook"]
+	m.mu.Unlock()
+	if !exists {
+		t.Error("expected recording session to be created")
+	}
+
+	// Duplicate publish should be no-op
+	if err := hooks[0].Handler(ctx); err != nil {
+		t.Fatalf("duplicate onPublish: %v", err)
+	}
+
+	// Non-matching stream should be skipped
+	ctx2 := &core.EventContext{StreamKey: "other/stream"}
+	if err := hooks[0].Handler(ctx2); err != nil {
+		t.Fatalf("non-matching onPublish: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Trigger onPublishStop
+	if err := hooks[1].Handler(ctx); err != nil {
+		t.Fatalf("onPublishStop: %v", err)
+	}
+
+	m.mu.Lock()
+	_, exists = m.sessions["live/rec-hook"]
+	m.mu.Unlock()
+	if exists {
+		t.Error("expected recording session to be removed after stop")
+	}
+
+	// Stop for non-existent session should be no-op
+	if err := hooks[1].Handler(ctx); err != nil {
+		t.Fatalf("second onPublishStop: %v", err)
+	}
+
+	m.Close()
+}
+
+func TestFileWriterDurationSegmentation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.RecordConfig{
+		Path: filepath.Join(dir, "{stream_key}", "{date}_{time}.flv"),
+		Segment: config.SegmentConfig{
+			Duration: 50 * time.Millisecond, // very short for testing
+		},
+	}
+
+	w, err := NewFileWriter("live/seg", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	firstFile := w.FilePath()
+
+	// Write a frame
+	frame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65, 0x01})
+	_ = w.WriteFrame(frame)
+
+	// Wait for duration to exceed
+	time.Sleep(60 * time.Millisecond)
+
+	// Write another frame to trigger rotation
+	frame2 := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 33, 33, []byte{0x65, 0x02})
+	_ = w.WriteFrame(frame2)
+
+	if w.FilePath() == firstFile {
+		t.Error("expected file rotation due to duration, but file path didn't change")
+	}
+}
+
+func TestFileWriterDefaultPath(t *testing.T) {
+	// Test expandPath with empty Path (uses default)
+	cfg := config.RecordConfig{
+		Path:   "",
+		Format: "flv",
+	}
+	w := &FileWriter{
+		cfg:       cfg,
+		streamKey: "live/test",
+		format:    newFrameWriter("flv"),
+	}
+	p := w.expandPath()
+	if p == "" {
+		t.Error("expandPath should produce non-empty path even with empty config")
+	}
+}
+
+func TestFileWriterDefaultPathFMP4(t *testing.T) {
+	cfg := config.RecordConfig{
+		Path:   "",
+		Format: "fmp4",
+	}
+	w := &FileWriter{
+		cfg:       cfg,
+		streamKey: "live/test",
+		format:    newFrameWriter("fmp4"),
+	}
+	p := w.expandPath()
+	if p == "" {
+		t.Error("expandPath should produce non-empty path")
+	}
+}
+
+func TestNotifyFileComplete(t *testing.T) {
+	// Test with empty URL (should be no-op)
+	w := &FileWriter{
+		cfg:       config.RecordConfig{},
+		streamKey: "live/test",
+		filePath:  "/tmp/test.flv",
+		format:    newFrameWriter("flv"),
+	}
+	// Should not panic
+	w.notifyFileComplete()
+}
+
 func TestModuleHooks(t *testing.T) {
 	dir := t.TempDir()
 	cfg := newTestConfig(dir)

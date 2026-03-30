@@ -63,6 +63,45 @@ func TestStreamHubList(t *testing.T) {
 	}
 }
 
+func TestStreamHubFind(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	hub := NewStreamHub(cfg, config.LimitsConfig{}, bus)
+
+	// Find non-existent
+	_, ok := hub.Find("live/nonexistent")
+	if ok {
+		t.Error("expected Find to return false for non-existent stream")
+	}
+
+	// Create and find
+	s, _ := hub.GetOrCreate("live/findme")
+	found, ok := hub.Find("live/findme")
+	if !ok {
+		t.Error("expected Find to return true for existing stream")
+	}
+	if found != s {
+		t.Error("expected Find to return same stream instance")
+	}
+}
+
+func TestStreamHubGetOrCreateReplacesDestroying(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	hub := NewStreamHub(cfg, config.LimitsConfig{}, bus)
+
+	s1, _ := hub.GetOrCreate("live/replace")
+	s1.Close() // set to destroying
+
+	s2, err := hub.GetOrCreate("live/replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1 == s2 {
+		t.Error("expected new stream after destroying")
+	}
+}
+
 func TestStreamHubMaxStreams(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

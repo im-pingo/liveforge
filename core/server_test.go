@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -233,6 +234,119 @@ func TestMakeListenerModuleOverrideTrue(t *testing.T) {
 
 	if !isTLSListener(t, ln) {
 		t.Fatal("expected TLS listener")
+	}
+}
+
+func TestServerAccessors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Server.Name = "accessors-test"
+	s := NewServer(cfg)
+
+	// Config
+	if s.Config() != cfg {
+		t.Error("Config() should return the same config pointer")
+	}
+
+	// EventBus
+	if s.GetEventBus() == nil {
+		t.Error("GetEventBus() should not be nil")
+	}
+
+	// StartTime
+	if s.StartTime().IsZero() {
+		t.Error("StartTime() should not be zero")
+	}
+
+	// UptimeSeconds
+	if s.UptimeSeconds() < 0 {
+		t.Error("UptimeSeconds() should be non-negative")
+	}
+}
+
+func TestServerModuleNames(t *testing.T) {
+	cfg := &config.Config{}
+	s := NewServer(cfg)
+
+	s.RegisterModule(&mockModule{name: "rtmp"})
+	s.RegisterModule(&mockModule{name: "hls"})
+	_ = s.Init()
+	defer s.Shutdown()
+
+	names := s.ModuleNames()
+	if len(names) != 2 {
+		t.Fatalf("expected 2 module names, got %d", len(names))
+	}
+	if names[0] != "rtmp" || names[1] != "hls" {
+		t.Errorf("unexpected module names: %v", names)
+	}
+}
+
+func TestServerAPIHandlers(t *testing.T) {
+	cfg := &config.Config{}
+	s := NewServer(cfg)
+
+	handler := http.NewServeMux()
+	s.RegisterAPIHandler("/test", handler)
+
+	handlers := s.APIHandlers()
+	if len(handlers) != 1 {
+		t.Fatalf("expected 1 API handler, got %d", len(handlers))
+	}
+	if handlers["/test"] == nil {
+		t.Error("expected handler for /test")
+	}
+}
+
+func TestServerConnectionTracking(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Limits.MaxConnections = 2
+	s := NewServer(cfg)
+
+	if s.ConnectionCount() != 0 {
+		t.Errorf("expected 0 connections, got %d", s.ConnectionCount())
+	}
+
+	if !s.AcquireConn() {
+		t.Error("first AcquireConn should succeed")
+	}
+	if s.ConnectionCount() != 1 {
+		t.Errorf("expected 1 connection, got %d", s.ConnectionCount())
+	}
+
+	if !s.AcquireConn() {
+		t.Error("second AcquireConn should succeed")
+	}
+	if s.ConnectionCount() != 2 {
+		t.Errorf("expected 2 connections, got %d", s.ConnectionCount())
+	}
+
+	// Third should fail (max=2)
+	if s.AcquireConn() {
+		t.Error("third AcquireConn should fail (max=2)")
+	}
+
+	s.ReleaseConn()
+	if s.ConnectionCount() != 1 {
+		t.Errorf("expected 1 connection after release, got %d", s.ConnectionCount())
+	}
+
+	// Should be able to acquire again
+	if !s.AcquireConn() {
+		t.Error("AcquireConn should succeed after release")
+	}
+}
+
+func TestServerConnectionTrackingUnlimited(t *testing.T) {
+	cfg := &config.Config{} // MaxConnections = 0 (unlimited)
+	s := NewServer(cfg)
+
+	for i := 0; i < 100; i++ {
+		if !s.AcquireConn() {
+			t.Fatalf("AcquireConn should always succeed with no limit, failed at %d", i)
+		}
+	}
+	if s.ConnectionCount() != 100 {
+		t.Errorf("expected 100 connections, got %d", s.ConnectionCount())
 	}
 }
 
