@@ -2,7 +2,7 @@ package httpstream
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -56,9 +56,8 @@ func NewLLHLSSegmenter(partDuration float64, container string, cb LLHLSSegmenter
 
 // Run starts the segmenter loop. Blocks until stream ends or Stop() is called.
 func (s *LLHLSSegmenter) Run(stream *core.Stream) {
-	log.Printf("[llhls] segmenter started for %s (container=%s, partDuration=%.3fs)",
-		stream.Key(), s.container, s.partDuration)
-	defer log.Printf("[llhls] segmenter stopped for %s", stream.Key())
+	slog.Info("segmenter started", "module", "llhls", "stream", stream.Key(), "container", s.container, "partDuration", s.partDuration)
+	defer slog.Info("segmenter stopped", "module", "llhls", "stream", stream.Key())
 
 	s.initMuxer(stream)
 

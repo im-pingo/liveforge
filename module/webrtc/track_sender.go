@@ -1,7 +1,7 @@
 package webrtc
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 
@@ -148,7 +148,7 @@ func (ts *TrackSender) rtcpLoop() {
 			case *rtcp.PictureLossIndication:
 				ts.Stats.PLICount.Add(1)
 				ts.needsKeyframe.Store(true)
-				log.Printf("[webrtc] session %s: PLI received, flagging for keyframe resync", ts.sessionID)
+				slog.Debug("PLI received", "module", "webrtc", "session", ts.sessionID)
 				if ts.onPLI != nil {
 					ts.onPLI()
 				}
@@ -156,7 +156,7 @@ func (ts *TrackSender) rtcpLoop() {
 			case *rtcp.FullIntraRequest:
 				ts.Stats.PLICount.Add(1)
 				ts.needsKeyframe.Store(true)
-				log.Printf("[webrtc] session %s: FIR received, flagging for keyframe resync", ts.sessionID)
+				slog.Debug("FIR received", "module", "webrtc", "session", ts.sessionID)
 				if ts.onPLI != nil {
 					ts.onPLI()
 				}

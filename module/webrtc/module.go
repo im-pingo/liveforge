@@ -2,7 +2,7 @@ package webrtc
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -94,13 +94,13 @@ func (m *Module) Init(s *core.Server) error {
 	if cfg.TLS.Configured() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
 		proto = "https"
 	}
-	log.Printf("[webrtc] %s listening on %s", proto, ln.Addr())
+	slog.Info("listening", "module", "webrtc", "proto", proto, "addr", ln.Addr())
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := m.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[webrtc] serve error: %v", err)
+			slog.Error("serve error", "module", "webrtc", "error", err)
 		}
 	}()
 
@@ -124,7 +124,7 @@ func (m *Module) Close() error {
 		m.httpSrv.Close()
 	}
 	m.wg.Wait()
-	log.Println("[webrtc] stopped")
+	slog.Info("stopped", "module", "webrtc")
 	return nil
 }
 

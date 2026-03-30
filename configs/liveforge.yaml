@@ -150,6 +150,11 @@ record:
   on_file_complete:
     url: ""
 
+metrics:
+  enabled: false
+  listen: ":9090"
+  path: "/metrics"
+
 api:
   enabled: true
   listen: ":8090"

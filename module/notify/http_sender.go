@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -69,7 +69,7 @@ func (s *HTTPSender) Send(p *NotifyPayload) {
 	select {
 	case s.queue <- p:
 	default:
-		log.Printf("[notify] queue full, dropping event %s for %s", p.Event, p.StreamKey)
+		slog.Warn("queue full, dropping event", "module", "notify", "event", p.Event, "stream", p.StreamKey)
 	}
 }
 
@@ -95,7 +95,7 @@ func (s *HTTPSender) worker() {
 func (s *HTTPSender) deliver(p *NotifyPayload) {
 	body, err := json.Marshal(p)
 	if err != nil {
-		log.Printf("[notify] marshal error: %v", err)
+		slog.Error("marshal error", "module", "notify", "error", err)
 		return
 	}
 
@@ -131,7 +131,7 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 
 		req, err := http.NewRequest(http.MethodPost, ep.URL, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("[notify] request error: %v", err)
+			slog.Error("request error", "module", "notify", "error", err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -143,7 +143,7 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[notify] POST %s attempt %d/%d failed: %v", ep.URL, attempt+1, retries, err)
+			slog.Warn("POST failed", "module", "notify", "url", ep.URL, "attempt", attempt+1, "max_retries", retries, "error", err)
 			continue
 		}
 		resp.Body.Close()
@@ -151,7 +151,7 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return // success
 		}
-		log.Printf("[notify] POST %s attempt %d/%d got status %d", ep.URL, attempt+1, retries, resp.StatusCode)
+		slog.Warn("POST unexpected status", "module", "notify", "url", ep.URL, "attempt", attempt+1, "max_retries", retries, "status", resp.StatusCode)
 	}
 }
 

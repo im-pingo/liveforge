@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,6 +26,7 @@ type FileWriter struct {
 	startTime    time.Time
 	bytesWritten int64
 	headerDone   bool
+	segmentIndex int
 }
 
 // NewFileWriter creates a new file writer for the given stream key.
@@ -60,10 +61,17 @@ func (w *FileWriter) WriteFrame(frame *avframe.AVFrame) error {
 	}
 	w.bytesWritten += int64(len(frame.Payload))
 
-	// Check segmentation
+	// Check segmentation by duration
 	if w.cfg.Segment.Duration > 0 && time.Since(w.startTime) >= w.cfg.Segment.Duration {
 		if err := w.rotate(); err != nil {
 			return fmt.Errorf("rotate file: %w", err)
+		}
+	}
+
+	// Check segmentation by max file size
+	if maxBytes := parseSize(w.cfg.Segment.MaxSize); maxBytes > 0 && w.bytesWritten >= maxBytes {
+		if err := w.rotate(); err != nil {
+			return fmt.Errorf("rotate file (size): %w", err)
 		}
 	}
 
@@ -75,7 +83,7 @@ func (w *FileWriter) Close() {
 	if w.file != nil {
 		w.file.Close()
 		w.notifyFileComplete()
-		log.Printf("[record] closed %s (%d bytes)", w.filePath, w.bytesWritten)
+		slog.Info("file closed", "module", "record", "path", w.filePath, "bytes", w.bytesWritten)
 		w.file = nil
 	}
 }
@@ -111,8 +119,10 @@ func (w *FileWriter) rotate() error {
 	if w.file != nil {
 		w.file.Close()
 		w.notifyFileComplete()
-		log.Printf("[record] segment complete: %s (%d bytes)", w.filePath, w.bytesWritten)
+		slog.Info("segment complete", "module", "record", "path", w.filePath, "bytes", w.bytesWritten)
 	}
+
+	w.segmentIndex++
 
 	// Open new file
 	return w.openFile()
@@ -130,8 +140,38 @@ func (w *FileWriter) expandPath() string {
 
 	p = strings.ReplaceAll(p, "{stream_key}", streamDir)
 	p = strings.ReplaceAll(p, "{date}", now.Format("2006-01-02"))
-	p = strings.ReplaceAll(p, "{time}", now.Format("150405"))
+	p = strings.ReplaceAll(p, "{time}", fmt.Sprintf("%s_%04d", now.Format("150405"), w.segmentIndex))
 	return p
+}
+
+// parseSize parses a human-readable size string like "512MB", "1GB", "100KB".
+// Returns the size in bytes. Returns 0 if the string is empty or unparseable.
+func parseSize(s string) int64 {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0
+	}
+
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "GB")
+	case strings.HasSuffix(s, "MB"):
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "MB")
+	case strings.HasSuffix(s, "KB"):
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "KB")
+	case strings.HasSuffix(s, "B"):
+		s = strings.TrimSuffix(s, "B")
+	}
+
+	var n int64
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n <= 0 {
+		return 0
+	}
+	return n * multiplier
 }
 
 func (w *FileWriter) notifyFileComplete() {
@@ -150,7 +190,7 @@ func (w *FileWriter) notifyFileComplete() {
 
 	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:gosec
 	if err != nil {
-		log.Printf("[record] file complete callback error: %v", err)
+		slog.Error("file complete callback error", "module", "record", "error", err)
 		return
 	}
 	resp.Body.Close()

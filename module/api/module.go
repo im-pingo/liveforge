@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -51,13 +51,13 @@ func (m *Module) Init(s *core.Server) error {
 	if cfg.TLS.Configured() && (cfg.API.TLS == nil || *cfg.API.TLS) {
 		proto = "https"
 	}
-	log.Printf("[api] %s listening on %s", proto, ln.Addr())
+	slog.Info("listening", "module", "api", "proto", proto, "addr", ln.Addr())
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := m.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[api] serve error: %v", err)
+			slog.Error("serve error", "module", "api", "error", err)
 		}
 	}()
 
@@ -73,7 +73,7 @@ func (m *Module) Close() error {
 		m.httpSrv.Close()
 	}
 	m.wg.Wait()
-	log.Println("[api] stopped")
+	slog.Info("stopped", "module", "api")
 	return nil
 }
 

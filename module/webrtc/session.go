@@ -1,7 +1,7 @@
 package webrtc
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -30,7 +30,7 @@ func newSession(id string, pc *webrtc.PeerConnection, streamKey, role string, m 
 	}
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[webrtc] session %s ICE state: %s", id, state)
+		slog.Debug("ICE state", "module", "webrtc", "session", id, "state", state)
 		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
 			s.Close()
 		}
@@ -45,6 +45,6 @@ func (s *Session) Close() {
 		close(s.done)
 		s.pc.Close()
 		s.module.removeSession(s)
-		log.Printf("[webrtc] session %s closed (role=%s, stream=%s)", s.id, s.role, s.streamKey)
+		slog.Info("session closed", "module", "webrtc", "session", s.id, "role", s.role, "stream", s.streamKey)
 	})
 }

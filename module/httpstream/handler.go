@@ -1,7 +1,7 @@
 package httpstream
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
@@ -92,7 +92,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer m.server.ReleaseConn()
 
-	log.Printf("[httpstream] request: %s", r.URL.Path)
+	slog.Debug("request", "module", "httpstream", "path", r.URL.Path)
 
 	// Try segment path first: /app/key/seg.ext
 	if app, key, segName, ext, ok := parseSegmentPath(r.URL.Path); ok {
@@ -248,7 +248,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[httpstream] %s subscriber for %s from %s", format, streamKey, r.RemoteAddr)
+	slog.Info("subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveStream(w, r, format, stream)
 
 	m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{

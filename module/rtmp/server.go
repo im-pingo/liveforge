@@ -1,7 +1,7 @@
 package rtmp
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -50,7 +50,7 @@ func (m *Module) Init(s *core.Server) error {
 	if cfg.TLS.Configured() && (cfg.RTMP.TLS == nil || *cfg.RTMP.TLS) {
 		proto = "RTMPS"
 	}
-	log.Printf("%s listening on %s", proto, cfg.RTMP.Listen)
+	slog.Info("listening", "module", "rtmp", "proto", proto, "addr", cfg.RTMP.Listen)
 
 	m.wg.Add(1)
 	go m.acceptLoop(cfg.RTMP.ChunkSize)
@@ -75,7 +75,7 @@ func (m *Module) Close() error {
 	m.connsMu.Unlock()
 
 	m.wg.Wait()
-	log.Println("RTMP module stopped")
+	slog.Info("stopped", "module", "rtmp")
 	return nil
 }
 
@@ -92,13 +92,13 @@ func (m *Module) acceptLoop(chunkSize int) {
 			case <-m.closing:
 				return
 			default:
-				log.Printf("RTMP accept error: %v", err)
+				slog.Error("accept error", "module", "rtmp", "error", err)
 				continue
 			}
 		}
 
 		if !m.server.AcquireConn() {
-			log.Printf("RTMP: max connections reached, rejecting %s", conn.RemoteAddr())
+			slog.Warn("max connections reached", "module", "rtmp", "remote", conn.RemoteAddr())
 			conn.Close()
 			continue
 		}
@@ -121,13 +121,13 @@ func (m *Module) handleConn(conn net.Conn, chunkSize int) {
 	}()
 
 	if err := ServerHandshake(conn); err != nil {
-		log.Printf("RTMP handshake failed: %v", err)
+		slog.Error("handshake failed", "module", "rtmp", "error", err)
 		conn.Close()
 		return
 	}
 
 	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize)
 	if err := handler.Handle(); err != nil {
-		log.Printf("RTMP handler error: %v", err)
+		slog.Error("handler error", "module", "rtmp", "error", err)
 	}
 }

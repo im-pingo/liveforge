@@ -3,7 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -36,7 +36,7 @@ func NewWSSender() *WSSender {
 func (s *WSSender) Send(p *NotifyPayload) {
 	data, err := json.Marshal(p)
 	if err != nil {
-		log.Printf("[notify] ws marshal error: %v", err)
+		slog.Error("ws marshal error", "module", "notify", "error", err)
 		return
 	}
 
@@ -70,7 +70,7 @@ func (s *WSSender) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		log.Printf("[notify] ws accept error: %v", err)
+		slog.Error("ws accept error", "module", "notify", "error", err)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (s *WSSender) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.clients[c] = struct{}{}
 	s.mu.Unlock()
 
-	log.Printf("[notify] ws client connected (events=%v)", events)
+	slog.Info("ws client connected", "module", "notify", "events", events)
 
 	// Block until the client disconnects or context is cancelled.
 	// Read loop detects close frames.
@@ -132,7 +132,7 @@ func (s *WSSender) removeClient(c *wsClient) {
 	if ok {
 		c.cancel()
 		c.conn.Close(websocket.StatusNormalClosure, "")
-		log.Println("[notify] ws client disconnected")
+		slog.Info("ws client disconnected", "module", "notify")
 	}
 }
 
