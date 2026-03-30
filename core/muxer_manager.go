@@ -12,17 +12,27 @@ type MuxerInstance struct {
 	Buffer   *SharedBuffer
 	subCount int
 	Done     chan struct{} // closed when last subscriber leaves
-	initOnce sync.Once
+	initMu   sync.Mutex
+	initDone bool
 	initData []byte
 }
 
-// SetInitData stores format-specific init data (thread-safe via sync.Once).
+// SetInitData stores format-specific init data (only the first call takes effect).
 func (inst *MuxerInstance) SetInitData(data []byte) {
-	inst.initOnce.Do(func() { inst.initData = data })
+	inst.initMu.Lock()
+	defer inst.initMu.Unlock()
+	if !inst.initDone {
+		inst.initData = data
+		inst.initDone = true
+	}
 }
 
 // InitData returns the stored init data. May return nil if not yet set.
-func (inst *MuxerInstance) InitData() []byte { return inst.initData }
+func (inst *MuxerInstance) InitData() []byte {
+	inst.initMu.Lock()
+	defer inst.initMu.Unlock()
+	return inst.initData
+}
 
 // MuxerManager manages per-format muxer instances for a stream.
 type MuxerManager struct {
