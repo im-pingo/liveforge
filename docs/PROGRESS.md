@@ -153,6 +153,7 @@
 | Cluster module | `module/cluster/module.go` | Module registration, forward + origin manager lifecycle |
 | Forward manager | `module/cluster/forward.go` | Multi-target RTMP push on publish, auto-cleanup on unpublish |
 | Origin pull manager | `module/cluster/origin.go` | On-demand pull from origin servers on subscribe, exponential backoff retry |
+| Scheduler | `module/cluster/scheduler.go` | Dynamic target resolution via HTTP callback, priority-based fallback to static config |
 | RTMP client | `module/cluster/rtmp_client.go` | Client-side RTMP handshake, connect, publish, play, media frame send/receive |
 
 ---
@@ -180,7 +181,6 @@
 |---------|-----------|--------|
 | **max_skip_count / max_skip_window** | `stream.max_skip_count` | SkipTracker implemented, not wired to subscribers (optional) |
 | **Simulcast** | `webrtc.simulcast` | Config has layer definitions, no layer selection logic in WebRTC module |
-| **Cluster schedule_url** | `cluster.forward.schedule_url`, `cluster.origin.schedule_url` | Config parsed, dynamic target scheduling not implemented |
 
 ---
 
