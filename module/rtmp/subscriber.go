@@ -95,6 +95,7 @@ func (s *Subscriber) WriteLoop() {
 
 	// Read live frames from ring buffer, skipping frames already sent via GOP cache
 	reader := s.stream.RingBuffer().NewReader()
+	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer)
 	for {
 		select {
 		case <-s.closed:
@@ -102,16 +103,9 @@ func (s *Subscriber) WriteLoop() {
 		default:
 		}
 
-		frame, ok := reader.TryRead()
+		frame, ok := filter.NextFrame()
 		if !ok {
-			frame, ok = reader.Read()
-			if !ok {
-				return
-			}
-		}
-
-		if frame == nil {
-			continue
+			return
 		}
 
 		// Skip frames that were already covered by the GOP cache
@@ -119,9 +113,11 @@ func (s *Subscriber) WriteLoop() {
 			continue
 		}
 
+		start := time.Now()
 		if err := s.sendFrame(frame); err != nil {
 			return
 		}
+		filter.ReportSendTime(time.Since(start))
 	}
 }
 

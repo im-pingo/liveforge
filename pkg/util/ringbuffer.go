@@ -92,8 +92,9 @@ func (rb *RingBuffer[T]) NewReaderAt(pos int64) *RingReader[T] {
 
 // RingReader is a per-consumer cursor into a RingBuffer.
 type RingReader[T any] struct {
-	rb         *RingBuffer[T]
-	readCursor int64
+	rb          *RingBuffer[T]
+	readCursor  int64
+	lastSkipped int64
 }
 
 // Read returns the next value, blocking until data is available.
@@ -120,6 +121,8 @@ func (r *RingReader[T]) Read() (T, bool) {
 
 // TryRead attempts a non-blocking read. Returns (value, false) if no data available.
 func (r *RingReader[T]) TryRead() (T, bool) {
+	r.lastSkipped = 0
+
 	wc := r.rb.writeCursor.Load()
 	if r.readCursor >= wc {
 		var zero T
@@ -129,12 +132,33 @@ func (r *RingReader[T]) TryRead() (T, bool) {
 	// Check if our position was overwritten (reader too slow)
 	oldest := wc - r.rb.size
 	if r.readCursor < oldest {
+		r.lastSkipped = oldest - r.readCursor
 		r.readCursor = oldest
 	}
 
 	val := r.rb.buf[r.readCursor%r.rb.size]
 	r.readCursor++
 	return val, true
+}
+
+// Skipped returns the number of frames skipped in the last TryRead call
+// due to the reader being too slow (ring buffer overwrite).
+func (r *RingReader[T]) Skipped() int64 {
+	return r.lastSkipped
+}
+
+// Lag returns the fraction of the ring buffer capacity that the reader trails behind the writer.
+// Returns a value in [0.0, 1.0] where 1.0 means the reader is about to be overwritten.
+func (r *RingReader[T]) Lag() float64 {
+	wc := r.rb.writeCursor.Load()
+	behind := wc - r.readCursor
+	if behind < 0 {
+		behind = 0
+	}
+	if behind > r.rb.size {
+		behind = r.rb.size
+	}
+	return float64(behind) / float64(r.rb.size)
 }
 
 // ReadCursor returns the current read position.

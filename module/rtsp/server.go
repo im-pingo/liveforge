@@ -324,8 +324,9 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 
 	// Start reading from the current write position to avoid duplicating GOP frames.
 	ringReader := session.Stream.RingBuffer().NewReaderAt(session.Stream.RingBuffer().WriteCursor())
+	filter := core.NewSlowConsumerFilter(ringReader, session.Stream.Config().SlowConsumer)
 	for {
-		frame, ok := ringReader.Read()
+		frame, ok := filter.NextFrame()
 		if !ok {
 			return
 		}
@@ -338,9 +339,11 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
+		start := time.Now()
 		if err := sub.SendFrame(frame); err != nil {
 			return
 		}
+		filter.ReportSendTime(time.Since(start))
 	}
 }
 

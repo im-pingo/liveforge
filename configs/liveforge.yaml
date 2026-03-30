@@ -73,6 +73,14 @@ stream:
   max_skip_window: 60s
   idle_timeout: 30s
   no_publisher_timeout: 15s
+  slow_consumer:
+    enabled: true
+    lag_warn_ratio: 0.5
+    lag_drop_ratio: 0.75
+    lag_critical_ratio: 0.9
+    lag_recover_ratio: 0.5
+    ewma_alpha: 0.3
+    send_time_ratio: 2.0
   simulcast:
     enabled: false
     auto_pause_layer: true

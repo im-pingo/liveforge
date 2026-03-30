@@ -95,6 +95,7 @@ func (s *Subscriber) Run() {
 	// reading the entire backlog. Combined with the DTS filter below, this
 	// prevents backward DTS jumps while tolerating small overlaps.
 	reader := stream.RingBuffer().NewReaderAt(stream.RingBuffer().WriteCursor())
+	filter := core.NewSlowConsumerFilter(reader, stream.Config().SlowConsumer)
 	for {
 		select {
 		case <-s.closed:
@@ -102,15 +103,12 @@ func (s *Subscriber) Run() {
 		default:
 		}
 
-		frame, ok := reader.TryRead()
+		frame, ok := filter.NextFrame()
 		if !ok {
-			frame, ok = reader.Read()
-			if !ok {
-				return
-			}
+			return
 		}
 
-		if frame == nil || frame.FrameType == avframe.FrameTypeSequenceHeader {
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
 
@@ -119,9 +117,11 @@ func (s *Subscriber) Run() {
 			continue
 		}
 
+		start := time.Now()
 		if err := s.sendFrame(muxer, frame); err != nil {
 			return
 		}
+		filter.ReportSendTime(time.Since(start))
 	}
 }
 
