@@ -179,19 +179,19 @@ func (ft *ForwardTarget) Close() {
 
 // ForwardManager manages all forward targets for all streams.
 type ForwardManager struct {
-	hub      *core.StreamHub
-	eventBus *core.EventBus
-	targets  []string
-	retryMax int
-	retryDel time.Duration
+	hub       *core.StreamHub
+	eventBus  *core.EventBus
+	scheduler *Scheduler
+	retryMax  int
+	retryDel  time.Duration
 
-	mu      sync.Mutex
-	active  map[string][]*ForwardTarget // streamKey -> targets
-	closed  chan struct{}
+	mu     sync.Mutex
+	active map[string][]*ForwardTarget // streamKey -> targets
+	closed chan struct{}
 }
 
 // NewForwardManager creates a new forward manager.
-func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, targets []string, retryMax int, retryDelay time.Duration) *ForwardManager {
+func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, retryMax int, retryDelay time.Duration) *ForwardManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
@@ -199,13 +199,13 @@ func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, targets []string
 		retryDelay = 5 * time.Second
 	}
 	return &ForwardManager{
-		hub:      hub,
-		eventBus: bus,
-		targets:  targets,
-		retryMax: retryMax,
-		retryDel: retryDelay,
-		active:   make(map[string][]*ForwardTarget),
-		closed:   make(chan struct{}),
+		hub:       hub,
+		eventBus:  bus,
+		scheduler: scheduler,
+		retryMax:  retryMax,
+		retryDel:  retryDelay,
+		active:    make(map[string][]*ForwardTarget),
+		closed:    make(chan struct{}),
 	}
 }
 
@@ -241,9 +241,15 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 		return nil
 	}
 
+	targets, err := fm.scheduler.Resolve("forward", ctx.StreamKey)
+	if err != nil {
+		slog.Warn("forward schedule resolve failed", "module", "cluster",
+			"stream", ctx.StreamKey, "error", err)
+		return nil
+	}
+
 	var fts []*ForwardTarget
-	for _, target := range fm.targets {
-		// Build full target URL: target base + stream key
+	for _, target := range targets {
 		url := target
 		if !containsStreamPath(target) {
 			url = fmt.Sprintf("%s/%s", target, ctx.StreamKey)
