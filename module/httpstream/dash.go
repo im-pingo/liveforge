@@ -2,7 +2,7 @@ package httpstream
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"strings"
 	"sync"
@@ -130,8 +130,8 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 // RingBuffer, groups them keyframe-to-keyframe, and produces separate video
 // and audio fMP4 segments.
 func (d *DASHManager) Run(stream *core.Stream) {
-	log.Printf("[dash] manager started for %s", d.streamKey)
-	defer log.Printf("[dash] manager stopped for %s", d.streamKey)
+	slog.Info("manager started", "module", "dash", "stream", d.streamKey)
+	defer slog.Info("manager stopped", "module", "dash", "stream", d.streamKey)
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame

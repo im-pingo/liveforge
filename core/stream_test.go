@@ -306,6 +306,52 @@ func TestSkipTrackerDisabled(t *testing.T) {
 	}
 }
 
+func TestStreamMaxBitrateEnforcement(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = false
+	limits := config.LimitsConfig{MaxBitratePerStream: 1} // 1 kbps — very low
+	s := NewStream("live/bitrate-test", cfg, limits, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	_ = s.SetPublisher(pub)
+
+	// Sequence headers must always be accepted regardless of bitrate
+	seqHeader := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, make([]byte, 10000))
+	if ok := s.WriteFrame(seqHeader); !ok {
+		t.Error("sequence header should always be accepted even when over bitrate")
+	}
+
+	// Write a large frame to push bitrate over 1 kbps
+	bigFrame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, make([]byte, 100000))
+	s.WriteFrame(bigFrame)
+
+	// Wait so that elapsed time > 0ms for bitrate computation
+	time.Sleep(2 * time.Millisecond)
+
+	// After writing 100KB, BitrateKbps >> 1. Next frame should be rejected.
+	nextFrame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 40, 40, make([]byte, 1000))
+	if ok := s.WriteFrame(nextFrame); ok {
+		t.Error("frame should be rejected when bitrate exceeds max_bitrate_per_stream")
+	}
+}
+
+func TestStreamMaxBitrateDisabled(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = false
+	limits := config.LimitsConfig{MaxBitratePerStream: 0} // disabled
+	s := NewStream("live/bitrate-disabled", cfg, limits, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	_ = s.SetPublisher(pub)
+
+	bigFrame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, make([]byte, 100000))
+	if ok := s.WriteFrame(bigFrame); !ok {
+		t.Error("frame should be accepted when max_bitrate_per_stream is disabled")
+	}
+}
+
 func TestStreamRepublishBeforeTimeout(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

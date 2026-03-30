@@ -2,7 +2,7 @@ package httpstream
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -68,13 +68,13 @@ func (m *Module) Init(s *core.Server) error {
 	if cfg.TLS.Configured() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {
 		proto = "https"
 	}
-	log.Printf("[httpstream] %s listening on %s", proto, ln.Addr())
+	slog.Info("listening", "module", "httpstream", "proto", proto, "addr", ln.Addr())
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := m.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[httpstream] serve error: %v", err)
+			slog.Error("serve error", "module", "httpstream", "error", err)
 		}
 	}()
 
@@ -228,7 +228,7 @@ func (m *Module) Close() error {
 	m.llhlsMu.Unlock()
 
 	m.wg.Wait()
-	log.Println("[httpstream] stopped")
+	slog.Info("stopped", "module", "httpstream")
 	return nil
 }
 

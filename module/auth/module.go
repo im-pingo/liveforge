@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"log"
+	"log/slog"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -23,7 +23,7 @@ func (m *Module) Name() string { return "auth" }
 // Init reads auth config from the server.
 func (m *Module) Init(s *core.Server) error {
 	m.cfg = s.Config().Auth
-	log.Printf("[auth] enabled, publish mode: %s, subscribe mode: %s", m.cfg.Publish.Mode, m.cfg.Subscribe.Mode)
+	slog.Info("enabled", "module", "auth", "publish_mode", m.cfg.Publish.Mode, "subscribe_mode", m.cfg.Subscribe.Mode)
 	return nil
 }
 
@@ -50,7 +50,7 @@ func (m *Module) Close() error { return nil }
 
 func (m *Module) onPublish(ctx *core.EventContext) error {
 	if err := checkAuth(m.cfg.Publish, ctx, "publish"); err != nil {
-		log.Printf("[auth] publish rejected for %s from %s: %v", ctx.StreamKey, ctx.RemoteAddr, err)
+		slog.Warn("publish rejected", "module", "auth", "stream", ctx.StreamKey, "remote", ctx.RemoteAddr, "error", err)
 		return err
 	}
 	return nil
@@ -58,7 +58,7 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 
 func (m *Module) onSubscribe(ctx *core.EventContext) error {
 	if err := checkAuth(m.cfg.Subscribe, ctx, "subscribe"); err != nil {
-		log.Printf("[auth] subscribe rejected for %s from %s: %v", ctx.StreamKey, ctx.RemoteAddr, err)
+		slog.Warn("subscribe rejected", "module", "auth", "stream", ctx.StreamKey, "remote", ctx.RemoteAddr, "error", err)
 		return err
 	}
 	return nil

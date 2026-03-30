@@ -2,7 +2,7 @@ package httpstream
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -50,7 +50,7 @@ func (m *Module) ensureMuxerCallbacks(stream *core.Stream) {
 
 func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	defer inst.Buffer.Close()
-	log.Printf("[httpstream] FLV muxer started for %s", stream.Key())
+	slog.Info("muxer started", "module", "httpstream", "format", "flv", "stream", stream.Key())
 
 	muxer := flv.NewMuxer()
 	var buf bytes.Buffer
@@ -86,7 +86,7 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	for {
 		select {
 		case <-inst.Done:
-			log.Printf("[httpstream] FLV muxer stopped for %s", stream.Key())
+			slog.Info("muxer stopped", "module", "httpstream", "format", "flv", "stream", stream.Key())
 			return
 		default:
 		}
@@ -107,7 +107,7 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	defer inst.Buffer.Close()
-	log.Printf("[httpstream] TS muxer started for %s", stream.Key())
+	slog.Info("muxer started", "module", "httpstream", "format", "ts", "stream", stream.Key())
 
 	// Determine codecs from sequence headers
 	var videoCodec, audioCodec avframe.CodecType
@@ -141,7 +141,7 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	for {
 		select {
 		case <-inst.Done:
-			log.Printf("[httpstream] TS muxer stopped for %s", stream.Key())
+			slog.Info("muxer stopped", "module", "httpstream", "format", "ts", "stream", stream.Key())
 			return
 		default:
 		}
@@ -159,7 +159,7 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	defer inst.Buffer.Close()
-	log.Printf("[httpstream] FMP4 muxer started for %s", stream.Key())
+	slog.Info("muxer started", "module", "httpstream", "format", "fmp4", "stream", stream.Key())
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
@@ -214,7 +214,7 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	for {
 		select {
 		case <-inst.Done:
-			log.Printf("[httpstream] FMP4 muxer stopped for %s", stream.Key())
+			slog.Info("muxer stopped", "module", "httpstream", "format", "fmp4", "stream", stream.Key())
 			return
 		default:
 		}

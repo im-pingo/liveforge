@@ -96,6 +96,10 @@ func defaults() *Config {
 		API: APIConfig{
 			Listen: ":8090",
 		},
+		Metrics: MetricsConfig{
+			Listen: ":9090",
+			Path:   "/metrics",
+		},
 	}
 }
 

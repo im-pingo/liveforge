@@ -162,6 +162,70 @@ func TestRecordSessionEndToEnd(t *testing.T) {
 	t.Logf("recorded %d bytes to %s", info.Size(), filePath)
 }
 
+func TestParseSize(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int64
+	}{
+		{"512MB", 512 * 1024 * 1024},
+		{"1GB", 1024 * 1024 * 1024},
+		{"100KB", 100 * 1024},
+		{"1024B", 1024},
+		{"0MB", 0},
+		{"", 0},
+		{"invalid", 0},
+		{"  256mb  ", 256 * 1024 * 1024}, // case insensitive + whitespace
+	}
+	for _, tt := range tests {
+		got := parseSize(tt.input)
+		if got != tt.want {
+			t.Errorf("parseSize(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestFileWriterMaxSizeSegmentation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.RecordConfig{
+		Path: filepath.Join(dir, "{stream_key}", "{date}_{time}.flv"),
+		Segment: config.SegmentConfig{
+			MaxSize: "1KB", // very small to trigger rotation
+		},
+	}
+
+	w, err := NewFileWriter("live/test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	firstFile := w.FilePath()
+
+	// Write frames until we exceed 1KB
+	for i := 0; i < 20; i++ {
+		frame := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			int64(i*33), int64(i*33), make([]byte, 200),
+		)
+		if err := w.WriteFrame(frame); err != nil {
+			t.Fatalf("write frame %d: %v", i, err)
+		}
+	}
+
+	// File should have rotated — current path should differ from first
+	if w.FilePath() == firstFile {
+		t.Error("expected file rotation due to max_size, but file path didn't change")
+	}
+
+	// Both files should exist
+	if _, err := os.Stat(firstFile); err != nil {
+		t.Errorf("first file should exist: %v", err)
+	}
+	if _, err := os.Stat(w.FilePath()); err != nil {
+		t.Errorf("rotated file should exist: %v", err)
+	}
+}
+
 func TestModuleHooks(t *testing.T) {
 	dir := t.TempDir()
 	cfg := newTestConfig(dir)

@@ -221,9 +221,20 @@ func (s *Stream) Publisher() Publisher {
 }
 
 // WriteFrame writes a media frame to the ring buffer and updates caches.
-func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
+// Returns false if the frame was rejected due to bitrate limit.
+func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Enforce max_bitrate_per_stream: reject non-header frames when over limit
+	if maxKbps := s.limits.MaxBitratePerStream; maxKbps > 0 {
+		if frame.FrameType != avframe.FrameTypeSequenceHeader {
+			snap := s.stats.snapshot()
+			if snap.BitrateKbps > int64(maxKbps) {
+				return false
+			}
+		}
+	}
 
 	// Store sequence headers separately for late-joining subscribers
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -267,6 +278,7 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
 
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
+	return true
 }
 
 // GOPCacheLen returns the total number of frames across all cached GOPs.

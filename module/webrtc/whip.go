@@ -3,7 +3,7 @@ package webrtc
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -98,7 +98,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := stream.SetPublisher(pub); err != nil {
-			log.Printf("[webrtc] WHIP set publisher failed: %v", err)
+			slog.Error("WHIP set publisher failed", "module", "webrtc", "error", err)
 			return
 		}
 		publisherSet = true
@@ -113,7 +113,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		codec := track.Codec()
 		avCodec := mimeToCodecType(codec.MimeType)
 		if avCodec == 0 {
-			log.Printf("[webrtc] WHIP unsupported codec: %s", codec.MimeType)
+			slog.Warn("WHIP unsupported codec", "module", "webrtc", "mime", codec.MimeType)
 			return
 		}
 
@@ -133,7 +133,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 
 		dp, err := pkgrtp.NewDepacketizer(avCodec)
 		if err != nil {
-			log.Printf("[webrtc] WHIP depacketizer error: %v", err)
+			slog.Error("WHIP depacketizer error", "module", "webrtc", "error", err)
 			return
 		}
 
@@ -190,7 +190,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(pc.LocalDescription().SDP))
 
-	log.Printf("[webrtc] WHIP session %s started for stream %s", sessionID, streamKey)
+	slog.Info("WHIP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
 }
 
 // readTrackLoop reads RTP packets from a WebRTC track, depacketizes them,

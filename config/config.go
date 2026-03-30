@@ -18,8 +18,9 @@ type Config struct {
 	Auth   AuthConfig   `yaml:"auth"`
 	Notify NotifyConfig `yaml:"notify"`
 	Cluster ClusterConfig `yaml:"cluster"`
-	Record RecordConfig  `yaml:"record"`
-	API    APIConfig     `yaml:"api"`
+	Record  RecordConfig  `yaml:"record"`
+	API     APIConfig     `yaml:"api"`
+	Metrics MetricsConfig `yaml:"metrics"`
 }
 
 // ServerConfig holds general server settings.
@@ -297,6 +298,13 @@ type SegmentConfig struct {
 // FileCompleteConfig holds file completion callback settings.
 type FileCompleteConfig struct {
 	URL string `yaml:"url"`
+}
+
+// MetricsConfig holds Prometheus metrics settings.
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	Path    string `yaml:"path"`
 }
 
 // APIConfig holds the management API settings.

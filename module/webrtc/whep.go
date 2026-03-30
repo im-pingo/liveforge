@@ -3,7 +3,7 @@ package webrtc
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -169,7 +169,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// Merge ICE state handling: log state, signal connection ready, and
 	// clean up on disconnect. This replaces the handler set by newSession.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[webrtc] WHEP session %s ICE state: %s", sessionID, state)
+		slog.Debug("WHEP ICE state", "module", "webrtc", "session", sessionID, "state", state)
 		switch state {
 		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
 			select {
@@ -241,7 +241,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(pc.LocalDescription().SDP))
 
-	log.Printf("[webrtc] WHEP session %s started for stream %s", sessionID, streamKey)
+	slog.Info("WHEP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
 }
 
 // whepFeedLoop reads AVFrames from the stream's RingBuffer and writes them
@@ -258,7 +258,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
-		log.Printf("[webrtc] peer connected, starting media feed (mode=%s)", mode)
+		slog.Info("peer connected, starting media feed", "module", "webrtc", "mode", mode)
 	case <-done:
 		return
 	}
@@ -310,7 +310,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 				return
 			}
 			video.ClearNeedsKeyframe()
-			log.Printf("[webrtc] PLI resync: sending keyframe (%d bytes)", len(frame.Payload))
+			slog.Debug("PLI resync: sending keyframe", "module", "webrtc", "bytes", len(frame.Payload))
 		}
 
 		var payload []byte
@@ -460,7 +460,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			if !gotKeyframe {
 				if frame.MediaType.IsVideo() && frame.FrameType == avframe.FrameTypeKeyframe {
 					gotKeyframe = true
-					log.Printf("[webrtc] realtime mode: got first keyframe, starting send")
+					slog.Info("realtime mode: got first keyframe", "module", "webrtc")
 				} else {
 					continue
 				}

@@ -2,7 +2,7 @@ package srt
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -67,7 +67,7 @@ func (m *Module) Init(s *core.Server) error {
 		return fmt.Errorf("SRT listen on %s: %w", cfg.SRT.Listen, err)
 	}
 
-	log.Printf("SRT listening on %s (latency %dms)", cfg.SRT.Listen, cfg.SRT.Latency)
+	slog.Info("listening", "module", "srt", "addr", cfg.SRT.Listen, "latency_ms", cfg.SRT.Latency)
 
 	m.wg.Add(1)
 	go m.serveLoop()
@@ -83,14 +83,14 @@ func (m *Module) Close() error {
 	close(m.closing)
 	m.srtSrv.Shutdown()
 	m.wg.Wait()
-	log.Println("SRT module stopped")
+	slog.Info("stopped", "module", "srt")
 	return nil
 }
 
 func (m *Module) serveLoop() {
 	defer m.wg.Done()
 	if err := m.srtSrv.Serve(); err != nil && err != gosrt.ErrServerClosed {
-		log.Printf("SRT serve error: %v", err)
+		slog.Error("serve error", "module", "srt", "error", err)
 	}
 }
 
@@ -147,7 +147,7 @@ func normalizeStreamKey(raw string) string {
 // handleConnect is the SRT server callback for incoming connections.
 func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	if !m.server.AcquireConn() {
-		log.Printf("SRT: max connections reached, rejecting %s", req.RemoteAddr())
+		slog.Warn("max connections reached", "module", "srt", "remote", req.RemoteAddr())
 		return gosrt.REJECT
 	}
 
@@ -155,7 +155,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	mode, streamKey := parseStreamID(streamID)
 
 	if streamKey == "" {
-		log.Printf("SRT: empty stream key from %s", req.RemoteAddr())
+		slog.Warn("empty stream key", "module", "srt", "remote", req.RemoteAddr())
 		m.server.ReleaseConn()
 		return gosrt.REJECT
 	}
@@ -163,7 +163,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	cfg := m.server.Config()
 	if req.IsEncrypted() && cfg.SRT.Passphrase != "" {
 		if err := req.SetPassphrase(cfg.SRT.Passphrase); err != nil {
-			log.Printf("SRT: passphrase mismatch from %s: %v", req.RemoteAddr(), err)
+			slog.Warn("passphrase mismatch", "module", "srt", "remote", req.RemoteAddr(), "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
 		}
@@ -178,7 +178,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 			RemoteAddr: req.RemoteAddr().String(),
 		}
 		if err := m.eventBus.Emit(core.EventPublish, ctx); err != nil {
-			log.Printf("SRT: publish auth rejected for %s: %v", streamKey, err)
+			slog.Warn("publish auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
 		}
@@ -191,14 +191,14 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 			RemoteAddr: req.RemoteAddr().String(),
 		}
 		if err := m.eventBus.Emit(core.EventSubscribe, ctx); err != nil {
-			log.Printf("SRT: subscribe auth rejected for %s: %v", streamKey, err)
+			slog.Warn("subscribe auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
 		}
 		return gosrt.SUBSCRIBE
 
 	default:
-		log.Printf("SRT: unknown mode %q from %s", mode, req.RemoteAddr())
+		slog.Warn("unknown mode", "module", "srt", "mode", mode, "remote", req.RemoteAddr())
 		m.server.ReleaseConn()
 		return gosrt.REJECT
 	}
@@ -219,7 +219,7 @@ func (m *Module) handlePublish(conn gosrt.Conn) {
 	m.pubsMu.Lock()
 	if _, exists := m.pubs[streamKey]; exists {
 		m.pubsMu.Unlock()
-		log.Printf("SRT: stream %s already publishing", streamKey)
+		slog.Warn("stream already publishing", "module", "srt", "stream", streamKey)
 		return
 	}
 	m.pubs[streamKey] = pub
@@ -231,9 +231,9 @@ func (m *Module) handlePublish(conn gosrt.Conn) {
 		m.pubsMu.Unlock()
 	}()
 
-	log.Printf("SRT publish start: %s from %s", streamKey, conn.RemoteAddr())
+	slog.Info("publish start", "module", "srt", "stream", streamKey, "remote", conn.RemoteAddr())
 	pub.Run()
-	log.Printf("SRT publish stop: %s", streamKey)
+	slog.Info("publish stop", "module", "srt", "stream", streamKey)
 }
 
 // handleSubscribe is the SRT server callback for subscribing connections.
@@ -248,7 +248,7 @@ func (m *Module) handleSubscribe(conn gosrt.Conn) {
 
 	sub := NewSubscriber(conn, streamKey, m.hub, m.eventBus)
 
-	log.Printf("SRT subscribe start: %s from %s", streamKey, conn.RemoteAddr())
+	slog.Info("subscribe start", "module", "srt", "stream", streamKey, "remote", conn.RemoteAddr())
 	sub.Run()
-	log.Printf("SRT subscribe stop: %s", streamKey)
+	slog.Info("subscribe stop", "module", "srt", "stream", streamKey)
 }

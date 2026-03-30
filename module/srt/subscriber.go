@@ -1,7 +1,7 @@
 package srt
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	gosrt "github.com/datarhei/gosrt"
@@ -37,12 +37,12 @@ func NewSubscriber(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *
 func (s *Subscriber) Run() {
 	stream, ok := s.hub.Find(s.streamKey)
 	if !ok {
-		log.Printf("SRT subscriber %s: stream not found", s.streamKey)
+		slog.Warn("stream not found", "module", "srt", "stream", s.streamKey)
 		return
 	}
 
 	if err := stream.AddSubscriber("srt"); err != nil {
-		log.Printf("SRT subscriber %s: %v", s.streamKey, err)
+		slog.Error("add subscriber error", "module", "srt", "stream", s.streamKey, "error", err)
 		return
 	}
 	defer stream.RemoveSubscriber("srt")

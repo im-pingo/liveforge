@@ -2,7 +2,7 @@ package rtmp
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
@@ -68,13 +68,13 @@ func (s *Subscriber) WriteLoop() {
 	// Send sequence headers
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		if err := s.sendFrame(vsh); err != nil {
-			log.Printf("RTMP subscriber %s: video seq header send error: %v", s.id, err)
+			slog.Error("video seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
 			return
 		}
 	}
 	if ash := s.stream.AudioSeqHeader(); ash != nil {
 		if err := s.sendFrame(ash); err != nil {
-			log.Printf("RTMP subscriber %s: audio seq header send error: %v", s.id, err)
+			slog.Error("audio seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
 			return
 		}
 	}
@@ -84,7 +84,7 @@ func (s *Subscriber) WriteLoop() {
 	if s.opts.StartMode == core.StartModeGOP {
 		for _, frame := range s.stream.GOPCache() {
 			if err := s.sendFrame(frame); err != nil {
-				log.Printf("RTMP subscriber %s: GOP cache send error: %v", s.id, err)
+				slog.Error("GOP cache send error", "module", "rtmp", "subscriber", s.id, "error", err)
 				return
 			}
 			if frame.DTS > lastDTS {

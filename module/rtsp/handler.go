@@ -2,7 +2,7 @@ package rtsp
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -64,7 +64,7 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	mediaInfo := stream.Publisher().MediaInfo()
 	sd := sdp.BuildFromMediaInfo(mediaInfo, req.URL, "0.0.0.0")
 	body := sd.Marshal()
-	log.Printf("rtsp: DESCRIBE SDP:\n%s", string(body))
+	slog.Debug("DESCRIBE SDP", "module", "rtsp", "body", string(body))
 	resp := newResponse(200, "OK", req)
 	resp.Headers.Set("Content-Type", "application/sdp")
 	resp.Headers.Set("Content-Base", req.URL+"/")
@@ -193,7 +193,7 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 				mediaInfo.VideoSequenceHeader,
 			)
 			stream.WriteFrame(seqFrame)
-			log.Printf("rtsp: injected SPS/PPS sequence header from SDP (%d bytes)", len(mediaInfo.VideoSequenceHeader))
+			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
 		}
 	}
 

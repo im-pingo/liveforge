@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -61,7 +61,7 @@ func (m *Module) Init(s *core.Server) error {
 	if s.Config().TLS.Configured() && (cfg.TLS == nil || *cfg.TLS) {
 		proto = "rtsps"
 	}
-	log.Printf("%s: listening on %s", proto, cfg.Listen)
+	slog.Info("listening", "module", "rtsp", "proto", proto, "addr", cfg.Listen)
 	return nil
 }
 
@@ -92,7 +92,7 @@ func (m *Module) sessionReaper() {
 			}
 			m.mu.Unlock()
 			for _, s := range expired {
-				log.Printf("rtsp: reaping expired session %s (stream=%s)", s.ID, s.StreamKey)
+				slog.Debug("reaping expired session", "module", "rtsp", "session", s.ID, "stream", s.StreamKey)
 				s.Close()
 			}
 		case <-m.done:
@@ -109,12 +109,12 @@ func (m *Module) acceptLoop() {
 			case <-m.done:
 				return
 			default:
-				log.Printf("rtsp: accept error: %v", err)
+				slog.Error("accept error", "module", "rtsp", "error", err)
 				continue
 			}
 		}
 		if !m.server.AcquireConn() {
-			log.Printf("rtsp: max connections reached, rejecting %s", conn.RemoteAddr())
+			slog.Warn("max connections reached", "module", "rtsp", "remote", conn.RemoteAddr())
 			conn.Close()
 			continue
 		}
@@ -182,7 +182,7 @@ func (m *Module) handleConn(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		log.Printf("rtsp: %s %s", req.Method, req.URL)
+		slog.Debug("request", "module", "rtsp", "method", req.Method, "url", req.URL)
 
 		// Create or find session
 		if session == nil && req.Method != "OPTIONS" {
@@ -289,14 +289,14 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 
 	sub, err := NewRTSPSubscriber(session.ID, session.MediaInfo, conn, videoChannel, audioChannel)
 	if err != nil {
-		log.Printf("rtsp: failed to create subscriber for session %s: %v", session.ID, err)
+		slog.Error("failed to create subscriber", "module", "rtsp", "session", session.ID, "error", err)
 		return
 	}
 	sub.videoUDP = videoUDP
 	sub.audioUDP = audioUDP
 	session.Subscriber = sub
 	if err := session.Stream.AddSubscriber("rtsp"); err != nil {
-		log.Printf("rtsp: subscriber limit reached for session %s: %v", session.ID, err)
+		slog.Warn("subscriber limit reached", "module", "rtsp", "session", session.ID, "error", err)
 		sub.Close()
 		return
 	}

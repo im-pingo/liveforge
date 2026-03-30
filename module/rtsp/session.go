@@ -2,7 +2,7 @@ package rtsp
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -106,7 +106,7 @@ func (s *RTSPSession) IsExpired() bool {
 func (s *RTSPSession) Close() {
 	if s.Publisher != nil {
 		if err := s.Publisher.Close(); err != nil {
-			log.Printf("rtsp: error closing publisher for session %s: %v", s.ID, err)
+			slog.Error("error closing publisher", "module", "rtsp", "session", s.ID, "error", err)
 		}
 		if s.Stream != nil {
 			s.Stream.RemovePublisher()
@@ -115,7 +115,7 @@ func (s *RTSPSession) Close() {
 	}
 	if s.Subscriber != nil {
 		if err := s.Subscriber.Close(); err != nil {
-			log.Printf("rtsp: error closing subscriber for session %s: %v", s.ID, err)
+			slog.Error("error closing subscriber", "module", "rtsp", "session", s.ID, "error", err)
 		}
 		if s.Stream != nil {
 			s.Stream.RemoveSubscriber("rtsp")
