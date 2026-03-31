@@ -59,18 +59,20 @@ type RateLimitConfig struct {
 
 // RTMPConfig holds RTMP module settings.
 type RTMPConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Listen    string `yaml:"listen"`
-	ChunkSize int    `yaml:"chunk_size"`
-	TLS       *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	Enabled     bool               `yaml:"enabled"`
+	Listen      string             `yaml:"listen"`
+	ChunkSize   int                `yaml:"chunk_size"`
+	TLS         *bool              `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	SkipTracker *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // RTSPConfig holds RTSP module settings.
 type RTSPConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Listen       string `yaml:"listen"`
-	RTPPortRange []int  `yaml:"rtp_port_range"`
-	TLS          *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	Enabled      bool               `yaml:"enabled"`
+	Listen       string             `yaml:"listen"`
+	RTPPortRange []int              `yaml:"rtp_port_range"`
+	TLS          *bool              `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	SkipTracker  *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
@@ -130,11 +132,12 @@ type ICEServer struct {
 
 // SRTConfig holds SRT module settings.
 type SRTConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	Listen     string `yaml:"listen"`
-	Latency    int    `yaml:"latency"`     // ms, receiver latency (default 120)
-	Passphrase string `yaml:"passphrase"`  // AES encryption passphrase (empty = no encryption)
-	PBKeyLen   int    `yaml:"pbkeylen"`    // crypto key length: 0, 16, 24, or 32
+	Enabled     bool               `yaml:"enabled"`
+	Listen      string             `yaml:"listen"`
+	Latency     int                `yaml:"latency"`     // ms, receiver latency (default 120)
+	Passphrase  string             `yaml:"passphrase"`  // AES encryption passphrase (empty = no encryption)
+	PBKeyLen    int                `yaml:"pbkeylen"`    // crypto key length: 0, 16, 24, or 32
+	SkipTracker *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // SIPConfig holds SIP module settings.
@@ -144,15 +147,24 @@ type SIPConfig struct {
 	Transport []string `yaml:"transport"`
 }
 
+// SkipTrackerConfig holds ring buffer skip tracking settings.
+// When a subscriber is too slow to keep up, the ring buffer overwrites unread frames.
+// SkipTracker counts these events in a sliding window and disconnects the subscriber
+// if the threshold is exceeded. Set MaxCount <= 0 to disable.
+type SkipTrackerConfig struct {
+	MaxCount int           `yaml:"max_count"`
+	Window   time.Duration `yaml:"window"`
+}
+
 // SlowConsumerConfig holds slow consumer frame dropping settings.
 type SlowConsumerConfig struct {
-	Enabled          bool    `yaml:"enabled"`
-	LagWarnRatio     float64 `yaml:"lag_warn_ratio"`
-	LagDropRatio     float64 `yaml:"lag_drop_ratio"`
-	LagCriticalRatio float64 `yaml:"lag_critical_ratio"`
-	LagRecoverRatio  float64 `yaml:"lag_recover_ratio"`
-	EWMAAlpha        float64 `yaml:"ewma_alpha"`
-	SendTimeRatio    float64 `yaml:"send_time_ratio"`
+	Enabled          bool               `yaml:"enabled"`
+	LagWarnRatio     float64            `yaml:"lag_warn_ratio"`
+	LagDropRatio     float64            `yaml:"lag_drop_ratio"`
+	LagCriticalRatio float64            `yaml:"lag_critical_ratio"`
+	LagRecoverRatio  float64            `yaml:"lag_recover_ratio"`
+	EWMAAlpha        float64            `yaml:"ewma_alpha"`
+	SendTimeRatio    float64            `yaml:"send_time_ratio"`
 }
 
 // StreamConfig holds stream-level settings.
@@ -161,8 +173,6 @@ type StreamConfig struct {
 	GOPCacheNum      int               `yaml:"gop_cache_num"`
 	AudioCacheMs     int               `yaml:"audio_cache_ms"`
 	RingBufferSize   int               `yaml:"ring_buffer_size"`
-	MaxSkipCount     int               `yaml:"max_skip_count"`
-	MaxSkipWindow    time.Duration     `yaml:"max_skip_window"`
 	IdleTimeout      time.Duration     `yaml:"idle_timeout"`
 	NoPublisherTimeout time.Duration   `yaml:"no_publisher_timeout"`
 	SlowConsumer     SlowConsumerConfig  `yaml:"slow_consumer"`

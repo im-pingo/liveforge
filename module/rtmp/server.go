@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
 
@@ -53,7 +54,7 @@ func (m *Module) Init(s *core.Server) error {
 	slog.Info("listening", "module", "rtmp", "proto", proto, "addr", cfg.RTMP.Listen)
 
 	m.wg.Add(1)
-	go m.acceptLoop(cfg.RTMP.ChunkSize)
+	go m.acceptLoop(cfg.RTMP.ChunkSize, cfg.RTMP.SkipTracker)
 
 	return nil
 }
@@ -82,7 +83,7 @@ func (m *Module) Close() error {
 // Hub returns the stream hub managed by this module.
 func (m *Module) Hub() *core.StreamHub { return m.hub }
 
-func (m *Module) acceptLoop(chunkSize int) {
+func (m *Module) acceptLoop(chunkSize int, skipCfg *config.SkipTrackerConfig) {
 	defer m.wg.Done()
 
 	for {
@@ -103,11 +104,11 @@ func (m *Module) acceptLoop(chunkSize int) {
 			continue
 		}
 		m.wg.Add(1)
-		go m.handleConn(conn, chunkSize)
+		go m.handleConn(conn, chunkSize, skipCfg)
 	}
 }
 
-func (m *Module) handleConn(conn net.Conn, chunkSize int) {
+func (m *Module) handleConn(conn net.Conn, chunkSize int, skipCfg *config.SkipTrackerConfig) {
 	defer m.wg.Done()
 	defer m.server.ReleaseConn()
 
@@ -126,7 +127,7 @@ func (m *Module) handleConn(conn net.Conn, chunkSize int) {
 		return
 	}
 
-	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize)
+	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize, skipCfg)
 	if err := handler.Handle(); err != nil {
 		slog.Error("handler error", "module", "rtmp", "error", err)
 	}

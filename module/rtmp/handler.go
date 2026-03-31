@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
@@ -37,11 +38,12 @@ type Handler struct {
 	isPublisher bool
 	appParams   map[string]string // params from connect (app field query string)
 
-	chunkSize int
+	chunkSize   int
+	skipCfg     *config.SkipTrackerConfig
 }
 
 // NewHandler creates a new RTMP connection handler.
-func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chunkSize int) *Handler {
+func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chunkSize int, skipCfg *config.SkipTrackerConfig) *Handler {
 	return &Handler{
 		conn:      conn,
 		cr:        NewChunkReader(conn, DefaultChunkSize),
@@ -49,6 +51,7 @@ func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chu
 		hub:       hub,
 		eventBus:  eventBus,
 		chunkSize: chunkSize,
+		skipCfg:   skipCfg,
 	}
 }
 
@@ -291,7 +294,7 @@ func (h *Handler) onPlay(vals []any) error {
 		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
 		return fmt.Errorf("play %s: %w", h.streamKey, err)
 	}
-	sub := NewSubscriber(h.streamKey, h.conn, h.cw, stream)
+	sub := NewSubscriber(h.streamKey, h.conn, h.cw, stream, h.skipCfg)
 	go func() {
 		defer func() {
 			stream.RemoveSubscriber("rtmp")

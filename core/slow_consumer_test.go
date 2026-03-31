@@ -49,7 +49,7 @@ func TestSlowConsumerFilterDisabled(t *testing.T) {
 	rb.Close()
 
 	reader := rb.NewReaderAt(0)
-	filter := NewSlowConsumerFilter(reader, cfg)
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
 	buildSlow(filter)
 
 	delivered := 0
@@ -75,7 +75,7 @@ func TestSlowConsumerFilterNormalState(t *testing.T) {
 	rb.Close()
 
 	reader := rb.NewReaderAt(0)
-	filter := NewSlowConsumerFilter(reader, cfg)
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
 
 	delivered := 0
 	for {
@@ -108,7 +108,7 @@ func TestSlowConsumerFilterDropNonKey(t *testing.T) {
 	rb.Close()
 
 	reader := rb.NewReaderAt(0)
-	filter := NewSlowConsumerFilter(reader, cfg)
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
 	buildSlow(filter)
 
 	keyframes := 0
@@ -152,7 +152,7 @@ func TestSlowConsumerFilterSkipToKey(t *testing.T) {
 	rb.Close()
 
 	reader := rb.NewReaderAt(0)
-	filter := NewSlowConsumerFilter(reader, cfg)
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
 	buildSlow(filter)
 
 	deliveredKeyframe := false
@@ -189,7 +189,7 @@ func TestSlowConsumerFilterRecovery(t *testing.T) {
 	rb.Close()
 
 	reader := rb.NewReaderAt(0)
-	filter := NewSlowConsumerFilter(reader, cfg)
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
 	buildSlow(filter)
 
 	// Read all frames until buffer exhausted
@@ -210,7 +210,7 @@ func TestSlowConsumerFilterEWMA(t *testing.T) {
 	cfg := testSlowConsumerConfig()
 	rb := util.NewRingBuffer[*avframe.AVFrame](100)
 	reader := rb.NewReaderAt(0)
-	filter := NewSlowConsumerFilter(reader, cfg)
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
 
 	// First report seeds the EWMA
 	filter.ReportSendTime(100 * time.Millisecond)
@@ -244,7 +244,7 @@ func TestSlowConsumerFilterHysteresis(t *testing.T) {
 		rb.Write(makeFrame(avframe.MediaTypeVideo, avframe.FrameTypeKeyframe))
 		rb.Close()
 		reader := rb.NewReaderAt(0)
-		filter := NewSlowConsumerFilter(reader, cfg)
+		filter := NewSlowConsumerFilter(reader, cfg, nil)
 		buildSlow(filter)
 
 		// Lag = 60/100 = 0.6, below drop threshold (0.75) even with slow EWMA
@@ -259,7 +259,7 @@ func TestSlowConsumerFilterHysteresis(t *testing.T) {
 		rb := util.NewRingBuffer[*avframe.AVFrame](100)
 		writeFrames(rb, 60) // writer at 60
 		reader := rb.NewReaderAt(0) // reader at 0, lag = 0.6
-		filter := NewSlowConsumerFilter(reader, cfg)
+		filter := NewSlowConsumerFilter(reader, cfg, nil)
 		filter.state = ConsumerStateDropNonKey // force into DropNonKey
 		buildSlow(filter)
 
@@ -275,7 +275,7 @@ func TestSlowConsumerFilterHysteresis(t *testing.T) {
 		rb := util.NewRingBuffer[*avframe.AVFrame](100)
 		writeFrames(rb, 40) // writer at 40
 		reader := rb.NewReaderAt(0) // reader at 0, lag = 0.4
-		filter := NewSlowConsumerFilter(reader, cfg)
+		filter := NewSlowConsumerFilter(reader, cfg, nil)
 		filter.state = ConsumerStateDropNonKey
 		buildSlow(filter)
 
@@ -284,6 +284,115 @@ func TestSlowConsumerFilterHysteresis(t *testing.T) {
 			t.Errorf("expected Normal after recovery (lag=0.4), got %s", filter.State())
 		}
 	})
+}
+
+func TestSlowConsumerFilterSkipTrackerDisconnect(t *testing.T) {
+	cfg := testSlowConsumerConfig()
+	cfg.Enabled = false // disable frame dropping to isolate skip tracker behavior
+
+	// Small ring buffer (size 4). Writing 8 frames with reader at 0 causes overwrite.
+	rb := util.NewRingBuffer[*avframe.AVFrame](4)
+	reader := rb.NewReaderAt(0)
+
+	skipCfg := &config.SkipTrackerConfig{MaxCount: 2, Window: 10 * time.Second}
+	filter := NewSlowConsumerFilter(reader, cfg, skipCfg)
+
+	// Each batch of 8 writes causes one skip event (reader jumps from stale pos to oldest).
+	// MaxCount=2 means the 3rd skip should exceed the threshold → disconnect.
+	for i := range 3 {
+		// Overwrite reader position
+		for range 8 {
+			rb.Write(makeFrame(avframe.MediaTypeVideo, avframe.FrameTypeInterframe))
+		}
+
+		frame, ok := filter.NextFrame()
+		if i < 2 {
+			if !ok || frame == nil {
+				t.Fatalf("skip %d: expected frame delivery, got ok=%v", i+1, ok)
+			}
+		} else {
+			// 3rd skip: should disconnect
+			if ok {
+				t.Fatalf("skip %d: expected disconnect (ok=false), got frame", i+1)
+			}
+			return
+		}
+
+		// Drain remaining readable frames using TryRead to avoid blocking
+		for {
+			_, readable := reader.TryRead()
+			if !readable {
+				break
+			}
+		}
+	}
+	t.Fatal("expected disconnect after exceeding skip threshold")
+}
+
+func TestSlowConsumerFilterSkipTrackerBelowThreshold(t *testing.T) {
+	cfg := testSlowConsumerConfig()
+	cfg.Enabled = false
+
+	rb := util.NewRingBuffer[*avframe.AVFrame](4)
+	reader := rb.NewReaderAt(0)
+
+	skipCfg := &config.SkipTrackerConfig{MaxCount: 5, Window: 10 * time.Second}
+	filter := NewSlowConsumerFilter(reader, cfg, skipCfg)
+
+	// Trigger 2 skip events, well below MaxCount=5
+	for range 2 {
+		for range 8 {
+			rb.Write(makeFrame(avframe.MediaTypeVideo, avframe.FrameTypeInterframe))
+		}
+		frame, ok := filter.NextFrame()
+		if !ok || frame == nil {
+			t.Fatal("expected frame delivery when below skip threshold")
+		}
+		// Drain
+		for {
+			_, readable := reader.TryRead()
+			if !readable {
+				break
+			}
+		}
+	}
+
+	// Write one more frame and verify still delivers
+	rb.Write(makeFrame(avframe.MediaTypeVideo, avframe.FrameTypeKeyframe))
+	rb.Close()
+	frame, ok := filter.NextFrame()
+	if !ok || frame == nil {
+		t.Fatal("expected frame delivery when below skip threshold")
+	}
+}
+
+func TestSlowConsumerFilterSkipTrackerNil(t *testing.T) {
+	cfg := testSlowConsumerConfig()
+	cfg.Enabled = false
+
+	rb := util.NewRingBuffer[*avframe.AVFrame](4)
+	reader := rb.NewReaderAt(0)
+
+	// nil skipCfg — SkipTracker disabled, should never disconnect due to skips
+	filter := NewSlowConsumerFilter(reader, cfg, nil)
+
+	// Trigger many overwrites — should never disconnect
+	for range 10 {
+		for range 8 {
+			rb.Write(makeFrame(avframe.MediaTypeVideo, avframe.FrameTypeInterframe))
+		}
+		frame, ok := filter.NextFrame()
+		if !ok || frame == nil {
+			t.Fatal("expected frame delivery with nil SkipTracker (disabled)")
+		}
+		// Drain
+		for {
+			_, readable := reader.TryRead()
+			if !readable {
+				break
+			}
+		}
+	}
 }
 
 func TestConsumerStateString(t *testing.T) {

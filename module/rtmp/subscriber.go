@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	flvpkg "github.com/im-pingo/liveforge/pkg/muxer/flv"
@@ -18,18 +19,20 @@ type Subscriber struct {
 	cw      *ChunkWriter
 	stream  *core.Stream
 	opts    core.SubscribeOptions
+	skipCfg *config.SkipTrackerConfig
 	closed  chan struct{}
 }
 
 // NewSubscriber creates a new RTMP subscriber.
-func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream) *Subscriber {
+func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream, skipCfg *config.SkipTrackerConfig) *Subscriber {
 	return &Subscriber{
-		id:     "rtmp-sub-" + streamKey,
-		conn:   conn,
-		cw:     cw,
-		stream: stream,
-		opts:   core.DefaultSubscribeOptions(),
-		closed: make(chan struct{}),
+		id:      "rtmp-sub-" + streamKey,
+		conn:    conn,
+		cw:      cw,
+		stream:  stream,
+		opts:    core.DefaultSubscribeOptions(),
+		skipCfg: skipCfg,
+		closed:  make(chan struct{}),
 	}
 }
 
@@ -95,7 +98,7 @@ func (s *Subscriber) WriteLoop() {
 
 	// Read live frames from ring buffer, skipping frames already sent via GOP cache
 	reader := s.stream.RingBuffer().NewReader()
-	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer)
+	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer, s.skipCfg)
 	for {
 		select {
 		case <-s.closed:

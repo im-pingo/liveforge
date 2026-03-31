@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -74,8 +73,6 @@ func defaults() *Config {
 			GOPCacheNum:    1,
 			AudioCacheMs:   1000,
 			RingBufferSize: 1024,
-			MaxSkipCount:   3,
-			MaxSkipWindow:  60 * time.Second,
 			SlowConsumer: SlowConsumerConfig{
 				Enabled:          true,
 				LagWarnRatio:     0.5,

@@ -211,7 +211,7 @@ func TestNewPublisher(t *testing.T) {
 func TestNewSubscriber(t *testing.T) {
 	bus := core.NewEventBus()
 	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 256}, config.LimitsConfig{}, bus)
-	sub := NewSubscriber(nil, "live/test", hub, bus)
+	sub := NewSubscriber(nil, "live/test", hub, bus, nil)
 	if sub.streamKey != "live/test" {
 		t.Errorf("streamKey = %q", sub.streamKey)
 	}

@@ -179,7 +179,7 @@
 
 | Feature | Config key | Status |
 |---------|-----------|--------|
-| **max_skip_count / max_skip_window** | `stream.max_skip_count` | SkipTracker implemented, not wired to subscribers (optional) |
+| ~~**max_skip_count / max_skip_window**~~ | `rtmp/rtsp/srt.skip_tracker` | **Done** — per-protocol SkipTracker config, wired to SlowConsumerFilter in all subscribers |
 | **Simulcast** | `webrtc.simulcast` | Config has layer definitions, no layer selection logic in WebRTC module |
 
 ---

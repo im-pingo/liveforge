@@ -240,7 +240,7 @@ func TestSubscriberIDAndOptions(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
 	cw := NewChunkWriter(conn, DefaultChunkSize)
-	sub := NewSubscriber("live/test", conn, cw, stream)
+	sub := NewSubscriber("live/test", conn, cw, stream, nil)
 
 	if sub.ID() != "rtmp-sub-live/test" {
 		t.Errorf("ID = %q", sub.ID())
@@ -257,7 +257,7 @@ func TestSubscriberClose(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
 	cw := NewChunkWriter(conn, DefaultChunkSize)
-	sub := NewSubscriber("live/test", conn, cw, stream)
+	sub := NewSubscriber("live/test", conn, cw, stream, nil)
 
 	if err := sub.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -312,7 +312,7 @@ func TestHandlerConnectWithAppParams(t *testing.T) {
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	handler := NewHandler(serverConn, hub, bus, 4096)
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
 
 	errCh := make(chan error, 1)
 	go func() {
