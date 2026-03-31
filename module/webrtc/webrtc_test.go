@@ -476,6 +476,69 @@ func TestTrackSenderPLIDoesNotWriteMedia(t *testing.T) {
 	}
 }
 
+func TestModuleInitWithGCC(t *testing.T) {
+	cfg := &config.Config{
+		Stream: config.StreamConfig{
+			RingBufferSize:     256,
+			GOPCache:           true,
+			GOPCacheNum:        1,
+			IdleTimeout:        30 * time.Second,
+			NoPublisherTimeout: 15 * time.Second,
+		},
+		WebRTC: config.WebRTCConfig{
+			Enabled:      true,
+			Listen:       ":0",
+			UDPPortRange: []int{20000, 20100},
+			GCC: config.GCCConfig{
+				Enabled:        true,
+				InitialBitrate: 2_000_000,
+				MinBitrate:     100_000,
+				MaxBitrate:     10_000_000,
+			},
+		},
+	}
+	s := core.NewServer(cfg)
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatalf("Init with GCC failed: %v", err)
+	}
+	defer m.Close()
+
+	if m.latestBWE == nil {
+		t.Error("expected latestBWE channel to be initialized when GCC enabled")
+	}
+}
+
+func TestModuleInitWithoutGCC(t *testing.T) {
+	cfg := &config.Config{
+		Stream: config.StreamConfig{
+			RingBufferSize:     256,
+			GOPCache:           true,
+			GOPCacheNum:        1,
+			IdleTimeout:        30 * time.Second,
+			NoPublisherTimeout: 15 * time.Second,
+		},
+		WebRTC: config.WebRTCConfig{
+			Enabled:      true,
+			Listen:       ":0",
+			UDPPortRange: []int{20000, 20100},
+			GCC: config.GCCConfig{
+				Enabled: false,
+			},
+		},
+	}
+	s := core.NewServer(cfg)
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatalf("Init without GCC failed: %v", err)
+	}
+	defer m.Close()
+
+	if m.latestBWE != nil {
+		t.Error("expected latestBWE to be nil when GCC disabled")
+	}
+}
+
 // createMinimalOffer creates a minimal SDP offer string for testing.
 func createMinimalOffer(t *testing.T) string {
 	t.Helper()
