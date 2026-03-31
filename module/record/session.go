@@ -1,7 +1,7 @@
 package record
 
 import (
-	"log"
+	"log/slog"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -43,13 +43,13 @@ func (s *RecordSession) Run() {
 	// Write sequence headers first if available
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		if err := s.writer.WriteFrame(vsh); err != nil {
-			log.Printf("[record] %s: write video seq header error: %v", s.streamKey, err)
+			slog.Error("write video seq header error", "module", "record", "stream", s.streamKey, "error", err)
 			return
 		}
 	}
 	if ash := s.stream.AudioSeqHeader(); ash != nil {
 		if err := s.writer.WriteFrame(ash); err != nil {
-			log.Printf("[record] %s: write audio seq header error: %v", s.streamKey, err)
+			slog.Error("write audio seq header error", "module", "record", "stream", s.streamKey, "error", err)
 			return
 		}
 	}
@@ -59,7 +59,7 @@ func (s *RecordSession) Run() {
 		frame, ok := s.reader.TryRead()
 		if ok {
 			if err := s.writer.WriteFrame(frame); err != nil {
-				log.Printf("[record] %s: write frame error: %v", s.streamKey, err)
+				slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
 				return
 			}
 			continue

@@ -4,12 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/logger"
 	"github.com/im-pingo/liveforge/module/api"
 	"github.com/im-pingo/liveforge/module/auth"
 	"github.com/im-pingo/liveforge/module/httpstream"
@@ -17,6 +19,8 @@ import (
 	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
+	"github.com/im-pingo/liveforge/module/cluster"
+	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
@@ -37,6 +41,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	logger.Init(cfg.Server.LogLevel)
 
 	s := core.NewServer(cfg)
 
@@ -80,18 +86,26 @@ func main() {
 		s.RegisterModule(record.NewModule())
 	}
 
+	if cfg.Cluster.Forward.Enabled || cfg.Cluster.Origin.Enabled {
+		s.RegisterModule(cluster.NewModule())
+	}
+
+	if cfg.Metrics.Enabled {
+		s.RegisterModule(metricsmod.NewModule())
+	}
+
 	if err := s.Init(); err != nil {
 		log.Fatalf("server init failed: %v", err)
 	}
 
-	log.Printf("liveforge %s started, server name: %s", version, cfg.Server.Name)
+	slog.Info("server started", "version", version, "name", cfg.Server.Name)
 
 	// Block until signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
-	log.Printf("received signal %v, shutting down...", sig)
+	slog.Info("shutting down", "signal", sig.String())
 
 	s.Shutdown()
-	log.Println("liveforge stopped")
+	slog.Info("server stopped")
 }

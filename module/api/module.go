@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -14,12 +14,14 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/ratelimit"
 )
 
 // Module implements the management API as a standalone HTTP server.
 type Module struct {
 	listener net.Listener
 	httpSrv  *http.Server
+	limiter  *ratelimit.Limiter
 	wg       sync.WaitGroup
 }
 
@@ -44,20 +46,24 @@ func (m *Module) Init(s *core.Server) error {
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, s)
 
-	handler := buildAuthHandler(mux, cfg.API)
+	var handler http.Handler = buildAuthHandler(mux, cfg.API)
+	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		handler = m.limiter.Wrap(handler)
+	}
 	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
 	if cfg.TLS.Configured() && (cfg.API.TLS == nil || *cfg.API.TLS) {
 		proto = "https"
 	}
-	log.Printf("[api] %s listening on %s", proto, ln.Addr())
+	slog.Info("listening", "module", "api", "proto", proto, "addr", ln.Addr())
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := m.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[api] serve error: %v", err)
+			slog.Error("serve error", "module", "api", "error", err)
 		}
 	}()
 
@@ -72,8 +78,11 @@ func (m *Module) Close() error {
 	if m.httpSrv != nil {
 		m.httpSrv.Close()
 	}
+	if m.limiter != nil {
+		m.limiter.Close()
+	}
 	m.wg.Wait()
-	log.Println("[api] stopped")
+	slog.Info("stopped", "module", "api")
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -32,29 +33,39 @@ func (cs ConsumerState) String() string {
 
 // SlowConsumerFilter wraps a RingReader and applies frame dropping policy
 // based on lag ratio and EWMA send time to handle slow consumers gracefully.
+// It also integrates SkipTracker to detect ring buffer overwrites.
 type SlowConsumerFilter struct {
-	reader  *util.RingReader[*avframe.AVFrame]
-	config  config.SlowConsumerConfig
-	state   ConsumerState
-	ewmaSend float64 // EWMA of send duration in milliseconds
-	dropped  int64   // total dropped frame count
+	reader      *util.RingReader[*avframe.AVFrame]
+	config      config.SlowConsumerConfig
+	skipTracker *SkipTracker
+	state       ConsumerState
+	ewmaSend    float64 // EWMA of send duration in milliseconds
+	dropped     int64   // total dropped frame count
 }
 
 // NewSlowConsumerFilter creates a new filter. If cfg.Enabled is false,
 // the filter acts as a passthrough (no dropping).
+// skipCfg controls the ring buffer skip tracker; nil disables skip tracking.
 func NewSlowConsumerFilter(
 	reader *util.RingReader[*avframe.AVFrame],
 	cfg config.SlowConsumerConfig,
+	skipCfg *config.SkipTrackerConfig,
 ) *SlowConsumerFilter {
+	var st *SkipTracker
+	if skipCfg != nil && skipCfg.MaxCount > 0 && skipCfg.Window > 0 {
+		st = NewSkipTracker(skipCfg.MaxCount, skipCfg.Window)
+	}
 	return &SlowConsumerFilter{
-		reader: reader,
-		config: cfg,
-		state:  ConsumerStateNormal,
+		reader:      reader,
+		config:      cfg,
+		skipTracker: st,
+		state:       ConsumerStateNormal,
 	}
 }
 
 // NextFrame reads the next frame from the ring buffer, applying the drop policy.
-// Returns (frame, true) on success, or (nil, false) if the ring buffer is closed.
+// Returns (frame, true) on success, or (nil, false) if the ring buffer is closed
+// or the subscriber exceeded the skip threshold.
 func (f *SlowConsumerFilter) NextFrame() (*avframe.AVFrame, bool) {
 	for {
 		frame, ok := f.reader.TryRead()
@@ -66,6 +77,15 @@ func (f *SlowConsumerFilter) NextFrame() (*avframe.AVFrame, bool) {
 		}
 		if frame == nil {
 			continue
+		}
+
+		// Check if ring buffer frames were skipped (overwritten)
+		if f.skipTracker != nil && f.reader.Skipped() > 0 {
+			if f.skipTracker.RecordSkip() {
+				slog.Warn("subscriber exceeded skip threshold, disconnecting",
+					"skipped", f.reader.Skipped())
+				return nil, false
+			}
 		}
 
 		// If filter is disabled, pass through all frames

@@ -91,6 +91,11 @@ func (s *Server) StartTime() time.Time {
 	return s.startTime
 }
 
+// UptimeSeconds returns the server uptime in seconds.
+func (s *Server) UptimeSeconds() float64 {
+	return time.Since(s.startTime).Seconds()
+}
+
 // ModuleNames returns the names of all registered modules.
 func (s *Server) ModuleNames() []string {
 	names := make([]string, len(s.modules))

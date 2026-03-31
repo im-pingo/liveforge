@@ -18,8 +18,9 @@ type Config struct {
 	Auth   AuthConfig   `yaml:"auth"`
 	Notify NotifyConfig `yaml:"notify"`
 	Cluster ClusterConfig `yaml:"cluster"`
-	Record RecordConfig  `yaml:"record"`
-	API    APIConfig     `yaml:"api"`
+	Record  RecordConfig  `yaml:"record"`
+	API     APIConfig     `yaml:"api"`
+	Metrics MetricsConfig `yaml:"metrics"`
 }
 
 // ServerConfig holds general server settings.
@@ -42,26 +43,36 @@ func (t TLSConfig) Configured() bool {
 
 // LimitsConfig holds resource limits.
 type LimitsConfig struct {
-	MaxStreams              int `yaml:"max_streams"`
-	MaxSubscribersPerStream int `yaml:"max_subscribers_per_stream"`
-	MaxConnections          int `yaml:"max_connections"`
-	MaxBitratePerStream     int `yaml:"max_bitrate_per_stream"`
+	MaxStreams              int            `yaml:"max_streams"`
+	MaxSubscribersPerStream int            `yaml:"max_subscribers_per_stream"`
+	MaxConnections          int            `yaml:"max_connections"`
+	MaxBitratePerStream     int            `yaml:"max_bitrate_per_stream"`
+	RateLimit               RateLimitConfig `yaml:"rate_limit"`
+}
+
+// RateLimitConfig holds per-IP HTTP rate limiting settings.
+type RateLimitConfig struct {
+	Enabled bool    `yaml:"enabled"`
+	Rate    float64 `yaml:"rate"`  // requests per second per IP
+	Burst   int     `yaml:"burst"` // max burst size per IP
 }
 
 // RTMPConfig holds RTMP module settings.
 type RTMPConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Listen    string `yaml:"listen"`
-	ChunkSize int    `yaml:"chunk_size"`
-	TLS       *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	Enabled     bool               `yaml:"enabled"`
+	Listen      string             `yaml:"listen"`
+	ChunkSize   int                `yaml:"chunk_size"`
+	TLS         *bool              `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	SkipTracker *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // RTSPConfig holds RTSP module settings.
 type RTSPConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Listen       string `yaml:"listen"`
-	RTPPortRange []int  `yaml:"rtp_port_range"`
-	TLS          *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	Enabled      bool               `yaml:"enabled"`
+	Listen       string             `yaml:"listen"`
+	RTPPortRange []int              `yaml:"rtp_port_range"`
+	TLS          *bool              `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	SkipTracker  *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
@@ -121,11 +132,12 @@ type ICEServer struct {
 
 // SRTConfig holds SRT module settings.
 type SRTConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	Listen     string `yaml:"listen"`
-	Latency    int    `yaml:"latency"`     // ms, receiver latency (default 120)
-	Passphrase string `yaml:"passphrase"`  // AES encryption passphrase (empty = no encryption)
-	PBKeyLen   int    `yaml:"pbkeylen"`    // crypto key length: 0, 16, 24, or 32
+	Enabled     bool               `yaml:"enabled"`
+	Listen      string             `yaml:"listen"`
+	Latency     int                `yaml:"latency"`     // ms, receiver latency (default 120)
+	Passphrase  string             `yaml:"passphrase"`  // AES encryption passphrase (empty = no encryption)
+	PBKeyLen    int                `yaml:"pbkeylen"`    // crypto key length: 0, 16, 24, or 32
+	SkipTracker *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // SIPConfig holds SIP module settings.
@@ -135,15 +147,24 @@ type SIPConfig struct {
 	Transport []string `yaml:"transport"`
 }
 
+// SkipTrackerConfig holds ring buffer skip tracking settings.
+// When a subscriber is too slow to keep up, the ring buffer overwrites unread frames.
+// SkipTracker counts these events in a sliding window and disconnects the subscriber
+// if the threshold is exceeded. Set MaxCount <= 0 to disable.
+type SkipTrackerConfig struct {
+	MaxCount int           `yaml:"max_count"`
+	Window   time.Duration `yaml:"window"`
+}
+
 // SlowConsumerConfig holds slow consumer frame dropping settings.
 type SlowConsumerConfig struct {
-	Enabled          bool    `yaml:"enabled"`
-	LagWarnRatio     float64 `yaml:"lag_warn_ratio"`
-	LagDropRatio     float64 `yaml:"lag_drop_ratio"`
-	LagCriticalRatio float64 `yaml:"lag_critical_ratio"`
-	LagRecoverRatio  float64 `yaml:"lag_recover_ratio"`
-	EWMAAlpha        float64 `yaml:"ewma_alpha"`
-	SendTimeRatio    float64 `yaml:"send_time_ratio"`
+	Enabled          bool               `yaml:"enabled"`
+	LagWarnRatio     float64            `yaml:"lag_warn_ratio"`
+	LagDropRatio     float64            `yaml:"lag_drop_ratio"`
+	LagCriticalRatio float64            `yaml:"lag_critical_ratio"`
+	LagRecoverRatio  float64            `yaml:"lag_recover_ratio"`
+	EWMAAlpha        float64            `yaml:"ewma_alpha"`
+	SendTimeRatio    float64            `yaml:"send_time_ratio"`
 }
 
 // StreamConfig holds stream-level settings.
@@ -152,13 +173,10 @@ type StreamConfig struct {
 	GOPCacheNum      int               `yaml:"gop_cache_num"`
 	AudioCacheMs     int               `yaml:"audio_cache_ms"`
 	RingBufferSize   int               `yaml:"ring_buffer_size"`
-	MaxSkipCount     int               `yaml:"max_skip_count"`
-	MaxSkipWindow    time.Duration     `yaml:"max_skip_window"`
 	IdleTimeout      time.Duration     `yaml:"idle_timeout"`
 	NoPublisherTimeout time.Duration   `yaml:"no_publisher_timeout"`
 	SlowConsumer     SlowConsumerConfig  `yaml:"slow_consumer"`
 	Simulcast        SimulcastConfig     `yaml:"simulcast"`
-	AudioOnDemand    AudioOnDemandConfig `yaml:"audio_on_demand"`
 	Feedback         FeedbackConfig      `yaml:"feedback"`
 }
 
@@ -173,12 +191,6 @@ type SimulcastConfig struct {
 type LayerConfig struct {
 	RID        string `yaml:"rid"`
 	MaxBitrate int    `yaml:"max_bitrate"`
-}
-
-// AudioOnDemandConfig holds audio on-demand settings.
-type AudioOnDemandConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	PauseDelay time.Duration `yaml:"pause_delay"`
 }
 
 // FeedbackConfig holds feedback routing settings.
@@ -261,20 +273,25 @@ type ClusterConfig struct {
 
 // ForwardConfig holds forward push settings.
 type ForwardConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	Targets       []string      `yaml:"targets"`
-	ScheduleURL   string        `yaml:"schedule_url"`
-	RetryMax      int           `yaml:"retry_max"`
-	RetryInterval time.Duration `yaml:"retry_interval"`
+	Enabled          bool          `yaml:"enabled"`
+	Targets          []string      `yaml:"targets"`
+	ScheduleURL      string        `yaml:"schedule_url"`
+	SchedulePriority string        `yaml:"schedule_priority"`
+	ScheduleTimeout  time.Duration `yaml:"schedule_timeout"`
+	RetryMax         int           `yaml:"retry_max"`
+	RetryInterval    time.Duration `yaml:"retry_interval"`
 }
 
 // OriginConfig holds origin pull settings.
 type OriginConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	Servers     []string      `yaml:"servers"`
-	ScheduleURL string        `yaml:"schedule_url"`
-	IdleTimeout time.Duration `yaml:"idle_timeout"`
-	RetryMax    int           `yaml:"retry_max"`
+	Enabled          bool          `yaml:"enabled"`
+	Servers          []string      `yaml:"servers"`
+	ScheduleURL      string        `yaml:"schedule_url"`
+	SchedulePriority string        `yaml:"schedule_priority"`
+	ScheduleTimeout  time.Duration `yaml:"schedule_timeout"`
+	IdleTimeout      time.Duration `yaml:"idle_timeout"`
+	RetryMax         int           `yaml:"retry_max"`
+	RetryDelay       time.Duration `yaml:"retry_delay"`
 }
 
 // RecordConfig holds recording settings.
@@ -297,6 +314,13 @@ type SegmentConfig struct {
 // FileCompleteConfig holds file completion callback settings.
 type FileCompleteConfig struct {
 	URL string `yaml:"url"`
+}
+
+// MetricsConfig holds Prometheus metrics settings.
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	Path    string `yaml:"path"`
 }
 
 // APIConfig holds the management API settings.

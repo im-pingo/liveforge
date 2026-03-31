@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -186,20 +185,73 @@ http_stream:
 	}
 }
 
-func TestMaxSkipWindowDefault(t *testing.T) {
-	yaml := `{}`
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
-		t.Fatal(err)
+func TestTLSConfigured(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  TLSConfig
+		want bool
+	}{
+		{"empty", TLSConfig{}, false},
+		{"cert_only", TLSConfig{CertFile: "cert.pem"}, false},
+		{"key_only", TLSConfig{KeyFile: "key.pem"}, false},
+		{"both", TLSConfig{CertFile: "cert.pem", KeyFile: "key.pem"}, true},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.Configured(); got != tt.want {
+				t.Errorf("Configured() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
-	cfg, err := Load(path)
+func TestNormalizeMPEGTS(t *testing.T) {
+	yaml := `
+http_stream:
+  llhls:
+    container: "mpegts"
+`
+	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
+	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	cfg, err := Load(tmpFile)
 	if err != nil {
-		t.Fatalf("Load error: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Stream.MaxSkipWindow != 60*time.Second {
-		t.Errorf("expected default MaxSkipWindow 60s, got %v", cfg.Stream.MaxSkipWindow)
+	if cfg.HTTP.LLHLS.Container != "ts" {
+		t.Errorf("expected container 'ts' after normalize, got %q", cfg.HTTP.LLHLS.Container)
+	}
+}
+
+func TestNormalizeMPEGDash(t *testing.T) {
+	yaml := `
+http_stream:
+  llhls:
+    container: "mpeg-ts"
+`
+	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
+	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTP.LLHLS.Container != "ts" {
+		t.Errorf("expected container 'ts' after normalize, got %q", cfg.HTTP.LLHLS.Container)
+	}
+}
+
+func TestLoadConfigInvalidPath(t *testing.T) {
+	_, err := Load("/nonexistent/path/config.yaml")
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+}
+
+func TestLoadConfigInvalidYAML(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "bad.yaml")
+	os.WriteFile(tmpFile, []byte("{{invalid yaml"), 0644)
+	_, err := Load(tmpFile)
+	if err == nil {
+		t.Error("expected error for invalid YAML")
 	}
 }
 

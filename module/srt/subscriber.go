@@ -1,10 +1,11 @@
 package srt
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	gosrt "github.com/datarhei/gosrt"
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
@@ -17,16 +18,18 @@ type Subscriber struct {
 	streamKey string
 	hub       *core.StreamHub
 	eventBus  *core.EventBus
+	skipCfg   *config.SkipTrackerConfig
 	closed    chan struct{}
 }
 
 // NewSubscriber creates a new SRT subscriber.
-func NewSubscriber(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *core.EventBus) *Subscriber {
+func NewSubscriber(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *core.EventBus, skipCfg *config.SkipTrackerConfig) *Subscriber {
 	return &Subscriber{
 		conn:      conn,
 		streamKey: streamKey,
 		hub:       hub,
 		eventBus:  bus,
+		skipCfg:   skipCfg,
 		closed:    make(chan struct{}),
 	}
 }
@@ -37,12 +40,12 @@ func NewSubscriber(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *
 func (s *Subscriber) Run() {
 	stream, ok := s.hub.Find(s.streamKey)
 	if !ok {
-		log.Printf("SRT subscriber %s: stream not found", s.streamKey)
+		slog.Warn("stream not found", "module", "srt", "stream", s.streamKey)
 		return
 	}
 
 	if err := stream.AddSubscriber("srt"); err != nil {
-		log.Printf("SRT subscriber %s: %v", s.streamKey, err)
+		slog.Error("add subscriber error", "module", "srt", "stream", s.streamKey, "error", err)
 		return
 	}
 	defer stream.RemoveSubscriber("srt")
@@ -95,7 +98,7 @@ func (s *Subscriber) Run() {
 	// reading the entire backlog. Combined with the DTS filter below, this
 	// prevents backward DTS jumps while tolerating small overlaps.
 	reader := stream.RingBuffer().NewReaderAt(stream.RingBuffer().WriteCursor())
-	filter := core.NewSlowConsumerFilter(reader, stream.Config().SlowConsumer)
+	filter := core.NewSlowConsumerFilter(reader, stream.Config().SlowConsumer, s.skipCfg)
 	for {
 		select {
 		case <-s.closed:

@@ -101,6 +101,7 @@ type Stream struct {
 	eventBus         *EventBus
 	noPublisherTimer *time.Timer
 	idleTimer        *time.Timer
+	feedbackRouter   *FeedbackRouter
 }
 
 // NewStream creates a new Stream in idle state.
@@ -115,6 +116,7 @@ func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, 
 		subscribers: make(map[string]int),
 	}
 	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
+	s.feedbackRouter = NewFeedbackRouter(cfg.Feedback)
 	return s
 }
 
@@ -221,9 +223,20 @@ func (s *Stream) Publisher() Publisher {
 }
 
 // WriteFrame writes a media frame to the ring buffer and updates caches.
-func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
+// Returns false if the frame was rejected due to bitrate limit.
+func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Enforce max_bitrate_per_stream: reject non-header frames when over limit
+	if maxKbps := s.limits.MaxBitratePerStream; maxKbps > 0 {
+		if frame.FrameType != avframe.FrameTypeSequenceHeader {
+			snap := s.stats.snapshot()
+			if snap.BitrateKbps > int64(maxKbps) {
+				return false
+			}
+		}
+	}
 
 	// Store sequence headers separately for late-joining subscribers
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -267,6 +280,7 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) {
 
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
+	return true
 }
 
 // GOPCacheLen returns the total number of frames across all cached GOPs.
@@ -375,6 +389,11 @@ func (s *Stream) MuxerManager() *MuxerManager {
 	return s.muxerManager
 }
 
+// FeedbackRouter returns the stream's feedback router.
+func (s *Stream) FeedbackRouter() *FeedbackRouter {
+	return s.feedbackRouter
+}
+
 // AddSubscriber increments the subscriber count for a protocol (e.g. "rtmp").
 // Returns an error if max_subscribers_per_stream limit is reached.
 func (s *Stream) AddSubscriber(protocol string) error {
@@ -393,6 +412,9 @@ func (s *Stream) AddSubscriber(protocol string) error {
 
 	s.subscribers[protocol]++
 
+	// Update feedback router with new subscriber count
+	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
+
 	// Cancel idle timer — we have a subscriber now
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
@@ -410,6 +432,7 @@ func (s *Stream) RemoveSubscriber(protocol string) {
 	if s.subscribers[protocol] <= 0 {
 		delete(s.subscribers, protocol)
 	}
+	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
 	s.checkIdleTimeout()
 }
 

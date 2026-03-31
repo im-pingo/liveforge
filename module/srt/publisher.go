@@ -1,7 +1,7 @@
 package srt
 
 import (
-	"log"
+	"log/slog"
 
 	gosrt "github.com/datarhei/gosrt"
 	"github.com/im-pingo/liveforge/core"
@@ -45,12 +45,12 @@ func (p *Publisher) Close() error { return p.conn.Close() }
 func (p *Publisher) Run() {
 	stream, err := p.hub.GetOrCreate(p.streamKey)
 	if err != nil {
-		log.Printf("SRT publisher %s: get stream error: %v", p.streamKey, err)
+		slog.Error("get stream error", "module", "srt", "stream", p.streamKey, "error", err)
 		return
 	}
 
 	if err := stream.SetPublisher(p); err != nil {
-		log.Printf("SRT publisher %s: set publisher error: %v", p.streamKey, err)
+		slog.Error("set publisher error", "module", "srt", "stream", p.streamKey, "error", err)
 		return
 	}
 

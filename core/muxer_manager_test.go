@@ -99,6 +99,53 @@ func TestMuxerInstanceDoneChannel(t *testing.T) {
 	}
 }
 
+func TestMuxerManagerFormats(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
+	mm := NewMuxerManager(stream, 256)
+
+	// Empty
+	formats := mm.Formats()
+	if len(formats) != 0 {
+		t.Errorf("expected empty formats, got %d", len(formats))
+	}
+
+	// Add subscribers
+	mm.GetOrCreateMuxer("flv")
+	mm.GetOrCreateMuxer("flv")
+	mm.GetOrCreateMuxer("ts")
+
+	formats = mm.Formats()
+	if formats["flv"] != 2 {
+		t.Errorf("expected 2 flv subscribers, got %d", formats["flv"])
+	}
+	if formats["ts"] != 1 {
+		t.Errorf("expected 1 ts subscriber, got %d", formats["ts"])
+	}
+}
+
+func TestMuxerManagerReleaseNonExistent(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
+	mm := NewMuxerManager(stream, 256)
+
+	// Should not panic
+	mm.ReleaseMuxer("nonexistent")
+}
+
+func TestMuxerManagerSubscriberCountNonExistent(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
+	mm := NewMuxerManager(stream, 256)
+
+	if mm.SubscriberCount("nonexistent") != 0 {
+		t.Error("expected 0 for non-existent format")
+	}
+}
+
 func TestMuxerInstanceInitData(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

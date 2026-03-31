@@ -1,7 +1,7 @@
 package record
 
 import (
-	"log"
+	"log/slog"
 	"path"
 	"sync"
 
@@ -31,8 +31,7 @@ func (m *Module) Name() string { return "record" }
 func (m *Module) Init(s *core.Server) error {
 	m.server = s
 	m.cfg = s.Config().Record
-	log.Printf("[record] enabled, pattern: %s, format: %s, path: %s",
-		m.cfg.StreamPattern, m.cfg.Format, m.cfg.Path)
+	slog.Info("enabled", "module", "record", "pattern", m.cfg.StreamPattern, "format", m.cfg.Format, "path", m.cfg.Path)
 	return nil
 }
 
@@ -67,7 +66,7 @@ func (m *Module) Close() error {
 	for _, s := range sessions {
 		s.Stop()
 	}
-	log.Println("[record] stopped")
+	slog.Info("stopped", "module", "record")
 	return nil
 }
 
@@ -90,13 +89,13 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 
 	session, err := NewRecordSession(ctx.StreamKey, stream, m.cfg)
 	if err != nil {
-		log.Printf("[record] failed to start session for %s: %v", ctx.StreamKey, err)
+		slog.Error("failed to start session", "module", "record", "stream", ctx.StreamKey, "error", err)
 		return nil
 	}
 
 	m.sessions[ctx.StreamKey] = session
 	go session.Run()
-	log.Printf("[record] started recording %s", ctx.StreamKey)
+	slog.Info("started recording", "module", "record", "stream", ctx.StreamKey)
 	return nil
 }
 
@@ -110,7 +109,7 @@ func (m *Module) onPublishStop(ctx *core.EventContext) error {
 
 	if ok {
 		session.Stop()
-		log.Printf("[record] stopped recording %s", ctx.StreamKey)
+		slog.Info("stopped recording", "module", "record", "stream", ctx.StreamKey)
 	}
 	return nil
 }

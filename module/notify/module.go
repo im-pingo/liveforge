@@ -1,7 +1,7 @@
 package notify
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/im-pingo/liveforge/config"
@@ -51,7 +51,7 @@ func (m *Module) Init(s *core.Server) error {
 		}
 		s.RegisterAPIHandler(path, http.HandlerFunc(m.wsSender.HandleWebSocket))
 	}
-	log.Printf("[notify] enabled, %d HTTP endpoints, websocket=%v", len(m.cfg.HTTP.Endpoints), m.cfg.WebSocket.Enabled)
+	slog.Info("enabled", "module", "notify", "http_endpoints", len(m.cfg.HTTP.Endpoints), "websocket", m.cfg.WebSocket.Enabled)
 	return nil
 }
 
@@ -77,7 +77,7 @@ func (m *Module) Close() error {
 	if m.wsSender != nil {
 		m.wsSender.Close()
 	}
-	log.Println("[notify] stopped")
+	slog.Info("stopped", "module", "notify")
 	return nil
 }
 

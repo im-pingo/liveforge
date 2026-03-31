@@ -3,7 +3,7 @@
 > This document tracks the overall development progress of the project.
 > It must be updated after every development session to prevent context loss.
 >
-> **Last updated: 2026-03-28**
+> **Last updated: 2026-03-30**
 
 ---
 
@@ -11,9 +11,9 @@
 
 **Liveforge** is a high-performance media streaming server written in Go, supporting multi-protocol ingest and playback.
 
-- **Code volume**: ~17,000 lines (excluding tests), ~26,300 total
-- **Commits**: 114
-- **Test packages**: 25 with tests, all passing, 0 failures
+- **Code volume**: ~19,400 lines (excluding tests), ~35,000 total
+- **Commits**: 133
+- **Test packages**: 29 with tests, all passing, 0 failures
 - **Author**: im-pingo <cczjp89@gmail.com>
 
 ---
@@ -133,8 +133,6 @@
 
 ---
 
-## In Progress 🚧
-
 ### Phase 7 — SRT Protocol
 
 | Module | Path | Description |
@@ -148,6 +146,27 @@
 
 ---
 
+### Phase 8 — Cluster Forwarding + Origin Pull
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Cluster module | `module/cluster/module.go` | Module registration, forward + origin manager lifecycle |
+| Forward manager | `module/cluster/forward.go` | Multi-target RTMP push on publish, auto-cleanup on unpublish |
+| Origin pull manager | `module/cluster/origin.go` | On-demand pull from origin servers on subscribe, exponential backoff retry |
+| Scheduler | `module/cluster/scheduler.go` | Dynamic target resolution via HTTP callback, priority-based fallback to static config |
+| RTMP client | `module/cluster/rtmp_client.go` | Client-side RTMP handshake, connect, publish, play, media frame send/receive |
+
+---
+
+### Phase 9 — Prometheus Metrics
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Metrics module | `module/metrics/module.go` | HTTP endpoint, Prometheus registry, Go/process collectors |
+| Collector | `module/metrics/collector.go` | Server-level gauges (streams, connections, uptime), per-stream counters (bytes, frames, bitrate, FPS, GOP cache, subscribers by protocol) |
+
+---
+
 ## Not Yet Implemented ❌
 
 ### Entirely missing (config exists, no code)
@@ -155,19 +174,13 @@
 | Feature | Config key | Estimated effort |
 |---------|-----------|-----------------|
 | **SIP** | `sip:` | Large |
-| **Cluster forwarding** | `cluster.forward:` | Medium |
-| **Cluster origin pull** | `cluster.origin:` | Medium |
 
 ### Config stubs (field exists, not enforced)
 
 | Feature | Config key | Status |
 |---------|-----------|--------|
-| **max_bitrate_per_stream** | `limits.max_bitrate_per_stream` | Config parsed, not enforced in code |
-| **audio_cache_ms** | `stream.audio_cache_ms` | Config parsed, not used in stream logic |
-| **max_skip_count / max_skip_window** | `stream.max_skip_count` | Config parsed, not enforced in ring buffer |
-| **Simulcast** | `webrtc.simulcast` | Config has layer definitions, no layer selection logic |
-| **Audio on demand** | `stream.audio_on_demand` | Config exists, stream pause/resume audio not implemented |
-| **Stream feedback** | `stream.feedback` | Config exists, passthrough/aggregate not implemented |
+| ~~**max_skip_count / max_skip_window**~~ | `rtmp/rtsp/srt.skip_tracker` | **Done** — per-protocol SkipTracker config, wired to SlowConsumerFilter in all subscribers |
+| **Simulcast** | `webrtc.simulcast` | Config has layer definitions, no layer selection logic in WebRTC module |
 
 ---
 
@@ -181,7 +194,9 @@ liveforge/
 ├── module/
 │   ├── api/                # REST API + web console + login auth
 │   ├── auth/               # JWT/callback auth
+│   ├── cluster/            # Cluster forwarding + origin pull
 │   ├── httpstream/         # HLS/DASH/HTTP-FLV/HTTP-TS/FMP4/WebSocket
+│   ├── metrics/            # Prometheus metrics endpoint
 │   ├── notify/             # HTTP webhook notifications
 │   ├── record/             # FLV stream recording
 │   ├── rtmp/               # RTMP ingest and playback
@@ -212,7 +227,7 @@ liveforge/
 | RTMP pull initial stutter | GOP cache burst causes ffplay frame drops on join | Low (expected live stream behavior) |
 | ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start + 3-segment hold for legacy players) |
 | ~~DASH audio in browser~~ | ~~Chrome MSE rejected audio: LL-HLS/DASH init segment URL conflict + ESDS encoding~~ | **Fixed** (separate `vinit.mp4` for DASH + 4-byte ESDS lengths + dynamic codec string) |
-| No Prometheus metrics | No metrics endpoint exposed | Low |
+| ~~No Prometheus metrics~~ | ~~No metrics endpoint exposed~~ | **Fixed** (`module/metrics/` with server + per-stream gauges) |
 
 ---
 

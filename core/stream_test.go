@@ -306,6 +306,235 @@ func TestSkipTrackerDisabled(t *testing.T) {
 	}
 }
 
+func TestStreamMaxBitrateEnforcement(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = false
+	limits := config.LimitsConfig{MaxBitratePerStream: 1} // 1 kbps — very low
+	s := NewStream("live/bitrate-test", cfg, limits, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	_ = s.SetPublisher(pub)
+
+	// Sequence headers must always be accepted regardless of bitrate
+	seqHeader := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, make([]byte, 10000))
+	if ok := s.WriteFrame(seqHeader); !ok {
+		t.Error("sequence header should always be accepted even when over bitrate")
+	}
+
+	// Write a large frame to push bitrate over 1 kbps
+	bigFrame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, make([]byte, 100000))
+	s.WriteFrame(bigFrame)
+
+	// Wait so that elapsed time > 0ms for bitrate computation
+	time.Sleep(2 * time.Millisecond)
+
+	// After writing 100KB, BitrateKbps >> 1. Next frame should be rejected.
+	nextFrame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 40, 40, make([]byte, 1000))
+	if ok := s.WriteFrame(nextFrame); ok {
+		t.Error("frame should be rejected when bitrate exceeds max_bitrate_per_stream")
+	}
+}
+
+func TestStreamMaxBitrateDisabled(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = false
+	limits := config.LimitsConfig{MaxBitratePerStream: 0} // disabled
+	s := NewStream("live/bitrate-disabled", cfg, limits, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	_ = s.SetPublisher(pub)
+
+	bigFrame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, make([]byte, 100000))
+	if ok := s.WriteFrame(bigFrame); !ok {
+		t.Error("frame should be accepted when max_bitrate_per_stream is disabled")
+	}
+}
+
+func TestStreamStateString(t *testing.T) {
+	tests := []struct {
+		state StreamState
+		want  string
+	}{
+		{StreamStateIdle, "idle"},
+		{StreamStateWaitingPull, "waiting_pull"},
+		{StreamStatePublishing, "publishing"},
+		{StreamStateNoPublisher, "no_publisher"},
+		{StreamStateDestroying, "destroying"},
+		{StreamState(99), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.state.String(); got != tt.want {
+			t.Errorf("StreamState(%d).String() = %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+func TestStreamAccessors(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	s := NewStream("live/accessors", cfg, config.LimitsConfig{}, bus)
+
+	if s.Key() != "live/accessors" {
+		t.Errorf("expected key live/accessors, got %s", s.Key())
+	}
+	if s.Config().RingBufferSize != cfg.RingBufferSize {
+		t.Error("Config() should return matching config")
+	}
+	if s.RingBuffer() == nil {
+		t.Error("RingBuffer() should not be nil")
+	}
+	if s.MuxerManager() == nil {
+		t.Error("MuxerManager() should not be nil")
+	}
+	if s.FeedbackRouter() == nil {
+		t.Error("FeedbackRouter() should not be nil")
+	}
+	if s.Publisher() != nil {
+		t.Error("Publisher() should be nil initially")
+	}
+	if s.VideoSeqHeader() != nil {
+		t.Error("VideoSeqHeader() should be nil initially")
+	}
+	if s.AudioSeqHeader() != nil {
+		t.Error("AudioSeqHeader() should be nil initially")
+	}
+
+	stats := s.Stats()
+	if stats.BytesIn != 0 {
+		t.Error("initial BytesIn should be 0")
+	}
+}
+
+func TestStreamClose(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	s := NewStream("live/close", cfg, config.LimitsConfig{}, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	_ = s.SetPublisher(pub)
+
+	s.Close()
+	if s.State() != StreamStateDestroying {
+		t.Errorf("expected destroying after Close, got %v", s.State())
+	}
+
+	// Double close should not panic
+	s.Close()
+}
+
+func TestStreamSubscribers(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	s := NewStream("live/subs", cfg, config.LimitsConfig{}, bus)
+
+	_ = s.AddSubscriber("rtmp")
+	_ = s.AddSubscriber("rtmp")
+	_ = s.AddSubscriber("hls")
+
+	subs := s.Subscribers()
+	if subs["rtmp"] != 2 {
+		t.Errorf("expected 2 rtmp subscribers, got %d", subs["rtmp"])
+	}
+	if subs["hls"] != 1 {
+		t.Errorf("expected 1 hls subscriber, got %d", subs["hls"])
+	}
+
+	s.RemoveSubscriber("rtmp")
+	subs = s.Subscribers()
+	if subs["rtmp"] != 1 {
+		t.Errorf("expected 1 rtmp subscriber after remove, got %d", subs["rtmp"])
+	}
+
+	s.RemoveSubscriber("rtmp")
+	subs = s.Subscribers()
+	if _, ok := subs["rtmp"]; ok {
+		t.Error("rtmp should be removed from subscribers map when count reaches 0")
+	}
+}
+
+func TestStreamMaxSubscribers(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	limits := config.LimitsConfig{MaxSubscribersPerStream: 2}
+	s := NewStream("live/max-subs", cfg, limits, bus)
+
+	if err := s.AddSubscriber("rtmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddSubscriber("hls"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddSubscriber("webrtc"); err == nil {
+		t.Error("expected error when exceeding max_subscribers_per_stream")
+	}
+}
+
+func TestStreamSeqHeaderCaching(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = false
+	s := NewStream("live/seqheader", cfg, config.LimitsConfig{}, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC}}
+	_ = s.SetPublisher(pub)
+
+	vsh := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x67, 0x42})
+	s.WriteFrame(vsh)
+
+	ash := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x12, 0x10})
+	s.WriteFrame(ash)
+
+	if s.VideoSeqHeader() == nil {
+		t.Error("VideoSeqHeader should be cached")
+	}
+	if s.AudioSeqHeader() == nil {
+		t.Error("AudioSeqHeader should be cached")
+	}
+}
+
+func TestStreamGOPCacheDetail(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = true
+	cfg.GOPCacheNum = 1
+	s := NewStream("live/gop-detail", cfg, config.LimitsConfig{}, bus)
+
+	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC}}
+	_ = s.SetPublisher(pub)
+
+	// Empty GOP cache detail
+	d := s.GOPCacheDetail()
+	if d.TotalFrames != 0 {
+		t.Errorf("expected 0 total frames, got %d", d.TotalFrames)
+	}
+
+	// Write keyframe + interframe + audio
+	kf := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 100, 100, []byte{0x65})
+	s.WriteFrame(kf)
+	inter := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 140, 140, []byte{0x41})
+	s.WriteFrame(inter)
+	af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 120, 120, []byte{0xFF})
+	s.WriteFrame(af)
+
+	d = s.GOPCacheDetail()
+	if d.TotalFrames != 3 {
+		t.Errorf("expected 3 total frames, got %d", d.TotalFrames)
+	}
+	if d.VideoFrames != 2 {
+		t.Errorf("expected 2 video frames, got %d", d.VideoFrames)
+	}
+	if d.AudioFrames != 1 {
+		t.Errorf("expected 1 audio frame, got %d", d.AudioFrames)
+	}
+	// GOP order: keyframe(100), interframe(140), audio(120)
+	// DurationMs = lastDTS - firstDTS = 120 - 100 = 20 (audio is last in sequence)
+	if d.DurationMs != 20 {
+		t.Errorf("expected duration 20ms, got %d", d.DurationMs)
+	}
+}
+
 func TestStreamRepublishBeforeTimeout(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
