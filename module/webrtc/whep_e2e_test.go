@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/webrtc/v4"
 )
@@ -298,4 +300,208 @@ func TestWHEPPayloadTypeCorrectness(t *testing.T) {
 	fmt.Printf("Frames sent: %d, Packets received: %d, Marker frames: %d\n", totalFrames, len(received), len(markerEvents))
 	fmt.Printf("PT=%d (consistent across all packets)\n", firstPT)
 	fmt.Printf("Burst ratio: %.1f%%, Gap count: %d\n", burstRatio*100, gapCount)
+}
+
+// TestWHEPWithGCC verifies that WHEP playback works correctly with GCC
+// congestion control enabled. This catches interceptor chain ordering bugs
+// like "missing transport layer cc header extension".
+func TestWHEPWithGCC(t *testing.T) {
+	// Create module with GCC enabled.
+	cfg := &config.Config{
+		Stream: config.StreamConfig{
+			RingBufferSize:     256,
+			GOPCache:           true,
+			GOPCacheNum:        1,
+			IdleTimeout:        30 * time.Second,
+			NoPublisherTimeout: 15 * time.Second,
+		},
+		WebRTC: config.WebRTCConfig{
+			Enabled:      true,
+			Listen:       ":0",
+			UDPPortRange: []int{20000, 20100},
+			GCC: config.GCCConfig{
+				Enabled:        true,
+				InitialBitrate: 2_000_000,
+				MinBitrate:     100_000,
+				MaxBitrate:     10_000_000,
+			},
+		},
+	}
+	s := core.NewServer(cfg)
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatalf("Init with GCC: %v", err)
+	}
+	defer m.Close()
+
+	if m.latestBWE == nil {
+		t.Fatal("expected latestBWE channel when GCC enabled")
+	}
+
+	// Create a publishing stream.
+	stream, err := s.StreamHub().GetOrCreate("live/gcc-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &testPublisher{
+		id:   "gcc-test-pub",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}
+	if err := stream.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write SPS/PPS sequence header.
+	spsData := []byte{0x67, 0x42, 0x00, 0x1f, 0xe9, 0x40, 0x14, 0x04, 0x78}
+	ppsData := []byte{0x68, 0xce, 0x38, 0x80}
+	stream.WriteFrame(&avframe.AVFrame{
+		MediaType: avframe.MediaTypeVideo,
+		FrameType: avframe.FrameTypeSequenceHeader,
+		Payload:   buildTestAVCConfigPayload(spsData, ppsData),
+		DTS:       0,
+	})
+
+	// Create WHEP client.
+	clientME := &webrtc.MediaEngine{}
+	if err := clientME.RegisterDefaultCodecs(); err != nil {
+		t.Fatal(err)
+	}
+	clientAPI := webrtc.NewAPI(webrtc.WithMediaEngine(clientME))
+	clientPC, err := clientAPI.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientPC.Close()
+
+	_, err = clientPC.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	offer, err := clientPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatherDone := webrtc.GatheringCompletePromise(clientPC)
+	if err := clientPC.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gatherDone
+
+	// Send WHEP request.
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webrtc/whep/live/gcc-test",
+		bytes.NewReader([]byte(clientPC.LocalDescription().SDP)),
+	)
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("WHEP returned %d: %s", rr.Code, rr.Body.String())
+	}
+
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  rr.Body.String(),
+	}
+	if err := clientPC.SetRemoteDescription(answer); err != nil {
+		t.Fatalf("SetRemoteDescription: %v", err)
+	}
+
+	// Collect received RTP packets.
+	var mu sync.Mutex
+	var packetCount int
+
+	clientPC.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		for {
+			_, _, err := track.ReadRTP()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			packetCount++
+			mu.Unlock()
+		}
+	})
+
+	// Wait for ICE connection.
+	connected := make(chan struct{})
+	clientPC.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		if state == webrtc.ICEConnectionStateConnected {
+			select {
+			case <-connected:
+			default:
+				close(connected)
+			}
+		}
+	})
+	select {
+	case <-connected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ICE connection timed out")
+	}
+
+	// Pump video frames at 25fps for 2 seconds.
+	// Send keyframes every 25 frames to ensure the feed loop (realtime mode)
+	// catches one even under CI/test resource contention.
+	idrNAL := make([]byte, 3000)
+	idrNAL[0] = 0x65
+	for i := 1; i < len(idrNAL); i++ {
+		idrNAL[i] = byte(i & 0xFF)
+	}
+
+	pNAL := make([]byte, 1000)
+	pNAL[0] = 0x41
+	for i := 1; i < len(pNAL); i++ {
+		pNAL[i] = byte(i & 0xFF)
+	}
+
+	const totalFrames = 50
+	const frameDurationMs = 40
+
+	sendStart := time.Now()
+	for i := 0; i < totalFrames; i++ {
+		targetTime := sendStart.Add(time.Duration(i) * frameDurationMs * time.Millisecond)
+		if sleepDur := time.Until(targetTime); sleepDur > 0 {
+			time.Sleep(sleepDur)
+		}
+
+		dts := int64(i * frameDurationMs)
+		var payload []byte
+		var frameType avframe.FrameType
+		if i%25 == 0 {
+			payload = buildAVCCPayload(idrNAL)
+			frameType = avframe.FrameTypeKeyframe
+		} else {
+			payload = buildAVCCPayload(pNAL)
+			frameType = avframe.FrameTypeInterframe
+		}
+
+		stream.WriteFrame(&avframe.AVFrame{
+			MediaType: avframe.MediaTypeVideo,
+			FrameType: frameType,
+			Payload:   payload,
+			DTS:       dts,
+		})
+	}
+
+	// Wait for packets to arrive via GCC pacer.
+	time.Sleep(1 * time.Second)
+
+	mu.Lock()
+	count := packetCount
+	mu.Unlock()
+
+	if count == 0 {
+		t.Fatal("received zero RTP packets with GCC enabled — " +
+			"likely 'missing transport layer cc header extension' error")
+	}
+
+	t.Logf("GCC E2E: sent %d frames, received %d RTP packets", totalFrames, count)
+	fmt.Printf("\n=== GCC WHEP E2E RESULT ===\n")
+	fmt.Printf("Frames sent: %d, RTP packets received: %d (GCC pacer active)\n", totalFrames, count)
 }

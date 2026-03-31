@@ -67,15 +67,25 @@ func (m *Module) Init(s *core.Server) error {
 	}
 
 	// Register interceptors.
+	//
+	// pion's Chain.BindLocalStream iterates in registration order, each
+	// interceptor wrapping the previous writer. The LAST registered is
+	// closest to the application for outgoing RTP. Registration order:
+	//   1. GCC (cc.Interceptor) — closest to network, pacer queues here
+	//   2. TWCC HeaderExtension — adds transport-cc ext to RTP headers
+	//   3. Default interceptors (NACK, RTCP reports, stats, TWCC sender)
+	//
+	// Outgoing chain: App → defaults → TWCC hdr ext (sets ext on header)
+	//   → GCC pacer (queues; on drain reads ext via OnSent) → network
 	ir := &interceptor.Registry{}
 
 	// Register GCC congestion control interceptor FIRST if enabled.
-	// pion's interceptor chain applies later-registered interceptors
-	// closer to the application for outgoing RTP. GCC must be registered
-	// BEFORE RegisterDefaultInterceptors so that TWCC (from defaults)
-	// adds the transport-cc header extension to outgoing packets BEFORE
-	// GCC's feedbackAdapter.OnSent reads it. Chain order for outgoing:
-	//   App → TWCC sender (adds ext) → GCC pacer (reads ext, queues) → UDP
+	// GCC's LeakyBucketPacer queues RTP packets and drains at the
+	// estimated bitrate. On drain, feedbackAdapter.OnSent reads the
+	// transport-cc header extension from each packet to track departure
+	// times. This extension must already be present when the packet is
+	// queued, which is why the TWCC HeaderExtensionInterceptor is
+	// registered AFTER GCC (closer to app in the chain).
 	if cfg.WebRTC.GCC.Enabled {
 		bweFactory, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
 			return gcc.NewSendSideBWE(
@@ -95,10 +105,19 @@ func (m *Module) Init(s *core.Server) error {
 			}
 		})
 		ir.Add(bweFactory)
+
+		// Register TWCC HeaderExtensionInterceptor AFTER GCC.
+		// RegisterDefaultInterceptors does NOT include this — it only
+		// registers the TWCC SenderInterceptor (generates TWCC RTCP for
+		// received streams). The HeaderExtensionInterceptor is what
+		// actually adds transport-cc sequence numbers to outgoing RTP
+		// headers, which GCC's feedbackAdapter.OnSent requires.
+		if err := webrtc.ConfigureTWCCHeaderExtensionSender(me, ir); err != nil {
+			return fmt.Errorf("webrtc: configure TWCC header extension: %w", err)
+		}
 	}
 
-	// Register default interceptors (NACK, TWCC sender, RTCP reports)
-	// AFTER GCC so TWCC wraps GCC in the outgoing chain.
+	// Register default interceptors (NACK, RTCP reports, stats, TWCC sender).
 	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
 		return err
 	}
