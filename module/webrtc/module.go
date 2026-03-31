@@ -66,18 +66,16 @@ func (m *Module) Init(s *core.Server) error {
 		return err
 	}
 
-	// Register interceptors: NACK responder (retransmission), TWCC sender
-	// (congestion control), and RTCP report generation.
+	// Register interceptors.
 	ir := &interceptor.Registry{}
-	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
-		return err
-	}
 
-	// Register GCC congestion control interceptor if enabled.
-	// GCC uses TWCC feedback (already registered above) to estimate
-	// available bandwidth and paces outgoing RTP packets via a
-	// LeakyBucketPacer. This eliminates burst-induced jitter buffer
-	// stuttering on WHEP playback.
+	// Register GCC congestion control interceptor FIRST if enabled.
+	// pion's interceptor chain applies later-registered interceptors
+	// closer to the application for outgoing RTP. GCC must be registered
+	// BEFORE RegisterDefaultInterceptors so that TWCC (from defaults)
+	// adds the transport-cc header extension to outgoing packets BEFORE
+	// GCC's feedbackAdapter.OnSent reads it. Chain order for outgoing:
+	//   App → TWCC sender (adds ext) → GCC pacer (reads ext, queues) → UDP
 	if cfg.WebRTC.GCC.Enabled {
 		bweFactory, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
 			return gcc.NewSendSideBWE(
@@ -97,6 +95,12 @@ func (m *Module) Init(s *core.Server) error {
 			}
 		})
 		ir.Add(bweFactory)
+	}
+
+	// Register default interceptors (NACK, TWCC sender, RTCP reports)
+	// AFTER GCC so TWCC wraps GCC in the outgoing chain.
+	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
+		return err
 	}
 
 	m.api = webrtc.NewAPI(
