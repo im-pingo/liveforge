@@ -253,7 +253,8 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 					targetTime := paceBaseWall.Add(dtsDelta)
 					sleepDur := time.Until(targetTime)
 
-					if sleepDur > 0 && sleepDur < time.Second {
+					switch dtsPaceAction(sleepDur) {
+					case "sleep":
 						timer := time.NewTimer(sleepDur)
 						select {
 						case <-timer.C:
@@ -261,11 +262,12 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 							timer.Stop()
 							return
 						}
-					} else if sleepDur < -500*time.Millisecond {
-						// Too far behind (>500ms): reset base to prevent permanent lag.
+					case "reset":
 						paceBaseWall = time.Now()
 						paceBaseDTS = frame.DTS
 					}
+					// "deliver": behind real-time, send immediately.
+					// GCC pacer smooths the RTP output.
 				}
 			}
 
@@ -282,6 +284,22 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		case <-stream.RingBuffer().Signal():
 		}
 	}
+}
+
+// dtsPaceAction returns the action the feed loop should take based on
+// how far ahead or behind the DTS pacer is relative to wall clock.
+//
+//   - "sleep":   ahead of real-time, sleep to match DTS pace
+//   - "deliver": behind or on time, deliver immediately (pacer smooths output)
+//   - "reset":   DTS discontinuity (>1s gap), reset pace base
+func dtsPaceAction(sleepDur time.Duration) string {
+	if sleepDur >= time.Second || sleepDur < -time.Second {
+		return "reset"
+	}
+	if sleepDur > 0 {
+		return "sleep"
+	}
+	return "deliver"
 }
 
 // codecToMime maps avframe CodecType to WebRTC MIME type.
