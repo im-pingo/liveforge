@@ -7,6 +7,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
@@ -21,13 +22,22 @@ import (
 // mode controls startup behavior:
 //   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
 //   - "live": send GOP cache (paced at 10x speed), then live frames.
-func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, videoCodec avframe.CodecType) {
+func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, videoCodec avframe.CodecType, bwe cc.BandwidthEstimator) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
 		slog.Info("peer connected, starting media feed", "module", "webrtc", "mode", mode)
 	case <-done:
 		return
+	}
+
+	if bwe != nil {
+		bwe.OnTargetBitrateChange(func(bitrate int) {
+			slog.Debug("GCC target bitrate changed",
+				"module", "webrtc",
+				"bitrate_kbps", bitrate/1000,
+			)
+		})
 	}
 
 	// Track the last DTS to compute sample durations.

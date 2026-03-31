@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -82,6 +83,15 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		releaseConn()
 		http.Error(w, "failed to create peer connection", http.StatusInternalServerError)
 		return
+	}
+
+	// Retrieve bandwidth estimator for this PeerConnection (if GCC enabled).
+	var bwe cc.BandwidthEstimator
+	if m.latestBWE != nil {
+		select {
+		case bwe = <-m.latestBWE:
+		default:
+		}
 	}
 
 	sessionID := uuid.New().String()
@@ -224,7 +234,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	// Start the feed goroutine. It waits for ICE+DTLS to complete before
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
-	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec)
+	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, bwe)
 
 	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
