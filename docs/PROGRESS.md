@@ -3,7 +3,7 @@
 > This document tracks the overall development progress of the project.
 > It must be updated after every development session to prevent context loss.
 >
-> **Last updated: 2026-03-30**
+> **Last updated: 2026-03-31**
 
 ---
 
@@ -11,9 +11,9 @@
 
 **Liveforge** is a high-performance media streaming server written in Go, supporting multi-protocol ingest and playback.
 
-- **Code volume**: ~19,400 lines (excluding tests), ~35,000 total
-- **Commits**: 133
-- **Test packages**: 29 with tests, all passing, 0 failures
+- **Code volume**: ~19,700 lines (excluding tests), ~36,000 total
+- **Commits**: 149
+- **Test packages**: 30 with tests, all passing, 0 failures
 - **Author**: im-pingo <cczjp89@gmail.com>
 
 ---
@@ -164,6 +164,23 @@
 |--------|------|-------------|
 | Metrics module | `module/metrics/module.go` | HTTP endpoint, Prometheus registry, Go/process collectors |
 | Collector | `module/metrics/collector.go` | Server-level gauges (streams, connections, uptime), per-stream counters (bytes, frames, bitrate, FPS, GOP cache, subscribers by protocol) |
+
+---
+
+### Phase 10 — Quality of Service + GCC
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Slow consumer filter | `core/slow_consumer.go` | EWMA-based lag detection, progressive frame dropping (warn/drop/critical), configurable ratios |
+| Multi-GOP cache | `core/stream.go` | Configurable `gop_cache_num`, audio cache window |
+| Stream feedback routing | `core/feedback.go` | Auto/passthrough/aggregate/drop modes for subscriber feedback |
+| Rate limiting | `pkg/ratelimit/` | Per-IP token bucket limiter for HTTP endpoints |
+| Structured logging | `pkg/logger/` | slog-based structured logging |
+| GCC congestion control | `module/webrtc/module.go` | Send-side bandwidth estimation via pion/interceptor GCC |
+| GCC-aware WHEP feed | `module/webrtc/whep_feed.go` | BandwidthEstimator integration, adaptive bitrate pacing |
+| TWCC header extension | `module/webrtc/module.go` | HeaderExtensionInterceptor for GCC compatibility |
+| SkipTracker per-protocol | `config/config.go` | Per-protocol slow consumer limits (max_count/window) wired to all subscribers |
+| fMP4 recording | `module/record/` | FMP4 format support, max_size segmentation |
 
 ---
 

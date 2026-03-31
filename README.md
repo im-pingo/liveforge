@@ -6,7 +6,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-25%20packages%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-30%20packages%20passing-brightgreen)](#testing)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -25,6 +25,12 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 - **Protocol bridge** — Push RTMP, pull via WebRTC; push WebRTC, pull via HLS — any combination works
 - **Codec support** — H.264, H.265/HEVC, VP8, VP9, AV1, AAC, Opus, G.711, MP3, and more
 - **GOP cache** — New subscribers receive the latest keyframe group instantly for fast startup
+- **LL-HLS** — Low-Latency HLS with partial segments, blocking playlist reload, and fMP4 container
+- **Cluster** — Multi-target RTMP forwarding and on-demand origin pull with HTTP scheduler callback
+- **Slow consumer protection** — EWMA-based lag detection with progressive frame dropping to prevent cascade stalls
+- **GCC congestion control** — Send-side bandwidth estimation for WebRTC WHEP with adaptive bitrate pacing
+- **Rate limiting** — Per-IP token bucket rate limiter for connection flood protection
+- **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
 - **Web console** — Real-time dashboard showing streams, bitrate, FPS, GOP cache, subscribers, and preview player
 - **REST API** — Full management API: list/inspect/delete streams, kick publishers, server stats, health checks
 - **Auth** — JWT token verification and HTTP callback authentication for publish and subscribe
@@ -141,7 +147,11 @@ Key sections:
 | `auth` | JWT and HTTP callback authentication |
 | `record` | FLV recording with segmentation |
 | `notify` | HTTP webhook notifications |
-| `stream` | GOP cache, ring buffer, idle timeout settings |
+| `cluster` | Multi-target forwarding and origin pull with scheduler |
+| `metrics` | Prometheus metrics endpoint (default `:9090`) |
+| `limits` | Global connection, stream, and subscriber limits |
+| `tls` | TLS certificate and key for HTTPS/secure protocols |
+| `stream` | GOP cache, ring buffer, idle timeout, slow consumer settings |
 
 Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}`.
 
@@ -155,17 +165,21 @@ liveforge/
 ├── module/
 │   ├── api/             # REST API + web console
 │   ├── auth/            # JWT / HTTP callback auth
-│   ├── httpstream/      # HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket
+│   ├── cluster/         # Multi-target forwarding + origin pull
+│   ├── httpstream/      # HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket
+│   ├── metrics/         # Prometheus metrics endpoint
 │   ├── notify/          # HTTP webhook notifications
 │   ├── record/          # FLV stream recording
 │   ├── rtmp/            # RTMP protocol (handshake, chunks, AMF0)
 │   ├── rtsp/            # RTSP protocol (TCP + UDP transport)
 │   ├── srt/             # SRT protocol (via datarhei/gosrt)
-│   └── webrtc/          # WebRTC WHIP/WHEP (via pion/webrtc)
+│   └── webrtc/          # WebRTC WHIP/WHEP + GCC (via pion/webrtc)
 ├── pkg/
 │   ├── avframe/         # Audio/video frame types
 │   ├── codec/           # H.264, H.265, AAC, AV1, Opus, MP3 parsers
+│   ├── logger/          # Structured logging
 │   ├── muxer/           # FLV, TS, FMP4 muxers
+│   ├── ratelimit/       # Per-IP token bucket rate limiter
 │   ├── rtp/             # Full RTP/RTCP stack with 12+ codec packetizers
 │   ├── sdp/             # SDP parser and builder
 │   └── util/            # Lock-free SPMC ring buffer
@@ -174,7 +188,7 @@ liveforge/
 
 ## Testing
 
-25 test packages, all passing:
+30 test packages, all passing:
 
 ```bash
 go test ./...
@@ -199,6 +213,9 @@ go test -cover ./...    # with coverage
 | Auth (JWT + callback) | Yes | Yes | Yes | Plugin |
 | Recording | Yes (FLV) | Yes | Yes | Plugin |
 | Webhooks | Yes (HMAC-signed) | No | Yes | No |
+| Cluster relay | Yes (forward + origin pull) | No | Yes | Plugin |
+| Prometheus metrics | Yes | No | Yes | Plugin |
+| GCC congestion control | Yes | No | No | No |
 | Single binary | Yes | Yes | Yes | No |
 | License | MIT | MIT | MIT | MIT |
 
@@ -212,10 +229,14 @@ For comprehensive documentation covering all features, configuration, usage scen
 
 - [x] TLS / HTTPS
 - [x] SRT protocol
-- [ ] SIP gateway
-- [ ] Cluster forwarding and origin pull
+- [x] Cluster forwarding and origin pull
 - [x] WebSocket notifications
-- [ ] Prometheus metrics
+- [x] Prometheus metrics
+- [x] LL-HLS (partial segments + blocking reload)
+- [x] Slow consumer protection (EWMA frame dropping)
+- [x] GCC congestion control for WebRTC
+- [x] Rate limiting
+- [ ] SIP gateway
 - [ ] Simulcast layer selection
 - [ ] Admin UI enhancements
 
