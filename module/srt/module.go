@@ -246,7 +246,7 @@ func (m *Module) handleSubscribe(conn gosrt.Conn) {
 		return
 	}
 
-	sub := NewSubscriber(conn, streamKey, m.hub, m.eventBus)
+	sub := NewSubscriber(conn, streamKey, m.hub, m.eventBus, m.server.Config().SRT.SkipTracker)
 
 	slog.Info("subscribe start", "module", "srt", "stream", streamKey, "remote", conn.RemoteAddr())
 	sub.Run()

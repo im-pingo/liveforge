@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -183,23 +182,6 @@ http_stream:
 	}
 	if cfg.HTTP.LLHLS.Container != "fmp4" {
 		t.Errorf("default container = %q, want %q", cfg.HTTP.LLHLS.Container, "fmp4")
-	}
-}
-
-func TestMaxSkipWindowDefault(t *testing.T) {
-	yaml := `{}`
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load error: %v", err)
-	}
-	if cfg.Stream.MaxSkipWindow != 60*time.Second {
-		t.Errorf("expected default MaxSkipWindow 60s, got %v", cfg.Stream.MaxSkipWindow)
 	}
 }
 
