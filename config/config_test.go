@@ -239,6 +239,68 @@ http_stream:
 	}
 }
 
+func TestGCCConfigDefaults(t *testing.T) {
+	yaml := `
+webrtc:
+  enabled: true
+  listen: ":8443"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if !cfg.WebRTC.GCC.Enabled {
+		t.Error("expected GCC enabled by default")
+	}
+	if cfg.WebRTC.GCC.InitialBitrate != 2_000_000 {
+		t.Errorf("expected initial bitrate 2000000, got %d", cfg.WebRTC.GCC.InitialBitrate)
+	}
+	if cfg.WebRTC.GCC.MinBitrate != 100_000 {
+		t.Errorf("expected min bitrate 100000, got %d", cfg.WebRTC.GCC.MinBitrate)
+	}
+	if cfg.WebRTC.GCC.MaxBitrate != 10_000_000 {
+		t.Errorf("expected max bitrate 10000000, got %d", cfg.WebRTC.GCC.MaxBitrate)
+	}
+}
+
+func TestGCCConfigExplicit(t *testing.T) {
+	yaml := `
+webrtc:
+  enabled: true
+  gcc:
+    enabled: false
+    initial_bitrate: 1000000
+    min_bitrate: 50000
+    max_bitrate: 5000000
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.WebRTC.GCC.Enabled {
+		t.Error("expected GCC disabled")
+	}
+	if cfg.WebRTC.GCC.InitialBitrate != 1_000_000 {
+		t.Errorf("expected 1000000, got %d", cfg.WebRTC.GCC.InitialBitrate)
+	}
+	if cfg.WebRTC.GCC.MinBitrate != 50_000 {
+		t.Errorf("expected 50000, got %d", cfg.WebRTC.GCC.MinBitrate)
+	}
+	if cfg.WebRTC.GCC.MaxBitrate != 5_000_000 {
+		t.Errorf("expected 5000000, got %d", cfg.WebRTC.GCC.MaxBitrate)
+	}
+}
+
 func TestLoadConfigInvalidPath(t *testing.T) {
 	_, err := Load("/nonexistent/path/config.yaml")
 	if err == nil {

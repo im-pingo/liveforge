@@ -121,6 +121,15 @@ type WebRTCConfig struct {
 	UDPPortRange []int       `yaml:"udp_port_range"`
 	Candidates   []string    `yaml:"candidates"`
 	TLS          *bool       `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	GCC          GCCConfig   `yaml:"gcc"`
+}
+
+// GCCConfig holds Google Congestion Control settings for WebRTC.
+type GCCConfig struct {
+	Enabled        bool `yaml:"enabled"`
+	InitialBitrate int  `yaml:"initial_bitrate"` // bits/sec
+	MinBitrate     int  `yaml:"min_bitrate"`     // bits/sec
+	MaxBitrate     int  `yaml:"max_bitrate"`     // bits/sec
 }
 
 // ICEServer holds a STUN/TURN server configuration.
