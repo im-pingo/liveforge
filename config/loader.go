@@ -59,6 +59,12 @@ func defaults() *Config {
 		WebRTC: WebRTCConfig{
 			Listen:       ":8443",
 			UDPPortRange: []int{20000, 30000},
+			GCC: GCCConfig{
+				Enabled:        true,
+				InitialBitrate: 2_000_000,
+				MinBitrate:     100_000,
+				MaxBitrate:     10_000_000,
+			},
 		},
 		SRT: SRTConfig{
 			Listen:  ":6000",

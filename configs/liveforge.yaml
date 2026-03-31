@@ -61,6 +61,11 @@ webrtc:
     - urls: ["stun:stun.l.google.com:19302"]
   udp_port_range: [20000, 30000]
   candidates: []
+  gcc:
+    enabled: true
+    initial_bitrate: 2000000
+    min_bitrate: 100000
+    max_bitrate: 10000000
 
 srt:
   enabled: true
