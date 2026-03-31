@@ -11,6 +11,8 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/ratelimit"
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -21,8 +23,9 @@ type Module struct {
 	sessions sync.Map // sessionID -> *Session
 	listener net.Listener
 	httpSrv  *http.Server
-	limiter  *ratelimit.Limiter
-	wg       sync.WaitGroup
+	limiter   *ratelimit.Limiter
+	wg        sync.WaitGroup
+	latestBWE chan cc.BandwidthEstimator
 }
 
 // NewModule creates a new WebRTC module.
@@ -68,6 +71,32 @@ func (m *Module) Init(s *core.Server) error {
 	ir := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
 		return err
+	}
+
+	// Register GCC congestion control interceptor if enabled.
+	// GCC uses TWCC feedback (already registered above) to estimate
+	// available bandwidth and paces outgoing RTP packets via a
+	// LeakyBucketPacer. This eliminates burst-induced jitter buffer
+	// stuttering on WHEP playback.
+	if cfg.WebRTC.GCC.Enabled {
+		bweFactory, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			return gcc.NewSendSideBWE(
+				gcc.SendSideBWEInitialBitrate(cfg.WebRTC.GCC.InitialBitrate),
+				gcc.SendSideBWEMinBitrate(cfg.WebRTC.GCC.MinBitrate),
+				gcc.SendSideBWEMaxBitrate(cfg.WebRTC.GCC.MaxBitrate),
+			)
+		})
+		if err != nil {
+			return fmt.Errorf("webrtc: create GCC interceptor: %w", err)
+		}
+		m.latestBWE = make(chan cc.BandwidthEstimator, 1)
+		bweFactory.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) {
+			select {
+			case m.latestBWE <- estimator:
+			default:
+			}
+		})
+		ir.Add(bweFactory)
 	}
 
 	m.api = webrtc.NewAPI(
