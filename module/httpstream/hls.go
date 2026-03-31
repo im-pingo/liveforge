@@ -3,7 +3,7 @@ package httpstream
 import (
 	"bytes"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"strings"
 	"sync"
@@ -55,8 +55,8 @@ func NewHLSManager(streamKey, basePath string, targetDur float64, maxSegments in
 // RingBuffer, muxes them into TS segments split on video keyframes, and
 // maintains a sliding window of recent segments.
 func (h *HLSManager) Run(stream *core.Stream) {
-	log.Printf("[hls] manager started for %s", h.streamKey)
-	defer log.Printf("[hls] manager stopped for %s", h.streamKey)
+	slog.Info("manager started", "module", "hls", "stream", h.streamKey)
+	defer slog.Info("manager stopped", "module", "hls", "stream", h.streamKey)
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqData, audioSeqData []byte

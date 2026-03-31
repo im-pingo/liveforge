@@ -2,7 +2,7 @@ package httpstream
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -75,8 +75,8 @@ func NewLLHLSManager(streamKey, basePath string, partDuration float64, segmentCo
 
 // Run starts the segmenter loop. Blocks until stream ends or Stop() is called.
 func (m *LLHLSManager) Run(stream *core.Stream) {
-	log.Printf("[llhls] manager started for %s", m.streamKey)
-	defer log.Printf("[llhls] manager stopped for %s", m.streamKey)
+	slog.Info("manager started", "module", "llhls", "stream", m.streamKey)
+	defer slog.Info("manager stopped", "module", "llhls", "stream", m.streamKey)
 	m.segmenter.Run(stream)
 }
 

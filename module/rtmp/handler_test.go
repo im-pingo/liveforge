@@ -29,7 +29,7 @@ func TestHandlerConnect(t *testing.T) {
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	handler := NewHandler(serverConn, hub, bus, 4096)
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -92,7 +92,7 @@ func TestHandlerPublish(t *testing.T) {
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	handler := NewHandler(serverConn, hub, bus, 4096)
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
 
 	go handler.Handle()
 
@@ -149,7 +149,7 @@ func TestHandlerMediaMessage(t *testing.T) {
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	handler := NewHandler(serverConn, hub, bus, 4096)
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
 
 	go handler.Handle()
 

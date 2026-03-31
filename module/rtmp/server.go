@@ -1,10 +1,11 @@
 package rtmp
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
 
@@ -50,10 +51,10 @@ func (m *Module) Init(s *core.Server) error {
 	if cfg.TLS.Configured() && (cfg.RTMP.TLS == nil || *cfg.RTMP.TLS) {
 		proto = "RTMPS"
 	}
-	log.Printf("%s listening on %s", proto, cfg.RTMP.Listen)
+	slog.Info("listening", "module", "rtmp", "proto", proto, "addr", cfg.RTMP.Listen)
 
 	m.wg.Add(1)
-	go m.acceptLoop(cfg.RTMP.ChunkSize)
+	go m.acceptLoop(cfg.RTMP.ChunkSize, cfg.RTMP.SkipTracker)
 
 	return nil
 }
@@ -75,14 +76,14 @@ func (m *Module) Close() error {
 	m.connsMu.Unlock()
 
 	m.wg.Wait()
-	log.Println("RTMP module stopped")
+	slog.Info("stopped", "module", "rtmp")
 	return nil
 }
 
 // Hub returns the stream hub managed by this module.
 func (m *Module) Hub() *core.StreamHub { return m.hub }
 
-func (m *Module) acceptLoop(chunkSize int) {
+func (m *Module) acceptLoop(chunkSize int, skipCfg *config.SkipTrackerConfig) {
 	defer m.wg.Done()
 
 	for {
@@ -92,22 +93,22 @@ func (m *Module) acceptLoop(chunkSize int) {
 			case <-m.closing:
 				return
 			default:
-				log.Printf("RTMP accept error: %v", err)
+				slog.Error("accept error", "module", "rtmp", "error", err)
 				continue
 			}
 		}
 
 		if !m.server.AcquireConn() {
-			log.Printf("RTMP: max connections reached, rejecting %s", conn.RemoteAddr())
+			slog.Warn("max connections reached", "module", "rtmp", "remote", conn.RemoteAddr())
 			conn.Close()
 			continue
 		}
 		m.wg.Add(1)
-		go m.handleConn(conn, chunkSize)
+		go m.handleConn(conn, chunkSize, skipCfg)
 	}
 }
 
-func (m *Module) handleConn(conn net.Conn, chunkSize int) {
+func (m *Module) handleConn(conn net.Conn, chunkSize int, skipCfg *config.SkipTrackerConfig) {
 	defer m.wg.Done()
 	defer m.server.ReleaseConn()
 
@@ -121,13 +122,13 @@ func (m *Module) handleConn(conn net.Conn, chunkSize int) {
 	}()
 
 	if err := ServerHandshake(conn); err != nil {
-		log.Printf("RTMP handshake failed: %v", err)
+		slog.Error("handshake failed", "module", "rtmp", "error", err)
 		conn.Close()
 		return
 	}
 
-	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize)
+	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize, skipCfg)
 	if err := handler.Handle(); err != nil {
-		log.Printf("RTMP handler error: %v", err)
+		slog.Error("handler error", "module", "rtmp", "error", err)
 	}
 }

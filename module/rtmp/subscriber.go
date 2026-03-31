@@ -2,10 +2,11 @@ package rtmp
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	flvpkg "github.com/im-pingo/liveforge/pkg/muxer/flv"
@@ -18,18 +19,20 @@ type Subscriber struct {
 	cw      *ChunkWriter
 	stream  *core.Stream
 	opts    core.SubscribeOptions
+	skipCfg *config.SkipTrackerConfig
 	closed  chan struct{}
 }
 
 // NewSubscriber creates a new RTMP subscriber.
-func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream) *Subscriber {
+func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream, skipCfg *config.SkipTrackerConfig) *Subscriber {
 	return &Subscriber{
-		id:     "rtmp-sub-" + streamKey,
-		conn:   conn,
-		cw:     cw,
-		stream: stream,
-		opts:   core.DefaultSubscribeOptions(),
-		closed: make(chan struct{}),
+		id:      "rtmp-sub-" + streamKey,
+		conn:    conn,
+		cw:      cw,
+		stream:  stream,
+		opts:    core.DefaultSubscribeOptions(),
+		skipCfg: skipCfg,
+		closed:  make(chan struct{}),
 	}
 }
 
@@ -68,13 +71,13 @@ func (s *Subscriber) WriteLoop() {
 	// Send sequence headers
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		if err := s.sendFrame(vsh); err != nil {
-			log.Printf("RTMP subscriber %s: video seq header send error: %v", s.id, err)
+			slog.Error("video seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
 			return
 		}
 	}
 	if ash := s.stream.AudioSeqHeader(); ash != nil {
 		if err := s.sendFrame(ash); err != nil {
-			log.Printf("RTMP subscriber %s: audio seq header send error: %v", s.id, err)
+			slog.Error("audio seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
 			return
 		}
 	}
@@ -84,7 +87,7 @@ func (s *Subscriber) WriteLoop() {
 	if s.opts.StartMode == core.StartModeGOP {
 		for _, frame := range s.stream.GOPCache() {
 			if err := s.sendFrame(frame); err != nil {
-				log.Printf("RTMP subscriber %s: GOP cache send error: %v", s.id, err)
+				slog.Error("GOP cache send error", "module", "rtmp", "subscriber", s.id, "error", err)
 				return
 			}
 			if frame.DTS > lastDTS {
@@ -95,7 +98,7 @@ func (s *Subscriber) WriteLoop() {
 
 	// Read live frames from ring buffer, skipping frames already sent via GOP cache
 	reader := s.stream.RingBuffer().NewReader()
-	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer)
+	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer, s.skipCfg)
 	for {
 		select {
 		case <-s.closed:

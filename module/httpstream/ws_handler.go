@@ -2,7 +2,7 @@ package httpstream
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -56,12 +56,12 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
-		log.Printf("[httpstream] websocket accept error: %v", err)
+		slog.Error("websocket accept error", "module", "httpstream", "error", err)
 		return
 	}
 	defer conn.CloseNow()
 
-	log.Printf("[httpstream] ws-%s subscriber for %s from %s", format, streamKey, r.RemoteAddr)
+	slog.Info("ws subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveWebSocket(r.Context(), conn, format, stream)
 
 	m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{

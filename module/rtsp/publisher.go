@@ -2,7 +2,7 @@ package rtsp
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
@@ -159,12 +159,12 @@ func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 	}
 	p.mu.Unlock()
 	if !ok {
-		log.Printf("rtsp: FeedRTP unknown PT=%d, registered PTs: %v", pkt.PayloadType, p.registeredPTs())
+		slog.Debug("FeedRTP unknown PT", "module", "rtsp", "pt", pkt.PayloadType, "registered", p.registeredPTs())
 		return nil // Unknown PT, skip
 	}
 	frame, err := dp.Depacketize(pkt)
 	if err != nil {
-		log.Printf("rtsp: FeedRTP depacketize error: %v", err)
+		slog.Error("FeedRTP depacketize error", "module", "rtsp", "error", err)
 		return err
 	}
 	if frame != nil {
