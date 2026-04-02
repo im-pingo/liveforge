@@ -95,10 +95,11 @@ type PCMFrame struct {
     Samples    []int16 // interleaved samples (L,R,L,R... or mono)
     SampleRate int     // 8000, 16000, 44100, 48000
     Channels   int     // 1 or 2
-    Timestamp  int64   // DTS in milliseconds (passed through from source)
 }
 
 // Decoder decodes compressed audio into PCM.
+// Instances are NOT safe for concurrent use. Each transcode goroutine
+// creates its own Decoder via the Registry.
 type Decoder interface {
     // Decode decodes one audio frame into PCM samples.
     Decode(payload []byte) (*PCMFrame, error)
@@ -109,12 +110,22 @@ type Decoder interface {
 }
 
 // Encoder encodes PCM into compressed audio.
+// Instances are NOT safe for concurrent use. Each transcode goroutine
+// creates its own Encoder via the Registry.
 type Encoder interface {
     // Encode encodes PCM samples into one compressed audio frame.
     Encode(pcm *PCMFrame) ([]byte, error)
-    // Codec returns the encoder's output codec type.
-    Codec() avframe.CodecType
+    // SampleRate returns the encoder's expected input sample rate.
+    // The transcode goroutine resamples PCM to this rate before encoding.
+    SampleRate() int
+    // Channels returns the encoder's expected input channel count.
+    Channels() int
 }
+
+// SequenceHeaderFunc returns an initial sequence header frame for the
+// target codec, or nil if the codec does not use sequence headers.
+// For example, AAC requires an AudioSpecificConfig frame before data.
+type SequenceHeaderFunc func() []byte
 ```
 
 ### pkg/audiocodec/registry.go
@@ -130,6 +141,7 @@ type Registry struct {
 
 type DecoderFactory func() Decoder
 type EncoderFactory func() Encoder
+type SeqHeaderFactory func() SequenceHeaderFunc // optional, may return nil
 
 // Global returns the process-wide codec registry.
 // Codec packages register themselves here during init().
@@ -197,31 +209,58 @@ type TranscodeManager struct {
 
 ```go
 // GetOrCreateReader returns a RingReader that produces AVFrames with audio
-// in the target codec. If the publisher's audio codec matches targetCodec,
-// it returns a reader on the original RingBuffer (zero overhead). Otherwise
-// it returns a reader on a shared TranscodedTrack, creating one if needed.
+// in the target codec, plus a release function that the caller MUST call
+// when done (similar to context.WithCancel returning a cancel function).
 //
-// The caller MUST call ReleaseReader when done to decrement the subscriber
-// count and allow cleanup of idle transcoded tracks.
+// If the publisher's audio codec matches targetCodec, it returns a reader
+// on the original RingBuffer (zero overhead) and a no-op release function.
+// Otherwise it returns a reader on a shared TranscodedTrack, creating one
+// if needed.
 func (tm *TranscodeManager) GetOrCreateReader(
     targetCodec avframe.CodecType,
-) (*util.RingReader[*avframe.AVFrame], error)
+) (reader *util.RingReader[*avframe.AVFrame], release func(), err error)
 ```
 
 Behavior:
 
-1. If `stream.Publisher().MediaInfo().AudioCodec == targetCodec` → return `stream.RingBuffer().NewReader()` directly. No TranscodedTrack created.
+1. If `stream.Publisher().MediaInfo().AudioCodec == targetCodec` → return `stream.RingBuffer().NewReader()` with a no-op release. No TranscodedTrack created.
 2. If `!registry.CanTranscode(sourceCodec, targetCodec)` → return error (codec not available).
-3. If TranscodedTrack for targetCodec already exists → increment subCount, return new reader.
-4. Otherwise → create TranscodedTrack, start transcode goroutine, return reader.
+3. If TranscodedTrack for targetCodec already exists → increment subCount, return new reader with release closure.
+4. Otherwise → create TranscodedTrack, start transcode goroutine, return reader with release closure.
+
+The release closure captures the target codec internally, so the caller never needs to remember which codec was requested.
 
 ### Transcode Goroutine
 
 ```go
 func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack) {
     sourceCodec := tm.stream.Publisher().MediaInfo().AudioCodec
-    decoder, _ := tm.registry.NewDecoder(sourceCodec)
-    encoder, _ := tm.registry.NewEncoder(track.targetCodec)
+
+    decoder, err := tm.registry.NewDecoder(sourceCodec)
+    if err != nil {
+        slog.Error("transcode: decoder unavailable", "from", sourceCodec, "error", err)
+        track.ringBuffer.Close()
+        return
+    }
+    encoder, err := tm.registry.NewEncoder(track.targetCodec)
+    if err != nil {
+        slog.Error("transcode: encoder unavailable", "to", track.targetCodec, "error", err)
+        track.ringBuffer.Close()
+        return
+    }
+
+    // Emit target codec's sequence header if the encoder provides one.
+    // For example, AAC encoders produce an AudioSpecificConfig frame that
+    // RTMP/FLV subscribers require before audio data frames.
+    if seqHeader := tm.registry.SequenceHeader(track.targetCodec); seqHeader != nil {
+        track.ringBuffer.Write(avframe.NewAVFrame(
+            avframe.MediaTypeAudio,
+            track.targetCodec,
+            avframe.FrameTypeSequenceHeader,
+            0, 0,
+            seqHeader,
+        ))
+    }
 
     reader := tm.stream.RingBuffer().NewReader()
     for {
@@ -249,18 +288,25 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
             continue
         }
 
-        // Audio sequence headers: skip (codec-specific, not relevant for target)
+        // Audio sequence headers: skip (source codec-specific, not relevant for target)
         if frame.FrameType == avframe.FrameTypeSequenceHeader {
             continue
         }
 
-        // Transcode: decode → PCM → encode
+        // Transcode: decode → PCM → (resample if needed) → encode
         pcm, err := decoder.Decode(frame.Payload)
         if err != nil {
+            slog.Debug("transcode: decode error", "error", err)
             continue
+        }
+        if decoder.SampleRate() != encoder.SampleRate() ||
+           decoder.Channels() != encoder.Channels() {
+            pcm = resample(pcm, decoder.SampleRate(), encoder.SampleRate(),
+                           decoder.Channels(), encoder.Channels())
         }
         encoded, err := encoder.Encode(pcm)
         if err != nil {
+            slog.Debug("transcode: encode error", "error", err)
             continue
         }
 
@@ -275,16 +321,26 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 }
 ```
 
-### Cleanup: ReleaseReader
+### Cleanup via Release Closure
+
+The release function returned by `GetOrCreateReader` is a closure that captures the target codec. Callers use `defer release()`:
 
 ```go
-func (tm *TranscodeManager) ReleaseReader(targetCodec avframe.CodecType) {
+reader, release, err := stream.TranscodeManager().GetOrCreateReader(avframe.CodecOpus)
+if err != nil { ... }
+defer release()
+```
+
+Internally the release closure calls:
+
+```go
+func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType) {
     tm.mu.Lock()
     defer tm.mu.Unlock()
 
     track, ok := tm.tracks[targetCodec]
     if !ok {
-        return
+        return // zero-overhead path (codec matched), no track to release
     }
     track.subCount--
     if track.subCount <= 0 {
@@ -293,6 +349,37 @@ func (tm *TranscodeManager) ReleaseReader(targetCodec avframe.CodecType) {
     }
 }
 ```
+
+### Publisher Change (Republish)
+
+When a publisher disconnects and a new publisher starts on the same stream (possibly with a different audio codec), all active TranscodedTracks become stale. `Stream.SetPublisher()` signals the TranscodeManager to tear down all tracks:
+
+```go
+func (tm *TranscodeManager) Reset() {
+    tm.mu.Lock()
+    defer tm.mu.Unlock()
+    for codec, track := range tm.tracks {
+        track.cancel()
+        delete(tm.tracks, codec)
+    }
+}
+```
+
+Existing subscribers holding readers on stale TranscodedTracks will see the RingBuffer close and exit their read loops. They can reconnect and get a new reader with a fresh transcode goroutine for the new publisher's codec.
+
+### GOP Cache for Transcoded Tracks
+
+TranscodedTracks do NOT have their own GOP cache. Late-joining subscribers on a TranscodedTrack only receive frames from the point the transcode goroutine has reached. This is acceptable because:
+
+1. **Video keyframes**: the transcode goroutine passes video through unchanged. The subscriber will receive the next keyframe from the source stream.
+2. **Audio**: audio frames are small and frequent (~20ms each). Missing a few frames at join time causes at most a brief silence, not a visual glitch.
+3. **Full GOP cache support** for transcoded tracks can be added later if needed, by having the transcode goroutine maintain its own cache. This is a future optimization, not a Phase 1 requirement.
+
+For WebRTC WHEP specifically, the existing GOP cache flow can be preserved: send GOP cache frames from the original RingBuffer (video only, skip incompatible audio), then switch to the TranscodedTrack reader for live frames.
+
+### Video Memory Note
+
+The transcode goroutine copies video frames into the transcoded RingBuffer. This means video data exists in two RingBuffers when transcoding is active. The memory overhead is proportional to `ringBufferSize * averageFrameSize`. For typical configurations (1024 slots, ~10KB average frame), this is ~10MB per transcoded track. This is acceptable for Phase 1. A future optimization could use a dual-reader approach (video from original, audio from transcoded) to eliminate the duplication.
 
 ## G.711 Implementation (Phase 1)
 
@@ -325,8 +412,8 @@ When transcoding between codecs with different sample rates (e.g., G.711 at 8kHz
 
 ```go
 // In transcodeLoop, between decode and encode:
-if decoder.SampleRate() != encoder.ExpectedSampleRate() {
-    pcm = resample(pcm, decoder.SampleRate(), encoder.ExpectedSampleRate())
+if decoder.SampleRate() != encoder.SampleRate() {
+    pcm = resample(pcm, decoder.SampleRate(), encoder.SampleRate())
 }
 ```
 
@@ -341,12 +428,13 @@ Current code in `whep_feed.go` reads directly from `stream.RingBuffer()` and ski
 ```go
 // Before: audioSender is nil for AAC → no audio
 // After:
-reader, err := stream.TranscodeManager().GetOrCreateReader(avframe.CodecOpus)
+reader, release, err := stream.TranscodeManager().GetOrCreateReader(avframe.CodecOpus)
 if err != nil {
     // Opus codec not available (not compiled in), fall back to no audio
     reader = stream.RingBuffer().NewReader()
+    release = func() {} // no-op
 }
-defer stream.TranscodeManager().ReleaseReader(avframe.CodecOpus)
+defer release()
 
 // reader now produces AVFrames with Opus audio + original video
 ```
@@ -356,8 +444,9 @@ defer stream.TranscodeManager().ReleaseReader(avframe.CodecOpus)
 When publisher is WebRTC (Opus) and subscriber is RTMP (needs AAC):
 
 ```go
-reader, _ := stream.TranscodeManager().GetOrCreateReader(avframe.CodecAAC)
-defer stream.TranscodeManager().ReleaseReader(avframe.CodecAAC)
+reader, release, err := stream.TranscodeManager().GetOrCreateReader(avframe.CodecAAC)
+if err != nil { ... }
+defer release()
 ```
 
 ### Other Modules
@@ -378,6 +467,8 @@ audio_codec:
   #   aac   (go build -tags audio_aac)
 ```
 
+When `audio_codec.enabled` is `false` (or the section is omitted), the TranscodeManager is not created on streams. Calls to `stream.TranscodeManager()` return nil, and protocol modules fall back to current behavior (no audio when codecs mismatch). This ensures zero runtime cost when transcoding is not wanted.
+
 No configuration is needed for which transcodings to enable. The system automatically transcodes when a subscriber needs a different codec and both decoder and encoder are available in the registry.
 
 ## Stream Lifecycle
@@ -396,7 +487,7 @@ No configuration is needed for which transcodings to enable. The system automati
 - Returns new reader on same transcoded RingBuffer
 
 ### WebRTC Subscriber Leaves
-- `ReleaseReader(CodecOpus)` called
+- `release()` called (closure from GetOrCreateReader)
 - subCount decremented
 
 ### Last WebRTC Subscriber Leaves
