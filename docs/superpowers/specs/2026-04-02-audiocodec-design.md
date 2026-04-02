@@ -156,6 +156,13 @@ func (r *Registry) NewEncoder(codec avframe.CodecType) (Encoder, error)
 
 // CanTranscode returns true if both decoder(from) and encoder(to) are available.
 func (r *Registry) CanTranscode(from, to avframe.CodecType) bool
+
+// RegisterSequenceHeader registers an optional sequence header factory for a codec.
+func (r *Registry) RegisterSequenceHeader(codec avframe.CodecType, fn SeqHeaderFactory)
+
+// SequenceHeader returns the sequence header bytes for a codec, or nil if
+// the codec does not use sequence headers.
+func (r *Registry) SequenceHeader(codec avframe.CodecType) []byte
 ```
 
 ### Codec Registration Pattern
@@ -223,6 +230,7 @@ func (tm *TranscodeManager) GetOrCreateReader(
 
 Behavior:
 
+0. If `stream.Publisher()` is nil → return error immediately. Callers must verify publisher presence, or handle this error as "no audio available yet."
 1. If `stream.Publisher().MediaInfo().AudioCodec == targetCodec` → return `stream.RingBuffer().NewReader()` with a no-op release. No TranscodedTrack created.
 2. If `!registry.CanTranscode(sourceCodec, targetCodec)` → return error (codec not available).
 3. If TranscodedTrack for targetCodec already exists → increment subCount, return new reader with release closure.
@@ -262,7 +270,9 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
         ))
     }
 
-    reader := tm.stream.RingBuffer().NewReader()
+    // Start from the current write position to avoid burst-reading stale frames.
+    // This matches the WHEP feed loop pattern (NewReaderAt with latest position).
+    reader := tm.stream.RingBuffer().NewReaderAt(tm.stream.RingBuffer().WriteCursor())
     for {
         select {
         case <-ctx.Done():
@@ -352,7 +362,7 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType) {
 
 ### Publisher Change (Republish)
 
-When a publisher disconnects and a new publisher starts on the same stream (possibly with a different audio codec), all active TranscodedTracks become stale. `Stream.SetPublisher()` signals the TranscodeManager to tear down all tracks:
+When a publisher disconnects and a new publisher starts on the same stream (possibly with a different audio codec), all active TranscodedTracks become stale. `Stream.SetPublisher()` must be modified to call `TranscodeManager.Reset()` before replacing the publisher. This is critical because the old publisher's codec-specific decoder would silently corrupt frames from the new publisher:
 
 ```go
 func (tm *TranscodeManager) Reset() {
@@ -412,8 +422,10 @@ When transcoding between codecs with different sample rates (e.g., G.711 at 8kHz
 
 ```go
 // In transcodeLoop, between decode and encode:
-if decoder.SampleRate() != encoder.SampleRate() {
-    pcm = resample(pcm, decoder.SampleRate(), encoder.SampleRate())
+if decoder.SampleRate() != encoder.SampleRate() ||
+   decoder.Channels() != encoder.Channels() {
+    pcm = resample(pcm, decoder.SampleRate(), encoder.SampleRate(),
+                   decoder.Channels(), encoder.Channels())
 }
 ```
 
@@ -454,6 +466,20 @@ defer release()
 HLS/DASH/HTTP-FLV: these modules use MuxerManager, which reads from the original RingBuffer and muxes into container formats. If the publisher codec is compatible with the container (AAC for FLV/TS), no change needed. If not (Opus publisher → HLS), the muxer worker would use TranscodeManager similarly.
 
 ## Configuration
+
+### Config Struct
+
+```go
+// Added to config/config.go
+type AudioCodecConfig struct {
+    Enabled bool `yaml:"enabled"`
+}
+
+// Added to Config struct:
+// AudioCodec AudioCodecConfig `yaml:"audio_codec"`
+```
+
+### YAML
 
 ```yaml
 # configs/liveforge.yaml
