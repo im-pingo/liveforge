@@ -40,7 +40,7 @@ cluster:
   origin:
     enabled: true
     servers:
-      - "rtmp://127.0.0.1:1935/live"
+      - "rtmp://127.0.0.1:1935"
     idle_timeout: 30s
     retry_max: 3
     retry_delay: 2s
