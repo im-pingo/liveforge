@@ -67,6 +67,8 @@ type RelayTransport interface {
 **Error contract for Push/Pull:**
 - Return `nil`: normal termination (source stream ended, context cancelled)
 - Return `error`: abnormal disconnection (network error, protocol error) — caller decides whether to retry
+- `Pull()` calls `stream.WriteFrame()` which returns `bool` — rejected frames (e.g. bitrate-limited) are silently dropped; this is not an error condition
+- Codec negotiation errors (e.g. remote rejects all offered codecs) return a non-retryable error wrapping `ErrCodecMismatch`
 
 ### TransportRegistry
 
@@ -117,7 +119,9 @@ Lowest latency path. No container format (FLV/TS), no protocol framing (RTMP chu
 
 #### SDP Signaling Endpoints
 
-Registered on the existing API HTTP server:
+Registered on the existing API HTTP server at `Init` time by `NewRTPTransport`. This is the only transport that registers HTTP routes — all others are pure outbound connections.
+
+Signaling endpoints respect the existing API authentication configuration (`api.auth.bearer_token` or session cookie). Cluster nodes must share the same bearer token to relay via RTP.
 
 ```
 POST /api/relay/push    — request to push RTP stream to this node
@@ -125,13 +129,24 @@ POST /api/relay/pull    — request to pull RTP stream from this node
 
 Request body:  SDP Offer (codec info, SSRC, sending port)
 Response body: SDP Answer (confirmed port, codec acknowledgment)
+              — or 406 Not Acceptable if no offered codecs are supported
 ```
 
 Reuses existing `pkg/sdp/` SDP build/parse capabilities.
 
+#### RTP URL Semantics
+
+`rtp://` URLs use the format `rtp://host:port/app/stream` where `host:port` refers to the **HTTP signaling server** (same as the API listen address on the target node). The actual RTP UDP data port is negotiated dynamically via SDP offer/answer. Example:
+
+```
+rtp://192.168.1.10:8090/live/stream1
+                  ^^^^
+                  API/signaling port, NOT the UDP data port
+```
+
 #### RTPTransport.Push() Flow
 
-1. Build SDP offer from `stream.MediaInfo()`
+1. Build SDP offer from `stream.Publisher().MediaInfo()` (nil-guarded; return error if no publisher)
 2. HTTP POST offer to target node's `/api/relay/push`
 3. Parse SDP answer, extract target IP:port
 4. Read AVFrame from stream RingBuffer → RTP pack → UDP send
@@ -147,11 +162,12 @@ Reuses existing `pkg/sdp/` SDP build/parse capabilities.
 5. Send RTCP RR every 5 seconds
 6. Stop on context cancel or 3 missed RTCP SRs/RTP packets
 
-#### RTCP Heartbeat
+#### RTCP Heartbeat & Graceful Shutdown
 
 - Sender: SR every 5 seconds
 - Receiver: RR every 5 seconds
 - Timeout: 3 consecutive missed intervals → consider peer disconnected
+- **Graceful shutdown**: `Close()` sends RTCP BYE packet before releasing the UDP socket, allowing the remote peer to detect shutdown immediately instead of waiting for the full 15s timeout
 
 ## ForwardManager / OriginManager Refactoring
 
@@ -176,7 +192,11 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 }
 ```
 
-`ForwardTarget.Run()` retry logic remains unchanged — calls `transport.Push()` instead of `forwardOnce()`.
+`ForwardTarget.Run()` calls `transport.Push()` instead of `forwardOnce()`. Retry uses exponential backoff (matching OriginPull behavior), capped at 30 seconds.
+
+**Stream path handling for forward targets**: All forward target URLs in config must include the full path (app + stream key). The current RTMP-specific `containsStreamPath` auto-append logic is removed — each protocol has different URL semantics, so explicit full URLs are required. The Scheduler callback can return protocol-appropriate full URLs per stream key.
+
+**Note**: Origin server URLs do NOT include the stream key — it is appended at runtime from the subscriber's requested stream key, same as current behavior.
 
 ### OriginManager Changes
 
@@ -205,6 +225,9 @@ func (m *Module) Init(s *core.Server) error {
     m.registry.Register(NewRTMPTransport())
     m.registry.Register(NewSRTTransport(cfg.SRT))
     m.registry.Register(NewRTSPTransport(cfg.RTSP))
+    // RTPTransport needs *core.Server to register HTTP signaling handlers
+    // on the API router at init time. This is the only transport that
+    // registers HTTP routes.
     m.registry.Register(NewRTPTransport(cfg.RTP, s))
 
     // ForwardManager/OriginManager receive registry
@@ -230,7 +253,7 @@ cluster:
       - "rtp://192.168.1.10:5000/live/stream1"
     schedule_url: ""
     retry_max: 3
-    retry_interval: 5s
+    retry_interval: 5s    # base delay for exponential backoff (existing field name preserved)
 
   origin:
     enabled: true
@@ -252,8 +275,8 @@ cluster:
     transport: tcp
 
   rtp:
-    listen: ":5000"
-    signaling_path: "/api/relay"
+    port_range: "20000-20100"     # UDP port range for dynamically allocated RTP data ports
+    signaling_path: "/api/relay"  # HTTP signaling base path (on API server)
     rtcp_interval: 5s
     timeout: 15s
 ```
@@ -280,8 +303,8 @@ type ClusterRTSPConfig struct {
 }
 
 type ClusterRTPConfig struct {
-    Listen        string        `yaml:"listen"`
-    SignalingPath string        `yaml:"signaling_path"`
+    PortRange     string        `yaml:"port_range"`      // UDP port range for RTP data (e.g. "20000-20100")
+    SignalingPath string        `yaml:"signaling_path"`   // HTTP signaling base path
     RTCPInterval  time.Duration `yaml:"rtcp_interval"`
     Timeout       time.Duration `yaml:"timeout"`
 }
@@ -296,7 +319,7 @@ Each target runs in its own goroutine. Failure on one target does not affect oth
 ```
 target URL → registry.Resolve() → transport.Push()
   ↓ error returned
-  → retry same URL (up to retry_max, exponential backoff)
+  → retry same URL (up to retry_max, exponential backoff capped at 30s)
   → exceed retry_max → log warning, stop this target
   → other targets unaffected
 ```
@@ -319,6 +342,18 @@ servers: [srt://origin1, rtmp://origin2, rtp://192.168.1.5]
 - Sender: 3 consecutive RTCP intervals with no RR received → close connection
 - Receiver: 3 consecutive RTCP intervals with no SR or RTP data → close connection
 - UDP is connectionless — RTCP heartbeat is the only liveness signal
+
+## Metrics & Observability
+
+New Prometheus metrics exposed via the existing metrics module:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `cluster_relay_active` | Gauge | `direction` (forward/origin), `protocol` | Active relay connections |
+| `cluster_relay_errors_total` | Counter | `direction`, `protocol`, `error_type` | Relay connection errors |
+| `cluster_relay_bytes_total` | Counter | `direction`, `protocol` | Bytes transferred via relay |
+| `cluster_relay_latency_seconds` | Histogram | `protocol` | End-to-end relay latency (RTP only, measured via RTCP SR/RR round-trip) |
+| `cluster_rtp_packet_loss_ratio` | Gauge | `stream`, `direction` | RTP packet loss ratio from RTCP RR fraction lost |
 
 ## File Structure
 
