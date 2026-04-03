@@ -210,7 +210,7 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/pulltest")
 
-	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, 1, 2*time.Second, 5*time.Second)
+	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), 1, 2*time.Second, 5*time.Second)
 
 	done := make(chan struct{})
 	go func() {

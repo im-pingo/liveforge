@@ -1,13 +1,13 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
@@ -16,6 +16,7 @@ type OriginPull struct {
 	streamKey   string
 	servers     []string
 	stream      *core.Stream
+	registry    *TransportRegistry
 	retryMax    int
 	retryDelay  time.Duration
 	idleTimeout time.Duration
@@ -25,11 +26,12 @@ type OriginPull struct {
 }
 
 // NewOriginPull creates a new origin pull instance.
-func NewOriginPull(streamKey string, servers []string, stream *core.Stream, retryMax int, retryDelay, idleTimeout time.Duration) *OriginPull {
+func NewOriginPull(streamKey string, servers []string, stream *core.Stream, registry *TransportRegistry, retryMax int, retryDelay, idleTimeout time.Duration) *OriginPull {
 	return &OriginPull{
 		streamKey:   streamKey,
 		servers:     servers,
 		stream:      stream,
+		registry:    registry,
 		retryMax:    retryMax,
 		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
@@ -95,115 +97,24 @@ func (op *OriginPull) Run() {
 }
 
 // pullOnce connects to a single origin server and pulls the stream.
-func (op *OriginPull) pullOnce(targetURL string) error {
-	host, app, streamName, err := parseRTMPURL(targetURL)
-	if err != nil {
-		return fmt.Errorf("parse URL: %w", err)
-	}
-
-	rc, err := dialRTMP(host)
+func (op *OriginPull) pullOnce(sourceURL string) error {
+	transport, err := op.registry.Resolve(sourceURL)
 	if err != nil {
 		return err
 	}
-	defer rc.conn.Close()
 
-	// Connect
-	if err := rc.sendConnect(app); err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-	if err := rc.readResponses(1); err != nil {
-		return fmt.Errorf("connect response: %w", err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Play sequence: createStream
-	if err := rc.sendPlay(streamName); err != nil {
-		return fmt.Errorf("play commands: %w", err)
-	}
-	if err := rc.readResponses(2); err != nil {
-		return fmt.Errorf("createStream response: %w", err)
-	}
-
-	// Send play command on stream ID 1
-	playPayload, _ := rtmp.AMF0Encode("play", float64(3), nil, streamName)
-	if err := rc.cw.WriteMessage(8, &rtmp.Message{
-		TypeID:   rtmp.MsgAMF0Command,
-		Length:   uint32(len(playPayload)),
-		StreamID: 1,
-		Payload:  playPayload,
-	}); err != nil {
-		return fmt.Errorf("play: %w", err)
-	}
-
-	slog.Info("origin pull connected", "module", "cluster",
-		"stream", op.streamKey, "url", targetURL)
-
-	// Set up publisher for the local stream
-	pub := &originPublisher{
-		id:   fmt.Sprintf("origin-pull-%s", op.streamKey),
-		info: &avframe.MediaInfo{},
-	}
-	if err := op.stream.SetPublisher(pub); err != nil {
-		return fmt.Errorf("set publisher: %w", err)
-	}
-	defer op.stream.RemovePublisher()
-
-	// Read media messages from the origin
-	for {
+	go func() {
 		select {
 		case <-op.closed:
-			return nil
-		default:
+			cancel()
+		case <-ctx.Done():
 		}
+	}()
 
-		msg, err := rc.cr.ReadMessage()
-		if err != nil {
-			return fmt.Errorf("read message: %w", err)
-		}
-
-		switch msg.TypeID {
-		case rtmp.MsgSetChunkSize:
-			if len(msg.Payload) >= 4 {
-				size := int(msg.Payload[0])<<24 | int(msg.Payload[1])<<16 | int(msg.Payload[2])<<8 | int(msg.Payload[3])
-				rc.cr.SetChunkSize(size)
-			}
-
-		case rtmp.MsgVideo:
-			frame := parseVideoPayload(msg.Payload, int64(msg.Timestamp))
-			if frame != nil {
-				// Update media info on first video frame
-				if pub.info.VideoCodec == 0 {
-					pub.info.VideoCodec = frame.Codec
-				}
-				op.stream.WriteFrame(frame)
-			}
-
-		case rtmp.MsgAudio:
-			frame := parseAudioPayload(msg.Payload, int64(msg.Timestamp))
-			if frame != nil {
-				if pub.info.AudioCodec == 0 {
-					pub.info.AudioCodec = frame.Codec
-				}
-				op.stream.WriteFrame(frame)
-			}
-
-		case rtmp.MsgAMF0Command:
-			vals, err := rtmp.AMF0Decode(msg.Payload)
-			if err != nil || len(vals) < 1 {
-				continue
-			}
-			cmd, _ := vals[0].(string)
-			if cmd == "onStatus" && len(vals) >= 4 {
-				if m, ok := vals[3].(map[string]any); ok {
-					code, _ := m["code"].(string)
-					if code == "NetStream.Play.UnpublishNotify" || code == "NetStream.Play.Stop" {
-						slog.Info("origin stream ended", "module", "cluster",
-							"stream", op.streamKey, "code", code)
-						return nil
-					}
-				}
-			}
-		}
-	}
+	return transport.Pull(ctx, sourceURL, op.stream)
 }
 
 // Close stops the origin pull.
@@ -232,6 +143,7 @@ type OriginManager struct {
 	hub         *core.StreamHub
 	eventBus    *core.EventBus
 	scheduler   *Scheduler
+	registry    *TransportRegistry
 	retryMax    int
 	retryDelay  time.Duration
 	idleTimeout time.Duration
@@ -242,7 +154,7 @@ type OriginManager struct {
 }
 
 // NewOriginManager creates a new origin manager.
-func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
+func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
@@ -256,6 +168,7 @@ func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Schedu
 		hub:         hub,
 		eventBus:    bus,
 		scheduler:   scheduler,
+		registry:    registry,
 		retryMax:    retryMax,
 		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
@@ -302,7 +215,7 @@ func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {
 		return nil
 	}
 
-	op := NewOriginPull(ctx.StreamKey, servers, stream, om.retryMax, om.retryDelay, om.idleTimeout)
+	op := NewOriginPull(ctx.StreamKey, servers, stream, om.registry, om.retryMax, om.retryDelay, om.idleTimeout)
 	om.active[ctx.StreamKey] = op
 
 	om.eventBus.Emit(core.EventOriginPullStart, &core.EventContext{ //nolint:errcheck
