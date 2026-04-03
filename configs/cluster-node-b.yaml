@@ -1,0 +1,53 @@
+server:
+  name: "cluster-node-b"
+  log_level: info
+  drain_timeout: 10s
+
+rtmp:
+  enabled: true
+  listen: ":1936"
+  chunk_size: 4096
+
+srt:
+  enabled: true
+  listen: ":6001"
+  latency: 120
+
+http_stream:
+  enabled: true
+  listen: ":8081"
+  cors: true
+  hls:
+    segment_duration: 6
+    playlist_size: 5
+  llhls:
+    enabled: true
+    part_duration: 0.2
+    segment_count: 4
+    container: "fmp4"
+
+stream:
+  gop_cache: true
+  gop_cache_num: 1
+  audio_cache_ms: 1000
+  ring_buffer_size: 1024
+  idle_timeout: 30s
+  no_publisher_timeout: 15s
+
+cluster:
+  forward:
+    enabled: false
+  origin:
+    enabled: true
+    servers:
+      - "rtmp://127.0.0.1:1935/live"
+    idle_timeout: 30s
+    retry_max: 3
+    retry_delay: 2s
+
+api:
+  enabled: true
+  listen: ":8091"
+  console:
+    username: "admin"
+    password: "admin"
