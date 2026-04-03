@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,16 +177,25 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 		return nil
 	}
 
+	// Extract stream name from key (e.g. "live/cluster_test" → "cluster_test").
+	// Target URLs in config are base URLs (e.g. "rtmp://host/app"),
+	// so we append the stream name to form the full URL.
+	streamName := ctx.StreamKey
+	if idx := strings.Index(ctx.StreamKey, "/"); idx >= 0 {
+		streamName = ctx.StreamKey[idx+1:]
+	}
+
 	var fts []*ForwardTarget
 	for _, targetURL := range targets {
-		transport, err := fm.registry.Resolve(targetURL)
+		fullURL := strings.TrimRight(targetURL, "/") + "/" + streamName
+		transport, err := fm.registry.Resolve(fullURL)
 		if err != nil {
 			slog.Warn("unsupported relay protocol", "module", "cluster",
-				"url", targetURL, "error", err)
+				"url", fullURL, "error", err)
 			continue
 		}
 
-		ft := NewForwardTarget(ctx.StreamKey, targetURL, stream, transport, fm.retryMax, fm.retryDel)
+		ft := NewForwardTarget(ctx.StreamKey, fullURL, stream, transport, fm.retryMax, fm.retryDel)
 		fts = append(fts, ft)
 		go ft.Run()
 	}
