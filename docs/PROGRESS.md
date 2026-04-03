@@ -182,6 +182,20 @@
 | SkipTracker per-protocol | `config/config.go` | Per-protocol slow consumer limits (max_count/window) wired to all subscribers |
 | fMP4 recording | `module/record/` | FMP4 format support, max_size segmentation |
 
+### Phase 11 — Multi-Protocol Cluster Relay
+
+| Module | Path | Description |
+|--------|------|-------------|
+| RelayTransport interface | `module/cluster/transport.go` | Plugin interface for cluster relay protocols (Push/Pull/Close/Scheme) |
+| TransportRegistry | `module/cluster/registry.go` | URL scheme-based transport resolution with Register/Resolve/Close |
+| RTMPTransport | `module/cluster/transport_rtmp.go` | RTMP relay via FLV-over-RTMP chunk stream |
+| SRTTransport | `module/cluster/transport_srt.go` | SRT relay via TS mux/demux over gosrt |
+| RTSPTransport | `module/cluster/transport_rtsp.go` | RTSP relay with TCP interleaved RTP framing |
+| RTPTransport | `module/cluster/transport_rtp.go` | Direct RTP relay with SDP-over-HTTP signaling, port allocator, RTCP SR/RR/BYE |
+| Relay metrics | `module/cluster/relay_metrics.go` | Prometheus gauges/counters for active relays, bytes, errors, latency, packet loss |
+| Cluster config | `config/config.go` | ClusterSRTConfig, ClusterRTSPConfig, ClusterRTPConfig structs with YAML tags |
+| RTCP BYE | `pkg/rtp/rtcp.go` | BuildBYE function and exported RTCP type constants |
+
 ---
 
 ## Not Yet Implemented ❌
@@ -211,7 +225,7 @@ liveforge/
 ├── module/
 │   ├── api/                # REST API + web console + login auth
 │   ├── auth/               # JWT/callback auth
-│   ├── cluster/            # Cluster forwarding + origin pull
+│   ├── cluster/            # Multi-protocol cluster relay (RTMP/SRT/RTSP/RTP)
 │   ├── httpstream/         # HLS/DASH/HTTP-FLV/HTTP-TS/FMP4/WebSocket
 │   ├── metrics/            # Prometheus metrics endpoint
 │   ├── notify/             # HTTP webhook notifications
