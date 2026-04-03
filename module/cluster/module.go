@@ -31,7 +31,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.registry.Register(NewRTMPTransport())
 	m.registry.Register(NewSRTTransport(cfg.SRT))
 	m.registry.Register(NewRTSPTransport(cfg.RTSP))
-	// RTP transport will be added in Phase 3
+	m.registry.Register(NewRTPTransport(cfg.RTP, s))
 
 	if cfg.Forward.Enabled && (len(cfg.Forward.Targets) > 0 || cfg.Forward.ScheduleURL != "") {
 		fwdScheduler := NewScheduler(
