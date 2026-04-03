@@ -140,6 +140,11 @@ notify:
 cluster:
   forward:
     enabled: false
+    # Targets support multiple protocols via URL scheme:
+    #   rtmp://host:1935/app/stream
+    #   srt://host:6000/app/stream
+    #   rtsp://host:554/app/stream
+    #   rtp://host:8090/app/stream  (SDP signaling via HTTP)
     targets: []
     schedule_url: ""
     schedule_priority: schedule_first
@@ -148,6 +153,7 @@ cluster:
     retry_interval: 3s
   origin:
     enabled: false
+    # Origin servers support the same URL schemes as forward targets.
     servers: []
     schedule_url: ""
     schedule_priority: schedule_first
@@ -155,6 +161,20 @@ cluster:
     idle_timeout: 30s
     retry_max: 3
     retry_delay: 2s
+  # SRT relay transport settings
+  srt:
+    latency: 120ms
+    # passphrase: ""
+    # pbkeylen: 16
+  # RTSP relay transport settings
+  rtsp:
+    transport: tcp  # tcp or udp
+  # RTP direct relay settings (SDP-over-HTTP signaling)
+  rtp:
+    port_range: "20000-20100"
+    signaling_path: "/api/relay"
+    rtcp_interval: 5s
+    timeout: 15s
 
 record:
   enabled: false
