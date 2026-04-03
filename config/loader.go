@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -108,6 +109,21 @@ func defaults() *Config {
 		Metrics: MetricsConfig{
 			Listen: ":9090",
 			Path:   "/metrics",
+		},
+		Cluster: ClusterConfig{
+			SRT: ClusterSRTConfig{
+				Latency:  120 * time.Millisecond,
+				PBKeyLen: 16,
+			},
+			RTSP: ClusterRTSPConfig{
+				Transport: "tcp",
+			},
+			RTP: ClusterRTPConfig{
+				PortRange:     "20000-20100",
+				SignalingPath: "/api/relay",
+				RTCPInterval:  5 * time.Second,
+				Timeout:       15 * time.Second,
+			},
 		},
 	}
 }

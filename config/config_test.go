@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -334,5 +335,41 @@ func TestLoadConfigSRTDefaults(t *testing.T) {
 	}
 	if cfg.SRT.Latency != 120 {
 		t.Errorf("expected default SRT latency 120, got %d", cfg.SRT.Latency)
+	}
+}
+
+func TestClusterTransportConfigDefaults(t *testing.T) {
+	yaml := `{}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+
+	if cfg.Cluster.SRT.Latency != 120*time.Millisecond {
+		t.Errorf("SRT.Latency = %v, want 120ms", cfg.Cluster.SRT.Latency)
+	}
+	if cfg.Cluster.SRT.PBKeyLen != 16 {
+		t.Errorf("SRT.PBKeyLen = %d, want 16", cfg.Cluster.SRT.PBKeyLen)
+	}
+	if cfg.Cluster.RTSP.Transport != "tcp" {
+		t.Errorf("RTSP.Transport = %q, want tcp", cfg.Cluster.RTSP.Transport)
+	}
+	if cfg.Cluster.RTP.PortRange != "20000-20100" {
+		t.Errorf("RTP.PortRange = %q, want 20000-20100", cfg.Cluster.RTP.PortRange)
+	}
+	if cfg.Cluster.RTP.SignalingPath != "/api/relay" {
+		t.Errorf("RTP.SignalingPath = %q, want /api/relay", cfg.Cluster.RTP.SignalingPath)
+	}
+	if cfg.Cluster.RTP.RTCPInterval != 5*time.Second {
+		t.Errorf("RTP.RTCPInterval = %v, want 5s", cfg.Cluster.RTP.RTCPInterval)
+	}
+	if cfg.Cluster.RTP.Timeout != 15*time.Second {
+		t.Errorf("RTP.Timeout = %v, want 15s", cfg.Cluster.RTP.Timeout)
 	}
 }

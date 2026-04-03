@@ -276,8 +276,31 @@ type NotifyWSConfig struct {
 
 // ClusterConfig holds cluster settings.
 type ClusterConfig struct {
-	Forward ForwardConfig `yaml:"forward"`
-	Origin  OriginConfig  `yaml:"origin"`
+	Forward ForwardConfig     `yaml:"forward"`
+	Origin  OriginConfig      `yaml:"origin"`
+	SRT     ClusterSRTConfig  `yaml:"srt"`
+	RTSP    ClusterRTSPConfig `yaml:"rtsp"`
+	RTP     ClusterRTPConfig  `yaml:"rtp"`
+}
+
+// ClusterSRTConfig holds SRT-specific relay settings.
+type ClusterSRTConfig struct {
+	Latency    time.Duration `yaml:"latency"`
+	Passphrase string        `yaml:"passphrase"`
+	PBKeyLen   int           `yaml:"pbkeylen"`
+}
+
+// ClusterRTSPConfig holds RTSP-specific relay settings.
+type ClusterRTSPConfig struct {
+	Transport string `yaml:"transport"` // "tcp" or "udp"
+}
+
+// ClusterRTPConfig holds RTP direct relay settings.
+type ClusterRTPConfig struct {
+	PortRange     string        `yaml:"port_range"`
+	SignalingPath string        `yaml:"signaling_path"`
+	RTCPInterval  time.Duration `yaml:"rtcp_interval"`
+	Timeout       time.Duration `yaml:"timeout"`
 }
 
 // ForwardConfig holds forward push settings.
