@@ -78,16 +78,18 @@ func main() {
 		s.RegisterModule(notify.NewModule())
 	}
 
+	// Cluster must be registered before API so its signaling handlers
+	// are available when the API module snapshots routes.
+	if cfg.Cluster.Forward.Enabled || cfg.Cluster.Origin.Enabled {
+		s.RegisterModule(cluster.NewModule())
+	}
+
 	if cfg.API.Enabled {
 		s.RegisterModule(api.NewModule())
 	}
 
 	if cfg.Record.Enabled {
 		s.RegisterModule(record.NewModule())
-	}
-
-	if cfg.Cluster.Forward.Enabled || cfg.Cluster.Origin.Enabled {
-		s.RegisterModule(cluster.NewModule())
 	}
 
 	if cfg.Metrics.Enabled {
