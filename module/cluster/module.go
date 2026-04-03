@@ -8,8 +8,9 @@ import (
 
 // Module implements core.Module for cluster forwarding and origin pull.
 type Module struct {
-	forward *ForwardManager
-	origin  *OriginManager
+	forward  *ForwardManager
+	origin   *OriginManager
+	registry *TransportRegistry
 }
 
 // NewModule creates a new cluster module.
@@ -26,6 +27,10 @@ func (m *Module) Init(s *core.Server) error {
 	hub := s.StreamHub()
 	bus := s.GetEventBus()
 
+	m.registry = NewTransportRegistry()
+	m.registry.Register(NewRTMPTransport())
+	// SRT, RTSP, RTP transports will be added in Phase 2 and 3
+
 	if cfg.Forward.Enabled && (len(cfg.Forward.Targets) > 0 || cfg.Forward.ScheduleURL != "") {
 		fwdScheduler := NewScheduler(
 			cfg.Forward.ScheduleURL,
@@ -33,12 +38,10 @@ func (m *Module) Init(s *core.Server) error {
 			cfg.Forward.SchedulePriority,
 			cfg.Forward.ScheduleTimeout,
 		)
-		registry := NewTransportRegistry()
-		registry.Register(NewRTMPTransport())
 		m.forward = NewForwardManager(
 			hub, bus,
 			fwdScheduler,
-			registry,
+			m.registry,
 			cfg.Forward.RetryMax,
 			cfg.Forward.RetryInterval,
 		)
@@ -54,12 +57,10 @@ func (m *Module) Init(s *core.Server) error {
 			cfg.Origin.SchedulePriority,
 			cfg.Origin.ScheduleTimeout,
 		)
-		origRegistry := NewTransportRegistry()
-		origRegistry.Register(NewRTMPTransport())
 		m.origin = NewOriginManager(
 			hub, bus,
 			origScheduler,
-			origRegistry,
+			m.registry,
 			cfg.Origin.RetryMax,
 			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
@@ -91,6 +92,9 @@ func (m *Module) Close() error {
 	}
 	if m.origin != nil {
 		m.origin.Close()
+	}
+	if m.registry != nil {
+		m.registry.Close()
 	}
 	return nil
 }
