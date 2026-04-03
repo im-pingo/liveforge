@@ -19,7 +19,7 @@ const (
 	rtcpPTBYE   = RTCPTypeBYE
 
 	rtcpHeaderSize      = 4
-	rtcpSRBodySize      = 20 // SSRC(4) + NTP(8) + RTPts(4) + pktCount(4) + octetCount(4) - wait, that's 24
+	rtcpSRBodySize      = 24 // SSRC(4) + NTP(8) + RTPts(4) + pktCount(4) + octetCount(4)
 	rtcpSRSize          = 28 // header(4) + SSRC(4) + NTP(8) + RTPts(4) + pktCount(4) + octetCount(4)
 	rtcpRRHeaderSize    = 8  // header(4) + SSRC(4)
 	rtcpReportBlockSize = 24

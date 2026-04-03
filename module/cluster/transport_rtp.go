@@ -401,9 +401,14 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		}
 	}
 
-	lastRecv := time.Now()
+	// Track remote sender address and SSRC for RTCP RR.
+	var mu sync.Mutex
+	var senderAddr *net.UDPAddr
+	var senderSSRC uint32
+	localSSRC := uint32(0x12345678) // arbitrary SSRC for receiver
+	var highestSeq uint32
 
-	// RTCP RR goroutine with timeout check.
+	// RTCP RR goroutine — sends Receiver Reports to remote sender.
 	go func() {
 		ticker := time.NewTicker(t.cfg.RTCPInterval)
 		defer ticker.Stop()
@@ -412,10 +417,31 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 			case <-done:
 				return
 			case <-ticker.C:
-				// Timeout check is done on the read side via SetReadDeadline.
+				mu.Lock()
+				addr := senderAddr
+				ssrc := senderSSRC
+				seq := highestSeq
+				mu.Unlock()
+				if addr != nil {
+					rr := pkgrtp.BuildRR(localSSRC, []pkgrtp.ReceptionReport{{
+						SSRC:       ssrc,
+						HighestSeq: seq,
+					}})
+					udpConn.WriteTo(rr, addr)
+				}
 			}
 		}
 	}()
+
+	sendPullBYE := func() {
+		mu.Lock()
+		addr := senderAddr
+		mu.Unlock()
+		if addr != nil {
+			bye := pkgrtp.BuildBYE(localSSRC)
+			udpConn.WriteTo(bye, addr)
+		}
+	}
 
 	buf := make([]byte, 2048)
 	for {
@@ -423,12 +449,14 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		n, remoteAddr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() != nil {
+				sendPullBYE()
 				return nil
 			}
 			// Check if timeout (no data received).
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				slog.Info("rtp relay pull timeout", "module", "cluster",
-					"source", sourceURL, "last_recv", time.Since(lastRecv))
+					"source", sourceURL)
+				sendPullBYE()
 				return nil
 			}
 			return fmt.Errorf("udp read: %w", err)
@@ -437,8 +465,13 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		if n == 0 {
 			continue
 		}
-		lastRecv = time.Now()
-		_ = remoteAddr
+
+		// Track sender address for RTCP RR.
+		mu.Lock()
+		if senderAddr == nil {
+			senderAddr = remoteAddr
+		}
+		mu.Unlock()
 
 		// Check if RTCP packet (PT 200-204 range with V=2).
 		if n >= 4 && (buf[0]>>6) == 2 {
@@ -452,6 +485,14 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
 		}
+
+		// Track sender SSRC and highest sequence number.
+		mu.Lock()
+		senderSSRC = pkt.SSRC
+		if uint32(pkt.SequenceNumber) > highestSeq {
+			highestSeq = uint32(pkt.SequenceNumber)
+		}
+		mu.Unlock()
 
 		dp, ok := depacketizers[pkt.PayloadType]
 		if !ok {
@@ -502,6 +543,12 @@ func (t *RTPTransport) handleSignalingPush(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Verify stream exists before allocating resources.
+	if _, ok := t.hub.Find(streamKey); !ok {
+		http.Error(w, "stream not found", http.StatusNotFound)
+		return
+	}
+
 	// Allocate local port for receiving RTP.
 	localPort, err := t.ports.Allocate()
 	if err != nil {
@@ -516,7 +563,7 @@ func (t *RTPTransport) handleSignalingPush(w http.ResponseWriter, r *http.Reques
 		"stream", streamKey, "local_port", localPort)
 
 	// Start a goroutine to receive RTP and write to stream.
-	go t.receiveRTP(streamKey, localPort)
+	go t.receiveRTP(streamKey, localPort, offerSD)
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.WriteHeader(http.StatusOK)
@@ -556,6 +603,12 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Check codec compatibility first.
+	if !hasAnySupportedCodec(offerSD) {
+		http.Error(w, ErrCodecMismatch.Error(), http.StatusNotAcceptable)
+		return
+	}
+
 	// Get remote listen address from offer.
 	remoteAddr, err := extractRemoteAddr(offerSD)
 	if err != nil {
@@ -567,12 +620,6 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 
 	// Build answer SDP from our stream info.
 	answerSD := sdp.BuildFromMediaInfo(mi, "", getLocalIP())
-
-	// Check codec compatibility.
-	if !hasAnySupportedCodec(offerSD) {
-		http.Error(w, ErrCodecMismatch.Error(), http.StatusNotAcceptable)
-		return
-	}
 
 	slog.Info("rtp signaling pull accepted", "module", "cluster",
 		"stream", streamKey, "remote", remoteAddr)
@@ -586,7 +633,7 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 }
 
 // receiveRTP listens on localPort for incoming RTP and writes frames to a stream.
-func (t *RTPTransport) receiveRTP(streamKey string, localPort int) {
+func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.SessionDescription) {
 	defer t.ports.Free(localPort)
 
 	listenAddr := &net.UDPAddr{Port: localPort}
@@ -600,24 +647,60 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int) {
 
 	stream, ok := t.hub.Find(streamKey)
 	if !ok {
-		// Stream may need to be created.
 		slog.Warn("rtp receive: stream not found", "module", "cluster", "stream", streamKey)
 		return
 	}
 
+	// Set up publisher from offered codecs.
+	mi := sdpToMediaInfo(offerSD)
+	ptMap := buildPTMap(offerSD)
+
+	pub := &originPublisher{
+		id:   fmt.Sprintf("rtp-push-%s", streamKey),
+		info: mi,
+	}
+	if err := stream.SetPublisher(pub); err != nil {
+		slog.Warn("rtp receive: set publisher failed", "module", "cluster",
+			"stream", streamKey, "error", err)
+		return
+	}
+	defer stream.RemovePublisher()
+
+	// Build depacketizers.
+	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
+	for pt, codec := range ptMap {
+		dp, err := pkgrtp.NewDepacketizer(codec)
+		if err == nil {
+			depacketizers[pt] = dp
+		}
+	}
+
+	var senderAddr *net.UDPAddr
+	localSSRC := uint32(0x87654321)
+
 	buf := make([]byte, 2048)
 	for {
 		udpConn.SetReadDeadline(time.Now().Add(t.cfg.Timeout))
-		n, _, err := udpConn.ReadFromUDP(buf)
+		n, remoteAddr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				slog.Info("rtp receive timeout", "module", "cluster", "stream", streamKey)
+			}
+			// Send BYE if we know the sender.
+			if senderAddr != nil {
+				bye := pkgrtp.BuildBYE(localSSRC)
+				udpConn.WriteTo(bye, senderAddr)
 			}
 			return
 		}
 
 		if n < 4 {
 			continue
+		}
+
+		// Track sender address.
+		if senderAddr == nil {
+			senderAddr = remoteAddr
 		}
 
 		// Skip RTCP.
@@ -630,10 +713,17 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int) {
 			continue
 		}
 
-		// Simple passthrough: write raw RTP data as a frame.
-		// In a full implementation, this would depacketize.
-		_ = stream
-		_ = pkt
+		dp, ok := depacketizers[pkt.PayloadType]
+		if !ok {
+			continue
+		}
+
+		frame, err := dp.Depacketize(&pkt)
+		if err != nil || frame == nil {
+			continue
+		}
+
+		stream.WriteFrame(frame)
 	}
 }
 
@@ -675,6 +765,29 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
 		}
 		audioSession = pkgrtp.NewSession(97, clockRate)
 	}
+
+	// RTCP SR goroutine for server-side send.
+	srDone := make(chan struct{})
+	go func() {
+		defer close(srDone)
+		ticker := time.NewTicker(t.cfg.RTCPInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-srDone:
+				return
+			case <-ticker.C:
+				if videoSession != nil {
+					sr := pkgrtp.BuildSR(videoSession.SSRC, 0, 0, 0, 0)
+					udpConn.Write(sr)
+				}
+				if audioSession != nil {
+					sr := pkgrtp.BuildSR(audioSession.SSRC, 0, 0, 0, 0)
+					udpConn.Write(sr)
+				}
+			}
+		}
+	}()
 
 	reader := stream.RingBuffer().NewReader()
 	for {

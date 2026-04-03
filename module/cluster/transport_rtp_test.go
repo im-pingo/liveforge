@@ -191,6 +191,9 @@ func TestRTPSignalingPushHandler(t *testing.T) {
 	}
 
 	hub, _ := newTestHub()
+	// Create the stream so the push handler can find it.
+	hub.GetOrCreate("live/test")
+
 	tr := &RTPTransport{
 		cfg:   defaultClusterRTPConfig(),
 		ports: pa,
