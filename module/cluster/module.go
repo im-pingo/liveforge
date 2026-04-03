@@ -54,9 +54,12 @@ func (m *Module) Init(s *core.Server) error {
 			cfg.Origin.SchedulePriority,
 			cfg.Origin.ScheduleTimeout,
 		)
+		origRegistry := NewTransportRegistry()
+		origRegistry.Register(NewRTMPTransport())
 		m.origin = NewOriginManager(
 			hub, bus,
 			origScheduler,
+			origRegistry,
 			cfg.Origin.RetryMax,
 			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
