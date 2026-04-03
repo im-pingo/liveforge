@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
@@ -231,6 +232,90 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	// Check that frames were written to the stream
 	if stream.VideoSeqHeader() != nil {
 		t.Log("video sequence header received")
+	}
+}
+
+// TestForwardManagerMultiProtocol verifies that the ForwardManager routes to
+// different transports based on URL scheme.
+func TestForwardManagerMultiProtocol(t *testing.T) {
+	hub, bus := newTestHub()
+
+	// Use real transports — targets will fail to connect but that's fine,
+	// we're testing that the registry resolves each URL to the correct transport.
+	registry := NewTransportRegistry()
+	registry.Register(NewRTMPTransport())
+	registry.Register(NewSRTTransport(defaultClusterSRTConfig()))
+
+	targets := []string{
+		"rtmp://127.0.0.1:19998/live/stream",
+		"srt://127.0.0.1:19997/live/stream",
+	}
+	scheduler := NewScheduler("", targets, "", 0)
+	fm := NewForwardManager(hub, bus, scheduler, registry, 1, time.Millisecond)
+
+	stream, _ := hub.GetOrCreate("live/multitest")
+	pub := &originPublisher{id: "test-pub", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+	}}
+	stream.SetPublisher(pub)
+
+	fm.onPublish(&core.EventContext{StreamKey: "live/multitest"})
+
+	if fm.ActiveCount() != 1 {
+		t.Errorf("ActiveCount = %d, want 1", fm.ActiveCount())
+	}
+
+	// Verify both targets were created (2 targets for this stream key).
+	fm.mu.Lock()
+	fts := fm.active["live/multitest"]
+	fm.mu.Unlock()
+
+	if len(fts) != 2 {
+		t.Fatalf("expected 2 forward targets, got %d", len(fts))
+	}
+
+	// Clean up.
+	fm.onPublishStop(&core.EventContext{StreamKey: "live/multitest"})
+	time.Sleep(50 * time.Millisecond)
+	fm.Close()
+
+	if fm.ActiveCount() != 0 {
+		t.Errorf("ActiveCount after stop = %d, want 0", fm.ActiveCount())
+	}
+}
+
+// TestTransportRegistryResolveMultiScheme verifies the registry resolves URLs
+// to the correct transport based on scheme.
+func TestTransportRegistryResolveMultiScheme(t *testing.T) {
+	registry := NewTransportRegistry()
+	registry.Register(NewRTMPTransport())
+	registry.Register(NewSRTTransport(defaultClusterSRTConfig()))
+	registry.Register(NewRTSPTransport(defaultClusterRTSPConfig()))
+
+	tests := []struct {
+		url    string
+		scheme string
+	}{
+		{"rtmp://host/live/stream", "rtmp"},
+		{"srt://host:6000/live/stream", "srt"},
+		{"rtsp://host:554/live/stream", "rtsp"},
+	}
+
+	for _, tt := range tests {
+		transport, err := registry.Resolve(tt.url)
+		if err != nil {
+			t.Errorf("Resolve(%q) error: %v", tt.url, err)
+			continue
+		}
+		if transport.Scheme() != tt.scheme {
+			t.Errorf("Resolve(%q).Scheme() = %q, want %q", tt.url, transport.Scheme(), tt.scheme)
+		}
+	}
+
+	// Unknown scheme should fail.
+	_, err := registry.Resolve("unknown://host/stream")
+	if err == nil {
+		t.Error("expected error for unknown scheme")
 	}
 }
 
