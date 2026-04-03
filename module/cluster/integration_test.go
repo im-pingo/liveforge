@@ -156,7 +156,7 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 		Payload:   []byte{0x12, 0x10},
 	})
 
-	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, 1, time.Second)
+	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), 1, time.Second)
 
 	done := make(chan struct{})
 	go func() {

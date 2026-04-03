@@ -140,9 +140,15 @@ func TestModuleCloseIdempotent(t *testing.T) {
 	}
 }
 
+func newTestRegistry() *TransportRegistry {
+	registry := NewTransportRegistry()
+	registry.Register(NewRTMPTransport())
+	return registry
+}
+
 func TestForwardManagerDefaults(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), 0, 0)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), newTestRegistry(), 0, 0)
 
 	if fm.retryMax != 3 {
 		t.Errorf("retryMax = %d, want 3", fm.retryMax)
@@ -157,7 +163,7 @@ func TestForwardManagerDefaults(t *testing.T) {
 
 func TestForwardManagerOnPublishNoStream(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
 	defer fm.Close()
 
 	// Publish event for non-existent stream should not create targets
@@ -172,7 +178,7 @@ func TestForwardManagerOnPublishNoStream(t *testing.T) {
 
 func TestForwardManagerOnPublishStop(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
 
 	stream, _ := hub.GetOrCreate("live/test")
 	// Set a dummy publisher so the stream is in publishing state
@@ -199,7 +205,7 @@ func TestForwardManagerOnPublishStop(t *testing.T) {
 
 func TestForwardManagerDuplicatePublish(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
 	defer fm.Close()
 
 	stream, _ := hub.GetOrCreate("live/test")
@@ -216,7 +222,7 @@ func TestForwardManagerDuplicatePublish(t *testing.T) {
 
 func TestForwardManagerClose(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
 
 	stream, _ := hub.GetOrCreate("live/test")
 	pub := &originPublisher{id: "test", info: &avframe.MediaInfo{}}
@@ -347,7 +353,7 @@ func TestForwardTargetClose(t *testing.T) {
 	stream, _ := hub.GetOrCreate("live/test")
 	_ = bus
 
-	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, 1, time.Millisecond)
+	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, NewRTMPTransport(), 1, time.Millisecond)
 
 	// Close before Run
 	ft.Close()
@@ -369,29 +375,11 @@ func TestOriginPullClose(t *testing.T) {
 	op.Close()
 }
 
-func TestContainsStreamPath(t *testing.T) {
-	tests := []struct {
-		url  string
-		want bool
-	}{
-		{"rtmp://host/live/stream", true},
-		{"rtmp://host/live", false},
-		{"rtmp://host/live/room/cam", true},
-	}
-
-	for _, tt := range tests {
-		got := containsStreamPath(tt.url)
-		if got != tt.want {
-			t.Errorf("containsStreamPath(%q) = %v, want %v", tt.url, got, tt.want)
-		}
-	}
-}
-
 func TestForwardTargetRunWithClosedTarget(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
 
-	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, 1, time.Millisecond)
+	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, NewRTMPTransport(), 1, time.Millisecond)
 	ft.Close()
 
 	// Run should return immediately when already closed

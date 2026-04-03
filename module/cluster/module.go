@@ -33,9 +33,12 @@ func (m *Module) Init(s *core.Server) error {
 			cfg.Forward.SchedulePriority,
 			cfg.Forward.ScheduleTimeout,
 		)
+		registry := NewTransportRegistry()
+		registry.Register(NewRTMPTransport())
 		m.forward = NewForwardManager(
 			hub, bus,
 			fwdScheduler,
+			registry,
 			cfg.Forward.RetryMax,
 			cfg.Forward.RetryInterval,
 		)
