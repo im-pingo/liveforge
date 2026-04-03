@@ -5,16 +5,25 @@ import (
 	"fmt"
 )
 
+// RTCP packet type constants (RFC 3550).
+const (
+	RTCPTypeSR  = 200
+	RTCPTypeRR  = 201
+	RTCPTypeBYE = 203
+)
+
 const (
 	rtcpVersion = 2
-	rtcpPTSR    = 200
-	rtcpPTRR    = 201
+	rtcpPTSR    = RTCPTypeSR
+	rtcpPTRR    = RTCPTypeRR
+	rtcpPTBYE   = RTCPTypeBYE
 
 	rtcpHeaderSize      = 4
 	rtcpSRBodySize      = 20 // SSRC(4) + NTP(8) + RTPts(4) + pktCount(4) + octetCount(4) - wait, that's 24
 	rtcpSRSize          = 28 // header(4) + SSRC(4) + NTP(8) + RTPts(4) + pktCount(4) + octetCount(4)
 	rtcpRRHeaderSize    = 8  // header(4) + SSRC(4)
 	rtcpReportBlockSize = 24
+	rtcpBYESize         = 8 // header(4) + SSRC(4)
 )
 
 // SenderReport represents an RTCP Sender Report (PT=200).
@@ -148,4 +157,17 @@ func ParseRR(data []byte) (*ReceiverReport, error) {
 		}
 	}
 	return rr, nil
+}
+
+// BuildBYE builds an RTCP BYE packet (PT=203) per RFC 3550.
+// It signals that the given SSRC is leaving the session.
+func BuildBYE(ssrc uint32) []byte {
+	buf := make([]byte, rtcpBYESize)
+	// Header: V=2, P=0, SC=1 (one SSRC), PT=203
+	// length = (8/4) - 1 = 1
+	buf[0] = (rtcpVersion << 6) | 1 // SC=1
+	buf[1] = rtcpPTBYE
+	binary.BigEndian.PutUint16(buf[2:4], 1) // length in 32-bit words - 1
+	binary.BigEndian.PutUint32(buf[4:8], ssrc)
+	return buf
 }
