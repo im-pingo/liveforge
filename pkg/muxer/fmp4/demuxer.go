@@ -504,7 +504,7 @@ func parseTrun(data []byte, info *trafInfo) {
 
 // isKeyframeSampleFlags checks sample flags to determine if a sample is a keyframe.
 // The muxer writes 0x02000000 for keyframes and 0x01010000 for non-keyframes.
-// In ISO 14496-12, bits 26-25 encode sample_depends_on:
+// In ISO 14496-12, bits 25-24 (0-indexed) encode sample_depends_on:
 //   0 = unknown, 1 = depends on others (non-key), 2 = does NOT depend (key)
 // Also bit 16 (sample_is_non_sync_sample): 0 = sync/key, 1 = non-sync.
 func isKeyframeSampleFlags(flags uint32) bool {
