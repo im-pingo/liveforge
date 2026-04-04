@@ -70,6 +70,26 @@ func WithHTTPStream() Option {
 	}
 }
 
+// WithLLHLS enables Low-Latency HLS with the specified container format.
+// Valid containers are "fmp4" and "ts". This option also enables HTTP streaming
+// if not already enabled.
+func WithLLHLS(container string) Option {
+	return func(c *config.Config) {
+		if !c.HTTP.Enabled {
+			c.HTTP.Enabled = true
+			c.HTTP.Listen = allocTCPAddr()
+		}
+		c.HTTP.LLHLS.Enabled = true
+		c.HTTP.LLHLS.Container = container
+		if c.HTTP.LLHLS.PartDuration == 0 {
+			c.HTTP.LLHLS.PartDuration = 0.2
+		}
+		if c.HTTP.LLHLS.SegmentCount == 0 {
+			c.HTTP.LLHLS.SegmentCount = 4
+		}
+	}
+}
+
 // WithAPI enables the management API module on an auto-allocated port.
 func WithAPI() Option {
 	return func(c *config.Config) {
