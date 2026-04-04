@@ -14,7 +14,7 @@ import (
 
 // PlayConfig describes the target and constraints for a play session.
 type PlayConfig struct {
-	Protocol string        // e.g. "rtmp", "rtsp", "srt"
+	Protocol string        // e.g. "rtmp", "rtsp", "srt", "whep"
 	URL      string        // e.g. "rtmp://127.0.0.1:1935/live/test"
 	Duration time.Duration // maximum play duration; 0 = until server closes
 	Token    string        // optional auth token
