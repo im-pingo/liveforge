@@ -9,18 +9,19 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 )
 
 // Handler processes RTSP requests.
 type Handler struct {
-	server      *core.Server
-	portManager *PortManager
+	server *core.Server
+	ports  *portalloc.PortAllocator
 }
 
 // NewHandler creates a new RTSP handler.
-func NewHandler(server *core.Server, pm *PortManager) *Handler {
-	return &Handler{server: server, portManager: pm}
+func NewHandler(server *core.Server, ports *portalloc.PortAllocator) *Handler {
+	return &Handler{server: server, ports: ports}
 }
 
 // newResponse creates a base response with CSeq from request.
@@ -92,8 +93,8 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 	tc := parseTransportHeader(transport)
 
 	var udpTransport *UDPTransport
-	if !tc.IsTCP && h.portManager != nil {
-		ut, err := NewUDPTransport(h.portManager)
+	if !tc.IsTCP && h.ports != nil {
+		ut, err := NewUDPTransport(h.ports)
 		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}

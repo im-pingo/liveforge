@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Notify>
+  <CmdType>Alarm</CmdType>
+  <SN>1</SN>
+  <DeviceID>34020000001110000001</DeviceID>
+  <AlarmPriority>3</AlarmPriority>
+  <AlarmMethod>5</AlarmMethod>
+  <AlarmTime>2026-04-04T14:30:00</AlarmTime>
+  <AlarmDescription>Motion detected at front gate</AlarmDescription>
+  <AlarmType>2</AlarmType>
+</Notify>

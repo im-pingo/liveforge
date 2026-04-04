@@ -79,9 +79,27 @@ srt:
   #   window: 60s
 
 sip:
-  enabled: false
+  enabled: true
   listen: ":5060"
   transport: ["udp", "tcp"]
+  server_id: "34020000002000000001"
+  domain: "3402000000"
+  auth:
+    enabled: false
+    password: ""
+
+gb28181:
+  enabled: true
+  stream_prefix: "gb28181"
+  rtp_port_range: [40000, 50000]
+  ssrc:
+    prefix: "34020"
+  keepalive:
+    interval: 60s
+    timeout: 180s
+  auto_invite: false
+  catalog_interval: 3600s
+  dump_file: ""
 
 stream:
   gop_cache: true
