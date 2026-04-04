@@ -22,6 +22,16 @@ func TestNewPlayer_RTMP(t *testing.T) {
 	}
 }
 
+func TestNewPlayer_RTSP(t *testing.T) {
+	p, err := NewPlayer("rtsp")
+	if err != nil {
+		t.Fatalf("NewPlayer(rtsp): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(rtsp) returned nil")
+	}
+}
+
 func TestNewPlayer_Unsupported(t *testing.T) {
 	_, err := NewPlayer("unsupported")
 	if err == nil {
@@ -165,5 +175,70 @@ func TestRTMPPlay(t *testing.T) {
 	}
 
 	t.Logf("report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
+
+func TestRTSPPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithRTSP())
+
+	// Push via RTMP in background so there is a stream for RTSP to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// Wait for stream to be established.
+	time.Sleep(1 * time.Second)
+
+	// Play via RTSP.
+	player, err := NewPlayer("rtsp")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("rtsp://%s/live/test", srv.RTSPAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "rtsp",
+		URL:      playURL,
+		Duration: 3 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	if !rpt.Video.DTSMonotonic {
+		t.Error("video DTS is not monotonic")
+	}
+
+	t.Logf("RTSP play report: video=%d frames, audio=%d frames, duration=%dms",
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
