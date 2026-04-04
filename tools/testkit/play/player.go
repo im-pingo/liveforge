@@ -29,7 +29,7 @@ type Player interface {
 }
 
 // NewPlayer returns a Player for the given protocol.
-// Supported protocols: "rtmp", "rtsp", "srt".
+// Supported protocols: "rtmp", "rtsp", "srt", "whep".
 func NewPlayer(protocol string) (Player, error) {
 	switch protocol {
 	case "rtmp":
@@ -38,6 +38,8 @@ func NewPlayer(protocol string) (Player, error) {
 		return &rtspPlayer{}, nil
 	case "srt":
 		return &srtPlayer{}, nil
+	case "whep":
+		return &whepPlayer{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported play protocol: %q", protocol)
 	}
