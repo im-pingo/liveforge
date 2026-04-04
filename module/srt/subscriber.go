@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"io"
 	"log/slog"
 	"time"
 
@@ -128,16 +129,31 @@ func (s *Subscriber) Run() {
 	}
 }
 
-// sendFrame muxes a single AVFrame into TS packets and writes them to the SRT connection.
+// sendFrame muxes a single AVFrame into TS packets and writes them to the SRT
+// connection. If the SRT write queue is full (which returns io.EOF), the write
+// is retried after a short delay to allow the congestion control to drain the
+// queue. This is essential for burst writes like the GOP cache.
 func (s *Subscriber) sendFrame(muxer *ts.Muxer, frame *avframe.AVFrame) error {
 	data := muxer.WriteFrame(frame)
 	if len(data) == 0 {
 		return nil
 	}
 
-	// SRT expects complete TS-aligned chunks. Write all packets at once.
-	_, err := s.conn.Write(data)
-	return err
+	const maxRetries = 50
+	for i := 0; i < maxRetries; i++ {
+		_, err := s.conn.Write(data)
+		if err == nil {
+			return nil
+		}
+		// The gosrt library returns io.EOF when the internal write queue is
+		// full (non-blocking channel send). Retry after a brief pause.
+		if err == io.EOF {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		return err
+	}
+	return io.EOF
 }
 
 // waitForSequenceHeaders blocks until at least one sequence header is available.

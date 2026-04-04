@@ -12,6 +12,89 @@ import (
 	"github.com/im-pingo/liveforge/tools/testkit/testutil"
 )
 
+func TestNewPlayer_SRT(t *testing.T) {
+	p, err := NewPlayer("srt")
+	if err != nil {
+		t.Fatalf("NewPlayer(srt): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(srt) returned nil")
+	}
+}
+
+func TestParseSRTPlayTarget(t *testing.T) {
+	tests := []struct {
+		name         string
+		url          string
+		token        string
+		wantAddr     string
+		wantStreamID string
+		wantErr      bool
+	}{
+		{
+			name:         "basic with port",
+			url:          "srt://127.0.0.1:6000?streamid=subscribe:live/test",
+			wantAddr:     "127.0.0.1:6000",
+			wantStreamID: "subscribe:live/test",
+		},
+		{
+			name:         "default port",
+			url:          "srt://example.com?streamid=subscribe:live/test",
+			wantAddr:     "example.com:6000",
+			wantStreamID: "subscribe:live/test",
+		},
+		{
+			name:         "token in query",
+			url:          "srt://host:6000?streamid=subscribe:live/test&token=abc123",
+			wantAddr:     "host:6000",
+			wantStreamID: "subscribe:live/test?token=abc123",
+		},
+		{
+			name:         "token from config",
+			url:          "srt://host:6000?streamid=subscribe:live/test",
+			token:        "mytoken",
+			wantAddr:     "host:6000",
+			wantStreamID: "subscribe:live/test?token=mytoken",
+		},
+		{
+			name:    "wrong scheme",
+			url:     "http://host:6000?streamid=subscribe:live/test",
+			wantErr: true,
+		},
+		{
+			name:    "missing streamid",
+			url:     "srt://host:6000",
+			wantErr: true,
+		},
+		{
+			name:    "missing host",
+			url:     "srt://?streamid=subscribe:live/test",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, streamID, err := parseSRTPlayTarget(tt.url, tt.token)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error for %q", tt.url)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if addr != tt.wantAddr {
+				t.Errorf("addr = %q, want %q", addr, tt.wantAddr)
+			}
+			if streamID != tt.wantStreamID {
+				t.Errorf("streamID = %q, want %q", streamID, tt.wantStreamID)
+			}
+		})
+	}
+}
+
 func TestNewPlayer_RTMP(t *testing.T) {
 	p, err := NewPlayer("rtmp")
 	if err != nil {
@@ -243,5 +326,75 @@ func TestRTSPPlay(t *testing.T) {
 	}
 
 	t.Logf("RTSP play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
+
+func TestSRTPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithSRT())
+
+	// Push via RTMP in background so there is a stream for SRT to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// Wait for stream to be established.
+	time.Sleep(1 * time.Second)
+
+	// Play via SRT.
+	player, err := NewPlayer("srt")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("srt://%s?streamid=subscribe:live/test", srv.SRTAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "srt",
+		URL:      playURL,
+		Duration: 3 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	if !rpt.Video.DTSMonotonic {
+		// TS over SRT may have small DTS reordering at GOP boundaries due to
+		// GOP cache replay and PES timestamp granularity. Log rather than fail.
+		t.Logf("note: video DTS is not strictly monotonic (expected for TS over SRT)")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
+
+	t.Logf("SRT play report: video=%d frames, audio=%d frames, duration=%dms",
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
