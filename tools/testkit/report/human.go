@@ -31,6 +31,30 @@ func FormatHuman(report *TopLevelReport) string {
 	return b.String()
 }
 
+// FormatHumanWithAssertions returns the human-readable report with assertion
+// results appended at the bottom.
+func FormatHumanWithAssertions(report *TopLevelReport, assertions []AssertionResult) string {
+	base := FormatHuman(report)
+	if len(assertions) == 0 {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	writeSection(&b, "Assertions")
+	for _, a := range assertions {
+		status := "PASS"
+		if !a.Pass {
+			status = "FAIL"
+		}
+		detail := a.Expression
+		if a.Error != "" {
+			detail += " (" + a.Error + ")"
+		}
+		writeRow(&b, fmt.Sprintf("[%s]", status), detail)
+	}
+	return b.String()
+}
+
 func writeHeader(b *strings.Builder, r *TopLevelReport) {
 	status := "PASS"
 	if !r.Pass {

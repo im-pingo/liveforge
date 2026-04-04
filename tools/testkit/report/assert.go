@@ -86,12 +86,13 @@ func parseExpression(expr string) (field, op, rhs string, err error) {
 // fieldMapping defines the top-level prefixes and which sub-report they resolve to.
 // The key is the first segment of the dot-path.
 var fieldMapping = map[string]string{
-	"video": "Play",
-	"audio": "Play",
-	"sync":  "Play",
-	"codec": "Play",
-	"push":  "Push",
-	"auth":  "Auth",
+	"video":   "Play",
+	"audio":   "Play",
+	"sync":    "Play",
+	"codec":   "Play",
+	"push":    "Push",
+	"auth":    "Auth",
+	"cluster": "Cluster",
 }
 
 // resolveField navigates the TopLevelReport struct tree using JSON tag names.

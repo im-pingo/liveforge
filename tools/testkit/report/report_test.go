@@ -395,3 +395,29 @@ func TestFormatHuman_ClusterReport(t *testing.T) {
 		t.Error("human output missing relay latency")
 	}
 }
+
+func TestFormatHumanWithAssertions(t *testing.T) {
+	report := &TopLevelReport{
+		Command:    "play",
+		DurationMs: 100,
+		Pass:       false,
+		Play:       &PlayReport{Video: VideoReport{FPS: 25.0}},
+	}
+	assertions := []AssertionResult{
+		{Expression: "video.fps>=29", Pass: false, Error: "25.00 < 29"},
+		{Expression: "video.dts_monotonic==true", Pass: true},
+	}
+	output := FormatHumanWithAssertions(report, assertions)
+	if !strings.Contains(output, "Assertions") {
+		t.Error("missing Assertions section")
+	}
+	if !strings.Contains(output, "[FAIL]") {
+		t.Error("missing FAIL assertion")
+	}
+	if !strings.Contains(output, "[PASS]") {
+		t.Error("missing PASS assertion")
+	}
+	if !strings.Contains(output, "video.fps>=29") {
+		t.Error("missing assertion expression")
+	}
+}
