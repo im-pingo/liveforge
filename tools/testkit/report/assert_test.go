@@ -229,3 +229,29 @@ func TestAssertNilSubReport(t *testing.T) {
 		t.Error("expected error when Play is nil and accessing video fields")
 	}
 }
+
+func TestAssertClusterFields(t *testing.T) {
+	top := &TopLevelReport{
+		Cluster: &ClusterReport{
+			Topology: "origin-edge",
+			RelayMs:  150,
+		},
+	}
+	tests := []struct {
+		expr string
+		pass bool
+	}{
+		{"cluster.relay_ms<=200", true},
+		{"cluster.relay_ms<100", false},
+		{"cluster.topology==origin-edge", true},
+	}
+	for _, tt := range tests {
+		result, err := EvalAssert(top, tt.expr)
+		if err != nil {
+			t.Fatalf("EvalAssert(%q): %v", tt.expr, err)
+		}
+		if result != tt.pass {
+			t.Errorf("EvalAssert(%q) = %v, want %v", tt.expr, result, tt.pass)
+		}
+	}
+}
