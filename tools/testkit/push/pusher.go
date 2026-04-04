@@ -27,7 +27,7 @@ type Pusher interface {
 }
 
 // NewPusher returns a Pusher for the given protocol.
-// Supported protocols: "rtmp", "rtsp", "srt", "whip".
+// Supported protocols: "rtmp", "rtsp", "srt", "whip", "gb28181".
 func NewPusher(protocol string) (Pusher, error) {
 	switch protocol {
 	case "rtmp":
@@ -38,6 +38,8 @@ func NewPusher(protocol string) (Pusher, error) {
 		return &srtPusher{}, nil
 	case "whip":
 		return &whipPusher{}, nil
+	case "gb28181":
+		return &gb28181Pusher{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported push protocol: %q", protocol)
 	}

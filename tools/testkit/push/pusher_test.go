@@ -320,6 +320,53 @@ func TestWHIPPush(t *testing.T) {
 	}
 }
 
+func TestNewPusher_GB28181(t *testing.T) {
+	p, err := NewPusher("gb28181")
+	if err != nil {
+		t.Fatalf("NewPusher(gb28181): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPusher(gb28181) returned nil")
+	}
+}
+
+func TestGB28181Push(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithSIP(), testutil.WithGB28181(), testutil.WithAPI())
+
+	src := source.NewFLVSourceLoop(2)
+	p, err := NewPusher("gb28181")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	cfg := PushConfig{
+		Protocol: "gb28181",
+		Target:   srv.SIPAddr(),
+		Duration: 5 * time.Second,
+		Token:    srv.APIAddr(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	rpt, err := p.Push(ctx, src, cfg)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if rpt.FramesSent == 0 {
+		t.Error("no frames sent")
+	}
+	if rpt.BytesSent == 0 {
+		t.Error("no bytes sent")
+	}
+	if rpt.Protocol != "gb28181" {
+		t.Errorf("protocol = %q, want %q", rpt.Protocol, "gb28181")
+	}
+	if rpt.DurationMs <= 0 {
+		t.Error("duration should be positive")
+	}
+}
+
 func TestRTMPPush_ContextCancel(t *testing.T) {
 	srv := testutil.StartTestServer(t, testutil.WithRTMP())
 
