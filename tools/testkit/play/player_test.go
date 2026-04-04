@@ -398,3 +398,80 @@ func TestSRTPlay(t *testing.T) {
 	t.Logf("SRT play report: video=%d frames, audio=%d frames, duration=%dms",
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
+
+func TestNewPlayer_WHEP(t *testing.T) {
+	p, err := NewPlayer("whep")
+	if err != nil {
+		t.Fatalf("NewPlayer(whep): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(whep) returned nil")
+	}
+}
+
+func TestWHEPPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithWebRTC(), testutil.WithAPI())
+
+	// Push via RTMP in background so there is a stream for WHEP to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// WebRTC needs extra time for negotiation.
+	time.Sleep(2 * time.Second)
+
+	// Play via WHEP.
+	player, err := NewPlayer("whep")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("http://%s/webrtc/whep/live/test", srv.WebRTCAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "whep",
+		URL:      playURL,
+		Duration: 5 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	// Audio may not be present: server only supports Opus but source is AAC.
+	// Log the result instead of failing.
+	if rpt.Audio.FrameCount == 0 {
+		t.Log("note: no audio frames received (expected: server supports Opus but source is AAC)")
+	}
+
+	t.Logf("WHEP play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
