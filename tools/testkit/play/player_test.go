@@ -475,3 +475,172 @@ func TestWHEPPlay(t *testing.T) {
 	t.Logf("WHEP play report: video=%d frames, audio=%d frames, duration=%dms",
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
+
+func TestNewPlayer_HTTPFLV(t *testing.T) {
+	p, err := NewPlayer("httpflv")
+	if err != nil {
+		t.Fatalf("NewPlayer(httpflv): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(httpflv) returned nil")
+	}
+}
+
+func TestNewPlayer_WSFLV(t *testing.T) {
+	p, err := NewPlayer("wsflv")
+	if err != nil {
+		t.Fatalf("NewPlayer(wsflv): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(wsflv) returned nil")
+	}
+}
+
+func TestHTTPFLVPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithAPI())
+
+	// Push via RTMP in background so there is a stream for HTTP-FLV to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// Wait for stream to be established.
+	time.Sleep(1 * time.Second)
+
+	// Play via HTTP-FLV.
+	player, err := NewPlayer("httpflv")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("http://%s/live/test.flv", srv.HTTPAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "httpflv",
+		URL:      playURL,
+		Duration: 3 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	if !rpt.Video.DTSMonotonic {
+		t.Error("video DTS is not monotonic")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
+	if !rpt.Audio.DTSMonotonic {
+		t.Error("audio DTS is not monotonic")
+	}
+	if rpt.DurationMs <= 0 {
+		t.Error("duration should be positive")
+	}
+
+	t.Logf("HTTP-FLV play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
+
+func TestWSFLVPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithAPI())
+
+	// Push via RTMP in background so there is a stream for WS-FLV to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// Wait for stream to be established.
+	time.Sleep(1 * time.Second)
+
+	// Play via WS-FLV.
+	player, err := NewPlayer("wsflv")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	// URL uses http:// scheme; the player converts to ws:// internally.
+	playURL := fmt.Sprintf("http://%s/ws/live/test.flv", srv.HTTPAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "wsflv",
+		URL:      playURL,
+		Duration: 3 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	if !rpt.Video.DTSMonotonic {
+		t.Error("video DTS is not monotonic")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
+	if !rpt.Audio.DTSMonotonic {
+		t.Error("audio DTS is not monotonic")
+	}
+	if rpt.DurationMs <= 0 {
+		t.Error("duration should be positive")
+	}
+
+	t.Logf("WS-FLV play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
