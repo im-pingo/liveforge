@@ -274,6 +274,52 @@ func TestSRTPush(t *testing.T) {
 	}
 }
 
+func TestNewPusher_WHIP(t *testing.T) {
+	p, err := NewPusher("whip")
+	if err != nil {
+		t.Fatalf("NewPusher(whip): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPusher(whip) returned nil")
+	}
+}
+
+func TestWHIPPush(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithWebRTC())
+
+	src := source.NewFLVSourceLoop(2)
+	p, err := NewPusher("whip")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	cfg := PushConfig{
+		Protocol: "whip",
+		Target:   fmt.Sprintf("http://%s/webrtc/whip/live/test", srv.WebRTCAddr()),
+		Duration: 3 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	rpt, err := p.Push(ctx, src, cfg)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if rpt.FramesSent == 0 {
+		t.Error("no frames sent")
+	}
+	if rpt.BytesSent == 0 {
+		t.Error("no bytes sent")
+	}
+	if rpt.Protocol != "whip" {
+		t.Errorf("protocol = %q, want %q", rpt.Protocol, "whip")
+	}
+	if rpt.DurationMs <= 0 {
+		t.Error("duration should be positive")
+	}
+}
+
 func TestRTMPPush_ContextCancel(t *testing.T) {
 	srv := testutil.StartTestServer(t, testutil.WithRTMP())
 
