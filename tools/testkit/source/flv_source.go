@@ -117,9 +117,10 @@ func (s *FLVSource) scan() {
 		AudioCodec: audioCodec,
 	}
 
-	// Source duration is the max DTS + one frame interval (~33ms for 30fps).
-	// This ensures the next loop starts after the last frame.
-	s.sourceDurationMS = maxDTS + 33
+	// Source duration is the max DTS plus one frame interval, ensuring the
+	// next loop starts after the last frame without DTS overlap.
+	const loopGapMS = 33 // ~30fps inter-frame gap for DTS continuity at loop boundaries
+	s.sourceDurationMS = maxDTS + loopGapMS
 }
 
 // NextFrame returns the next AVFrame or io.EOF when the source is exhausted.
