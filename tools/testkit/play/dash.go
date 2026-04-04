@@ -197,7 +197,7 @@ func (p *dashPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCall
 		}
 
 		// Fetch new video segments.
-		if videoAS != nil && videoAS.SegmentTemplate != nil && videoTrack != nil {
+		if videoAS.SegmentTemplate != nil && videoTrack != nil {
 			fetchSegments(playCtx, baseURL, cfg.Token, videoAS.SegmentTemplate, videoTrack, onFrame)
 		}
 
