@@ -17,21 +17,14 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
-// portAllocator manages a pool of UDP ports for RTP sessions.
-type portAllocator struct {
-	mu        sync.Mutex
-	available map[int]struct{}
-	minPort   int
-	maxPort   int
-}
-
-// newPortAllocator creates a port allocator from a range string like "20000-20100".
-func newPortAllocator(portRange string) (*portAllocator, error) {
+// parsePortRange parses a "min-max" string into a portalloc.PortAllocator.
+func parsePortRange(portRange string) (*portalloc.PortAllocator, error) {
 	parts := strings.SplitN(portRange, "-", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid port range %q: expected min-max", portRange)
@@ -44,48 +37,13 @@ func newPortAllocator(portRange string) (*portAllocator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid max port %q: %w", parts[1], err)
 	}
-	if minPort > maxPort {
-		return nil, fmt.Errorf("invalid port range: min %d > max %d", minPort, maxPort)
-	}
-	if minPort < 1 || maxPort > 65535 {
-		return nil, fmt.Errorf("port range out of bounds: %d-%d", minPort, maxPort)
-	}
-
-	avail := make(map[int]struct{}, maxPort-minPort+1)
-	for p := minPort; p <= maxPort; p++ {
-		avail[p] = struct{}{}
-	}
-	return &portAllocator{
-		available: avail,
-		minPort:   minPort,
-		maxPort:   maxPort,
-	}, nil
-}
-
-// Allocate returns an available port or error if exhausted.
-func (pa *portAllocator) Allocate() (int, error) {
-	pa.mu.Lock()
-	defer pa.mu.Unlock()
-	for port := range pa.available {
-		delete(pa.available, port)
-		return port, nil
-	}
-	return 0, fmt.Errorf("no available RTP ports in range %d-%d", pa.minPort, pa.maxPort)
-}
-
-// Free returns a port to the pool.
-func (pa *portAllocator) Free(port int) {
-	pa.mu.Lock()
-	defer pa.mu.Unlock()
-	if port >= pa.minPort && port <= pa.maxPort {
-		pa.available[port] = struct{}{}
-	}
+	return portalloc.New(minPort, maxPort)
 }
 
 // RTPTransport implements RelayTransport for direct RTP relay with SDP-over-HTTP signaling.
 type RTPTransport struct {
 	cfg   config.ClusterRTPConfig
-	ports *portAllocator
+	ports *portalloc.PortAllocator
 	hub   *core.StreamHub
 }
 
@@ -105,10 +63,10 @@ func NewRTPTransport(cfg config.ClusterRTPConfig, s *core.Server) *RTPTransport 
 		cfg.Timeout = 15 * time.Second
 	}
 
-	ports, err := newPortAllocator(cfg.PortRange)
+	ports, err := parsePortRange(cfg.PortRange)
 	if err != nil {
 		slog.Warn("rtp port allocator init failed, using defaults", "module", "cluster", "error", err)
-		ports, _ = newPortAllocator("20000-20100")
+		ports, _ = portalloc.New(20000, 20100)
 	}
 
 	t := &RTPTransport{

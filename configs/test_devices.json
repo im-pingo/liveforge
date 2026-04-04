@@ -1,0 +1,58 @@
+{
+  "34020000001110000001": {
+    "DeviceID": "34020000001110000001",
+    "RemoteAddr": "192.168.1.100:5060",
+    "Transport": "udp",
+    "RegisteredAt": "2026-04-04T10:00:00Z",
+    "LastKeepalive": "2026-04-04T14:00:00Z",
+    "Status": 2,
+    "Channels": {
+      "34020000001320000001": {
+        "ChannelID": "34020000001320000001",
+        "Name": "Front Gate Camera",
+        "Manufacturer": "Hikvision",
+        "Status": "ON",
+        "PTZType": 1,
+        "Latitude": 39.916527,
+        "Longitude": 116.397128
+      },
+      "34020000001320000002": {
+        "ChannelID": "34020000001320000002",
+        "Name": "Parking Lot Camera",
+        "Manufacturer": "Dahua",
+        "Status": "ON",
+        "PTZType": 0,
+        "Latitude": 39.9166,
+        "Longitude": 116.3972
+      },
+      "34020000001320000003": {
+        "ChannelID": "34020000001320000003",
+        "Name": "Lobby Camera",
+        "Manufacturer": "Hikvision",
+        "Status": "OFF",
+        "PTZType": 2,
+        "Latitude": 0,
+        "Longitude": 0
+      }
+    }
+  },
+  "34020000001110000002": {
+    "DeviceID": "34020000001110000002",
+    "RemoteAddr": "192.168.1.101:5060",
+    "Transport": "tcp",
+    "RegisteredAt": "2026-04-04T11:00:00Z",
+    "LastKeepalive": "2026-04-04T14:00:00Z",
+    "Status": 2,
+    "Channels": {
+      "34020000001320000010": {
+        "ChannelID": "34020000001320000010",
+        "Name": "Warehouse Camera",
+        "Manufacturer": "Uniview",
+        "Status": "ON",
+        "PTZType": 1,
+        "Latitude": 31.2304,
+        "Longitude": 121.4737
+      }
+    }
+  }
+}

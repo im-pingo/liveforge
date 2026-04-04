@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
 func TestHandleOptions(t *testing.T) {
@@ -56,8 +58,8 @@ func TestHandleSetupTCPInterleaved(t *testing.T) {
 }
 
 func TestHandleSetupUDP(t *testing.T) {
-	pm := NewPortManager(10000, 10010)
-	h := NewHandler(nil, pm)
+	pa, _ := portalloc.New(10000, 10010)
+	h := NewHandler(nil, pa)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}

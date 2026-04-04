@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <CmdType>Catalog</CmdType>
+  <SN>1</SN>
+  <DeviceID>34020000001110000001</DeviceID>
+  <SumNum>3</SumNum>
+  <DeviceList Num="3">
+    <Item>
+      <DeviceID>34020000001320000001</DeviceID>
+      <Name>Front Gate Camera</Name>
+      <Manufacturer>Hikvision</Manufacturer>
+      <Status>ON</Status>
+      <PTZType>1</PTZType>
+      <Longitude>116.397128</Longitude>
+      <Latitude>39.916527</Latitude>
+    </Item>
+    <Item>
+      <DeviceID>34020000001320000002</DeviceID>
+      <Name>Parking Lot Camera</Name>
+      <Manufacturer>Dahua</Manufacturer>
+      <Status>ON</Status>
+      <PTZType>0</PTZType>
+      <Longitude>116.397200</Longitude>
+      <Latitude>39.916600</Latitude>
+    </Item>
+    <Item>
+      <DeviceID>34020000001320000003</DeviceID>
+      <Name>Lobby Camera</Name>
+      <Manufacturer>Hikvision</Manufacturer>
+      <Status>OFF</Status>
+      <PTZType>2</PTZType>
+    </Item>
+  </DeviceList>
+</Response>

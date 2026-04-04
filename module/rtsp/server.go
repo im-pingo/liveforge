@@ -12,16 +12,17 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
 // Module implements core.Module for RTSP.
 type Module struct {
-	server      *core.Server
-	listener    net.Listener
-	handler     *Handler
-	portManager *PortManager
-	sessions    map[string]*RTSPSession
+	server   *core.Server
+	listener net.Listener
+	handler  *Handler
+	ports    *portalloc.PortAllocator
+	sessions map[string]*RTSPSession
 	mu          sync.Mutex
 	done        chan struct{}
 }
@@ -41,12 +42,13 @@ func (m *Module) Init(s *core.Server) error {
 	cfg := s.Config().RTSP
 
 	if len(cfg.RTPPortRange) == 2 {
-		m.portManager = NewPortManager(cfg.RTPPortRange[0], cfg.RTPPortRange[1])
-	} else {
-		m.portManager = NewPortManager(30000, 40000) // default range
+		m.ports, _ = portalloc.New(cfg.RTPPortRange[0], cfg.RTPPortRange[1])
+	}
+	if m.ports == nil {
+		m.ports, _ = portalloc.New(30000, 40000) // default range
 	}
 
-	m.handler = NewHandler(s, m.portManager)
+	m.handler = NewHandler(s, m.ports)
 
 	ln, err := s.MakeListener(cfg.Listen, cfg.TLS)
 	if err != nil {

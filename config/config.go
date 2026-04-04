@@ -13,8 +13,9 @@ type Config struct {
 	WS     WSConfig     `yaml:"websocket"`
 	WebRTC WebRTCConfig `yaml:"webrtc"`
 	SRT    SRTConfig    `yaml:"srt"`
-	SIP    SIPConfig    `yaml:"sip"`
-	Stream StreamConfig `yaml:"stream"`
+	SIP     SIPConfig     `yaml:"sip"`
+	GB28181 GB28181Config `yaml:"gb28181"`
+	Stream  StreamConfig  `yaml:"stream"`
 	Auth   AuthConfig   `yaml:"auth"`
 	Notify NotifyConfig `yaml:"notify"`
 	Cluster ClusterConfig `yaml:"cluster"`
@@ -155,6 +156,38 @@ type SIPConfig struct {
 	Enabled   bool     `yaml:"enabled"`
 	Listen    string   `yaml:"listen"`
 	Transport []string `yaml:"transport"`
+	ServerID  string   `yaml:"server_id"`
+	Domain    string   `yaml:"domain"`
+	Auth      SIPAuth  `yaml:"auth"`
+}
+
+// SIPAuth holds SIP digest authentication settings.
+type SIPAuth struct {
+	Enabled  bool   `yaml:"enabled"`
+	Password string `yaml:"password"`
+}
+
+// GB28181Config holds GB28181 module settings.
+type GB28181Config struct {
+	Enabled         bool          `yaml:"enabled"`
+	StreamPrefix    string        `yaml:"stream_prefix"`
+	RTPPortRange    []int         `yaml:"rtp_port_range"`
+	SSRC            SSRCConfig    `yaml:"ssrc"`
+	Keepalive       KeepaliveConfig `yaml:"keepalive"`
+	AutoInvite      bool          `yaml:"auto_invite"`
+	CatalogInterval time.Duration `yaml:"catalog_interval"`
+	DumpFile        string        `yaml:"dump_file"`
+}
+
+// SSRCConfig holds SSRC generation settings for GB28181.
+type SSRCConfig struct {
+	Prefix string `yaml:"prefix"`
+}
+
+// KeepaliveConfig holds device keepalive detection settings.
+type KeepaliveConfig struct {
+	Interval time.Duration `yaml:"interval"`
+	Timeout  time.Duration `yaml:"timeout"`
 }
 
 // SkipTrackerConfig holds ring buffer skip tracking settings.
@@ -282,6 +315,15 @@ type ClusterConfig struct {
 	SRT     ClusterSRTConfig  `yaml:"srt"`
 	RTSP    ClusterRTSPConfig `yaml:"rtsp"`
 	RTP     ClusterRTPConfig  `yaml:"rtp"`
+	GB28181 ClusterGBConfig   `yaml:"gb28181"`
+}
+
+// ClusterGBConfig holds GB28181 cluster relay settings.
+type ClusterGBConfig struct {
+	PortRange     []int         `yaml:"port_range"`
+	SignalingPath string        `yaml:"signaling_path"`
+	RTCPInterval  time.Duration `yaml:"rtcp_interval"`
+	Timeout       time.Duration `yaml:"timeout"`
 }
 
 // ClusterSRTConfig holds SRT-specific relay settings.
