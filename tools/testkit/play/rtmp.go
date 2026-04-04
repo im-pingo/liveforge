@@ -42,7 +42,11 @@ func (p *rtmpPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCall
 
 	// Append token to stream name if provided.
 	if cfg.Token != "" {
-		streamName += "?token=" + cfg.Token
+		if strings.Contains(streamName, "?") {
+			streamName += "&token=" + cfg.Token
+		} else {
+			streamName += "?token=" + cfg.Token
+		}
 	}
 
 	rc, err := dialRTMP(ctx, host)
@@ -170,7 +174,9 @@ func clientHandshake(conn net.Conn) error {
 	// Send C0 (version 3) + C1 (1536 random bytes).
 	c0c1 := make([]byte, 1+handshakeSize)
 	c0c1[0] = 3
-	rand.Read(c0c1[1:])
+	if _, err := rand.Read(c0c1[1:]); err != nil {
+		return fmt.Errorf("generate random C1: %w", err)
+	}
 
 	if _, err := conn.Write(c0c1); err != nil {
 		return fmt.Errorf("write C0C1: %w", err)
@@ -305,11 +311,15 @@ func (rc *rtmpConn) readResponses(targetTxnID float64) error {
 func (rc *rtmpConn) setChunkSize(size int) error {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, uint32(size))
-	return rc.cw.WriteMessage(2, &rtmp.Message{
+	if err := rc.cw.WriteMessage(2, &rtmp.Message{
 		TypeID:  rtmp.MsgSetChunkSize,
 		Length:  4,
 		Payload: payload,
-	})
+	}); err != nil {
+		return err
+	}
+	rc.cw.SetChunkSize(size)
+	return nil
 }
 
 // parseVideoPayload parses an FLV video tag body into an AVFrame.
@@ -326,18 +336,18 @@ func parseVideoPayload(data []byte, dts int64) *avframe.AVFrame {
 		return nil
 	}
 
+	avcPacketType := data[1]
+
 	var frameType avframe.FrameType
-	if frameTypeID == flvpkg.VideoFrameKeyframe {
-		if data[1] == flvpkg.AVCPacketSequenceHeader {
-			frameType = avframe.FrameTypeSequenceHeader
-		} else {
-			frameType = avframe.FrameTypeKeyframe
-		}
+	if avcPacketType == flvpkg.AVCPacketSequenceHeader {
+		frameType = avframe.FrameTypeSequenceHeader
+	} else if frameTypeID == flvpkg.VideoFrameKeyframe {
+		frameType = avframe.FrameTypeKeyframe
 	} else {
 		frameType = avframe.FrameTypeInterframe
 	}
 
-	cts := int64(data[2])<<16 | int64(data[3])<<8 | int64(data[4])
+	cts := int64(int32(binary.BigEndian.Uint32([]byte{0, data[2], data[3], data[4]})) >> 8)
 
 	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, data[5:])
 }
