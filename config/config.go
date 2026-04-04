@@ -117,6 +117,7 @@ type WSConfig struct {
 type WebRTCConfig struct {
 	Enabled      bool        `yaml:"enabled"`
 	Listen       string      `yaml:"listen"`
+	ICELite      bool        `yaml:"ice_lite"`
 	ICEServers   []ICEServer `yaml:"ice_servers"`
 	UDPPortRange []int       `yaml:"udp_port_range"`
 	Candidates   []string    `yaml:"candidates"`

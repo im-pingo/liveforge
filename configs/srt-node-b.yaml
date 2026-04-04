@@ -18,6 +18,15 @@ http_stream:
   listen: ":8081"
   cors: true
 
+webrtc:
+  enabled: true
+  listen: ":8444"
+  ice_lite: true
+  ice_servers:
+    - urls: ["stun:stun.l.google.com:19302"]
+  udp_port_range: [30500, 31000]
+  candidates: []
+
 stream:
   gop_cache: true
   gop_cache_num: 1

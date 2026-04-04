@@ -25,7 +25,9 @@ type Module struct {
 	httpSrv  *http.Server
 	limiter   *ratelimit.Limiter
 	wg        sync.WaitGroup
-	latestBWE chan cc.BandwidthEstimator
+	latestBWE              chan cc.BandwidthEstimator
+	nextInitialBitrate     int64 // per-session override, set before NewPeerConnection
+	nextInitialBitrateMu   sync.Mutex
 }
 
 // NewModule creates a new WebRTC module.
@@ -44,6 +46,13 @@ func (m *Module) Init(s *core.Server) error {
 	// Configure pion SettingEngine.
 	se := webrtc.SettingEngine{}
 
+	// ICE Lite: server skips candidate gathering and connectivity checks.
+	// Ideal for directly-accessible servers (no NAT). Makes ICE instant.
+	if cfg.WebRTC.ICELite {
+		se.SetLite(true)
+		slog.Info("ICE Lite enabled", "module", "webrtc")
+	}
+
 	// Set UDP port range for ICE candidates.
 	if len(cfg.WebRTC.UDPPortRange) == 2 {
 		se.SetEphemeralUDPPortRange(uint16(cfg.WebRTC.UDPPortRange[0]), uint16(cfg.WebRTC.UDPPortRange[1]))
@@ -60,6 +69,7 @@ func (m *Module) Init(s *core.Server) error {
 	// Include loopback (127.0.0.1) as an ICE host candidate so same-host clients
 	// connect via loopback UDP instead of the LAN interface, avoiding packet loss.
 	se.SetIncludeLoopbackCandidate(true)
+
 
 	me := &webrtc.MediaEngine{}
 	if err := registerCodecs(me); err != nil {
@@ -88,8 +98,18 @@ func (m *Module) Init(s *core.Server) error {
 	// registered AFTER GCC (closer to app in the chain).
 	if cfg.WebRTC.GCC.Enabled {
 		bweFactory, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			// Use per-session override if set by WHEP handler (based on
+			// the stream's actual bitrate), otherwise fall back to config.
+			initialBitrate := cfg.WebRTC.GCC.InitialBitrate
+			m.nextInitialBitrateMu.Lock()
+			if m.nextInitialBitrate > 0 {
+				initialBitrate = int(m.nextInitialBitrate)
+				m.nextInitialBitrate = 0
+			}
+			m.nextInitialBitrateMu.Unlock()
+
 			return gcc.NewSendSideBWE(
-				gcc.SendSideBWEInitialBitrate(cfg.WebRTC.GCC.InitialBitrate),
+				gcc.SendSideBWEInitialBitrate(initialBitrate),
 				gcc.SendSideBWEMinBitrate(cfg.WebRTC.GCC.MinBitrate),
 				gcc.SendSideBWEMaxBitrate(cfg.WebRTC.GCC.MaxBitrate),
 			)
@@ -218,8 +238,12 @@ func (m *Module) findSession(id string) (*Session, bool) {
 }
 
 // iceServersFromConfig converts config ICE servers to pion ICE server structs.
+// Returns nil when ICE Lite is enabled (lite agents use host candidates only).
 func (m *Module) iceServersFromConfig() []webrtc.ICEServer {
 	cfg := m.server.Config()
+	if cfg.WebRTC.ICELite {
+		return nil
+	}
 	var servers []webrtc.ICEServer
 	for _, s := range cfg.WebRTC.ICEServers {
 		servers = append(servers, webrtc.ICEServer{
