@@ -34,7 +34,14 @@ func (p *whepPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCall
 	if err != nil {
 		return fmt.Errorf("whep: create peer connection: %w", err)
 	}
-	defer pc.Close()
+	// Track OnTrack goroutines so we wait for all frame delivery to complete
+	// before returning. Close the PeerConnection first to unblock track reads,
+	// then wait for goroutines to finish.
+	var wg sync.WaitGroup
+	defer func() {
+		pc.Close()
+		wg.Wait()
+	}()
 
 	// Add receive-only transceivers for video and audio.
 	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
@@ -67,7 +74,9 @@ func (p *whepPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCall
 		if err != nil {
 			return
 		}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			buf := make([]byte, 1500)
 			for {
 				// pion/webrtc/v4 uses pion/rtp v1, but our depacketizer uses v2.
