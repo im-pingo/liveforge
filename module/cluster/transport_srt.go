@@ -41,24 +41,12 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 	}
 	defer conn.Close()
 
-	slog.Info("srt relay push connected", "module", "cluster", "target", targetURL)
+	slog.Info("srt relay push connected, waiting for sequence headers", "module", "cluster", "target", targetURL)
 
-	pub := stream.Publisher()
-	if pub == nil {
-		return fmt.Errorf("stream has no publisher")
-	}
-	mi := pub.MediaInfo()
-
-	var videoSeqData, audioSeqData []byte
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
-		videoSeqData = vsh.Payload
-	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
-		audioSeqData = ash.Payload
-	}
-
-	muxer := ts.NewMuxer(mi.VideoCodec, mi.AudioCodec, videoSeqData, audioSeqData)
-
+	// Wait for sequence headers to be available before creating the muxer.
+	// The forward hook fires on EventPublish, but the first sequence header
+	// frame may not have arrived yet.
+	var muxer *ts.Muxer
 	reader := stream.RingBuffer().NewReader()
 	for {
 		select {
@@ -78,6 +66,32 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 			case <-stream.RingBuffer().Signal():
 			}
 			continue
+		}
+
+		// Lazily create the muxer once we see a keyframe (seq headers are set by then).
+		if muxer == nil {
+			if !frame.FrameType.IsKeyframe() {
+				continue // skip until we get a keyframe
+			}
+			pub := stream.Publisher()
+			if pub == nil {
+				return fmt.Errorf("stream has no publisher")
+			}
+			mi := pub.MediaInfo()
+
+			var videoSeqData, audioSeqData []byte
+			if vsh := stream.VideoSeqHeader(); vsh != nil {
+				videoSeqData = vsh.Payload
+			}
+			if ash := stream.AudioSeqHeader(); ash != nil {
+				audioSeqData = ash.Payload
+			}
+
+			slog.Info("srt relay push muxer initialized", "module", "cluster", "target", targetURL,
+				"video_codec", mi.VideoCodec, "audio_codec", mi.AudioCodec,
+				"video_seq_len", len(videoSeqData), "audio_seq_len", len(audioSeqData))
+
+			muxer = ts.NewMuxer(mi.VideoCodec, mi.AudioCodec, videoSeqData, audioSeqData)
 		}
 
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {

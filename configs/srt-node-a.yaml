@@ -1,0 +1,41 @@
+server:
+  name: "srt-node-a"
+  log_level: info
+  drain_timeout: 10s
+
+rtmp:
+  enabled: true
+  listen: ":1935"
+  chunk_size: 4096
+
+srt:
+  enabled: true
+  listen: ":6000"
+  latency: 120
+
+stream:
+  gop_cache: true
+  gop_cache_num: 1
+  audio_cache_ms: 1000
+  ring_buffer_size: 1024
+  idle_timeout: 30s
+  no_publisher_timeout: 15s
+
+cluster:
+  forward:
+    enabled: true
+    targets:
+      - "srt://127.0.0.1:6001/live"
+    retry_max: 3
+    retry_interval: 2s
+  origin:
+    enabled: false
+  srt:
+    latency: 120ms
+
+api:
+  enabled: true
+  listen: ":8090"
+  console:
+    username: "admin"
+    password: "admin"
