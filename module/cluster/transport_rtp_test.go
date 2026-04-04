@@ -15,7 +15,7 @@ import (
 )
 
 func TestRTPTransportScheme(t *testing.T) {
-	pa, _ := newPortAllocator("30000-30010")
+	pa, _ := parsePortRange("30000-30010")
 	tr := &RTPTransport{
 		cfg:   defaultClusterRTPConfig(),
 		ports: pa,
@@ -26,9 +26,9 @@ func TestRTPTransportScheme(t *testing.T) {
 }
 
 func TestPortAllocator(t *testing.T) {
-	pa, err := newPortAllocator("30000-30004")
+	pa, err := parsePortRange("30000-30004")
 	if err != nil {
-		t.Fatalf("newPortAllocator: %v", err)
+		t.Fatalf("parsePortRange: %v", err)
 	}
 
 	// Allocate all 5 ports.
@@ -82,7 +82,7 @@ func TestPortAllocatorBadRange(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := newPortAllocator(tt.portRange)
+			_, err := parsePortRange(tt.portRange)
 			if err == nil {
 				t.Errorf("expected error for range %q", tt.portRange)
 			}
@@ -92,7 +92,7 @@ func TestPortAllocatorBadRange(t *testing.T) {
 
 func TestPortAllocatorParseEdgeCases(t *testing.T) {
 	// Single port range.
-	pa, err := newPortAllocator("20000-20000")
+	pa, err := parsePortRange("20000-20000")
 	if err != nil {
 		t.Fatalf("single port range: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestPortAllocatorParseEdgeCases(t *testing.T) {
 }
 
 func TestRTPTransportPushBadURL(t *testing.T) {
-	pa, _ := newPortAllocator("30100-30110")
+	pa, _ := parsePortRange("30100-30110")
 	tr := &RTPTransport{
 		cfg:   defaultClusterRTPConfig(),
 		ports: pa,
@@ -185,9 +185,9 @@ func TestBuildBYE(t *testing.T) {
 }
 
 func TestRTPSignalingPushHandler(t *testing.T) {
-	pa, err := newPortAllocator("31000-31010")
+	pa, err := parsePortRange("31000-31010")
 	if err != nil {
-		t.Fatalf("newPortAllocator: %v", err)
+		t.Fatalf("parsePortRange: %v", err)
 	}
 
 	hub, _ := newTestHub()
@@ -242,9 +242,9 @@ func TestRTPSignalingPushHandler(t *testing.T) {
 }
 
 func TestRTPSignalingPullHandler(t *testing.T) {
-	pa, err := newPortAllocator("31020-31030")
+	pa, err := parsePortRange("31020-31030")
 	if err != nil {
-		t.Fatalf("newPortAllocator: %v", err)
+		t.Fatalf("parsePortRange: %v", err)
 	}
 
 	hub, _ := newTestHub()
@@ -322,9 +322,9 @@ func TestRTPSignalingPullHandler(t *testing.T) {
 }
 
 func TestRTPSignaling406(t *testing.T) {
-	pa, err := newPortAllocator("31040-31050")
+	pa, err := parsePortRange("31040-31050")
 	if err != nil {
-		t.Fatalf("newPortAllocator: %v", err)
+		t.Fatalf("parsePortRange: %v", err)
 	}
 
 	hub, _ := newTestHub()
@@ -417,7 +417,7 @@ func TestDefaultClusterRTPConfig(t *testing.T) {
 }
 
 func TestRTPTransportClose(t *testing.T) {
-	pa, _ := newPortAllocator("30200-30210")
+	pa, _ := parsePortRange("30200-30210")
 	tr := &RTPTransport{
 		cfg:   defaultClusterRTPConfig(),
 		ports: pa,

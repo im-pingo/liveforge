@@ -23,6 +23,23 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTi
 			continue
 		}
 		if f.MediaType.IsVideo() {
+			// Strip non-VCL NALUs (SPS/PPS/SEI/AUD) from H.264 AVCC payloads.
+			// These parameter sets are already in the init segment's avcC box;
+			// duplicating them in samples can cause browser MSE to reject the
+			// segment with bufferAppendError.
+			if f.Codec == avframe.CodecH264 {
+				filtered := filterH264VCLNALUs(f.Payload)
+				if len(filtered) == 0 {
+					continue
+				}
+				if len(filtered) != len(f.Payload) {
+					// Create a shallow copy with the filtered payload
+					cf := *f
+					cf.Payload = filtered
+					videoFrames = append(videoFrames, &cf)
+					continue
+				}
+			}
 			videoFrames = append(videoFrames, f)
 		} else if f.MediaType.IsAudio() {
 			audioFrames = append(audioFrames, f)
@@ -149,6 +166,50 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 
 	WriteFullBox(&traf, BoxTrun, 0, trunFlags, trun.Bytes())
 	WriteBox(w, BoxTraf, traf.Bytes())
+}
+
+// filterH264VCLNALUs strips non-VCL NAL units from an AVCC (4-byte length-prefixed)
+// H.264 payload, keeping only slice NALUs (types 1-5). SPS(7), PPS(8), SEI(6),
+// and AUD(9) are removed since they are already in the init segment's avcC box
+// and can cause browser MSE to reject fMP4 segments.
+func filterH264VCLNALUs(data []byte) []byte {
+	if len(data) < 5 {
+		return data
+	}
+
+	needsFilter := false
+	offset := 0
+	for offset+4 < len(data) {
+		nalLen := int(binary.BigEndian.Uint32(data[offset:]))
+		if nalLen <= 0 || offset+4+nalLen > len(data) {
+			break
+		}
+		nalType := data[offset+4] & 0x1F
+		if nalType == 6 || nalType == 7 || nalType == 8 || nalType == 9 {
+			needsFilter = true
+			break
+		}
+		offset += 4 + nalLen
+	}
+	if !needsFilter {
+		return data
+	}
+
+	var result []byte
+	offset = 0
+	for offset+4 < len(data) {
+		nalLen := int(binary.BigEndian.Uint32(data[offset:]))
+		if nalLen <= 0 || offset+4+nalLen > len(data) {
+			break
+		}
+		nalType := data[offset+4] & 0x1F
+		// Keep VCL NALUs (1=non-IDR slice, 2=slice A, 3=slice B, 4=slice C, 5=IDR)
+		if nalType >= 1 && nalType <= 5 {
+			result = append(result, data[offset:offset+4+nalLen]...)
+		}
+		offset += 4 + nalLen
+	}
+	return result
 }
 
 // fixTrunDataOffsetsPerTrack scans moofBytes for traf boxes and patches each

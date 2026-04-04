@@ -544,6 +544,80 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-top: 1px solid rgba(255,255,255,0.08);
   display: none;
 }
+
+/* Nav tabs */
+.nav-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.nav-tab {
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 20px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* GB28181 device badges */
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.3px; }
+.badge-online { background: rgba(74,222,128,0.15); color: var(--green); }
+.badge-offline { background: rgba(248,113,113,0.15); color: var(--red); }
+.badge-on { background: rgba(74,222,128,0.15); color: var(--green); }
+.badge-off { background: rgba(136,136,136,0.15); color: var(--text2); }
+
+/* GB28181 expandable channels */
+.ch-toggle { cursor: pointer; }
+.ch-toggle:hover { background: var(--surface2); }
+.channel-row td { padding-left: 40px !important; background: var(--bg); font-size: 13px; }
+.channel-row td:first-child { border-left: 3px solid var(--accent); }
+
+/* GB28181 section headers */
+.gb-section-title { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin: 24px 0 12px; }
+
+/* PTZ modal */
+.ptz-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000; display: none; align-items: center; justify-content: center; }
+.ptz-overlay.active { display: flex; }
+.ptz-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 320px; }
+.ptz-modal h3 { font-size: 16px; margin-bottom: 16px; }
+.ptz-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+.ptz-btn {
+  width: 100%; aspect-ratio: 1; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface2); color: var(--text); font-size: 18px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: background 0.1s;
+}
+.ptz-btn:hover { background: var(--accent); color: #fff; }
+.ptz-btn:active { transform: scale(0.95); }
+.ptz-btn.stop { background: var(--red); color: #fff; font-size: 12px; font-weight: 600; }
+.ptz-zoom { display: flex; gap: 8px; margin-bottom: 16px; }
+.ptz-zoom button { flex: 1; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface2); color: var(--text); font-size: 14px; cursor: pointer; }
+.ptz-zoom button:hover { background: var(--accent); color: #fff; }
+.ptz-speed { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; font-size: 13px; color: var(--text2); }
+.ptz-speed input[type=range] { flex: 1; accent-color: var(--accent); }
+.ptz-close { float: right; background: none; border: none; color: var(--text2); font-size: 22px; cursor: pointer; }
+
+/* Playback modal */
+.pb-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000; display: none; align-items: center; justify-content: center; }
+.pb-overlay.active { display: flex; }
+.pb-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 360px; }
+.pb-modal h3 { font-size: 16px; margin-bottom: 16px; }
+.pb-modal label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+.pb-modal input[type=datetime-local] {
+  width: 100%; padding: 8px 10px; margin-bottom: 12px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); color: var(--text); font-size: 13px;
+}
+.pb-modal .pb-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* Toast notification */
+.toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; font-size: 13px; z-index: 2000; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+.toast.show { opacity: 1; }
 </style>
 </head>
 <body>
@@ -564,6 +638,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     </div>
   </header>
 
+  <div class="nav-tabs" id="nav-tabs" style="display:none">
+    <button class="nav-tab active" onclick="switchTab('streams')">Streams</button>
+    <button class="nav-tab" onclick="switchTab('gb28181')">GB28181 Devices</button>
+  </div>
+
+  <div id="view-streams">
   <div class="stats">
     <div class="stat-card">
       <div class="stat-label">Active Streams</div>
@@ -597,6 +677,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <th>Codecs</th>
           <th>Bitrate</th>
           <th>FPS</th>
+          <th>Uptime</th>
           <th>GOP Cache</th>
           <th>Subscribers</th>
           <th>Actions</th>
@@ -610,6 +691,72 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div class="empty-sub">Push a stream to get started, e.g. <code>ffmpeg ... -f flv rtmp://host/live/test</code></div>
     </div>
   </div>
+  </div><!-- /view-streams -->
+
+  <div id="view-gb28181" style="display:none">
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Devices Online</div>
+        <div class="stat-value" id="gb-stat-online" style="color:var(--green)">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Devices</div>
+        <div class="stat-value accent" id="gb-stat-devices">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Channels</div>
+        <div class="stat-value" id="gb-stat-channels">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Media Sessions</div>
+        <div class="stat-value" id="gb-stat-sessions">0</div>
+      </div>
+    </div>
+
+    <div class="gb-section-title">Devices</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Device ID</th>
+            <th>Remote Addr</th>
+            <th>Transport</th>
+            <th>Status</th>
+            <th>Channels</th>
+            <th>Last Keepalive</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="gb-devices-tbody"></tbody>
+      </table>
+      <div id="gb-devices-empty" class="empty-state" style="display:none">
+        <div class="empty-icon">&#128247;</div>
+        <div class="empty-title">No GB28181 devices</div>
+        <div class="empty-sub">Devices will appear when they register via SIP</div>
+      </div>
+    </div>
+
+    <div class="gb-section-title">Media Sessions</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Session ID</th>
+            <th>Channel</th>
+            <th>Stream Key</th>
+            <th>Direction</th>
+            <th>State</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="gb-sessions-tbody"></tbody>
+      </table>
+      <div id="gb-sessions-empty" class="empty-state" style="display:none;padding:20px">
+        <div class="empty-sub">No active media sessions</div>
+      </div>
+    </div>
+  </div><!-- /view-gb28181 -->
 </div>
 
 <!-- Confirm modal -->
@@ -681,6 +828,57 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- PTZ Control Modal -->
+<div class="ptz-overlay" id="ptz-overlay">
+  <div class="ptz-modal">
+    <button class="ptz-close" onclick="closePTZ()">&times;</button>
+    <h3>PTZ Control <span style="color:var(--text2);font-size:13px;font-weight:400" id="ptz-channel-label"></span></h3>
+    <div class="ptz-grid">
+      <button class="ptz-btn" onmousedown="sendPTZ('upleft')" onmouseup="sendPTZ('stop')">&#8598;</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('up')" onmouseup="sendPTZ('stop')">&#8593;</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('upright')" onmouseup="sendPTZ('stop')">&#8599;</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('left')" onmouseup="sendPTZ('stop')">&#8592;</button>
+      <button class="ptz-btn stop" onclick="sendPTZ('stop')">STOP</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('right')" onmouseup="sendPTZ('stop')">&#8594;</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('downleft')" onmouseup="sendPTZ('stop')">&#8601;</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('down')" onmouseup="sendPTZ('stop')">&#8595;</button>
+      <button class="ptz-btn" onmousedown="sendPTZ('downright')" onmouseup="sendPTZ('stop')">&#8600;</button>
+    </div>
+    <div class="ptz-zoom">
+      <button onmousedown="sendPTZ('zoomin')" onmouseup="sendPTZ('stop')">&#128269;+ Zoom In</button>
+      <button onmousedown="sendPTZ('zoomout')" onmouseup="sendPTZ('stop')">&#128269;- Zoom Out</button>
+    </div>
+    <div class="ptz-speed">
+      <span>H Speed</span>
+      <input type="range" id="ptz-hspeed" min="1" max="255" value="64">
+      <span id="ptz-hspeed-val">64</span>
+    </div>
+    <div class="ptz-speed">
+      <span>V Speed</span>
+      <input type="range" id="ptz-vspeed" min="1" max="255" value="64">
+      <span id="ptz-vspeed-val">64</span>
+    </div>
+  </div>
+</div>
+
+<!-- Playback Modal -->
+<div class="pb-overlay" id="pb-overlay">
+  <div class="pb-modal">
+    <h3>Playback <span style="color:var(--text2);font-size:13px;font-weight:400" id="pb-channel-label"></span></h3>
+    <label>Start Time</label>
+    <input type="datetime-local" id="pb-start">
+    <label>End Time</label>
+    <input type="datetime-local" id="pb-end">
+    <div class="pb-actions">
+      <button class="btn" onclick="closePlayback()">Cancel</button>
+      <button class="btn btn-play" onclick="gbStartPlayback()">Start Playback</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
 <script src="/console/static/mpegts.min.js"></script>
 <script src="/console/static/hls.min.js"></script>
 <script src="/console/static/dash.all.min.js"></script>
@@ -714,6 +912,18 @@ function formatBitrate(kbps) {
   if (!kbps || kbps === 0) return "-";
   if (kbps >= 1000) return (kbps / 1000).toFixed(1) + " Mbps";
   return kbps + " kbps";
+}
+
+function formatUptime(sec) {
+  sec = Math.floor(sec);
+  var d = Math.floor(sec / 86400);
+  var h = Math.floor((sec % 86400) / 3600);
+  var m = Math.floor((sec % 3600) / 60);
+  var s = sec % 60;
+  if (d > 0) return d + "d " + h + "h " + m + "m";
+  if (h > 0) return h + "h " + m + "m " + s + "s";
+  if (m > 0) return m + "m " + s + "s";
+  return s + "s";
 }
 
 /* --- Confirm modal --- */
@@ -1371,6 +1581,7 @@ function refreshServerInfo() {
       document.getElementById("server-version").textContent = "v" + (data.version || "?");
       document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
       if (data.endpoints) endpoints = data.endpoints;
+      if (data.modules) updateGB28181Tab(data.modules);
       updatePublishButton();
     })
     .catch(function() {});
@@ -1414,6 +1625,12 @@ function refresh() {
         return;
       }
       empty.style.display = "none";
+
+      streams.sort(function(a, b) {
+        if (a.key < b.key) return -1;
+        if (a.key > b.key) return 1;
+        return 0;
+      });
 
       var html = "";
       for (var i = 0; i < streams.length; i++) {
@@ -1460,6 +1677,8 @@ function refresh() {
           + ' <span style="color:var(--blue)">V' + gopV + '</span>'
           + ' <span style="color:#c084fc">A' + gopA + '</span></div></div>';
 
+        var uptimeHtml = st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : '<span style="color:#555">-</span>';
+
         html += "<tr>"
           + '<td class="stream-key">' + esc(s.key) + "</td>"
           + '<td><span class="state state-' + esc(s.state) + '">' + esc(s.state.replace("_", " ")) + '</span></td>'
@@ -1467,6 +1686,7 @@ function refresh() {
           + "<td>" + codecs + "</td>"
           + '<td class="mono">' + formatBitrate(st.bitrate_kbps) + "</td>"
           + '<td class="mono">' + (st.fps ? st.fps.toFixed(1) : "-") + "</td>"
+          + '<td class="mono">' + uptimeHtml + "</td>"
           + "<td>" + gopHtml + "</td>"
           + '<td><div class="subs">' + subHtml + "</div></td>"
           + "<td>" + acts + "</td>"
@@ -1772,9 +1992,297 @@ function updatePublishButton() {
   if (btn) btn.style.display = endpoints.webrtc ? "inline-block" : "none";
 }
 
+/* === GB28181 Console === */
+var activeTab = 'streams';
+var gbInterval = null;
+var streamsInterval = null;
+var gbHasModule = false;
+var ptzTargetChannel = '';
+var pbTargetChannel = '';
+var gbExpandedDevices = {};
+var gbDeviceChannels = {};
+
+function updateGB28181Tab(modules) {
+  gbHasModule = modules && modules.indexOf("gb28181") >= 0;
+  var tabs = document.getElementById("nav-tabs");
+  if (tabs) tabs.style.display = gbHasModule ? "flex" : "none";
+}
+
+function switchTab(name) {
+  activeTab = name;
+  var tabs = document.querySelectorAll(".nav-tab");
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle("active", tabs[i].textContent.toLowerCase().indexOf(name === 'streams' ? 'stream' : 'gb28181') >= 0);
+  }
+  document.getElementById("view-streams").style.display = name === 'streams' ? 'block' : 'none';
+  document.getElementById("view-gb28181").style.display = name === 'gb28181' ? 'block' : 'none';
+
+  // Manage polling
+  if (name === 'streams') {
+    if (gbInterval) { clearInterval(gbInterval); gbInterval = null; }
+    if (!streamsInterval) { streamsInterval = setInterval(refresh, 2000); }
+    refresh();
+  } else {
+    if (streamsInterval) { clearInterval(streamsInterval); streamsInterval = null; }
+    if (!gbInterval) { gbInterval = setInterval(refreshGB28181, 3000); }
+    refreshGB28181();
+  }
+}
+
+function refreshGB28181() {
+  Promise.all([
+    fetch("/api/v1/gb28181/devices").then(function(r) { return r.json(); }),
+    fetch("/api/v1/gb28181/sessions").then(function(r) { return r.json(); })
+  ]).then(function(results) {
+    var devices = results[0] || [];
+    var sessions = results[1] || [];
+    renderDevicesTable(devices);
+    renderSessionsTable(sessions);
+
+    // Stats
+    var online = 0, totalCh = 0;
+    for (var i = 0; i < devices.length; i++) {
+      if (devices[i].status === "online") online++;
+      totalCh += devices[i].channel_count || 0;
+    }
+    document.getElementById("gb-stat-online").textContent = online;
+    document.getElementById("gb-stat-devices").textContent = devices.length;
+    document.getElementById("gb-stat-channels").textContent = totalCh;
+    document.getElementById("gb-stat-sessions").textContent = sessions.length;
+  }).catch(function() {});
+}
+
+function renderDevicesTable(devices) {
+  var tbody = document.getElementById("gb-devices-tbody");
+  var empty = document.getElementById("gb-devices-empty");
+  if (devices.length === 0) {
+    tbody.innerHTML = "";
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+  var html = "";
+  for (var i = 0; i < devices.length; i++) {
+    var d = devices[i];
+    var badgeCls = d.status === "online" ? "badge-online" : "badge-offline";
+    var safeID = esc(d.device_id);
+    var expanded = gbExpandedDevices[d.device_id];
+    var arrow = expanded ? "&#9660;" : "&#9654;";
+    var timeStr = d.last_keepalive ? new Date(d.last_keepalive).toLocaleTimeString() : "-";
+
+    html += '<tr class="ch-toggle" onclick="toggleDevice(\'' + safeID + '\')">'
+      + '<td style="width:24px;text-align:center;color:var(--text2)">' + arrow + '</td>'
+      + '<td style="font-family:monospace;font-size:13px">' + safeID + '</td>'
+      + '<td>' + esc(d.remote_addr) + '</td>'
+      + '<td>' + esc(d.transport || "udp").toUpperCase() + '</td>'
+      + '<td><span class="badge ' + badgeCls + '">' + esc(d.status) + '</span></td>'
+      + '<td>' + (d.channel_count || 0) + '</td>'
+      + '<td>' + timeStr + '</td>'
+      + '<td><div class="actions">'
+      + '<button class="btn btn-play" onclick="event.stopPropagation();gbCatalog(\'' + safeID + '\')">Catalog</button>'
+      + '<button class="btn btn-danger" onclick="event.stopPropagation();gbDeleteDevice(\'' + safeID + '\')">Delete</button>'
+      + '</div></td></tr>';
+
+    // Expanded channel rows
+    if (expanded && gbDeviceChannels[d.device_id]) {
+      var channels = gbDeviceChannels[d.device_id];
+      for (var j = 0; j < channels.length; j++) {
+        var ch = channels[j];
+        var chStatus = (ch.status || "").toUpperCase() === "ON" ? "badge-on" : "badge-off";
+        var chID = esc(ch.channel_id);
+        html += '<tr class="channel-row">'
+          + '<td></td>'
+          + '<td style="font-family:monospace;font-size:12px">' + chID + '</td>'
+          + '<td>' + esc(ch.name) + '</td>'
+          + '<td></td>'
+          + '<td><span class="badge ' + chStatus + '">' + esc(ch.status || "OFF") + '</span></td>'
+          + '<td>' + (ch.ptz_type > 0 ? "PTZ-" + ch.ptz_type : "-") + '</td>'
+          + '<td></td>'
+          + '<td><div class="actions">'
+          + '<button class="btn btn-play" onclick="gbPlay(\'' + chID + '\')">Play</button>'
+          + '<button class="btn btn-warn" onclick="gbStop(\'' + chID + '\')">Stop</button>'
+          + '<button class="btn" style="background:var(--blue);color:#fff" onclick="openPTZ(\'' + chID + '\')">PTZ</button>'
+          + '<button class="btn" style="background:var(--yellow);color:#000" onclick="openPlayback(\'' + chID + '\')">Playback</button>'
+          + '</div></td></tr>';
+      }
+    }
+  }
+  tbody.innerHTML = html;
+}
+
+function renderSessionsTable(sessions) {
+  var tbody = document.getElementById("gb-sessions-tbody");
+  var empty = document.getElementById("gb-sessions-empty");
+  if (sessions.length === 0) {
+    tbody.innerHTML = "";
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+  var html = "";
+  for (var i = 0; i < sessions.length; i++) {
+    var s = sessions[i];
+    var stCls = s.state === "streaming" ? "state-publishing" : "state-idle";
+    html += '<tr>'
+      + '<td style="font-family:monospace;font-size:12px">' + esc(s.id).substring(0, 20) + '</td>'
+      + '<td style="font-family:monospace;font-size:12px">' + esc(s.channel_id) + '</td>'
+      + '<td class="stream-key">' + esc(s.stream_key) + '</td>'
+      + '<td>' + esc(s.direction) + '</td>'
+      + '<td><span class="state ' + stCls + '">' + esc(s.state) + '</span></td>'
+      + '<td><div class="actions">'
+      + '<button class="btn btn-play" onclick="openPlayer(\'' + esc(s.stream_key).replace(/'/g, "\\'") + '\')">Preview</button>'
+      + '<button class="btn btn-danger" onclick="gbCloseSession(\'' + esc(s.id).replace(/'/g, "\\'") + '\')">Close</button>'
+      + '</div></td></tr>';
+  }
+  tbody.innerHTML = html;
+}
+
+/* Device actions */
+function toggleDevice(deviceID) {
+  if (gbExpandedDevices[deviceID]) {
+    delete gbExpandedDevices[deviceID];
+    refreshGB28181();
+    return;
+  }
+  gbExpandedDevices[deviceID] = true;
+  fetch("/api/v1/gb28181/channels?device_id=" + encodeURIComponent(deviceID))
+    .then(function(r) { return r.json(); })
+    .then(function(channels) {
+      gbDeviceChannels[deviceID] = channels || [];
+      refreshGB28181();
+    });
+}
+
+function gbCatalog(deviceID) {
+  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(deviceID) + "/catalog", { method: "POST" })
+    .then(function(r) { return r.json(); })
+    .then(function() { showToast("Catalog query sent to " + deviceID); refreshGB28181(); });
+}
+
+function gbDeleteDevice(deviceID) {
+  showModal("Delete Device", 'Unregister device "' + deviceID + '" and close all sessions?', function() {
+    fetch("/api/v1/gb28181/devices/" + encodeURIComponent(deviceID), { method: "DELETE" })
+      .then(function() { delete gbExpandedDevices[deviceID]; delete gbDeviceChannels[deviceID]; refreshGB28181(); });
+  });
+}
+
+/* Channel actions */
+function gbPlay(channelID) {
+  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(channelID) + "/play", { method: "POST" })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) { showToast("Error: " + data.error); return; }
+      showToast("Playing: " + (data.stream_key || channelID));
+      refreshGB28181();
+      if (data.stream_key) {
+        setTimeout(function() { openPlayer(data.stream_key); }, 1500);
+      }
+    })
+    .catch(function() { showToast("Play request failed"); });
+}
+
+function gbStop(channelID) {
+  showModal("Stop Play", 'Stop live view for "' + channelID + '"?', function() {
+    fetch("/api/v1/gb28181/channels/" + encodeURIComponent(channelID) + "/play", { method: "DELETE" })
+      .then(function() { refreshGB28181(); });
+  });
+}
+
+/* PTZ */
+function openPTZ(channelID) {
+  ptzTargetChannel = channelID;
+  document.getElementById("ptz-channel-label").textContent = channelID;
+  document.getElementById("ptz-overlay").classList.add("active");
+}
+
+function closePTZ() {
+  document.getElementById("ptz-overlay").classList.remove("active");
+  ptzTargetChannel = '';
+}
+
+function sendPTZ(command) {
+  if (!ptzTargetChannel) return;
+  var hSpeed = parseInt(document.getElementById("ptz-hspeed").value) || 64;
+  var vSpeed = parseInt(document.getElementById("ptz-vspeed").value) || 64;
+  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(ptzTargetChannel) + "/ptz", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({command: command, h_speed: hSpeed, v_speed: vSpeed})
+  });
+}
+
+// PTZ speed slider display
+document.getElementById("ptz-hspeed").addEventListener("input", function() {
+  document.getElementById("ptz-hspeed-val").textContent = this.value;
+});
+document.getElementById("ptz-vspeed").addEventListener("input", function() {
+  document.getElementById("ptz-vspeed-val").textContent = this.value;
+});
+
+/* Playback */
+function openPlayback(channelID) {
+  pbTargetChannel = channelID;
+  document.getElementById("pb-channel-label").textContent = channelID;
+  // Default: last hour
+  var now = new Date();
+  var oneHourAgo = new Date(now.getTime() - 3600000);
+  document.getElementById("pb-start").value = oneHourAgo.toISOString().slice(0, 16);
+  document.getElementById("pb-end").value = now.toISOString().slice(0, 16);
+  document.getElementById("pb-overlay").classList.add("active");
+}
+
+function closePlayback() {
+  document.getElementById("pb-overlay").classList.remove("active");
+  pbTargetChannel = '';
+}
+
+function gbStartPlayback() {
+  if (!pbTargetChannel) return;
+  var startVal = document.getElementById("pb-start").value;
+  var endVal = document.getElementById("pb-end").value;
+  if (!startVal || !endVal) { showToast("Please select start and end time"); return; }
+
+  var startTime = new Date(startVal).toISOString();
+  var endTime = new Date(endVal).toISOString();
+
+  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(pbTargetChannel) + "/playback", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({start_time: startTime, end_time: endTime})
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      closePlayback();
+      if (data.error) { showToast("Error: " + data.error); return; }
+      showToast("Playback started: " + (data.stream_key || ""));
+      refreshGB28181();
+      if (data.stream_key) {
+        setTimeout(function() { openPlayer(data.stream_key); }, 1500);
+      }
+    })
+    .catch(function() { showToast("Playback request failed"); });
+}
+
+/* Session actions */
+function gbCloseSession(sessionID) {
+  showModal("Close Session", 'Force close session "' + sessionID.substring(0, 20) + '..."?', function() {
+    fetch("/api/v1/gb28181/sessions/" + encodeURIComponent(sessionID), { method: "DELETE" })
+      .then(function() { refreshGB28181(); });
+  });
+}
+
+/* Toast */
+function showToast(msg) {
+  var el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(function() { el.classList.remove("show"); }, 3000);
+}
+
+/* === Init === */
 refreshServerInfo();
 refresh();
-setInterval(refresh, 2000);
+streamsInterval = setInterval(refresh, 2000);
 setInterval(refreshServerInfo, 5000);
 </script>
 </body>

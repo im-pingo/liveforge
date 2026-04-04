@@ -4,49 +4,9 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
-
-// PortManager manages UDP port allocation for RTP/RTCP pairs.
-type PortManager struct {
-	minPort int
-	maxPort int
-	used    map[int]bool
-	mu      sync.Mutex
-}
-
-// NewPortManager creates a PortManager that allocates ports within [minPort, maxPort).
-func NewPortManager(minPort, maxPort int) *PortManager {
-	return &PortManager{
-		minPort: minPort,
-		maxPort: maxPort,
-		used:    make(map[int]bool),
-	}
-}
-
-// Allocate returns an even RTP port and its odd RTCP companion.
-func (pm *PortManager) Allocate() (rtpPort, rtcpPort int, err error) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	for p := pm.minPort; p < pm.maxPort; p += 2 {
-		if p%2 != 0 {
-			continue
-		}
-		if !pm.used[p] && !pm.used[p+1] {
-			pm.used[p] = true
-			pm.used[p+1] = true
-			return p, p + 1, nil
-		}
-	}
-	return 0, 0, fmt.Errorf("no available port pairs in range %d-%d", pm.minPort, pm.maxPort)
-}
-
-// Release returns a port pair to the pool.
-func (pm *PortManager) Release(rtpPort int) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	delete(pm.used, rtpPort)
-	delete(pm.used, rtpPort+1)
-}
 
 // UDPTransport manages a pair of UDP sockets for RTP and RTCP.
 type UDPTransport struct {
@@ -56,40 +16,40 @@ type UDPTransport struct {
 	rtcpPort   int
 	clientAddr *net.UDPAddr // client's RTP address
 	clientRTCP *net.UDPAddr // client's RTCP address
-	pm         *PortManager
+	ports      *portalloc.PortAllocator
 	done       chan struct{}
 	closed     bool
 	mu         sync.Mutex
 }
 
 // NewUDPTransport allocates a port pair and binds UDP sockets.
-func NewUDPTransport(pm *PortManager) (*UDPTransport, error) {
-	rtpPort, rtcpPort, err := pm.Allocate()
+func NewUDPTransport(ports *portalloc.PortAllocator) (*UDPTransport, error) {
+	rtpPort, rtcpPort, err := ports.AllocatePair()
 	if err != nil {
 		return nil, err
 	}
 
 	rtpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", rtpPort))
 	if err != nil {
-		pm.Release(rtpPort)
+		ports.Free(rtpPort, rtcpPort)
 		return nil, fmt.Errorf("resolve RTP addr: %w", err)
 	}
 	rtpConn, err := net.ListenUDP("udp", rtpAddr)
 	if err != nil {
-		pm.Release(rtpPort)
+		ports.Free(rtpPort, rtcpPort)
 		return nil, fmt.Errorf("listen RTP on :%d: %w", rtpPort, err)
 	}
 
 	rtcpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", rtcpPort))
 	if err != nil {
 		rtpConn.Close()
-		pm.Release(rtpPort)
+		ports.Free(rtpPort, rtcpPort)
 		return nil, fmt.Errorf("resolve RTCP addr: %w", err)
 	}
 	rtcpConn, err := net.ListenUDP("udp", rtcpAddr)
 	if err != nil {
 		rtpConn.Close()
-		pm.Release(rtpPort)
+		ports.Free(rtpPort, rtcpPort)
 		return nil, fmt.Errorf("listen RTCP on :%d: %w", rtcpPort, err)
 	}
 
@@ -98,7 +58,7 @@ func NewUDPTransport(pm *PortManager) (*UDPTransport, error) {
 		rtcpConn: rtcpConn,
 		rtpPort:  rtpPort,
 		rtcpPort: rtcpPort,
-		pm:       pm,
+		ports:    ports,
 		done:     make(chan struct{}),
 	}, nil
 }
@@ -153,5 +113,5 @@ func (u *UDPTransport) Close() {
 	close(u.done)
 	u.rtpConn.Close()
 	u.rtcpConn.Close()
-	u.pm.Release(u.rtpPort)
+	u.ports.Free(u.rtpPort, u.rtcpPort)
 }
