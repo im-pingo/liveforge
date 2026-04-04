@@ -128,6 +128,52 @@ func TestRTMPPush(t *testing.T) {
 	}
 }
 
+func TestNewPusher_RTSP(t *testing.T) {
+	p, err := NewPusher("rtsp")
+	if err != nil {
+		t.Fatalf("NewPusher(rtsp): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPusher(rtsp) returned nil")
+	}
+}
+
+func TestRTSPPush(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTSP())
+
+	src := source.NewFLVSourceLoop(2)
+	p, err := NewPusher("rtsp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	cfg := PushConfig{
+		Protocol: "rtsp",
+		Target:   fmt.Sprintf("rtsp://%s/live/test", srv.RTSPAddr()),
+		Duration: 3 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rpt, err := p.Push(ctx, src, cfg)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if rpt.FramesSent == 0 {
+		t.Error("no frames sent")
+	}
+	if rpt.BytesSent == 0 {
+		t.Error("no bytes sent")
+	}
+	if rpt.Protocol != "rtsp" {
+		t.Errorf("protocol = %q, want %q", rpt.Protocol, "rtsp")
+	}
+	if rpt.DurationMs <= 0 {
+		t.Error("duration should be positive")
+	}
+}
+
 func TestRTMPPush_ContextCancel(t *testing.T) {
 	srv := testutil.StartTestServer(t, testutil.WithRTMP())
 
