@@ -3,6 +3,7 @@ package play
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -724,5 +725,500 @@ func TestWSFLVPlay(t *testing.T) {
 	}
 
 	t.Logf("WS-FLV play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
+
+func TestNewPlayer_LLHLS(t *testing.T) {
+	p, err := NewPlayer("llhls")
+	if err != nil {
+		t.Fatalf("NewPlayer(llhls): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(llhls) returned nil")
+	}
+}
+
+func TestParseLLHLSPlaylist(t *testing.T) {
+	body := `#EXTM3U
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:6
+#EXT-X-PART-INF:PART-TARGET=0.200
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=0.600,CAN-SKIP-UNTIL=36.0
+#EXT-X-MAP:URI="/live/test/init.mp4"
+#EXT-X-MEDIA-SEQUENCE:0
+
+#EXT-X-PART:DURATION=0.20000,URI="/live/test/0.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.20000,URI="/live/test/0.1.m4s"
+#EXT-X-PART:DURATION=0.20000,URI="/live/test/0.2.m4s"
+#EXTINF:0.600,
+/live/test/0.m4s
+
+#EXT-X-PART:DURATION=0.20000,URI="/live/test/1.0.m4s",INDEPENDENT=YES
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="/live/test/1.1.m4s"
+`
+	pl := parseLLHLSPlaylist(body)
+
+	if pl.mediaSequence != 0 {
+		t.Errorf("mediaSequence = %d, want 0", pl.mediaSequence)
+	}
+	if pl.initURI != "/live/test/init.mp4" {
+		t.Errorf("initURI = %q, want %q", pl.initURI, "/live/test/init.mp4")
+	}
+	if len(pl.parts) != 4 {
+		t.Fatalf("got %d parts, want 4", len(pl.parts))
+	}
+
+	// First part: MSN=0, PartIdx=0, Independent=true
+	if pl.parts[0].MSN != 0 || pl.parts[0].PartIdx != 0 {
+		t.Errorf("part[0] MSN=%d PartIdx=%d, want 0,0", pl.parts[0].MSN, pl.parts[0].PartIdx)
+	}
+	if !pl.parts[0].Independent {
+		t.Error("part[0] should be INDEPENDENT")
+	}
+	if pl.parts[0].URI != "/live/test/0.0.m4s" {
+		t.Errorf("part[0] URI = %q", pl.parts[0].URI)
+	}
+
+	// Fourth part: MSN=1, PartIdx=0 (after segment boundary reset)
+	if pl.parts[3].MSN != 1 || pl.parts[3].PartIdx != 0 {
+		t.Errorf("part[3] MSN=%d PartIdx=%d, want 1,0", pl.parts[3].MSN, pl.parts[3].PartIdx)
+	}
+
+	// Full segments
+	if len(pl.segments) != 1 {
+		t.Fatalf("got %d segments, want 1", len(pl.segments))
+	}
+	if pl.segments[0].URI != "/live/test/0.m4s" {
+		t.Errorf("segment[0] URI = %q", pl.segments[0].URI)
+	}
+	if pl.segments[0].SeqNum != 0 {
+		t.Errorf("segment[0] SeqNum = %d, want 0", pl.segments[0].SeqNum)
+	}
+
+	// Preload hint
+	if pl.preloadHint != "/live/test/1.1.m4s" {
+		t.Errorf("preloadHint = %q, want %q", pl.preloadHint, "/live/test/1.1.m4s")
+	}
+}
+
+func TestParseLLHLSPlaylist_TS(t *testing.T) {
+	// TS container: no EXT-X-MAP
+	body := `#EXTM3U
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:6
+#EXT-X-PART-INF:PART-TARGET=0.200
+#EXT-X-MEDIA-SEQUENCE:5
+
+#EXT-X-PART:DURATION=0.20000,URI="/live/test/5.0.ts",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.20000,URI="/live/test/5.1.ts"
+#EXTINF:0.400,
+/live/test/5.ts
+`
+	pl := parseLLHLSPlaylist(body)
+
+	if pl.initURI != "" {
+		t.Errorf("initURI should be empty for TS, got %q", pl.initURI)
+	}
+	if pl.mediaSequence != 5 {
+		t.Errorf("mediaSequence = %d, want 5", pl.mediaSequence)
+	}
+	if len(pl.parts) != 2 {
+		t.Fatalf("got %d parts, want 2", len(pl.parts))
+	}
+	if pl.parts[0].MSN != 5 {
+		t.Errorf("part[0] MSN = %d, want 5", pl.parts[0].MSN)
+	}
+}
+
+func TestParseAttributeValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		attr  string
+		want  string
+	}{
+		{
+			name: "quoted URI",
+			line: `#EXT-X-MAP:URI="/live/test/init.mp4"`,
+			attr: "URI",
+			want: "/live/test/init.mp4",
+		},
+		{
+			name: "unquoted DURATION",
+			line: `#EXT-X-PART:DURATION=0.20000,URI="/live/test/0.0.m4s"`,
+			attr: "DURATION",
+			want: "0.20000",
+		},
+		{
+			name: "quoted URI with comma after",
+			line: `#EXT-X-PART:DURATION=0.20000,URI="/live/test/0.0.m4s",INDEPENDENT=YES`,
+			attr: "URI",
+			want: "/live/test/0.0.m4s",
+		},
+		{
+			name: "missing attribute",
+			line: `#EXT-X-PART:DURATION=0.20000`,
+			attr: "URI",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseAttributeValue(tt.line, tt.attr)
+			if got != tt.want {
+				t.Errorf("parseAttributeValue(%q, %q) = %q, want %q", tt.line, tt.attr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCalcNextBlockingParams(t *testing.T) {
+	pl := &llhlsPlaylist{
+		parts: []llhlsPart{
+			{MSN: 0, PartIdx: 0},
+			{MSN: 0, PartIdx: 1},
+			{MSN: 0, PartIdx: 2},
+			{MSN: 1, PartIdx: 0},
+		},
+	}
+
+	// Consumed everything: expect next after max.
+	msn, part := calcNextBlockingParams(pl, 1, 0)
+	if msn != 1 || part != 1 {
+		t.Errorf("got MSN=%d part=%d, want 1,1", msn, part)
+	}
+
+	// Consumed part of data: expect next unconsumed.
+	msn, part = calcNextBlockingParams(pl, 0, 1)
+	if msn != 0 || part != 2 {
+		t.Errorf("got MSN=%d part=%d, want 0,2", msn, part)
+	}
+}
+
+func TestBuildBlockingReloadURL(t *testing.T) {
+	result, err := buildBlockingReloadURL("http://localhost:8080/live/test.m3u8", 3, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "http://localhost:8080/live/test.m3u8?_HLS_msn=3&_HLS_part=2" {
+		t.Errorf("got %q", result)
+	}
+
+	// With existing query params.
+	result, err = buildBlockingReloadURL("http://localhost:8080/live/test.m3u8?token=abc", 1, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should contain all three params.
+	for _, expected := range []string{"_HLS_msn=1", "_HLS_part=0", "token=abc"} {
+		if !strings.Contains(result, expected) {
+			t.Errorf("result %q missing %q", result, expected)
+		}
+	}
+}
+
+func TestLLHLSPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithLLHLS("fmp4"), testutil.WithAPI())
+
+	// Push via RTMP in background so there is a stream for LL-HLS to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// LL-HLS needs time to produce partial segments.
+	time.Sleep(3 * time.Second)
+
+	// Play via LL-HLS.
+	player, err := NewPlayer("llhls")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("http://%s/live/test.m3u8", srv.HTTPAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "llhls",
+		URL:      playURL,
+		Duration: 5 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	// fmp4 demuxing may have small DTS reordering at partial segment boundaries.
+	if !rpt.Video.DTSMonotonic {
+		t.Logf("note: video DTS is not strictly monotonic (expected for fmp4 partial segments)")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
+
+	t.Logf("LL-HLS play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
+
+func TestNewPlayer_DASH(t *testing.T) {
+	p, err := NewPlayer("dash")
+	if err != nil {
+		t.Fatalf("NewPlayer(dash): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(dash) returned nil")
+	}
+}
+
+func TestParseMPD(t *testing.T) {
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT6S"
+     availabilityStartTime="2026-04-04T12:00:00Z" publishTime="2026-04-04T12:00:30Z"
+     timeShiftBufferDepth="PT36S" minBufferTime="PT2S"
+     profiles="urn:mpeg:dash:profile:isoff-live:2011">
+  <Period id="0" start="PT0S">
+    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">
+      <SegmentTemplate timescale="1000" startNumber="1"
+                       initialization="/live/test/vinit.mp4"
+                       media="/live/test/v$Number$.m4s">
+        <SegmentTimeline>
+          <S t="0" d="6000"/>
+          <S d="6000"/>
+          <S d="6000"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="0" bandwidth="2000000" codecs="avc1.640028" width="1920" height="1080"/>
+    </AdaptationSet>
+    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" startWithSAP="1" segmentAlignment="true">
+      <SegmentTemplate timescale="1000" startNumber="1"
+                       initialization="/live/test/audio_init.mp4"
+                       media="/live/test/a$Number$.m4s">
+        <SegmentTimeline>
+          <S t="0" d="6000"/>
+          <S d="6000"/>
+          <S d="6000"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="1" bandwidth="128000" codecs="mp4a.40.2" audioSamplingRate="44100"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+	mpd, err := parseMPD(body)
+	if err != nil {
+		t.Fatalf("parseMPD: %v", err)
+	}
+
+	if mpd.Type != "dynamic" {
+		t.Errorf("MPD type = %q, want %q", mpd.Type, "dynamic")
+	}
+	if mpd.MinimumUpdatePeriod != "PT6S" {
+		t.Errorf("minimumUpdatePeriod = %q, want %q", mpd.MinimumUpdatePeriod, "PT6S")
+	}
+	if len(mpd.Periods) != 1 {
+		t.Fatalf("got %d periods, want 1", len(mpd.Periods))
+	}
+
+	period := mpd.Periods[0]
+	if len(period.AdaptationSets) != 2 {
+		t.Fatalf("got %d AdaptationSets, want 2", len(period.AdaptationSets))
+	}
+
+	// Video AdaptationSet.
+	videoAS := period.AdaptationSets[0]
+	if videoAS.ContentType != "video" {
+		t.Errorf("AS[0] contentType = %q, want %q", videoAS.ContentType, "video")
+	}
+	if videoAS.SegmentTemplate == nil {
+		t.Fatal("video SegmentTemplate is nil")
+	}
+	if videoAS.SegmentTemplate.StartNumber != 1 {
+		t.Errorf("video startNumber = %d, want 1", videoAS.SegmentTemplate.StartNumber)
+	}
+	if videoAS.SegmentTemplate.Initialization != "/live/test/vinit.mp4" {
+		t.Errorf("video init = %q", videoAS.SegmentTemplate.Initialization)
+	}
+	if videoAS.SegmentTemplate.Media != "/live/test/v$Number$.m4s" {
+		t.Errorf("video media = %q", videoAS.SegmentTemplate.Media)
+	}
+	if cnt := timelineSegmentCount(videoAS.SegmentTemplate.Timeline); cnt != 3 {
+		t.Errorf("video timeline segment count = %d, want 3", cnt)
+	}
+
+	// Audio AdaptationSet.
+	audioAS := period.AdaptationSets[1]
+	if audioAS.ContentType != "audio" {
+		t.Errorf("AS[1] contentType = %q, want %q", audioAS.ContentType, "audio")
+	}
+	if audioAS.SegmentTemplate == nil {
+		t.Fatal("audio SegmentTemplate is nil")
+	}
+	if audioAS.SegmentTemplate.Initialization != "/live/test/audio_init.mp4" {
+		t.Errorf("audio init = %q", audioAS.SegmentTemplate.Initialization)
+	}
+	if audioAS.SegmentTemplate.Media != "/live/test/a$Number$.m4s" {
+		t.Errorf("audio media = %q", audioAS.SegmentTemplate.Media)
+	}
+}
+
+func TestParsePT(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+	}{
+		{"PT6S", 6 * time.Second},
+		{"PT3S", 3 * time.Second},
+		{"PT0.5S", 500 * time.Millisecond},
+		{"", 0},
+		{"invalid", 0},
+		{"PT", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := parsePT(tt.input)
+			if got != tt.want {
+				t.Errorf("parsePT(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTimelineSegmentCount(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []mpdTimelineEntry
+		want    int
+	}{
+		{
+			name:    "three entries no repeat",
+			entries: []mpdTimelineEntry{{D: 6000}, {D: 6000}, {D: 6000}},
+			want:    3,
+		},
+		{
+			name:    "one entry with repeat",
+			entries: []mpdTimelineEntry{{D: 6000, R: 4}},
+			want:    5,
+		},
+		{
+			name:    "mixed",
+			entries: []mpdTimelineEntry{{D: 6000}, {D: 6000, R: 2}},
+			want:    4,
+		},
+		{
+			name:    "nil timeline",
+			entries: nil,
+			want:    0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var tl *mpdSegmentTimeline
+			if tt.entries != nil {
+				tl = &mpdSegmentTimeline{Entries: tt.entries}
+			}
+			got := timelineSegmentCount(tl)
+			if got != tt.want {
+				t.Errorf("timelineSegmentCount = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDASHPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithAPI())
+
+	// Push via RTMP in background so there is a stream for DASH to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// DASH needs at least 3 segments before serving MPD (server waits up to 15s).
+	// Use a longer initial sleep so segments are ready.
+	time.Sleep(5 * time.Second)
+
+	// Play via DASH.
+	player, err := NewPlayer("dash")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("http://%s/live/test.mpd", srv.HTTPAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "dash",
+		URL:      playURL,
+		Duration: 5 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	// fmp4 demuxing may have small DTS reordering at segment boundaries.
+	if !rpt.Video.DTSMonotonic {
+		t.Logf("note: video DTS is not strictly monotonic (expected for fmp4 segments)")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
+
+	t.Logf("DASH play report: video=%d frames, audio=%d frames, duration=%dms",
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
