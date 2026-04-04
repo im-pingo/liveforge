@@ -1,0 +1,47 @@
+server:
+  name: "srt-node-c"
+  log_level: info
+  drain_timeout: 10s
+
+rtmp:
+  enabled: true
+  listen: ":1937"
+  chunk_size: 4096
+
+srt:
+  enabled: true
+  listen: ":6002"
+  latency: 120
+
+http_stream:
+  enabled: true
+  listen: ":8082"
+  cors: true
+
+stream:
+  gop_cache: true
+  gop_cache_num: 1
+  audio_cache_ms: 1000
+  ring_buffer_size: 1024
+  idle_timeout: 30s
+  no_publisher_timeout: 15s
+
+cluster:
+  forward:
+    enabled: false
+  origin:
+    enabled: true
+    servers:
+      - "srt://127.0.0.1:6001"
+    idle_timeout: 30s
+    retry_max: 3
+    retry_delay: 2s
+  srt:
+    latency: 120ms
+
+api:
+  enabled: true
+  listen: ":8092"
+  console:
+    username: "admin"
+    password: "admin"
