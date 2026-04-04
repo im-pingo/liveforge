@@ -238,6 +238,9 @@ func TestRTSPPlay(t *testing.T) {
 	if !rpt.Video.DTSMonotonic {
 		t.Error("video DTS is not monotonic")
 	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
 
 	t.Logf("RTSP play report: video=%d frames, audio=%d frames, duration=%dms",
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)

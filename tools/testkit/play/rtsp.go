@@ -2,6 +2,7 @@ package play
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -11,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"context"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
@@ -196,9 +195,9 @@ func parseRTSPPlayTarget(cfg PlayConfig) (targetURL, addr string, err error) {
 	targetURL = cfg.URL
 	if cfg.Token != "" {
 		if strings.Contains(targetURL, "?") {
-			targetURL += "&token=" + cfg.Token
+			targetURL += "&token=" + url.QueryEscape(cfg.Token)
 		} else {
-			targetURL += "?token=" + cfg.Token
+			targetURL += "?token=" + url.QueryEscape(cfg.Token)
 		}
 	}
 
