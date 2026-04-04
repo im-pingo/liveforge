@@ -26,6 +26,9 @@ func WithRTMP() Option {
 	return func(c *config.Config) {
 		c.RTMP.Enabled = true
 		c.RTMP.Listen = allocTCPAddr()
+		if c.RTMP.ChunkSize == 0 {
+			c.RTMP.ChunkSize = 4096
+		}
 	}
 }
 
