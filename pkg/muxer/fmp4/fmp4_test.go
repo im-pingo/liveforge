@@ -182,6 +182,135 @@ func TestMuxerFlow(t *testing.T) {
 	}
 }
 
+func TestFilterH264VCLNALUs(t *testing.T) {
+	// Build AVCC payload: SPS(7) + PPS(8) + IDR(5)
+	makeNAL := func(nalType byte, size int) []byte {
+		nal := make([]byte, size)
+		nal[0] = nalType & 0x1F
+		buf := make([]byte, 4+size)
+		binary.BigEndian.PutUint32(buf, uint32(size))
+		copy(buf[4:], nal)
+		return buf
+	}
+
+	sps := makeNAL(7, 10)  // SPS
+	pps := makeNAL(8, 5)   // PPS
+	sei := makeNAL(6, 8)   // SEI
+	idr := makeNAL(5, 100) // IDR slice
+
+	tests := []struct {
+		name    string
+		input   []byte
+		wantLen int // expected length of filtered output
+	}{
+		{
+			name:    "SPS+PPS+IDR keeps only IDR",
+			input:   concat(sps, pps, idr),
+			wantLen: len(idr),
+		},
+		{
+			name:    "SPS+PPS+SEI+IDR keeps only IDR",
+			input:   concat(sps, pps, sei, idr),
+			wantLen: len(idr),
+		},
+		{
+			name:    "IDR only unchanged",
+			input:   idr,
+			wantLen: len(idr),
+		},
+		{
+			name:    "non-IDR slice unchanged",
+			input:   makeNAL(1, 50),
+			wantLen: len(makeNAL(1, 50)),
+		},
+		{
+			name:    "SPS+PPS only returns empty",
+			input:   concat(sps, pps),
+			wantLen: 0,
+		},
+		{
+			name:    "empty input",
+			input:   nil,
+			wantLen: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filterH264VCLNALUs(tt.input)
+			if len(got) != tt.wantLen {
+				t.Errorf("filterH264VCLNALUs() len = %d, want %d", len(got), tt.wantLen)
+			}
+			// Verify all remaining NALUs are VCL (type 1-5)
+			offset := 0
+			for offset+4 < len(got) {
+				nalLen := int(binary.BigEndian.Uint32(got[offset:]))
+				if offset+4+nalLen > len(got) {
+					t.Fatalf("invalid AVCC at offset %d", offset)
+				}
+				nalType := got[offset+4] & 0x1F
+				if nalType < 1 || nalType > 5 {
+					t.Errorf("non-VCL NAL type %d in output", nalType)
+				}
+				offset += 4 + nalLen
+			}
+		})
+	}
+}
+
+func TestBuildMediaSegmentStripsNonVCL(t *testing.T) {
+	// AVCC: SPS(7, 10 bytes) + PPS(8, 5 bytes) + IDR(5, 50 bytes)
+	avcc := make([]byte, 0)
+	for _, entry := range []struct {
+		nalType byte
+		size    int
+	}{
+		{7, 10}, // SPS
+		{8, 5},  // PPS
+		{5, 50}, // IDR
+	} {
+		nal := make([]byte, entry.size)
+		nal[0] = entry.nalType & 0x1F
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(entry.size))
+		avcc = append(avcc, buf...)
+		avcc = append(avcc, nal...)
+	}
+
+	frames := []*avframe.AVFrame{
+		{
+			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
+			FrameType: avframe.FrameTypeKeyframe,
+			DTS:       0,
+			PTS:       0,
+			Payload:   avcc,
+		},
+	}
+
+	seg := BuildMediaSegment(frames, 1, 44100)
+	if len(seg) == 0 {
+		t.Fatal("expected non-empty segment")
+	}
+
+	// Find mdat and verify it only contains IDR (54 bytes = 4 len + 50 data)
+	moofSize := int(binary.BigEndian.Uint32(seg[0:4]))
+	mdatSize := int(binary.BigEndian.Uint32(seg[moofSize : moofSize+4]))
+	mdatPayload := mdatSize - 8
+	// IDR NALU is 50 bytes + 4 byte length prefix = 54 bytes
+	if mdatPayload != 54 {
+		t.Errorf("mdat payload = %d bytes, want 54 (IDR only)", mdatPayload)
+	}
+}
+
+func concat(slices ...[]byte) []byte {
+	var result []byte
+	for _, s := range slices {
+		result = append(result, s...)
+	}
+	return result
+}
+
 func TestBuildMediaSegmentSkipsSequenceHeaders(t *testing.T) {
 	frames := []*avframe.AVFrame{
 		{

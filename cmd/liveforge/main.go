@@ -20,7 +20,9 @@ import (
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
 	"github.com/im-pingo/liveforge/module/cluster"
+	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
 	metricsmod "github.com/im-pingo/liveforge/module/metrics"
+	sipmod "github.com/im-pingo/liveforge/module/sip"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
@@ -70,6 +72,20 @@ func main() {
 
 	if cfg.WebRTC.Enabled {
 		s.RegisterModule(webrtcmod.NewModule())
+	}
+
+	// SIP must be registered before GB28181 so its service is available.
+	var sipModule *sipmod.Module
+	if cfg.SIP.Enabled {
+		sipModule = sipmod.NewModule()
+		s.RegisterModule(sipModule)
+	}
+
+	if cfg.GB28181.Enabled {
+		if sipModule == nil {
+			log.Fatal("gb28181 requires sip to be enabled")
+		}
+		s.RegisterModule(gb28181mod.NewModule(sipModule.Service()))
 	}
 
 	// Notify must be registered before API so its WebSocket handler

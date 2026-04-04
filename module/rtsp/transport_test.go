@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"testing"
+
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
 func TestWriteReadInterleaved(t *testing.T) {
@@ -61,9 +63,9 @@ func TestInterleavedDifferentChannels(t *testing.T) {
 	}
 }
 
-func TestPortManagerAllocateRelease(t *testing.T) {
-	pm := NewPortManager(10000, 10010)
-	rtp1, rtcp1, err := pm.Allocate()
+func TestPortAllocatorAllocateRelease(t *testing.T) {
+	pa, _ := portalloc.New(10000, 10010)
+	rtp1, rtcp1, err := pa.AllocatePair()
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -75,7 +77,7 @@ func TestPortManagerAllocateRelease(t *testing.T) {
 	}
 
 	// Allocate again, should get different ports
-	rtp2, _, err := pm.Allocate()
+	rtp2, _, err := pa.AllocatePair()
 	if err != nil {
 		t.Fatalf("Allocate 2: %v", err)
 	}
@@ -84,8 +86,8 @@ func TestPortManagerAllocateRelease(t *testing.T) {
 	}
 
 	// Release and re-allocate
-	pm.Release(rtp1)
-	rtp3, _, err := pm.Allocate()
+	pa.Free(rtp1, rtp1+1)
+	rtp3, _, err := pa.AllocatePair()
 	if err != nil {
 		t.Fatalf("Allocate 3: %v", err)
 	}
@@ -94,11 +96,11 @@ func TestPortManagerAllocateRelease(t *testing.T) {
 	}
 }
 
-func TestPortManagerExhausted(t *testing.T) {
-	pm := NewPortManager(10000, 10004) // only 2 pairs available
-	_, _, _ = pm.Allocate()
-	_, _, _ = pm.Allocate()
-	_, _, err := pm.Allocate()
+func TestPortAllocatorExhausted(t *testing.T) {
+	pa, _ := portalloc.New(10000, 10003) // only 2 pairs available
+	_, _, _ = pa.AllocatePair()
+	_, _, _ = pa.AllocatePair()
+	_, _, err := pa.AllocatePair()
 	if err == nil {
 		t.Fatal("expected port exhaustion error")
 	}

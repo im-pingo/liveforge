@@ -32,6 +32,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.registry.Register(NewSRTTransport(cfg.SRT))
 	m.registry.Register(NewRTSPTransport(cfg.RTSP))
 	m.registry.Register(NewRTPTransport(cfg.RTP, s))
+	m.registry.Register(NewGBTransport(cfg.GB28181, s))
 
 	if cfg.Forward.Enabled && (len(cfg.Forward.Targets) > 0 || cfg.Forward.ScheduleURL != "") {
 		fwdScheduler := NewScheduler(
