@@ -13,6 +13,20 @@ srt:
   listen: ":6000"
   latency: 120
 
+http_stream:
+  enabled: true
+  listen: ":8080"
+  cors: true
+
+webrtc:
+  enabled: true
+  listen: ":8443"
+  ice_lite: true
+  ice_servers:
+    - urls: ["stun:stun.l.google.com:19302"]
+  udp_port_range: [30000, 30500]
+  candidates: []
+
 stream:
   gop_cache: true
   gop_cache_num: 1

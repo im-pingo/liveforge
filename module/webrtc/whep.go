@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
@@ -73,6 +75,15 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		releaseConn()
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
+	}
+
+	// Set GCC initial bitrate to the stream's actual bitrate (with 20% headroom)
+	// so the pacer doesn't throttle at startup. The factory closure reads this
+	// value when pion creates the BWE for this PeerConnection.
+	if stats := stream.Stats(); stats.BitrateKbps > 0 {
+		m.nextInitialBitrateMu.Lock()
+		m.nextInitialBitrate = stats.BitrateKbps * 1000 * 120 / 100 // kbps→bps + 20%
+		m.nextInitialBitrateMu.Unlock()
 	}
 
 	pc, err := m.api.NewPeerConnection(webrtc.Configuration{
@@ -212,8 +223,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-
 	if err := pc.SetLocalDescription(answer); err != nil {
 		sess.Close()
 		stream.RemoveSubscriber("webrtc")
@@ -222,7 +231,25 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	<-gatherComplete
+	// Wait for at least one ICE candidate or gathering complete,
+	// whichever comes first. Avoids blocking on slow STUN/TURN
+	// servers in LAN environments where host candidates suffice.
+	gatherDone := make(chan struct{})
+	var gatherOnce sync.Once
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil { // gathering complete
+			gatherOnce.Do(func() { close(gatherDone) })
+		}
+	})
+	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
+		if state == webrtc.ICEGatheringStateComplete {
+			gatherOnce.Do(func() { close(gatherDone) })
+		}
+	})
+	select {
+	case <-gatherDone:
+	case <-time.After(500 * time.Millisecond):
+	}
 
 	// Determine playback mode from query parameter.
 	// "realtime" (default): skip GOP cache, wait for next live keyframe.

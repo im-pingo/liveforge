@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
@@ -174,8 +175,6 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-
 	if err := pc.SetLocalDescription(answer); err != nil {
 		sess.Close()
 		releaseConn()
@@ -183,7 +182,24 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	<-gatherComplete
+	// Wait for at least one ICE candidate or gathering complete,
+	// whichever comes first. Avoids blocking on slow STUN/TURN timeouts.
+	gatherDone := make(chan struct{})
+	var gatherOnce sync.Once
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			gatherOnce.Do(func() { close(gatherDone) })
+		}
+	})
+	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
+		if state == webrtc.ICEGatheringStateComplete {
+			gatherOnce.Do(func() { close(gatherDone) })
+		}
+	})
+	select {
+	case <-gatherDone:
+	case <-time.After(500 * time.Millisecond):
+	}
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/webrtc/session/"+sessionID)

@@ -1242,12 +1242,25 @@ function playWHEP(streamKey, mode) {
   pc.createOffer().then(function(offer) {
     return pc.setLocalDescription(offer);
   }).then(function() {
-    // Wait for ICE gathering
+    // Wait for at least one ICE candidate (host) or gathering complete,
+    // whichever comes first. Avoids waiting for slow STUN/TURN timeouts.
     return new Promise(function(resolve) {
       if (pc.iceGatheringState === "complete") { resolve(); return; }
-      pc.onicegatheringstatechange = function() {
-        if (pc.iceGatheringState === "complete") resolve();
+      var resolved = false;
+      pc.onicecandidate = function(e) {
+        if (!resolved && (e.candidate === null || e.candidate.type === "host")) {
+          resolved = true;
+          resolve();
+        }
       };
+      pc.onicegatheringstatechange = function() {
+        if (!resolved && pc.iceGatheringState === "complete") {
+          resolved = true;
+          resolve();
+        }
+      };
+      // Safety timeout: don't wait more than 500ms for candidates
+      setTimeout(function() { if (!resolved) { resolved = true; resolve(); } }, 500);
     });
   }).then(function() {
     return fetch(url, {
