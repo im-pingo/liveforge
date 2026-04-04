@@ -38,6 +38,7 @@ func (p *srtPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
 		onFrame(frame)
 	})
+	defer demuxer.Flush()
 
 	var deadline time.Time
 	if cfg.Duration > 0 {
@@ -75,12 +76,10 @@ func (p *srtPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 		select {
 		case <-ctx.Done():
 			conn.Close()
-			demuxer.Flush()
 			return ctx.Err()
 
 		case <-deadlineCh:
 			conn.Close()
-			demuxer.Flush()
 			return nil
 
 		case res := <-readCh:
@@ -89,10 +88,8 @@ func (p *srtPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 					return ctx.Err()
 				}
 				if res.err == io.EOF {
-					demuxer.Flush()
 					return nil
 				}
-				demuxer.Flush()
 				return fmt.Errorf("srt read: %w", res.err)
 			}
 
@@ -130,9 +127,10 @@ func parseSRTPlayTarget(rawURL, token string) (addr, streamID string, err error)
 		return "", "", fmt.Errorf("missing streamid in SRT URL query parameters")
 	}
 
-	// Append token from URL query if present.
+	// Append token from URL query if present. u.Query().Get returns the
+	// decoded value, so re-encode it to avoid corrupting the streamid.
 	if urlToken := u.Query().Get("token"); urlToken != "" {
-		streamID += "?token=" + urlToken
+		streamID += "?token=" + url.QueryEscape(urlToken)
 	} else if token != "" {
 		// Append token from PlayConfig if provided and not already in URL.
 		streamID += "?token=" + url.QueryEscape(token)
