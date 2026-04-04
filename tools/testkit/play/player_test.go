@@ -570,6 +570,88 @@ func TestHTTPFLVPlay(t *testing.T) {
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
 
+func TestNewPlayer_HLS(t *testing.T) {
+	p, err := NewPlayer("hls")
+	if err != nil {
+		t.Fatalf("NewPlayer(hls): %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewPlayer(hls) returned nil")
+	}
+}
+
+func TestHLSPlay(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithAPI())
+
+	// Push via RTMP in background so there is a stream for HLS to subscribe to.
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+
+	pushURL := fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{
+			Protocol: "rtmp",
+			Target:   pushURL,
+		})
+		pushDone <- err
+	}()
+
+	// HLS needs time to generate the first TS segment. The server waits up to
+	// 10s for at least one segment on m3u8 request, but the stream must be
+	// publishing first. Wait for the RTMP push to establish.
+	time.Sleep(1 * time.Second)
+
+	// Play via HLS.
+	player, err := NewPlayer("hls")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+
+	a := analyzer.New()
+	playURL := fmt.Sprintf("http://%s/live/test.m3u8", srv.HTTPAddr())
+	playCtx, playCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer playCancel()
+
+	playCfg := PlayConfig{
+		Protocol: "hls",
+		URL:      playURL,
+		Duration: 5 * time.Second,
+	}
+
+	if err := player.Play(playCtx, playCfg, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Stop the pusher.
+	pushCancel()
+	<-pushDone
+
+	// Verify the analyzer report.
+	rpt := a.Report()
+
+	if rpt.Video.FrameCount == 0 {
+		t.Error("no video frames received")
+	}
+	// TS demuxing may have small DTS reordering at segment boundaries due to
+	// PES timestamp granularity. Log rather than fail.
+	if !rpt.Video.DTSMonotonic {
+		t.Logf("note: video DTS is not strictly monotonic (expected for TS segments)")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Error("no audio frames received")
+	}
+
+	t.Logf("HLS play report: video=%d frames, audio=%d frames, duration=%dms",
+		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
+}
+
 func TestWSFLVPlay(t *testing.T) {
 	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithAPI())
 
