@@ -101,6 +101,9 @@ gb28181:
   catalog_interval: 3600s
   dump_file: ""
 
+audio_codec:
+  enabled: true
+
 stream:
   gop_cache: true
   gop_cache_num: 1
