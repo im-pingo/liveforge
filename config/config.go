@@ -21,7 +21,13 @@ type Config struct {
 	Cluster ClusterConfig `yaml:"cluster"`
 	Record  RecordConfig  `yaml:"record"`
 	API     APIConfig     `yaml:"api"`
-	Metrics MetricsConfig `yaml:"metrics"`
+	Metrics    MetricsConfig    `yaml:"metrics"`
+	AudioCodec AudioCodecConfig `yaml:"audio_codec"`
+}
+
+// AudioCodecConfig controls audio transcoding between protocols.
+type AudioCodecConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // ServerConfig holds general server settings.

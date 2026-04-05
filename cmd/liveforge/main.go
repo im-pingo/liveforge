@@ -48,6 +48,10 @@ func main() {
 
 	s := core.NewServer(cfg)
 
+	if cfg.AudioCodec.Enabled {
+		s.StreamHub().SetAudioCodecEnabled(true)
+	}
+
 	// Auth module must be registered before protocol modules
 	// so its hooks are in place when connections arrive.
 	if cfg.Auth.Enabled {

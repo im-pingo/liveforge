@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/webrtc/v4"
 )
@@ -138,14 +139,22 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	if info.HasAudio() {
 		mime := codecToMime(info.AudioCodec)
+		if mime == "" && stream.TranscodeManager() != nil {
+			// Publisher codec not WebRTC-compatible; transcode to Opus.
+			mime = webrtc.MimeTypeOpus
+		}
 		if mime != "" {
 			clockRate := uint32(48000)
 			channels := uint16(2)
-			if info.SampleRate > 0 {
-				clockRate = uint32(info.SampleRate)
-			}
-			if info.Channels > 0 {
-				channels = uint16(info.Channels)
+			// When transcoding, always use Opus defaults (48kHz/2ch).
+			// For direct codec passthrough, use publisher's parameters.
+			if codecToMime(info.AudioCodec) != "" {
+				if info.SampleRate > 0 {
+					clockRate = uint32(info.SampleRate)
+				}
+				if info.Channels > 0 {
+					channels = uint16(info.Channels)
+				}
 			}
 			at, err := webrtc.NewTrackLocalStaticSample(
 				webrtc.RTPCodecCapability{MimeType: mime, ClockRate: clockRate, Channels: channels},
@@ -259,9 +268,15 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		mode = "realtime"
 	}
 
+	// Determine target audio codec for the feed loop.
+	targetAudioCodec := info.AudioCodec
+	if audioSender != nil && codecToMime(info.AudioCodec) == "" {
+		targetAudioCodec = avframe.CodecOpus // transcoding to Opus
+	}
+
 	// Start the feed goroutine. It waits for ICE+DTLS to complete before
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
-	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, bwe)
+	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, targetAudioCodec, bwe)
 
 	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
