@@ -30,6 +30,8 @@ func NewStreamHub(cfg config.StreamConfig, limits config.LimitsConfig, bus *Even
 
 // SetAudioCodecEnabled enables audio transcoding for new streams.
 func (h *StreamHub) SetAudioCodecEnabled(enabled bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.audioCodecEnabled = enabled
 }
 

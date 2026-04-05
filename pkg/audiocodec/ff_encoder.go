@@ -166,6 +166,7 @@ import "C"
 
 import (
 	"fmt"
+	"log/slog"
 	"unsafe"
 )
 
@@ -186,6 +187,8 @@ func NewFFmpegEncoder(codecName string, sampleRate, channels int) *FFmpegEncoder
 	var ctx *C.AVCodecContext
 	ret := C.ff_encoder_open(cName, C.int(sampleRate), C.int(channels), &ctx)
 	if ret != 0 {
+		slog.Warn("FFmpeg encoder open failed, returning inactive encoder",
+			"codec", codecName, "sample_rate", sampleRate, "channels", channels, "ret", int(ret))
 		return &FFmpegEncoder{codecName: codecName, sampleRate: sampleRate, channels: channels}
 	}
 	return &FFmpegEncoder{

@@ -119,6 +119,12 @@ func (r *RingReader[T]) Read() (T, bool) {
 	}
 }
 
+// Signal returns the notification channel of the underlying ring buffer.
+// Useful for select-based consumers that need to multiplex with other channels.
+func (r *RingReader[T]) Signal() <-chan struct{} {
+	return r.rb.signal
+}
+
 // TryRead attempts a non-blocking read. Returns (value, false) if no data available.
 func (r *RingReader[T]) TryRead() (T, bool) {
 	r.lastSkipped = 0

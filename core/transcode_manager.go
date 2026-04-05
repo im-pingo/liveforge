@@ -45,11 +45,12 @@ func NewTranscodeManager(stream *Stream, registry *audiocodec.Registry, bufSize 
 // Otherwise it creates or reuses a shared TranscodedTrack.
 // The returned func must be called to release the subscription.
 func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	if tm.stream.Publisher() == nil {
+	pub := tm.stream.Publisher()
+	if pub == nil {
 		return nil, func() {}, fmt.Errorf("no publisher on stream")
 	}
 
-	sourceCodec := tm.stream.Publisher().MediaInfo().AudioCodec
+	sourceCodec := pub.MediaInfo().AudioCodec
 
 	// Zero-overhead path: target matches source, no transcoding needed.
 	if targetCodec == sourceCodec {

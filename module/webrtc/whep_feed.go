@@ -315,7 +315,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		select {
 		case <-done:
 			return
-		case <-stream.RingBuffer().Signal():
+		case <-reader.Signal():
 		}
 	}
 }

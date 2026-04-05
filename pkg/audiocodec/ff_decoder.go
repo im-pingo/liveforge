@@ -138,6 +138,7 @@ import "C"
 
 import (
 	"fmt"
+	"log/slog"
 	"unsafe"
 )
 
@@ -179,8 +180,8 @@ func NewFFmpegDecoder(codecName string) *FFmpegDecoder {
 	var ctx *C.AVCodecContext
 	ret := C.ff_decoder_open(cName, C.int(sr), C.int(ch), &ctx)
 	if ret != 0 {
-		// Returning a decoder that will error on Decode is preferable
-		// to panicking here.
+		slog.Warn("FFmpeg decoder open failed, returning inactive decoder",
+			"codec", codecName, "sample_rate", sr, "channels", ch, "ret", int(ret))
 		return &FFmpegDecoder{codecName: codecName, sampleRate: sr, channels: ch}
 	}
 	return &FFmpegDecoder{
