@@ -1419,7 +1419,8 @@ function playDASH(streamKey) {
 function playWHEP(streamKey, mode) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.webrtc);
-  var url = "http://" + location.hostname + ":" + port + "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime");
+  var proto = location.protocol === "https:" ? "https://" : "http://";
+  var url = proto + location.hostname + ":" + port + "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime");
   setPlayerURL(url);
   setPlayerStatus("Negotiating WebRTC...");
 
@@ -1708,8 +1709,23 @@ var publishStatsVisible = false;
 function openPublishModal() {
   document.getElementById("publish-overlay").classList.add("active");
   setPublishStatus("");
-  enumerateDevices();
-  startPreview();
+
+  // Secure context check: getUserMedia requires HTTPS or localhost.
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setPublishStatus("Camera/mic requires HTTPS or localhost access", "error");
+    return;
+  }
+
+  // Request permission first (any camera+mic), then enumerate to get labels.
+  navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(function(stream) {
+    publishStream = stream;
+    document.getElementById("publish-preview").srcObject = stream;
+    return navigator.mediaDevices.enumerateDevices();
+  }).then(function(devices) {
+    populateDeviceSelects(devices);
+  }).catch(function(e) {
+    setPublishStatus("Camera/mic error: " + e.message, "error");
+  });
 }
 
 function closePublishModal() {
@@ -1729,27 +1745,38 @@ function setPublishStatus(msg, cls) {
   el.className = "publish-status" + (cls ? " " + cls : "");
 }
 
-function enumerateDevices() {
-  navigator.mediaDevices.enumerateDevices().then(function(devices) {
-    var videoSel = document.getElementById("publish-video-device");
-    var audioSel = document.getElementById("publish-audio-device");
-    videoSel.innerHTML = "";
-    audioSel.innerHTML = "";
+function populateDeviceSelects(devices) {
+  var videoSel = document.getElementById("publish-video-device");
+  var audioSel = document.getElementById("publish-audio-device");
 
-    devices.forEach(function(d) {
-      var opt = document.createElement("option");
-      opt.value = d.deviceId;
-      opt.textContent = d.label || (d.kind + " " + d.deviceId.substring(0, 8));
-      if (d.kind === "videoinput") videoSel.appendChild(opt);
-      if (d.kind === "audioinput") audioSel.appendChild(opt);
-    });
-  }).catch(function(e) {
-    setPublishStatus("Cannot enumerate devices: " + e.message, "error");
+  // Remember current selections to preserve across re-enumeration.
+  var prevVideo = videoSel.value;
+  var prevAudio = audioSel.value;
+  videoSel.innerHTML = "";
+  audioSel.innerHTML = "";
+
+  var videoIdx = 1, audioIdx = 1;
+  devices.forEach(function(d) {
+    var opt = document.createElement("option");
+    opt.value = d.deviceId;
+    if (d.kind === "videoinput") {
+      opt.textContent = d.label || ("Camera " + videoIdx++);
+      videoSel.appendChild(opt);
+    } else if (d.kind === "audioinput") {
+      opt.textContent = d.label || ("Microphone " + audioIdx++);
+      audioSel.appendChild(opt);
+    }
   });
+
+  // Restore previous selections if still available.
+  if (prevVideo) videoSel.value = prevVideo;
+  if (prevAudio) audioSel.value = prevAudio;
 }
 
 function startPreview() {
   stopPreview();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+
   var videoId = document.getElementById("publish-video-device").value;
   var audioId = document.getElementById("publish-audio-device").value;
   var constraints = {
@@ -1759,8 +1786,10 @@ function startPreview() {
   navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
     publishStream = stream;
     document.getElementById("publish-preview").srcObject = stream;
-    // Re-enumerate to get labels (labels become available after permission grant)
-    enumerateDevices();
+    // Re-enumerate to get labels after permission grant.
+    return navigator.mediaDevices.enumerateDevices();
+  }).then(function(devices) {
+    populateDeviceSelects(devices);
   }).catch(function(e) {
     setPublishStatus("Camera/mic error: " + e.message, "error");
   });
@@ -1824,16 +1853,31 @@ function startPublish() {
   };
 
   var port = portFromListen(endpoints.webrtc);
-  var url = "http://" + location.hostname + ":" + port + "/webrtc/whip/" + streamKey;
+  var proto = location.protocol === "https:" ? "https://" : "http://";
+  var url = proto + location.hostname + ":" + port + "/webrtc/whip/" + streamKey;
 
   pc.createOffer().then(function(offer) {
     return pc.setLocalDescription(offer);
   }).then(function() {
+    // Wait for at least one ICE candidate (host) or gathering complete,
+    // whichever comes first. Avoids waiting for slow STUN/TURN timeouts.
     return new Promise(function(resolve) {
       if (pc.iceGatheringState === "complete") { resolve(); return; }
-      pc.onicegatheringstatechange = function() {
-        if (pc.iceGatheringState === "complete") resolve();
+      var resolved = false;
+      pc.onicecandidate = function(e) {
+        if (!resolved && (e.candidate === null || e.candidate.type === "host")) {
+          resolved = true;
+          resolve();
+        }
       };
+      pc.onicegatheringstatechange = function() {
+        if (!resolved && pc.iceGatheringState === "complete") {
+          resolved = true;
+          resolve();
+        }
+      };
+      // Safety timeout: don't wait more than 500ms for candidates
+      setTimeout(function() { if (!resolved) { resolved = true; resolve(); } }, 500);
     });
   }).then(function() {
     return fetch(url, {
@@ -1847,7 +1891,7 @@ function startPublish() {
     }
     var loc = resp.headers.get("Location");
     if (loc) {
-      publishSessionURL = "http://" + location.hostname + ":" + port + loc;
+      publishSessionURL = proto + location.hostname + ":" + port + loc;
     }
     return resp.text();
   }).then(function(sdp) {
