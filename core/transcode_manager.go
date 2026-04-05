@@ -65,7 +65,9 @@ func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*u
 	if track, ok := tm.tracks[targetCodec]; ok {
 		track.subCount++
 		reader := track.ringBuffer.NewReaderAt(track.ringBuffer.WriteCursor())
-		return reader, func() { tm.releaseTrack(targetCodec) }, nil
+		var once sync.Once
+		release := func() { once.Do(func() { tm.releaseTrack(targetCodec) }) }
+		return reader, release, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,10 +79,12 @@ func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*u
 	}
 	tm.tracks[targetCodec] = track
 
-	go tm.transcodeLoop(ctx, track)
+	go tm.transcodeLoop(ctx, track, sourceCodec)
 
 	reader := track.ringBuffer.NewReaderAt(track.ringBuffer.WriteCursor())
-	return reader, func() { tm.releaseTrack(targetCodec) }, nil
+	var once sync.Once
+	release := func() { once.Do(func() { tm.releaseTrack(targetCodec) }) }
+	return reader, release, nil
 }
 
 // releaseTrack decrements the subscriber count for a track and cleans it up when empty.
@@ -100,9 +104,8 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType) {
 }
 
 // transcodeLoop is the core decode-resample-encode pipeline for a single target codec.
-func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack) {
-	sourceCodec := tm.stream.Publisher().MediaInfo().AudioCodec
-
+// sourceCodec is passed in to avoid a TOCTOU race on Publisher().
+func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack, sourceCodec avframe.CodecType) {
 	decoder, err := tm.registry.NewDecoder(sourceCodec)
 	if err != nil {
 		slog.Error("transcode: decoder unavailable", "from", sourceCodec, "error", err)
@@ -242,6 +245,7 @@ func (tm *TranscodeManager) Reset() {
 		if track.cancel != nil {
 			track.cancel()
 		}
+		track.ringBuffer.Close()
 		delete(tm.tracks, codec)
 	}
 }

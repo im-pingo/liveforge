@@ -24,8 +24,11 @@ func TestTranscodeManagerZeroOverhead(t *testing.T) {
 	if reader == nil {
 		t.Fatal("expected non-nil reader")
 	}
-	if len(tm.tracks) != 0 {
-		t.Fatalf("expected 0 tracks, got %d", len(tm.tracks))
+	tm.mu.Lock()
+	trackCount := len(tm.tracks)
+	tm.mu.Unlock()
+	if trackCount != 0 {
+		t.Fatalf("expected 0 tracks, got %d", trackCount)
 	}
 }
 
@@ -43,8 +46,11 @@ func TestTranscodeManagerCreateTrack(t *testing.T) {
 	if reader == nil {
 		t.Fatal("expected non-nil reader")
 	}
-	if len(tm.tracks) != 1 {
-		t.Fatalf("expected 1 track, got %d", len(tm.tracks))
+	tm.mu.Lock()
+	trackCount := len(tm.tracks)
+	tm.mu.Unlock()
+	if trackCount != 1 {
+		t.Fatalf("expected 1 track, got %d", trackCount)
 	}
 }
 
@@ -56,22 +62,38 @@ func TestTranscodeManagerSharing(t *testing.T) {
 	_, release1, _ := tm.GetOrCreateReader(avframe.CodecG711A)
 	_, release2, _ := tm.GetOrCreateReader(avframe.CodecG711A)
 
-	if len(tm.tracks) != 1 {
-		t.Fatalf("expected 1 shared track, got %d", len(tm.tracks))
+	tm.mu.Lock()
+	trackCount := len(tm.tracks)
+	subCount := 0
+	if track, ok := tm.tracks[avframe.CodecG711A]; ok {
+		subCount = track.subCount
 	}
-	if tm.tracks[avframe.CodecG711A].subCount != 2 {
-		t.Fatalf("expected subCount=2, got %d", tm.tracks[avframe.CodecG711A].subCount)
+	tm.mu.Unlock()
+	if trackCount != 1 {
+		t.Fatalf("expected 1 shared track, got %d", trackCount)
+	}
+	if subCount != 2 {
+		t.Fatalf("expected subCount=2, got %d", subCount)
 	}
 
 	release1()
-	if tm.tracks[avframe.CodecG711A].subCount != 1 {
+	tm.mu.Lock()
+	subCount = 0
+	if track, ok := tm.tracks[avframe.CodecG711A]; ok {
+		subCount = track.subCount
+	}
+	tm.mu.Unlock()
+	if subCount != 1 {
 		t.Fatalf("expected subCount=1 after release1")
 	}
 
 	release2()
 	time.Sleep(50 * time.Millisecond)
-	if len(tm.tracks) != 0 {
-		t.Fatalf("expected 0 tracks after all releases, got %d", len(tm.tracks))
+	tm.mu.Lock()
+	trackCount = len(tm.tracks)
+	tm.mu.Unlock()
+	if trackCount != 0 {
+		t.Fatalf("expected 0 tracks after all releases, got %d", trackCount)
 	}
 }
 
@@ -86,8 +108,11 @@ func TestTranscodeManagerReset(t *testing.T) {
 	tm.Reset()
 	time.Sleep(50 * time.Millisecond)
 
-	if len(tm.tracks) != 0 {
-		t.Fatalf("expected 0 tracks after Reset, got %d", len(tm.tracks))
+	tm.mu.Lock()
+	trackCount := len(tm.tracks)
+	tm.mu.Unlock()
+	if trackCount != 0 {
+		t.Fatalf("expected 0 tracks after Reset, got %d", trackCount)
 	}
 }
 
