@@ -206,32 +206,53 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 			pcm = resampler.Resample(pcm)
 		}
 
-		// Accumulate and encode in encoder-sized chunks
-		pcmBuf = append(pcmBuf, pcm.Samples...)
-		if len(pcmBuf) > maxPCMBufSamples {
-			pcmBuf = pcmBuf[len(pcmBuf)-maxPCMBufSamples:]
-		}
-		for len(pcmBuf) >= frameSize {
+		// Accumulate and encode in encoder-sized chunks.
+		// For PCM codecs (frameSize == 0), encode each decoded buffer directly.
+		if frameSize == 0 {
 			chunk := &audiocodec.PCMFrame{
-				Samples:    pcmBuf[:frameSize],
+				Samples:    pcm.Samples,
 				SampleRate: encoder.SampleRate(),
 				Channels:   encoder.Channels(),
 			}
 			encoded, encErr := encoder.Encode(chunk)
 			if encErr != nil {
-				pcmBuf = pcmBuf[frameSize:]
 				continue
 			}
-
-			dts := ts.Next(encoder.FrameSize())
-
+			samplesPerChannel := len(pcm.Samples) / encoder.Channels()
+			dts := ts.Next(samplesPerChannel)
 			track.ringBuffer.Write(avframe.NewAVFrame(
 				avframe.MediaTypeAudio, track.targetCodec,
 				avframe.FrameTypeInterframe,
 				dts, dts,
 				encoded,
 			))
-			pcmBuf = pcmBuf[frameSize:]
+		} else {
+			pcmBuf = append(pcmBuf, pcm.Samples...)
+			if len(pcmBuf) > maxPCMBufSamples {
+				pcmBuf = pcmBuf[len(pcmBuf)-maxPCMBufSamples:]
+			}
+			for len(pcmBuf) >= frameSize {
+				chunk := &audiocodec.PCMFrame{
+					Samples:    pcmBuf[:frameSize],
+					SampleRate: encoder.SampleRate(),
+					Channels:   encoder.Channels(),
+				}
+				encoded, encErr := encoder.Encode(chunk)
+				if encErr != nil {
+					pcmBuf = pcmBuf[frameSize:]
+					continue
+				}
+
+				dts := ts.Next(encoder.FrameSize())
+
+				track.ringBuffer.Write(avframe.NewAVFrame(
+					avframe.MediaTypeAudio, track.targetCodec,
+					avframe.FrameTypeInterframe,
+					dts, dts,
+					encoded,
+				))
+				pcmBuf = pcmBuf[frameSize:]
+			}
 		}
 	}
 }
