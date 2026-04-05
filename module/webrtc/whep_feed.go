@@ -7,6 +7,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/im-pingo/liveforge/pkg/util"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -22,7 +23,7 @@ import (
 // mode controls startup behavior:
 //   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
 //   - "live": send GOP cache (paced at 10x speed), then live frames.
-func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, videoCodec avframe.CodecType, bwe cc.BandwidthEstimator) {
+func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, videoCodec avframe.CodecType, targetAudioCodec avframe.CodecType, bwe cc.BandwidthEstimator) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
@@ -39,6 +40,13 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			)
 		})
 	}
+
+	// Determine if audio transcoding is needed.
+	var sourceAudioCodec avframe.CodecType
+	if pub := stream.Publisher(); pub != nil {
+		sourceAudioCodec = pub.MediaInfo().AudioCodec
+	}
+	needsTranscode := targetAudioCodec != sourceAudioCodec && sourceAudioCodec != 0
 
 	// Track the last DTS to compute sample durations.
 	var lastVideoDTS, lastAudioDTS int64
@@ -175,7 +183,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		for _, frame := range gopCache {
 			if frame.MediaType.IsVideo() {
 				writeVideoSample(frame)
-			} else if frame.MediaType.IsAudio() {
+			} else if frame.MediaType.IsAudio() && !needsTranscode {
+				// Skip cached audio when transcoding; the transcoded reader
+				// provides audio in the target codec from its own buffer.
 				writeAudioSample(frame)
 			}
 			if frame.DTS > 0 && prevDTS > 0 {
@@ -225,11 +235,35 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		paceBaseDTS = lastVideoDTS
 	}
 
+	// Set up the live reader. When audio transcoding is needed, use
+	// TranscodeManager's reader which provides video passthrough and
+	// transcoded audio frames in the target codec.
+	var reader *util.RingReader[*avframe.AVFrame]
+	var transcodeRelease func()
+	if needsTranscode {
+		if tm := stream.TranscodeManager(); tm != nil {
+			var err error
+			reader, transcodeRelease, err = tm.GetOrCreateReader(targetAudioCodec)
+			if err != nil {
+				slog.Warn("whep: audio transcode failed, video only", "error", err)
+				needsTranscode = false
+				reader = stream.RingBuffer().NewReaderAt(startPos)
+			}
+		} else {
+			needsTranscode = false
+			reader = stream.RingBuffer().NewReaderAt(startPos)
+		}
+	} else {
+		reader = stream.RingBuffer().NewReaderAt(startPos)
+	}
+	if transcodeRelease != nil {
+		defer transcodeRelease()
+	}
+
 	// Live frame loop: start reading only NEW frames (after snapshot).
 	// In realtime mode, skip all frames until the first video keyframe
 	// arrives, then start sending from that keyframe onward.
 	gotKeyframe := mode == "live" // live mode already has GOP cache, no need to wait
-	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		frame, ok := reader.TryRead()
 		if ok {
