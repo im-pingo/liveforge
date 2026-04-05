@@ -10,6 +10,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	flvpkg "github.com/im-pingo/liveforge/pkg/muxer/flv"
+	"github.com/im-pingo/liveforge/pkg/util"
 )
 
 // Subscriber implements core.Subscriber for RTMP connections.
@@ -68,6 +69,17 @@ func (s *Subscriber) WriteLoop() {
 		return
 	}
 
+	// Determine if audio transcoding is needed.
+	// RTMP/FLV supports AAC and MP3; other codecs (Opus, G.711, etc.) need transcoding.
+	var transcodeRelease func()
+	needsTranscode := false
+	if pub := s.stream.Publisher(); pub != nil {
+		ac := pub.MediaInfo().AudioCodec
+		if ac != 0 && ac != avframe.CodecAAC && ac != avframe.CodecMP3 {
+			needsTranscode = true
+		}
+	}
+
 	// Send sequence headers
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		if err := s.sendFrame(vsh); err != nil {
@@ -75,10 +87,12 @@ func (s *Subscriber) WriteLoop() {
 			return
 		}
 	}
-	if ash := s.stream.AudioSeqHeader(); ash != nil {
-		if err := s.sendFrame(ash); err != nil {
-			slog.Error("audio seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
-			return
+	if !needsTranscode {
+		if ash := s.stream.AudioSeqHeader(); ash != nil {
+			if err := s.sendFrame(ash); err != nil {
+				slog.Error("audio seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
+				return
+			}
 		}
 	}
 
@@ -86,6 +100,11 @@ func (s *Subscriber) WriteLoop() {
 	var lastDTS int64
 	if s.opts.StartMode == core.StartModeGOP {
 		for _, frame := range s.stream.GOPCache() {
+			// Skip audio from GOP cache when transcoding; transcoded audio
+			// comes from the TranscodeManager reader.
+			if needsTranscode && frame.MediaType.IsAudio() {
+				continue
+			}
 			if err := s.sendFrame(frame); err != nil {
 				slog.Error("GOP cache send error", "module", "rtmp", "subscriber", s.id, "error", err)
 				return
@@ -96,8 +115,27 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Read live frames from ring buffer, skipping frames already sent via GOP cache
-	reader := s.stream.RingBuffer().NewReader()
+	// Set up the live reader. When transcoding, use TranscodeManager's reader
+	// which provides video passthrough and transcoded audio in AAC.
+	var reader *util.RingReader[*avframe.AVFrame]
+	if needsTranscode {
+		if tm := s.stream.TranscodeManager(); tm != nil {
+			var err error
+			reader, transcodeRelease, err = tm.GetOrCreateReader(avframe.CodecAAC)
+			if err != nil {
+				slog.Warn("rtmp: audio transcode unavailable", "subscriber", s.id, "error", err)
+				reader = s.stream.RingBuffer().NewReader()
+			}
+		} else {
+			reader = s.stream.RingBuffer().NewReader()
+		}
+	} else {
+		reader = s.stream.RingBuffer().NewReader()
+	}
+	if transcodeRelease != nil {
+		defer transcodeRelease()
+	}
+
 	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer, s.skipCfg)
 	for {
 		select {
