@@ -34,9 +34,12 @@ static int ff_resampler_open(int in_rate, int in_channels,
 }
 
 // ff_resample converts interleaved S16 samples through the resampler.
-// It feeds the input then flushes buffered samples so the full expected
-// output is returned in a single call.
-// Returns the total number of output samples per channel, or negative on error.
+// This is a streaming call: the resampler maintains internal state between
+// invocations, so fractional sample positions are preserved across calls.
+// Do NOT flush (swr_convert with NULL input) between calls — flushing
+// resets the internal phase and causes cumulative sample-count drift that
+// manifests as gradual audio slowdown in real-time playback.
+// Returns the number of output samples per channel, or negative on error.
 // The caller must free *out with free().
 static int ff_resample(SwrContext *ctx,
                        const int16_t *in, int in_count,
@@ -53,25 +56,14 @@ static int ff_resample(SwrContext *ctx,
     const uint8_t *in_data[1]  = { (const uint8_t *)in };
     uint8_t       *out_data[1] = { (uint8_t *)buf };
 
-    // Feed input data.
     int got = swr_convert(ctx, out_data, (int)out_max, in_data, in_count);
     if (got < 0) {
         free(buf);
         return got;
     }
 
-    int total = got;
-
-    // Flush any remaining buffered samples.
-    while (swr_get_delay(ctx, (int64_t)out_rate) > 0) {
-        uint8_t *flush_data[1] = { (uint8_t *)(buf + total * out_channels) };
-        int flushed = swr_convert(ctx, flush_data, (int)(out_max - total), NULL, 0);
-        if (flushed <= 0) break;
-        total += flushed;
-    }
-
     *out = buf;
-    return total;
+    return got;
 }
 */
 import "C"

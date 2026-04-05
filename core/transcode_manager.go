@@ -106,6 +106,18 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType) {
 
 // transcodeLoop is the core decode-resample-encode pipeline for a single target codec.
 // sourceCodec is passed in to avoid a TOCTOU race on Publisher().
+//
+// Architecture: inline processing to minimize video delivery jitter.
+// Each frame is handled as it arrives from the source ring buffer:
+//   - Video frames: pass through to transcoded buffer immediately.
+//   - Audio frames: decode/resample/encode inline (single frame at a time).
+//
+// This limits the maximum video delivery delay to one audio encode
+// operation (~0.5ms) rather than batching N encodes which blocks video
+// for N × encode_time. Chrome's jitter estimator accumulates delivery
+// irregularities via EWMA, so even small periodic delays compound over
+// minutes into large jitter buffer growth. The ring buffer remains
+// single-producer (this goroutine only), avoiding data races.
 func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack, sourceCodec avframe.CodecType) {
 	decoder, err := tm.registry.NewDecoder(sourceCodec)
 	if err != nil {
@@ -146,50 +158,18 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 	frameSize := encoder.FrameSize() * encoder.Channels()
 	const maxPCMBufSamples = 48000 * 2 // cap at ~1s of 48kHz stereo
 
-	reader := tm.stream.RingBuffer().NewReaderAt(tm.stream.RingBuffer().WriteCursor())
-	for {
-		select {
-		case <-ctx.Done():
-			track.ringBuffer.Close()
-			return
-		default:
-		}
-
-		frame, ok := reader.TryRead()
-		if !ok {
-			select {
-			case <-ctx.Done():
-				track.ringBuffer.Close()
-				return
-			case <-tm.stream.RingBuffer().Signal():
-				continue
-			}
-		}
-
-		// Video: passthrough unchanged
-		if frame.MediaType.IsVideo() {
-			track.ringBuffer.Write(frame)
-			continue
-		}
-
-		// Skip source sequence headers
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			continue
-		}
-
-		// Anchor timestamp to first audio frame
+	// encodeAudio processes a single audio frame through the decode-resample-encode pipeline.
+	encodeAudio := func(frame *avframe.AVFrame) {
 		if !tsInited {
 			ts.Init(frame.DTS, encoder.SampleRate())
 			tsInited = true
 		}
 
-		// Decode
-		pcm, err := decoder.Decode(frame.Payload)
-		if err != nil {
-			continue
+		pcm, decErr := decoder.Decode(frame.Payload)
+		if decErr != nil {
+			return
 		}
 
-		// Lazy resampler init using actual decoded params
 		if !resamplerInited {
 			if pcm.SampleRate != encoder.SampleRate() ||
 				pcm.Channels != encoder.Channels() {
@@ -197,18 +177,14 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 					pcm.SampleRate, pcm.Channels,
 					encoder.SampleRate(), encoder.Channels(),
 				)
-				defer resampler.Close()
 			}
 			resamplerInited = true
 		}
 
-		// Resample if needed
 		if resampler != nil {
 			pcm = resampler.Resample(pcm)
 		}
 
-		// Accumulate and encode in encoder-sized chunks.
-		// For PCM codecs (frameSize == 0), encode each decoded buffer directly.
 		if frameSize == 0 {
 			chunk := &audiocodec.PCMFrame{
 				Samples:    pcm.Samples,
@@ -217,7 +193,7 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 			}
 			encoded, encErr := encoder.Encode(chunk)
 			if encErr != nil {
-				continue
+				return
 			}
 			samplesPerChannel := len(pcm.Samples) / encoder.Channels()
 			dts := ts.Next(samplesPerChannel)
@@ -243,9 +219,7 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 					pcmBuf = pcmBuf[frameSize:]
 					continue
 				}
-
 				dts := ts.Next(encoder.FrameSize())
-
 				track.ringBuffer.Write(avframe.NewAVFrame(
 					avframe.MediaTypeAudio, track.targetCodec,
 					avframe.FrameTypeInterframe,
@@ -254,6 +228,61 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 				))
 				pcmBuf = pcmBuf[frameSize:]
 			}
+		}
+	}
+
+	reader := tm.stream.RingBuffer().NewReaderAt(tm.stream.RingBuffer().WriteCursor())
+
+	for {
+		select {
+		case <-ctx.Done():
+			if resampler != nil {
+				resampler.Close()
+			}
+			track.ringBuffer.Close()
+			return
+		default:
+		}
+
+		// Inline processing: handle each frame as it arrives. Video passes
+		// through immediately; audio encodes inline. This limits the maximum
+		// video delivery delay to a single audio encode operation (~0.5ms)
+		// rather than batching N audio encodes which would block video for
+		// N × encode_time. Chrome's jitter estimator accumulates delivery
+		// irregularities via EWMA, so even small periodic delays from batch
+		// encoding compound over minutes into large jitter buffer growth.
+		drained := false
+		for {
+			frame, ok := reader.TryRead()
+			if !ok {
+				break
+			}
+			drained = true
+
+			if frame.MediaType.IsVideo() {
+				// Video passthrough: zero encoding delay.
+				track.ringBuffer.Write(frame)
+			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
+				// Skip source audio sequence headers.
+			} else {
+				encodeAudio(frame)
+			}
+		}
+
+		if drained {
+			// More frames may have arrived during encoding; loop back.
+			continue
+		}
+
+		// No frames available — wait for signal.
+		select {
+		case <-ctx.Done():
+			if resampler != nil {
+				resampler.Close()
+			}
+			track.ringBuffer.Close()
+			return
+		case <-tm.stream.RingBuffer().Signal():
 		}
 	}
 }

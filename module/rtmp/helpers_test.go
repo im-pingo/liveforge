@@ -164,6 +164,50 @@ func TestParseVideoPayload(t *testing.T) {
 	}
 }
 
+func TestParseVideoPayloadBFrameCTS(t *testing.T) {
+	tests := []struct {
+		name    string
+		cts     int32 // composition time offset in ms
+		dts     int64
+		wantPTS int64
+	}{
+		{"CTS=66ms", 66, 0, 66},
+		{"CTS=100ms", 100, 1000, 1100},
+		{"CTS=33ms", 33, 2000, 2033},
+		{"CTS=0", 0, 500, 500},
+		{"CTS=large", 300, 0, 300},
+		{"CTS=negative", -33, 100, 67},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Encode CTS as signed 24-bit big-endian
+			ctsBytes := [3]byte{
+				byte(tt.cts >> 16),
+				byte(tt.cts >> 8),
+				byte(tt.cts),
+			}
+			data := []byte{
+				0x27,            // interframe (2) + H.264 (7)
+				0x01,            // AVC NALU
+				ctsBytes[0], ctsBytes[1], ctsBytes[2],
+				0x41, 0x9A, 0x00, 0x01, // NALU data
+			}
+
+			frame := parseVideoPayload(data, tt.dts)
+			if frame == nil {
+				t.Fatal("expected non-nil frame")
+			}
+			if frame.DTS != tt.dts {
+				t.Errorf("DTS = %d, want %d", frame.DTS, tt.dts)
+			}
+			if frame.PTS != tt.wantPTS {
+				t.Errorf("PTS = %d, want %d", frame.PTS, tt.wantPTS)
+			}
+		})
+	}
+}
+
 func TestParseAudioPayload(t *testing.T) {
 	// AAC sequence header
 	seqData := []byte{

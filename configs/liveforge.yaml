@@ -64,9 +64,9 @@ webrtc:
   candidates: []
   gcc:
     enabled: true
-    initial_bitrate: 10000000
+    initial_bitrate: 100000000
     min_bitrate: 100000
-    max_bitrate: 10000000
+    max_bitrate: 100000000
 
 srt:
   enabled: true

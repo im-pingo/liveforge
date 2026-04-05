@@ -38,16 +38,48 @@ static int ff_decoder_open(const char *name, int sample_rate, int channels,
     return 0;
 }
 
-// ff_decoder_set_extradata copies extradata into the codec context.
-static int ff_decoder_set_extradata(AVCodecContext *ctx,
-                                    const uint8_t *data, int size) {
-    av_freep(&ctx->extradata);
-    ctx->extradata_size = 0;
-    if (size <= 0) return 0;
-    ctx->extradata = (uint8_t *)av_mallocz(size + AV_INPUT_BUFFER_PADDING_SIZE);
-    if (!ctx->extradata) return -1;
-    memcpy(ctx->extradata, data, size);
-    ctx->extradata_size = size;
+// ff_decoder_reopen frees the old context and creates a new one with
+// extradata set BEFORE avcodec_open2. This is critical for codecs like
+// AAC where AudioSpecificConfig determines the actual sample rate and
+// channel layout. Setting extradata after avcodec_open2 causes the
+// decoder to ignore it and use stale defaults (e.g. 44100 Hz instead
+// of the correct 48000 Hz from the AudioSpecificConfig).
+// Returns the new context in *out_ctx; the caller must stop using the old one.
+static int ff_decoder_reopen(AVCodecContext *old_ctx,
+                             const uint8_t *extradata, int extradata_size,
+                             AVCodecContext **out_ctx) {
+    const AVCodec *codec = old_ctx->codec;
+    int sample_rate = old_ctx->sample_rate;
+    int channels    = old_ctx->ch_layout.nb_channels;
+
+    // Free the old context entirely.
+    avcodec_free_context(&old_ctx);
+
+    // Allocate a fresh context.
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return -2;
+
+    ctx->sample_rate = sample_rate;
+    av_channel_layout_default(&ctx->ch_layout, channels);
+
+    // Set extradata BEFORE open so the decoder parses it during init.
+    if (extradata_size > 0) {
+        ctx->extradata = (uint8_t *)av_mallocz(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (!ctx->extradata) {
+            avcodec_free_context(&ctx);
+            return -1;
+        }
+        memcpy(ctx->extradata, extradata, extradata_size);
+        ctx->extradata_size = extradata_size;
+    }
+
+    int ret = avcodec_open2(ctx, codec, NULL);
+    if (ret < 0) {
+        avcodec_free_context(&ctx);
+        return ret;
+    }
+
+    *out_ctx = ctx;
     return 0;
 }
 
@@ -196,7 +228,17 @@ func (d *FFmpegDecoder) SetExtradata(data []byte) {
 	if d.ctx == nil || len(data) == 0 {
 		return
 	}
-	C.ff_decoder_set_extradata(d.ctx, (*C.uint8_t)(unsafe.Pointer(&data[0])), C.int(len(data)))
+	var newCtx *C.AVCodecContext
+	ret := C.ff_decoder_reopen(d.ctx, (*C.uint8_t)(unsafe.Pointer(&data[0])), C.int(len(data)), &newCtx)
+	if ret != 0 {
+		slog.Warn("FFmpeg decoder reopen with extradata failed",
+			"codec", d.codecName, "ret", int(ret))
+		return
+	}
+	// Old context was freed by ff_decoder_reopen; update Go-side fields.
+	d.ctx = newCtx
+	d.sampleRate = int(newCtx.sample_rate)
+	d.channels = int(newCtx.ch_layout.nb_channels)
 }
 
 func (d *FFmpegDecoder) Decode(payload []byte) (*PCMFrame, error) {

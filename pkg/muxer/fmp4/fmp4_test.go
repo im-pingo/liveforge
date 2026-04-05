@@ -143,6 +143,88 @@ func TestBuildMediaSegment(t *testing.T) {
 	}
 }
 
+func TestBuildMediaSegmentBFrameCTS(t *testing.T) {
+	// Simulate a GOP with B-frames: I, P, B, B (in decode/DTS order)
+	// DTS increases monotonically; PTS reflects display order.
+	frames := []*avframe.AVFrame{
+		{
+			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
+			FrameType: avframe.FrameTypeKeyframe,
+			DTS:       0,
+			PTS:       66, // CTS = 66
+			Payload:   []byte{0x65, 0x88, 0x00, 0x01},
+		},
+		{
+			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
+			FrameType: avframe.FrameTypeInterframe,
+			DTS:       33,
+			PTS:       132, // CTS = 99
+			Payload:   []byte{0x41, 0x9A, 0x00, 0x02},
+		},
+		{
+			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
+			FrameType: avframe.FrameTypeInterframe,
+			DTS:       66,
+			PTS:       33, // CTS = -33
+			Payload:   []byte{0x41, 0x9A, 0x00, 0x03},
+		},
+	}
+
+	data := BuildMediaSegment(frames, 1, 0)
+	if len(data) == 0 {
+		t.Fatal("empty media segment")
+	}
+
+	// Find the trun box inside moof and verify it contains composition time offsets.
+	// The trun flags should include 0x000800 (sample-composition-time-offsets-present).
+	moofSize := int(binary.BigEndian.Uint32(data[0:4]))
+	moofData := data[8:moofSize] // skip box header
+
+	trunFound := false
+	offset := 0
+	for offset+8 <= len(moofData) {
+		boxSize := int(binary.BigEndian.Uint32(moofData[offset : offset+4]))
+		boxType := string(moofData[offset+4 : offset+8])
+		if boxSize < 8 || offset+boxSize > len(moofData) {
+			break
+		}
+		if boxType == "traf" {
+			// Search inside traf for trun
+			inner := offset + 8
+			end := offset + boxSize
+			for inner+8 <= end {
+				innerSize := int(binary.BigEndian.Uint32(moofData[inner : inner+4]))
+				innerType := string(moofData[inner+4 : inner+8])
+				if innerSize < 8 || inner+innerSize > end {
+					break
+				}
+				if innerType == "trun" {
+					trunFound = true
+					// version(1) + flags(3) at offset+8
+					version := moofData[inner+8]
+					flags := uint32(moofData[inner+9])<<16 | uint32(moofData[inner+10])<<8 | uint32(moofData[inner+11])
+					if version != 1 {
+						t.Errorf("trun version = %d, want 1 (signed CTS)", version)
+					}
+					if flags&0x000800 == 0 {
+						t.Error("trun flags missing sample-composition-time-offsets-present (0x000800)")
+					}
+					break
+				}
+				inner += innerSize
+			}
+			break // only check first traf (video)
+		}
+		offset += boxSize
+	}
+	if !trunFound {
+		t.Error("trun box not found in moof")
+	}
+}
+
 func TestBuildMediaSegmentEmpty(t *testing.T) {
 	data := BuildMediaSegment(nil, 1, 44100)
 	if data != nil {

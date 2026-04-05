@@ -62,6 +62,18 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		}
 	}
 
+	// B-frame drop: Chrome's WebRTC H.264 decoder does not perform B-frame
+	// reordering (it's designed for Baseline profile). Sending B-frames
+	// causes either visual jitter (DTS-order) or mosaic corruption
+	// (PTS-order). We drop B-frames and send only I/P reference frames.
+	//
+	// Detection: track the highest PTS sent. Any frame whose PTS is below
+	// that threshold is a B-frame (its display time precedes a previously
+	// decoded reference frame). When there are no B-frames (PTS == DTS),
+	// all frames pass through since PTS is always increasing.
+	var maxSentVideoPTS int64
+	var lastSentVideoDTS int64 = -1
+
 	// writeVideoSample writes one video frame to the WebRTC track.
 	//
 	// Codec-specific handling:
@@ -70,6 +82,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	//   VP8/VP9/AV1: raw frame data passed directly to pion's packetizer.
 	//
 	// PLI/FIR resync: inter-frames are skipped until the next keyframe.
+	// B-frame drop: frames with PTS < maxSentVideoPTS are silently dropped.
 	writeVideoSample := func(frame *avframe.AVFrame) {
 		if video == nil {
 			return
@@ -84,18 +97,28 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		}
 
 		// PLI/FIR resync: skip inter-frames until the next keyframe.
-		// IMPORTANT: always advance lastVideoDTS even for skipped frames so
-		// the first keyframe after resync gets a normal ~40ms duration instead
-		// of a multi-second gap that corrupts Chrome's jitter buffer timing.
+		// Reset DTS tracker so the first keyframe after resync
+		// gets a normal ~40ms duration instead of a multi-second gap.
 		if video.NeedsKeyframe() {
 			if frame.FrameType != avframe.FrameTypeKeyframe {
 				if frame.DTS > 0 {
 					lastVideoDTS = frame.DTS
 				}
+				lastSentVideoDTS = -1 // reset so keyframe gets default duration
 				return
 			}
 			video.ClearNeedsKeyframe()
 			slog.Debug("PLI resync: sending keyframe", "module", "webrtc", "bytes", len(frame.Payload))
+		}
+
+		// Drop B-frames: if this frame's display time (PTS) is earlier than
+		// a frame we already sent, it's a B-frame that the WebRTC decoder
+		// cannot handle. Drop it silently but still track DTS for the pacer.
+		if frame.FrameType != avframe.FrameTypeKeyframe && frame.PTS < maxSentVideoPTS {
+			if frame.DTS > 0 {
+				lastVideoDTS = frame.DTS
+			}
+			return
 		}
 
 		var payload []byte
@@ -120,15 +143,27 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			}
 		}
 
-		// Compute duration from DTS delta.
+		// Track DTS for the pacer (used in live mode GOP→live transition).
+		if frame.DTS > 0 {
+			lastVideoDTS = frame.DTS
+		}
+
+		// Compute duration from DTS delta between sent frames.
+		// This drives RTP timestamp advancement in pion's packetizer.
+		//
+		// When B-frames are dropped, lastSentVideoDTS tracks the DTS of
+		// the previous *sent* frame, so the duration correctly spans the
+		// gap including dropped B-frames (matching the DTS pacer's delivery).
 		duration := time.Duration(0)
-		if lastVideoDTS > 0 && frame.DTS > lastVideoDTS {
-			duration = time.Duration(frame.DTS-lastVideoDTS) * time.Millisecond
+		if lastSentVideoDTS >= 0 && frame.DTS > lastSentVideoDTS {
+			duration = time.Duration(frame.DTS-lastSentVideoDTS) * time.Millisecond
 		} else {
 			duration = 40 * time.Millisecond // ~25fps default
 		}
-		if frame.DTS > 0 {
-			lastVideoDTS = frame.DTS
+		lastSentVideoDTS = frame.DTS
+
+		if frame.PTS > maxSentVideoPTS {
+			maxSentVideoPTS = frame.PTS
 		}
 
 		if err := video.WriteSample(media.Sample{
@@ -137,6 +172,15 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		}); err != nil {
 			return
 		}
+	}
+
+	// Compute fixed audio frame duration for transcoded Opus.
+	// Using a fixed duration avoids any DTS-delta precision issues and
+	// ensures RTP timestamps advance by exactly 960 ticks per frame
+	// (20ms × 48kHz), matching the actual Opus content duration.
+	var fixedAudioDur time.Duration
+	if needsTranscode && targetAudioCodec == avframe.CodecOpus {
+		fixedAudioDur = 20 * time.Millisecond // 960 samples / 48kHz
 	}
 
 	// writeAudioSample writes audio frames. AAC from RTMP is not WebRTC
@@ -157,11 +201,15 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			return
 		}
 
-		duration := time.Duration(0)
-		if lastAudioDTS > 0 && frame.DTS > lastAudioDTS {
+		var duration time.Duration
+		if fixedAudioDur > 0 {
+			// Transcoded Opus: use fixed duration for exact RTP timestamp spacing.
+			duration = fixedAudioDur
+		} else if lastAudioDTS > 0 && frame.DTS > lastAudioDTS {
+			// Direct passthrough: compute from DTS delta.
 			duration = time.Duration(frame.DTS-lastAudioDTS) * time.Millisecond
 		} else {
-			duration = 23 * time.Millisecond // ~44100Hz AAC frame
+			duration = 20 * time.Millisecond // safe default for most codecs
 		}
 		if frame.DTS > 0 {
 			lastAudioDTS = frame.DTS
@@ -177,15 +225,27 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 
 	// Live mode: send GOP cache so the subscriber gets an immediate keyframe,
 	// paced at 10x real-time speed to avoid flooding the browser's jitter buffer.
+	//
+	// When audio transcoding is needed, skip the GOP cache entirely.
+	// The GOP cache only contains source-codec audio (e.g. AAC) which cannot
+	// be sent over the Opus track. Sending video-only from the cache causes
+	// A/V desync: the browser buffers 1-2s of video before any audio arrives,
+	// making audio lag behind by the GOP cache duration.
+	// Falling back to realtime behavior (wait for live keyframe) ensures both
+	// audio and video start from the same point in time.
+	if mode == "live" && needsTranscode {
+		slog.Info("live mode with audio transcoding: skipping GOP cache to preserve A/V sync",
+			"module", "webrtc")
+		mode = "realtime" // fall back to realtime behavior
+	}
+
 	if mode == "live" {
 		gopCache := stream.GOPCache()
 		var prevDTS int64
 		for _, frame := range gopCache {
 			if frame.MediaType.IsVideo() {
 				writeVideoSample(frame)
-			} else if frame.MediaType.IsAudio() && !needsTranscode {
-				// Skip cached audio when transcoding; the transcoded reader
-				// provides audio in the target codec from its own buffer.
+			} else if frame.MediaType.IsAudio() {
 				writeAudioSample(frame)
 			}
 			if frame.DTS > 0 && prevDTS > 0 {
@@ -277,7 +337,17 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 				}
 			}
 
-			// DTS-based pacing: sleep if we're sending faster than real-time.
+			// Audio: deliver immediately without DTS pacing.
+			// Audio has its own fixed duration (e.g. 20ms for Opus) that drives
+			// RTP timestamp advancement. Chrome's audio jitter buffer handles
+			// arrival variance independently. Pacing audio would delay video
+			// frame reads in this goroutine, causing video jitter.
+			if frame.MediaType.IsAudio() {
+				writeAudioSample(frame)
+				continue
+			}
+
+			// DTS-based pacing: sleep if we're sending video faster than real-time.
 			if frame.DTS > 0 {
 				if paceBaseWall.IsZero() {
 					paceBaseWall = time.Now()
@@ -307,8 +377,6 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 
 			if frame.MediaType.IsVideo() {
 				writeVideoSample(frame)
-			} else if frame.MediaType.IsAudio() {
-				writeAudioSample(frame)
 			}
 			continue
 		}

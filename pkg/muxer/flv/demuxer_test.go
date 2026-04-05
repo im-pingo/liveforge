@@ -100,6 +100,55 @@ func TestDemuxAudioAAC(t *testing.T) {
 	}
 }
 
+func TestDemuxVideoBFrameCTS(t *testing.T) {
+	tests := []struct {
+		name    string
+		cts     int32
+		dts     uint32
+		wantPTS int64
+	}{
+		{"CTS=66ms", 66, 1000, 1066},
+		{"CTS=100ms", 100, 2000, 2100},
+		{"CTS=33ms", 33, 500, 533},
+		{"CTS=0", 0, 1000, 1000},
+		{"CTS=negative", -33, 100, 67},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctsBytes := [3]byte{
+				byte(tt.cts >> 16),
+				byte(tt.cts >> 8),
+				byte(tt.cts),
+			}
+			videoData := []byte{
+				(VideoFrameInterframe << 4) | VideoCodecH264,
+				AVCPacketNALU,
+				ctsBytes[0], ctsBytes[1], ctsBytes[2],
+				0x41, 0x9A, 0x00, 0x01,
+			}
+			tag := buildFLVTag(TagTypeVideo, tt.dts, videoData)
+
+			var buf bytes.Buffer
+			buf.Write(FLVHeader)
+			buf.Write(PreviousTagSize0)
+			buf.Write(tag)
+
+			d := NewDemuxer(&buf)
+			frame, err := d.ReadTag()
+			if err != nil {
+				t.Fatalf("ReadTag error: %v", err)
+			}
+			if frame.DTS != int64(tt.dts) {
+				t.Errorf("DTS = %d, want %d", frame.DTS, tt.dts)
+			}
+			if frame.PTS != tt.wantPTS {
+				t.Errorf("PTS = %d, want %d", frame.PTS, tt.wantPTS)
+			}
+		})
+	}
+}
+
 func TestDemuxSequenceHeader(t *testing.T) {
 	// Video sequence header
 	videoData := []byte{

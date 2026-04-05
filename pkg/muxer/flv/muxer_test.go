@@ -103,6 +103,48 @@ func TestMuxRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMuxRoundTripBFrameCTS(t *testing.T) {
+	// Mux → Demux round trip with B-frames (PTS != DTS)
+	var buf bytes.Buffer
+	m := NewMuxer()
+
+	if err := m.WriteHeader(&buf, true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate decode order: I, P, B, B with varying CTS values
+	frames := []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x01, 0x64, 0x00, 0x28}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 66, []byte{0x65, 0x88}),    // CTS=66
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 33, 132, []byte{0x41, 0x01}), // CTS=99
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 66, 33, []byte{0x41, 0x02}),  // CTS=-33
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 100, 100, []byte{0x41, 0x03}), // CTS=0
+	}
+
+	for _, f := range frames {
+		if err := m.WriteFrame(&buf, f); err != nil {
+			t.Fatalf("WriteFrame error: %v", err)
+		}
+	}
+
+	// Demux and verify PTS is preserved
+	reader := bytes.NewReader(buf.Bytes())
+	d := NewDemuxer(reader)
+
+	for i, expected := range frames {
+		got, err := d.ReadTag()
+		if err != nil {
+			t.Fatalf("ReadTag[%d] error: %v", i, err)
+		}
+		if got.DTS != expected.DTS {
+			t.Errorf("[%d] DTS: got %d, want %d", i, got.DTS, expected.DTS)
+		}
+		if got.PTS != expected.PTS {
+			t.Errorf("[%d] PTS: got %d, want %d (CTS=%d)", i, got.PTS, expected.PTS, expected.PTS-expected.DTS)
+		}
+	}
+}
+
 func TestMuxEnhancedVideoH265(t *testing.T) {
 	var buf bytes.Buffer
 	m := NewMuxer()

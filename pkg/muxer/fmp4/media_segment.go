@@ -125,8 +125,9 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 
 	// trun: sample entries
 	// flags: 0x000001 (data-offset-present) | 0x000100 (sample-duration-present) |
-	//        0x000200 (sample-size-present) | 0x000400 (sample-flags-present)
-	trunFlags := uint32(0x000001 | 0x000100 | 0x000200 | 0x000400)
+	//        0x000200 (sample-size-present) | 0x000400 (sample-flags-present) |
+	//        0x000800 (sample-composition-time-offsets-present)
+	trunFlags := uint32(0x000001 | 0x000100 | 0x000200 | 0x000400 | 0x000800)
 	var trun bytes.Buffer
 	binary.Write(&trun, binary.BigEndian, uint32(len(frames))) // sample_count
 	binary.Write(&trun, binary.BigEndian, uint32(0))           // data_offset (placeholder)
@@ -159,12 +160,24 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 			sampleFlags = 0x01010000
 		}
 
+		// Composition time offset (PTS - DTS) scaled to track timescale.
+		// Required for B-frame content where PTS != DTS.
+		cts := f.PTS - f.DTS
+		var sampleCTO int32
+		if timescale > 0 {
+			sampleCTO = int32(cts * int64(timescale) / 1000)
+		} else {
+			sampleCTO = int32(cts)
+		}
+
 		binary.Write(&trun, binary.BigEndian, duration)
 		binary.Write(&trun, binary.BigEndian, sampleSize)
 		binary.Write(&trun, binary.BigEndian, sampleFlags)
+		binary.Write(&trun, binary.BigEndian, sampleCTO)
 	}
 
-	WriteFullBox(&traf, BoxTrun, 0, trunFlags, trun.Bytes())
+	// Version 1 trun uses signed composition time offsets (required for B-frames).
+	WriteFullBox(&traf, BoxTrun, 1, trunFlags, trun.Bytes())
 	WriteBox(w, BoxTraf, traf.Bytes())
 }
 

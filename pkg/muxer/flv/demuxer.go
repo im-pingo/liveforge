@@ -97,7 +97,7 @@ func (d *Demuxer) parseVideoTag(data []byte, dts int64) (*avframe.AVFrame, error
 	frameTypeID := (data[0] >> 4) & 0x0F
 	codecID := data[0] & 0x0F
 	avcPacketType := data[1]
-	cts := int64(int32(binary.BigEndian.Uint32([]byte{0, data[2], data[3], data[4]})) >> 8)
+	cts := int64(int32(binary.BigEndian.Uint32([]byte{data[2], data[3], data[4], 0})) >> 8)
 
 	codec := FLVVideoCodecToAVFrame(codecID)
 	if codec == 0 {
