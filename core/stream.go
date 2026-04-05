@@ -102,6 +102,7 @@ type Stream struct {
 	noPublisherTimer *time.Timer
 	idleTimer        *time.Timer
 	feedbackRouter   *FeedbackRouter
+	transcodeManager *TranscodeManager
 }
 
 // NewStream creates a new Stream in idle state.
@@ -156,6 +157,10 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 		s.idleTimer = nil
+	}
+
+	if s.transcodeManager != nil {
+		s.transcodeManager.Reset()
 	}
 
 	s.publisher = pub
@@ -392,6 +397,11 @@ func (s *Stream) MuxerManager() *MuxerManager {
 // FeedbackRouter returns the stream's feedback router.
 func (s *Stream) FeedbackRouter() *FeedbackRouter {
 	return s.feedbackRouter
+}
+
+// TranscodeManager returns the stream's audio transcoding manager, or nil if disabled.
+func (s *Stream) TranscodeManager() *TranscodeManager {
+	return s.transcodeManager
 }
 
 // AddSubscriber increments the subscriber count for a protocol (e.g. "rtmp").

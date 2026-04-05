@@ -5,15 +5,17 @@ import (
 	"sync"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
 )
 
 // StreamHub manages all active streams.
 type StreamHub struct {
-	mu         sync.RWMutex
-	streams    map[string]*Stream
-	config     config.StreamConfig
-	limits     config.LimitsConfig
-	eventBus   *EventBus
+	mu               sync.RWMutex
+	streams          map[string]*Stream
+	config           config.StreamConfig
+	limits           config.LimitsConfig
+	eventBus         *EventBus
+	audioCodecEnabled bool
 }
 
 // NewStreamHub creates a new StreamHub.
@@ -24,6 +26,11 @@ func NewStreamHub(cfg config.StreamConfig, limits config.LimitsConfig, bus *Even
 		limits:   limits,
 		eventBus: bus,
 	}
+}
+
+// SetAudioCodecEnabled enables audio transcoding for new streams.
+func (h *StreamHub) SetAudioCodecEnabled(enabled bool) {
+	h.audioCodecEnabled = enabled
 }
 
 // GetOrCreate returns an existing stream or creates a new one.
@@ -45,6 +52,9 @@ func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 	}
 
 	s := NewStream(key, h.config, h.limits, h.eventBus)
+	if h.audioCodecEnabled {
+		s.transcodeManager = NewTranscodeManager(s, audiocodec.Global(), h.config.RingBufferSize)
+	}
 	h.streams[key] = s
 
 	h.eventBus.Emit(EventStreamCreate, &EventContext{StreamKey: key}) //nolint:errcheck
