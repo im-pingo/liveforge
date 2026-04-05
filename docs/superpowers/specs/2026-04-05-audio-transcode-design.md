@@ -99,6 +99,10 @@ type PCMFrame struct {
 // Decoder decodes compressed audio into PCM.
 // Instances are NOT safe for concurrent use.
 type Decoder interface {
+    // SetExtradata provides codec-specific initialization data before decoding.
+    // For AAC: the AudioSpecificConfig from the stream's sequence header.
+    // For other codecs: no-op.
+    SetExtradata(data []byte)
     Decode(payload []byte) (*PCMFrame, error)
     SampleRate() int
     Channels() int
@@ -127,6 +131,7 @@ type Registry struct {
     mu       sync.RWMutex
     decoders map[avframe.CodecType]DecoderFactory
     encoders map[avframe.CodecType]EncoderFactory
+    seqHdrs  map[avframe.CodecType]SeqHeaderFactory
 }
 
 type DecoderFactory func() Decoder
@@ -134,10 +139,16 @@ type EncoderFactory func() Encoder
 type SeqHeaderFactory func() SequenceHeaderFunc
 
 func Global() *Registry
+
+// Registration (called from init)
+func (r *Registry) RegisterDecoder(codec avframe.CodecType, f DecoderFactory)
+func (r *Registry) RegisterEncoder(codec avframe.CodecType, f EncoderFactory)
+func (r *Registry) RegisterSequenceHeader(codec avframe.CodecType, fn SeqHeaderFactory)
+
+// Lookup
 func (r *Registry) NewDecoder(codec avframe.CodecType) (Decoder, error)
 func (r *Registry) NewEncoder(codec avframe.CodecType) (Encoder, error)
 func (r *Registry) CanTranscode(from, to avframe.CodecType) bool
-func (r *Registry) RegisterSequenceHeader(codec avframe.CodecType, fn SeqHeaderFactory)
 func (r *Registry) SequenceHeader(codec avframe.CodecType) []byte
 ```
 
@@ -176,6 +187,24 @@ func (d *FFmpegDecoder) SampleRate() int
 func (d *FFmpegDecoder) Channels() int
 func (d *FFmpegDecoder) Close()
 ```
+
+#### AAC Extradata (AudioSpecificConfig)
+
+FFmpeg's AAC decoder requires `CodecContext.SetExtradata()` with the AudioSpecificConfig before it can decode raw AAC frames (as delivered in RTMP/FLV). The `FFmpegDecoder` handles this via a `SetExtradata(data []byte)` method:
+
+```go
+func (d *FFmpegDecoder) SetExtradata(data []byte)
+```
+
+The transcode goroutine calls `SetExtradata` using the stream's `AudioSeqHeader` before the decode loop begins:
+
+```go
+if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil {
+    decoder.SetExtradata(seqHeader.Payload)
+}
+```
+
+For codecs that do not use extradata (Opus, G.711, MP3), `SetExtradata` is a no-op. For AAC, the AudioSpecificConfig is extracted from the `FrameTypeSequenceHeader` AVFrame that the publisher writes to the stream when it starts.
 
 ### FFmpegEncoder
 
@@ -247,8 +276,11 @@ func init() {
             return NewFFmpegEncoder(c.encName, c.rate, c.ch)
         })
     }
+    // Sequence headers: only AAC needs one (AudioSpecificConfig for RTMP/FLV).
+    // Opus, G.711, G.722, MP3, Speex do NOT use sequence headers — their
+    // decoders initialize from the first data packet directly.
     r.RegisterSequenceHeader(avframe.CodecAAC, func() SequenceHeaderFunc {
-        return aacSequenceHeader
+        return aacSequenceHeader // builds ASC from encoder's sampleRate + channels
     })
 }
 ```
@@ -385,6 +417,28 @@ Video frames pass through unchanged with original DTS/PTS. Audio timestamps are 
 
 ## TranscodeManager
 
+### Lifecycle
+
+TranscodeManager is created in `NewStream()` when `AudioCodecConfig.Enabled` is true. When disabled, `stream.TranscodeManager()` returns nil, and protocol modules fall back to current behavior.
+
+```go
+// In core/stream.go NewStream():
+if cfg.AudioCodec.Enabled {
+    s.transcodeManager = NewTranscodeManager(s, audiocodec.Global(), cfg.RingBufferSize)
+}
+```
+
+The TranscodeManager field is added to the `Stream` struct alongside the existing `muxerManager` and `feedbackRouter` fields, following the same pattern.
+
+### GOP Cache for Transcoded Tracks
+
+TranscodedTracks do NOT maintain their own GOP cache. Late-joining subscribers on a TranscodedTrack receive frames from the current transcode position only. This is a known limitation:
+
+- **Video**: the subscriber will receive the next keyframe from the source stream (passed through unchanged). Initial delay is at most one GOP interval.
+- **Audio**: audio frames are small and frequent (~20ms each). Missing a few frames causes at most a brief silence.
+
+This matches the behavior documented in the original design and is acceptable for live streaming. Full GOP cache for transcoded tracks can be added later if needed.
+
 ### Core Method: GetOrCreateReader (unchanged from original design)
 
 ```go
@@ -406,20 +460,32 @@ Behavior:
 func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack) {
     sourceCodec := tm.stream.Publisher().MediaInfo().AudioCodec
 
-    decoder, _ := tm.registry.NewDecoder(sourceCodec)
-    encoder, _ := tm.registry.NewEncoder(track.targetCodec)
+    decoder, err := tm.registry.NewDecoder(sourceCodec)
+    if err != nil {
+        slog.Error("transcode: decoder unavailable", "from", sourceCodec, "error", err)
+        track.ringBuffer.Close()
+        return
+    }
+    encoder, err := tm.registry.NewEncoder(track.targetCodec)
+    if err != nil {
+        slog.Error("transcode: encoder unavailable", "to", track.targetCodec, "error", err)
+        decoder.Close()
+        track.ringBuffer.Close()
+        return
+    }
     defer decoder.Close()
     defer encoder.Close()
 
-    var resampler *FFmpegResampler
-    if decoder.SampleRate() != encoder.SampleRate() ||
-       decoder.Channels() != encoder.Channels() {
-        resampler = NewFFmpegResampler(
-            decoder.SampleRate(), decoder.Channels(),
-            encoder.SampleRate(), encoder.Channels(),
-        )
-        defer resampler.Close()
+    // Set extradata for codecs that need it (e.g. AAC AudioSpecificConfig)
+    if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil {
+        decoder.SetExtradata(seqHeader.Payload)
     }
+
+    // Resampler is created lazily after the first successful decode,
+    // using the actual decoded sample rate/channels (which may differ
+    // from the codec table defaults for variable-rate streams).
+    var resampler *FFmpegResampler
+    resamplerInited := false
 
     // Emit sequence header for target codec
     if seqHeader := tm.registry.SequenceHeader(track.targetCodec); seqHeader != nil {
@@ -433,6 +499,7 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
     tsInited := false
     var pcmBuf []int16
     frameSize := encoder.FrameSize() * encoder.Channels()
+    const maxPCMBufSamples = 48000 * 2 // cap at ~1 second of 48kHz stereo
 
     reader := tm.stream.RingBuffer().NewReaderAt(tm.stream.RingBuffer().WriteCursor())
     for {
@@ -477,13 +544,32 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
             continue
         }
 
+        // Lazy resampler init: use actual decoded params, not codec table defaults.
+        // This handles streams where the actual sample rate differs from the
+        // nominal value (e.g., AAC at 22050Hz instead of the default 44100Hz).
+        if !resamplerInited {
+            if pcm.SampleRate != encoder.SampleRate() ||
+               pcm.Channels != encoder.Channels() {
+                resampler = NewFFmpegResampler(
+                    pcm.SampleRate, pcm.Channels,
+                    encoder.SampleRate(), encoder.Channels(),
+                )
+                defer resampler.Close()
+            }
+            resamplerInited = true
+        }
+
         // Resample
         if resampler != nil {
             pcm = resampler.Resample(pcm)
         }
 
-        // Accumulate and encode in encoder-sized chunks
+        // Accumulate and encode in encoder-sized chunks.
+        // Cap buffer at maxPCMBufSamples to prevent unbounded growth on encode errors.
         pcmBuf = append(pcmBuf, pcm.Samples...)
+        if len(pcmBuf) > maxPCMBufSamples {
+            pcmBuf = pcmBuf[len(pcmBuf)-maxPCMBufSamples:]
+        }
         for len(pcmBuf) >= frameSize {
             chunk := &PCMFrame{
                 Samples:    pcmBuf[:frameSize],
@@ -514,15 +600,21 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 
 Release closure calls `releaseTrack()` which decrements subCount. When subCount reaches 0, the goroutine is cancelled and the track is deleted.
 
-`Reset()` is called from `Stream.SetPublisher()` when a new publisher replaces the old one. All active TranscodedTracks are cancelled and removed.
+`Reset()` is called from `Stream.SetPublisher()` when a new publisher replaces the old one (republish scenario). All active TranscodedTracks are cancelled and removed. This is necessary because the old decoder instances hold stale codec context (e.g., AAC extradata from the previous publisher) that would corrupt frames from the new publisher.
+
+Note: `SetPublisher()` currently does not reset MuxerManager or other components on republish. The TranscodeManager reset is specifically required because decoders hold stateful codec context that is publisher-specific. MuxerManager does not have this issue because it consumes AVFrames which are self-describing.
 
 ## Configuration
 
 ```go
 // config/config.go
+
 type AudioCodecConfig struct {
     Enabled bool `yaml:"enabled"`
 }
+
+// Added to Config struct:
+AudioCodec AudioCodecConfig `yaml:"audio_codec"`
 ```
 
 ```yaml
@@ -530,7 +622,11 @@ audio_codec:
   enabled: true
 ```
 
-When `enabled: false`, TranscodeManager is not created on streams. Protocol modules fall back to current behavior (no audio when codecs mismatch).
+When `enabled: false` (or the section is omitted), `stream.TranscodeManager()` returns nil. Protocol modules check for nil and fall back to current behavior (no audio when codecs mismatch).
+
+### Opus Frame Duration
+
+The Opus encoder is configured with a 20ms frame duration (960 samples at 48kHz). This is the standard for WebRTC and provides the best balance of latency and efficiency. The `FFmpegEncoder` sets this via the Opus-specific `frame_duration` option on the CodecContext. Other Opus frame durations (2.5ms, 5ms, 10ms, 40ms, 60ms) are not exposed as configuration — 20ms is hardcoded as the default.
 
 ## Protocol Integration
 
@@ -650,6 +746,23 @@ Protocol module integration (by priority):
   module/rtmp/subscriber.go     — same
   core/muxer_manager.go         — same (affects HLS/DASH/HTTP-FLV/SRT)
 ```
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| FFmpeg static libs in Git LFS add CI complexity | Medium | Document LFS setup in BUILD.md; CI config enables LFS by default |
+| FFmpeg security patches require rebuilding all 4 platforms | Medium | BUILD.md includes exact source URLs and steps; version tracked in VERSION file |
+| macOS Homebrew bottle extraction is fragile across versions | Low | Pin specific FFmpeg version; document exact bottle URL |
+| CGo cross-compilation requires per-platform C toolchain | Medium | CI uses per-platform runners (or Docker); local dev only builds native platform |
+| Memory allocation in hot path (PCMFrame per decode) | Low | Acceptable for initial implementation; PCMFrame pooling is a future optimization |
+| FFmpeg init crash at startup if libs have ABI mismatch | Low | go-astiav validates FFmpeg version at import time; VERSION file ensures consistency |
+
+## Future Optimizations
+
+- **PCMFrame buffer pooling**: reduce GC pressure by reusing PCMFrame allocations across decode calls
+- **Transcoded track GOP cache**: maintain GOP cache on TranscodedTracks for faster late-join
+- **Dual-reader approach**: read video from original RingBuffer and audio from transcoded RingBuffer to eliminate video frame duplication in memory
 
 ## Non-Goals
 
