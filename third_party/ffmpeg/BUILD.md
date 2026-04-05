@@ -36,13 +36,15 @@ cd /tmp/ffmpeg-8.1
   --disable-doc \
   --disable-network \
   --disable-everything \
-  --enable-decoder=pcm_mulaw,pcm_alaw,aac,libopus,mp3float \
-  --enable-encoder=pcm_mulaw,pcm_alaw,aac,libopus,libmp3lame \
+  --enable-decoder=pcm_mulaw,pcm_alaw,aac,libopus,mp3float,adpcm_g722,libspeex \
+  --enable-encoder=pcm_mulaw,pcm_alaw,aac,libopus,libmp3lame,adpcm_g722,libspeex \
   --enable-libopus \
   --enable-libmp3lame \
   --enable-libspeex \
-  --enable-decoder=libspeex \
-  --enable-encoder=libspeex \
+  --enable-swresample \
+  --enable-avcodec \
+  --enable-static \
+  --disable-shared \
   --extra-cflags="-I/opt/homebrew/include" \
   --extra-ldflags="-L/opt/homebrew/lib"
 

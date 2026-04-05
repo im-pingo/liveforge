@@ -162,6 +162,15 @@ func NewFFmpegDecoder(codecName string) *FFmpegDecoder {
 	case "libopus":
 		sr = 48000
 		ch = 2
+	case "mp3float":
+		sr = 44100
+		ch = 2
+	case "g722":
+		sr = 16000
+		ch = 1
+	case "libspeex":
+		sr = 8000
+		ch = 1
 	}
 
 	cName := C.CString(codecName)

@@ -31,6 +31,9 @@ static int ff_encoder_open(const char *name, int sample_rate, int channels,
     } else if (codec->id == AV_CODEC_ID_OPUS) {
         ctx->sample_fmt = AV_SAMPLE_FMT_S16;
         ctx->bit_rate   = 64000;
+    } else if (codec->id == AV_CODEC_ID_MP3) {
+        ctx->sample_fmt = AV_SAMPLE_FMT_S16P;
+        ctx->bit_rate   = 128000;
     } else {
         // Default to S16 for unknown codecs.
         ctx->sample_fmt = AV_SAMPLE_FMT_S16;
