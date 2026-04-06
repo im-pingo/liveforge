@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	pionrtp "github.com/pion/rtp/v2"
 )
 
 func TestVP9PacketizeSingle(t *testing.T) {
@@ -104,5 +105,41 @@ func TestVP9DepacketizeRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(result.Payload, data) {
 		t.Errorf("payload mismatch after round-trip: got %d bytes, want %d", len(result.Payload), len(data))
+	}
+}
+
+func TestVP9KeyframeDetection(t *testing.T) {
+	// VP9 RTP payload descriptor: P bit (0x40) indicates inter-prediction.
+	// P=0 → keyframe, P=1 → interframe.
+	// The packetizer sets B=1,E=1 for single-packet frames: descriptor = 0x0C.
+	// For keyframe (P=0): 0x0C. For interframe (P=1): 0x4C.
+
+	d := &VP9Depacketizer{}
+
+	tests := []struct {
+		name       string
+		descriptor byte
+		want       avframe.FrameType
+	}{
+		{"keyframe", 0x0C, avframe.FrameTypeKeyframe},       // B=1,E=1,P=0
+		{"interframe", 0x4C, avframe.FrameTypeInterframe},   // B=1,E=1,P=1
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkt := &pionrtp.Packet{
+				Payload: []byte{tt.descriptor, 0x01, 0x02, 0x03},
+			}
+			f, err := d.Depacketize(pkt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f == nil {
+				t.Fatal("expected frame")
+			}
+			if f.FrameType != tt.want {
+				t.Errorf("got %v, want %v", f.FrameType, tt.want)
+			}
+		})
 	}
 }

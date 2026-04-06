@@ -105,10 +105,17 @@ func (d *VP9Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, er
 	if eBit != 0 {
 		data := d.buf
 		d.buf = nil
+		// VP9 keyframe detection: the P bit (0x40) in the first descriptor byte
+		// indicates an inter-prediction frame. Keyframes have P=0.
+		// See draft-ietf-payload-vp9 §4.2.
+		ft := avframe.FrameTypeInterframe
+		if len(payload) > 0 && (payload[0]&0x40) == 0 {
+			ft = avframe.FrameTypeKeyframe
+		}
 		return avframe.NewAVFrame(
 			avframe.MediaTypeVideo,
 			avframe.CodecVP9,
-			avframe.FrameTypeInterframe,
+			ft,
 			0, 0,
 			data,
 		), nil

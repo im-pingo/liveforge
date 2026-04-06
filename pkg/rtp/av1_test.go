@@ -102,3 +102,35 @@ func TestAV1DepacketizeRoundTrip(t *testing.T) {
 		t.Errorf("payload mismatch after round-trip: got %d bytes, want %d", len(result.Payload), len(data))
 	}
 }
+
+func TestAV1KeyframeDetection(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want avframe.FrameType
+	}{
+		{
+			// OBU_SEQUENCE_HEADER (type=1): header byte = (1 << 3) | 0x02 (has_size) = 0x0A
+			// size=2 (LEB128), then 2 dummy bytes, followed by OBU_FRAME header.
+			"keyframe with sequence header",
+			[]byte{0x0A, 0x02, 0xAA, 0xBB, 0x32, 0x01, 0xCC},
+			avframe.FrameTypeKeyframe,
+		},
+		{
+			// OBU_FRAME (type=6): header byte = (6 << 3) | 0x02 = 0x32
+			// No sequence header → interframe.
+			"interframe no sequence header",
+			[]byte{0x32, 0x02, 0xCC, 0xDD},
+			avframe.FrameTypeInterframe,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyAV1Frame(tt.data)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

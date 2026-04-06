@@ -103,14 +103,72 @@ func (d *AV1Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, er
 	if pkt.Marker {
 		data := d.buf
 		d.buf = nil
+		// AV1 keyframe detection: parse OBUs in the reassembled frame.
+		// A keyframe contains an OBU_FRAME or OBU_FRAME_HEADER with
+		// frame_type == KEY_FRAME (0). We scan for the first frame header OBU.
+		ft := classifyAV1Frame(data)
 		return avframe.NewAVFrame(
 			avframe.MediaTypeVideo,
 			avframe.CodecAV1,
-			avframe.FrameTypeInterframe,
+			ft,
 			0, 0,
 			data,
 		), nil
 	}
 
 	return nil, nil
+}
+
+// classifyAV1Frame scans OBUs in the frame data to detect keyframes.
+// AV1 OBU format: obu_header (1-2 bytes) + optional size LEB128 + payload.
+// A keyframe has an OBU_SEQUENCE_HEADER (type 1) typically preceding the
+// OBU_FRAME (type 6) or OBU_FRAME_HEADER (type 3) with frame_type == KEY_FRAME.
+// For simplicity, we treat any frame containing an OBU_SEQUENCE_HEADER as a keyframe,
+// since encoders emit it at the start of each key picture.
+func classifyAV1Frame(data []byte) avframe.FrameType {
+	offset := 0
+	for offset < len(data) {
+		if offset >= len(data) {
+			break
+		}
+		header := data[offset]
+		obuType := (header >> 3) & 0x0F
+		hasExtension := (header & 0x04) != 0
+		hasSizeField := (header & 0x02) != 0
+		offset++ // past obu_header
+
+		if hasExtension {
+			if offset >= len(data) {
+				break
+			}
+			offset++ // skip extension byte
+		}
+
+		if obuType == 1 { // OBU_SEQUENCE_HEADER
+			return avframe.FrameTypeKeyframe
+		}
+
+		if hasSizeField {
+			// Read LEB128 size
+			obuSize := 0
+			shift := 0
+			for offset < len(data) {
+				b := data[offset]
+				offset++
+				obuSize |= int(b&0x7F) << shift
+				if (b & 0x80) == 0 {
+					break
+				}
+				shift += 7
+				if shift > 28 {
+					return avframe.FrameTypeInterframe // corrupt
+				}
+			}
+			offset += obuSize
+		} else {
+			// No size field — remaining data is the OBU payload.
+			break
+		}
+	}
+	return avframe.FrameTypeInterframe
 }

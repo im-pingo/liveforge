@@ -100,10 +100,16 @@ func (d *VP8Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, er
 	if pkt.Marker {
 		data := d.buf
 		d.buf = nil
+		// VP8 keyframe detection: bit 0 of the first byte is the inverse keyframe flag.
+		// See RFC 6386 §9.1: keyframe when (data[0] & 0x01) == 0.
+		ft := avframe.FrameTypeInterframe
+		if len(data) > 0 && (data[0]&0x01) == 0 {
+			ft = avframe.FrameTypeKeyframe
+		}
 		return avframe.NewAVFrame(
 			avframe.MediaTypeVideo,
 			avframe.CodecVP8,
-			avframe.FrameTypeInterframe,
+			ft,
 			0, 0,
 			data,
 		), nil

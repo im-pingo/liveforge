@@ -102,3 +102,45 @@ func TestVP8DepacketizeRoundTrip(t *testing.T) {
 		t.Errorf("payload mismatch after round-trip: got %d bytes, want %d", len(result.Payload), len(data))
 	}
 }
+
+func TestVP8KeyframeDetection(t *testing.T) {
+	// VP8 keyframe: bit 0 of first byte is 0.
+	// See RFC 6386 §9.1: frame_tag = (frame_type << 0) | ...
+	// frame_type=0 → keyframe, frame_type=1 → interframe.
+	keyData := []byte{0x90, 0x01, 0x02} // bit 0 = 0 → keyframe
+	interData := []byte{0x91, 0x01, 0x02} // bit 0 = 1 → interframe
+
+	tests := []struct {
+		name string
+		data []byte
+		want avframe.FrameType
+	}{
+		{"keyframe", keyData, avframe.FrameTypeKeyframe},
+		{"interframe", interData, avframe.FrameTypeInterframe},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecVP8, avframe.FrameTypeKeyframe, 0, 0, tt.data)
+			p := &VP8Packetizer{}
+			pkts, err := p.Packetize(frame, 1400)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := &VP8Depacketizer{}
+			var result *avframe.AVFrame
+			for _, pkt := range pkts {
+				f, _ := d.Depacketize(pkt)
+				if f != nil {
+					result = f
+				}
+			}
+			if result == nil {
+				t.Fatal("no frame")
+			}
+			if result.FrameType != tt.want {
+				t.Errorf("got %v, want %v", result.FrameType, tt.want)
+			}
+		})
+	}
+}
