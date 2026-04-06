@@ -1,8 +1,16 @@
 package core
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"sync"
@@ -27,6 +35,9 @@ type Server struct {
 
 	apiMu       sync.RWMutex
 	apiHandlers map[string]http.Handler
+
+	autoCertOnce sync.Once
+	autoCert     *tls.Certificate // auto-generated self-signed cert (nil if file-based TLS configured)
 }
 
 // NewServer creates a new Server instance.
@@ -174,6 +185,133 @@ func (s *Server) MakeListener(addr string, moduleTLS *bool) (net.Listener, error
 	}
 
 	return net.Listen("tcp", addr)
+}
+
+// MakeListenerAutoTLS creates a TCP listener that uses TLS when available.
+//
+// TLS is used when any of these conditions are met:
+//   - File-based cert/key are configured (tls.cert_file + tls.key_file)
+//   - Auto-generated self-signed cert is enabled (tls.auto: true)
+//
+// If neither is configured, falls back to plain TCP.
+// If the per-module TLS override is explicitly false, always uses plain TCP.
+func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener, error) {
+	// If module explicitly disables TLS, use plain TCP.
+	if moduleTLS != nil && !*moduleTLS {
+		return net.Listen("tcp", addr)
+	}
+
+	// If file-based TLS is configured, use it.
+	if s.config.TLS.Configured() {
+		cert, err := tls.LoadX509KeyPair(s.config.TLS.CertFile, s.config.TLS.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		return tls.Listen("tcp", addr, tlsCfg)
+	}
+
+	// Auto-generate self-signed cert only when tls.auto is enabled.
+	if s.config.TLS.Auto {
+		autoCert := s.getOrCreateAutoCert()
+		if autoCert == nil {
+			return nil, fmt.Errorf("failed to generate self-signed TLS certificate")
+		}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{*autoCert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		return tls.Listen("tcp", addr, tlsCfg)
+	}
+
+	// No TLS configured — plain TCP.
+	return net.Listen("tcp", addr)
+}
+
+// HasTLS returns true if TLS is available (either file-based or auto-generated).
+func (s *Server) HasTLS() bool {
+	if s.config.TLS.Configured() {
+		return true
+	}
+	return s.config.TLS.Auto && s.getOrCreateAutoCert() != nil
+}
+
+// AutoCertPEM returns the auto-generated certificate in PEM format, or nil
+// if no auto-cert exists (file-based TLS is configured or cert generation failed).
+func (s *Server) AutoCertPEM() []byte {
+	cert := s.getOrCreateAutoCert()
+	if cert == nil || len(cert.Certificate) == 0 {
+		return nil
+	}
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.Certificate[0],
+	})
+}
+
+// getOrCreateAutoCert lazily generates a self-signed TLS certificate.
+func (s *Server) getOrCreateAutoCert() *tls.Certificate {
+	s.autoCertOnce.Do(func() {
+		cert, err := generateSelfSignedCert()
+		if err != nil {
+			slog.Error("failed to generate self-signed TLS certificate", "error", err)
+			return
+		}
+		slog.Info("generated self-signed TLS certificate for console HTTPS")
+		s.autoCert = cert
+	})
+	return s.autoCert
+}
+
+// generateSelfSignedCert creates a self-signed ECDSA certificate valid for
+// localhost and common LAN addresses.
+func generateSelfSignedCert() (*tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      pkix.Name{Organization: []string{"LiveForge"}, CommonName: "LiveForge Console"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses: []net.IP{
+			net.IPv4(127, 0, 0, 1),
+			net.IPv6loopback,
+		},
+	}
+
+	// Add all local interface IPs as SANs so LAN access works.
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+				template.IPAddresses = append(template.IPAddresses, ipNet.IP)
+			}
+		}
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return nil, fmt.Errorf("create certificate: %w", err)
+	}
+
+	cert := &tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  key,
+	}
+	return cert, nil
 }
 
 // aliveLoop periodically emits alive events for all active streams.

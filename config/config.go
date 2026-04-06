@@ -41,6 +41,7 @@ type ServerConfig struct {
 type TLSConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
+	Auto     bool   `yaml:"auto"` // auto-generate self-signed cert when cert_file/key_file are empty
 }
 
 // Configured returns true when both cert and key paths are set.

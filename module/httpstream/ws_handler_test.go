@@ -41,8 +41,10 @@ func TestParseStreamPathWS(t *testing.T) {
 func newTestServer(t *testing.T) (*Module, *core.Server, string) {
 	t.Helper()
 
+	noTLS := false
 	cfg := &config.Config{}
 	cfg.HTTP.Listen = "127.0.0.1:0"
+	cfg.HTTP.TLS = &noTLS
 	cfg.HTTP.CORS = true
 	cfg.Stream.RingBufferSize = 256
 

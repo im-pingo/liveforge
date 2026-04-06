@@ -638,6 +638,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     </div>
   </header>
 
+  <div id="cert-banner" style="display:none;background:#332b00;color:#ffd666;padding:8px 16px;font-size:13px;text-align:center;border-bottom:1px solid #554400;">
+    Self-signed TLS certificate detected.
+    To avoid browser warnings: <a href="/console/cert.pem" style="color:#6c9eff;text-decoration:underline;">Download cert.pem</a> and add it to your OS trust store, or launch Chrome with <code style="background:#221a00;padding:2px 6px;border-radius:3px;">--ignore-certificate-errors</code>
+  </div>
+
   <div class="nav-tabs" id="nav-tabs" style="display:none">
     <button class="nav-tab active" onclick="switchTab('streams')">Streams</button>
     <button class="nav-tab" onclick="switchTab('gb28181')">GB28181 Devices</button>
@@ -1143,7 +1148,7 @@ function setPlayerURL(url) {
 function playHTTPFLV(streamKey) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.http);
-  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".flv";
+  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".flv";
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1202,7 +1207,7 @@ function playWSFLV(streamKey) {
 function playHTTPTS(streamKey) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.http);
-  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".ts";
+  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".ts";
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1231,7 +1236,7 @@ function playHTTPTS(streamKey) {
 function playFMP4(streamKey) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.http);
-  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".mp4";
+  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".mp4";
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1327,7 +1332,7 @@ function playFMP4(streamKey) {
 function playHLS(streamKey) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.http);
-  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".m3u8";
+  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".m3u8";
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1380,7 +1385,7 @@ function playHLS(streamKey) {
 function playDASH(streamKey) {
   destroyCurrentPlayer();
   var port = portFromListen(endpoints.http);
-  var url = "http://" + location.hostname + ":" + port + "/" + streamKey + ".mpd";
+  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".mpd";
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1712,7 +1717,7 @@ function openPublishModal() {
 
   // Secure context check: getUserMedia requires HTTPS or localhost.
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setPublishStatus("Camera/mic requires HTTPS or localhost access", "error");
+    setPublishStatus("Camera/mic unavailable. Access console via https:// or http://localhost:" + location.port + "/console", "error");
     return;
   }
 
@@ -1897,7 +1902,10 @@ function startPublish() {
   }).then(function(sdp) {
     return pc.setRemoteDescription({ type: "answer", sdp: sdp });
   }).then(function() {
-    setPublishStatus("WebRTC connected, waiting for ICE...");
+    var s = pc.iceConnectionState;
+    if (s !== "connected" && s !== "completed") {
+      setPublishStatus("WebRTC connected, waiting for ICE...");
+    }
   }).catch(function(e) {
     setPublishStatus("WHIP error: " + e.message, "error");
     cleanupPublishPC();
@@ -2328,6 +2336,13 @@ refreshServerInfo();
 refresh();
 streamsInterval = setInterval(refresh, 2000);
 setInterval(refreshServerInfo, 5000);
+
+// Show self-signed cert banner when using HTTPS with auto-generated cert.
+if (location.protocol === "https:") {
+  fetch("/console/cert.pem", { method: "HEAD" }).then(function(r) {
+    if (r.ok) document.getElementById("cert-banner").style.display = "block";
+  }).catch(function(){});
+}
 </script>
 </body>
 </html>

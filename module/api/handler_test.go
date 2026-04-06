@@ -12,11 +12,15 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 func newTestConfig() *config.Config {
+	noTLS := boolPtr(false)
 	return &config.Config{
 		API: config.APIConfig{
 			Enabled: true,
 			Listen:  ":0",
+			TLS:     noTLS,
 		},
 		Stream: config.StreamConfig{
 			GOPCache:           true,

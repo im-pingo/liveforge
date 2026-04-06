@@ -320,6 +320,7 @@ func TestWHEPWithGCC(t *testing.T) {
 		WebRTC: config.WebRTCConfig{
 			Enabled:      true,
 			Listen:       ":0",
+			TLS:          func() *bool { b := false; return &b }(),
 			UDPPortRange: []int{20000, 20100},
 			GCC: config.GCCConfig{
 				Enabled:        true,

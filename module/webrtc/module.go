@@ -148,8 +148,8 @@ func (m *Module) Init(s *core.Server) error {
 		webrtc.WithInterceptorRegistry(ir),
 	)
 
-	// Start HTTP signaling server.
-	ln, err := s.MakeListener(cfg.WebRTC.Listen, cfg.WebRTC.TLS)
+	// Start HTTP signaling server (auto-TLS so WHIP/WHEP work from HTTPS console).
+	ln, err := s.MakeListenerAutoTLS(cfg.WebRTC.Listen, cfg.WebRTC.TLS)
 	if err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
-	if cfg.TLS.Configured() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
+	if s.HasTLS() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
 		proto = "https"
 	}
 	slog.Info("listening", "module", "webrtc", "proto", proto, "addr", ln.Addr())

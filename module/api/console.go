@@ -31,3 +31,17 @@ func (h *Handlers) handleDebugWebRTC(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(debugWebRTCHTML)
 }
+
+// handleCertDownload serves the auto-generated self-signed certificate as a
+// downloadable PEM file. Users can install this into their OS/browser trust
+// store to avoid certificate warnings.
+func (h *Handlers) handleCertDownload(w http.ResponseWriter, r *http.Request) {
+	pemData := h.server.AutoCertPEM()
+	if pemData == nil {
+		http.Error(w, "no auto-generated certificate available", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"liveforge-cert.pem\"")
+	w.Write(pemData)
+}

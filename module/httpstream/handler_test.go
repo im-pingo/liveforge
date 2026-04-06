@@ -69,8 +69,10 @@ func TestParseSegmentPath(t *testing.T) {
 func newHTTPTestServer(t *testing.T) (*Module, *core.Server, string) {
 	t.Helper()
 
+	noTLS := false
 	cfg := &config.Config{}
 	cfg.HTTP.Listen = "127.0.0.1:0"
+	cfg.HTTP.TLS = &noTLS
 	cfg.HTTP.CORS = true
 	cfg.Stream.RingBufferSize = 256
 
@@ -284,8 +286,10 @@ func TestHandlerFMP4Stream(t *testing.T) {
 }
 
 func TestHandlerMaxConnections(t *testing.T) {
+	noTLS := false
 	cfg := &config.Config{}
 	cfg.HTTP.Listen = "127.0.0.1:0"
+	cfg.HTTP.TLS = &noTLS
 	cfg.HTTP.CORS = true
 	cfg.Stream.RingBufferSize = 256
 	cfg.Limits.MaxConnections = 1

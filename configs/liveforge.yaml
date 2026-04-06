@@ -6,6 +6,7 @@ server:
 tls:
   cert_file: ""
   key_file: ""
+  auto: false  # auto-generate self-signed cert (enables HTTPS for console camera/mic access)
 
 limits:
   max_streams: 0

@@ -144,7 +144,7 @@ async function connect() {
   // Determine WHEP URL: same host, port from webrtc config.
   // The debug page is served from the API port; WHEP is on the WebRTC port.
   // Use the webrtc listen port from the page's known config.
-  const whepBase = detectWhepBase();
+  const whepBase = await detectWhepBase();
   const whepUrl = whepBase + '/webrtc/whep/' + streamKey + '?mode=' + mode;
 
   logMsg('Connecting to ' + whepUrl, 'log-info');
@@ -224,13 +224,24 @@ function disconnect() {
   logMsg('Disconnected', 'log-warn');
 }
 
-function detectWhepBase() {
-  // Assume WHEP is on the same host. Try common ports.
-  // User can override by editing the stream key field with full URL.
-  const loc = window.location;
-  const proto = loc.protocol === 'https:' ? 'https' : 'http';
-  // Default WebRTC port from config: 8443
-  return proto + '://' + loc.hostname + ':8443';
+let _whepBaseCache = null;
+async function detectWhepBase() {
+  if (_whepBaseCache) return _whepBaseCache;
+  try {
+    const resp = await fetch('/api/v1/server/info');
+    const json = await resp.json();
+    const listen = json.data && json.data.endpoints && json.data.endpoints.webrtc;
+    if (listen) {
+      const i = listen.lastIndexOf(':');
+      const port = i >= 0 ? listen.substring(i + 1) : listen;
+      const proto = location.protocol === 'https:' ? 'https' : 'http';
+      _whepBaseCache = proto + '://' + location.hostname + ':' + port;
+      return _whepBaseCache;
+    }
+  } catch (e) { /* fall through */ }
+  // Fallback: same origin
+  _whepBaseCache = location.origin;
+  return _whepBaseCache;
 }
 
 function startStatsCollection() {

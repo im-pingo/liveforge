@@ -37,7 +37,7 @@ func (m *Module) Name() string { return "api" }
 func (m *Module) Init(s *core.Server) error {
 	cfg := s.Config()
 
-	ln, err := s.MakeListener(cfg.API.Listen, cfg.API.TLS)
+	ln, err := s.MakeListenerAutoTLS(cfg.API.Listen, cfg.API.TLS)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
-	if cfg.TLS.Configured() && (cfg.API.TLS == nil || *cfg.API.TLS) {
+	if s.HasTLS() && (cfg.API.TLS == nil || *cfg.API.TLS) {
 		proto = "https"
 	}
 	slog.Info("listening", "module", "api", "proto", proto, "addr", ln.Addr())

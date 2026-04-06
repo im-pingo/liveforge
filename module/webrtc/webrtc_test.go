@@ -30,6 +30,7 @@ func newTestServer(t *testing.T) *core.Server {
 		WebRTC: config.WebRTCConfig{
 			Enabled:      true,
 			Listen:       ":0",
+			TLS:          func() *bool { b := false; return &b }(),
 			UDPPortRange: []int{20000, 20100},
 		},
 	}
@@ -488,6 +489,7 @@ func TestModuleInitWithGCC(t *testing.T) {
 		WebRTC: config.WebRTCConfig{
 			Enabled:      true,
 			Listen:       ":0",
+			TLS:          func() *bool { b := false; return &b }(),
 			UDPPortRange: []int{20000, 20100},
 			GCC: config.GCCConfig{
 				Enabled:        true,
@@ -521,6 +523,7 @@ func TestModuleInitWithoutGCC(t *testing.T) {
 		WebRTC: config.WebRTCConfig{
 			Enabled:      true,
 			Listen:       ":0",
+			TLS:          func() *bool { b := false; return &b }(),
 			UDPPortRange: []int{20000, 20100},
 			GCC: config.GCCConfig{
 				Enabled: false,

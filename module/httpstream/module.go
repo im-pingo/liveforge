@@ -55,7 +55,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.server = s
 	cfg := s.Config()
 
-	ln, err := s.MakeListener(cfg.HTTP.Listen, cfg.HTTP.TLS)
+	ln, err := s.MakeListenerAutoTLS(cfg.HTTP.Listen, cfg.HTTP.TLS)
 	if err != nil {
 		return err
 	}
@@ -72,7 +72,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.httpSrv = &http.Server{Handler: handler}
 
 	proto := "http"
-	if cfg.TLS.Configured() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {
+	if s.HasTLS() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {
 		proto = "https"
 	}
 	slog.Info("listening", "module", "httpstream", "proto", proto, "addr", ln.Addr())

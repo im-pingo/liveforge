@@ -122,6 +122,7 @@ func TestIceServersFromConfig(t *testing.T) {
 		WebRTC: config.WebRTCConfig{
 			Enabled: true,
 			Listen:  ":0",
+			TLS:     func() *bool { b := false; return &b }(),
 			ICEServers: []config.ICEServer{
 				{
 					URLs:       []string{"stun:stun.example.com:3478"},
