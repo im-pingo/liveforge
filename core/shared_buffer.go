@@ -44,6 +44,11 @@ func (r *SharedBufferReader) Read() ([]byte, bool) {
 	return r.reader.Read()
 }
 
+// Close marks this reader as closed, unblocking any in-progress Read().
+func (r *SharedBufferReader) Close() {
+	r.reader.Close()
+}
+
 // TryRead attempts a non-blocking read.
 func (r *SharedBufferReader) TryRead() ([]byte, bool) {
 	return r.reader.TryRead()

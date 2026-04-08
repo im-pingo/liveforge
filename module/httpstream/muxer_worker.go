@@ -103,16 +103,17 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	// Read live frames
 	reader, release := muxerLiveReader(stream, startPos, audioCompatible)
 	defer release()
-	for {
-		select {
-		case <-inst.Done:
-			slog.Info("muxer stopped", "module", "httpstream", "format", "flv", "stream", stream.Key())
-			return
-		default:
-		}
 
+	// Close reader when muxer is done so Read() unblocks promptly.
+	go func() {
+		<-inst.Done
+		reader.Close()
+	}()
+
+	for {
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
+			slog.Info("muxer stopped", "module", "httpstream", "format", "flv", "stream", stream.Key())
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -170,28 +171,29 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 			continue
 		}
 		if data := muxer.WriteFrame(f); len(data) > 0 {
-			inst.Buffer.Write(copyBytes(data))
+			inst.Buffer.Write(data)
 		}
 	}
 
 	// Read live frames
 	reader, release := muxerLiveReader(stream, startPos, audioCompatible)
 	defer release()
-	for {
-		select {
-		case <-inst.Done:
-			slog.Info("muxer stopped", "module", "httpstream", "format", "ts", "stream", stream.Key())
-			return
-		default:
-		}
 
+	// Close reader when muxer is done so Read() unblocks promptly.
+	go func() {
+		<-inst.Done
+		reader.Close()
+	}()
+
+	for {
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
+			slog.Info("muxer stopped", "module", "httpstream", "format", "ts", "stream", stream.Key())
 			return
 		}
 
 		if data := muxer.WriteFrame(frame); len(data) > 0 {
-			inst.Buffer.Write(copyBytes(data))
+			inst.Buffer.Write(data)
 		}
 	}
 }
@@ -274,16 +276,17 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	// Read live frames and emit each as its own moof+mdat segment.
 	reader, release := muxerLiveReader(stream, startPos, audioCompatible)
 	defer release()
-	for {
-		select {
-		case <-inst.Done:
-			slog.Info("muxer stopped", "module", "httpstream", "format", "fmp4", "stream", stream.Key())
-			return
-		default:
-		}
 
+	// Close reader when muxer is done so Read() unblocks promptly.
+	go func() {
+		<-inst.Done
+		reader.Close()
+	}()
+
+	for {
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
+			slog.Info("muxer stopped", "module", "httpstream", "format", "fmp4", "stream", stream.Key())
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {

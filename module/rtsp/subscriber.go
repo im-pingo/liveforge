@@ -4,6 +4,7 @@ import (
 	"io"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
@@ -38,11 +39,11 @@ type RTSPSubscriber struct {
 	audioDTSInitialized bool
 	sendCount    int
 
-	// RTCP SR tracking
+	// RTCP SR tracking — atomic for lock-free updates in sendPackets hot path
 	videoSSRC    uint32
-	packetCount  uint32
-	octetCount   uint32
-	lastRTPTime  uint32
+	packetCount  atomic.Uint32
+	octetCount   atomic.Uint32
+	lastRTPTime  atomic.Uint32
 
 	mu     sync.Mutex
 	closed bool
@@ -217,12 +218,10 @@ func (s *RTSPSubscriber) sendPackets(pkts []*pionrtp.Packet, channel uint8, udp 
 		if err != nil {
 			return err
 		}
-		s.mu.Lock()
 		s.sendCount++
-		s.packetCount++
-		s.octetCount += uint32(len(pkt.Payload))
-		s.lastRTPTime = pkt.Timestamp
-		s.mu.Unlock()
+		s.packetCount.Add(1)
+		s.octetCount.Add(uint32(len(pkt.Payload)))
+		s.lastRTPTime.Store(pkt.Timestamp)
 		if udp != nil {
 			if err := udp.SendRTP(data); err != nil {
 				return err
@@ -248,10 +247,11 @@ func (s *RTSPSubscriber) rtcpLoop() {
 				s.mu.Unlock()
 				return
 			}
-			pktCount := s.packetCount
-			octCount := s.octetCount
-			rtpTime := s.lastRTPTime
 			s.mu.Unlock()
+
+			pktCount := s.packetCount.Load()
+			octCount := s.octetCount.Load()
+			rtpTime := s.lastRTPTime.Load()
 
 			ntpTime := toNTP(time.Now())
 			sr := pkgrtp.BuildSR(s.videoSSRC, ntpTime, rtpTime, pktCount, octCount)

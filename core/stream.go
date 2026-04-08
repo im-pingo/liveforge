@@ -96,6 +96,7 @@ type Stream struct {
 
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
+	seqHeaderReady chan struct{} // closed when first sequence header arrives
 
 	stats            StreamStats
 	eventBus         *EventBus
@@ -108,13 +109,14 @@ type Stream struct {
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *Stream {
 	s := &Stream{
-		key:         key,
-		config:      cfg,
-		limits:      limits,
-		state:       StreamStateIdle,
-		ringBuffer:  util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
-		eventBus:    bus,
-		subscribers: make(map[string]int),
+		key:            key,
+		config:         cfg,
+		limits:         limits,
+		state:          StreamStateIdle,
+		ringBuffer:     util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
+		eventBus:       bus,
+		subscribers:    make(map[string]int),
+		seqHeaderReady: make(chan struct{}),
 	}
 	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
 	s.feedbackRouter = NewFeedbackRouter(cfg.Feedback)
@@ -250,6 +252,13 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 		} else if frame.MediaType.IsAudio() {
 			s.audioSeqHeader = frame
 		}
+		// Signal waiters that at least one sequence header is available.
+		select {
+		case <-s.seqHeaderReady:
+			// Already closed
+		default:
+			close(s.seqHeaderReady)
+		}
 	}
 
 	// Update GOP cache for video frames
@@ -377,6 +386,12 @@ func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.audioSeqHeader
+}
+
+// SeqHeaderReady returns a channel that is closed when the first sequence header
+// (video or audio) is stored. Subscribers can select on this instead of polling.
+func (s *Stream) SeqHeaderReady() <-chan struct{} {
+	return s.seqHeaderReady
 }
 
 // Stats returns a point-in-time snapshot of stream statistics.

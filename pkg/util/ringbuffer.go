@@ -1,6 +1,7 @@
 package util
 
 import (
+	"sync"
 	"sync/atomic"
 )
 
@@ -12,15 +13,19 @@ type RingBuffer[T any] struct {
 	writeCursor atomic.Int64 // next write position (monotonically increasing)
 	signal      chan struct{}
 	closed      atomic.Bool
+	mu          sync.Mutex // protects cond for Read() blocking
+	cond        *sync.Cond // wakes blocked Read() callers on Write/Close
 }
 
 // NewRingBuffer creates a new ring buffer with the given capacity.
 func NewRingBuffer[T any](size int) *RingBuffer[T] {
-	return &RingBuffer[T]{
+	rb := &RingBuffer[T]{
 		buf:    make([]T, size),
 		size:   int64(size),
 		signal: make(chan struct{}, 1),
 	}
+	rb.cond = sync.NewCond(&rb.mu)
+	return rb
 }
 
 // Write adds a value to the ring buffer. If the buffer is full, the oldest
@@ -35,7 +40,10 @@ func (rb *RingBuffer[T]) Write(val T) {
 	rb.buf[pos%rb.size] = val
 	rb.writeCursor.Store(pos + 1)
 
-	// Non-blocking notify to wake any waiting readers
+	// Wake all Read() callers blocked on cond.Wait()
+	rb.cond.Broadcast()
+
+	// Non-blocking notify for select-based consumers using Signal()
 	select {
 	case rb.signal <- struct{}{}:
 	default:
@@ -46,7 +54,9 @@ func (rb *RingBuffer[T]) Write(val T) {
 // After Close, Write is a no-op.
 func (rb *RingBuffer[T]) Close() {
 	rb.closed.Store(true)
-	// Wake all blocked readers
+	// Wake all Read() callers blocked on cond.Wait()
+	rb.cond.Broadcast()
+	// Wake select-based consumers using Signal()
 	select {
 	case rb.signal <- struct{}{}:
 	default:
@@ -95,28 +105,37 @@ type RingReader[T any] struct {
 	rb          *RingBuffer[T]
 	readCursor  int64
 	lastSkipped int64
+	closed      atomic.Bool // per-reader close flag
 }
 
 // Read returns the next value, blocking until data is available.
-// Returns (value, true) on success, or (zero, false) if the buffer is closed and no data remains.
+// Returns (value, true) on success, or (zero, false) if the buffer or reader is closed and no data remains.
 func (r *RingReader[T]) Read() (T, bool) {
 	for {
 		val, ok := r.TryRead()
 		if ok {
 			return val, true
 		}
-		if r.rb.closed.Load() {
+		if r.rb.closed.Load() || r.closed.Load() {
 			var zero T
 			return zero, false
 		}
-		// Wait for signal from writer
-		<-r.rb.signal
-		// Re-broadcast signal for other waiting readers
-		select {
-		case r.rb.signal <- struct{}{}:
-		default:
+		// Block until writer signals new data via cond.Broadcast().
+		// Using sync.Cond avoids the stale-signal busy-spin that occurred
+		// with the previous channel + re-broadcast approach.
+		r.rb.mu.Lock()
+		for r.readCursor >= r.rb.writeCursor.Load() && !r.rb.closed.Load() && !r.closed.Load() {
+			r.rb.cond.Wait()
 		}
+		r.rb.mu.Unlock()
 	}
+}
+
+// Close marks this reader as closed, causing any blocking Read() to return (zero, false).
+// Safe to call concurrently and multiple times.
+func (r *RingReader[T]) Close() {
+	r.closed.Store(true)
+	r.rb.cond.Broadcast()
 }
 
 // Signal returns the notification channel of the underlying ring buffer.

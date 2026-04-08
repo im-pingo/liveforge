@@ -91,15 +91,14 @@ func (m *Module) serveWebSocket(ctx context.Context, conn *websocket.Conn, forma
 		}
 	}
 
-	// Read loop: pull muxed data from shared buffer, send as WS binary frames
-	for {
-		select {
-		case <-ctx.Done():
-			conn.Close(websocket.StatusNormalClosure, "client disconnected")
-			return
-		default:
-		}
+	// Read loop: pull muxed data from shared buffer, send as WS binary frames.
+	// Close the reader when the client disconnects so Read() unblocks.
+	go func() {
+		<-ctx.Done()
+		reader.Close()
+	}()
 
+	for {
 		data, ok := reader.Read()
 		if !ok {
 			conn.Close(websocket.StatusNormalClosure, "stream ended")

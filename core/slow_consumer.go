@@ -144,6 +144,11 @@ func (f *SlowConsumerFilter) Dropped() int64 {
 	return f.dropped
 }
 
+// Close marks the underlying reader as closed, unblocking any in-progress Read().
+func (f *SlowConsumerFilter) Close() {
+	f.reader.Close()
+}
+
 // updateState transitions the state machine based on lag ratio and EWMA.
 func (f *SlowConsumerFilter) updateState() {
 	lag := f.reader.Lag()

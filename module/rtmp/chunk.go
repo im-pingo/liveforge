@@ -188,6 +188,7 @@ func (cr *ChunkReader) readMessageHeader(chunkFmt uint8, h *chunkHeader) error {
 type ChunkWriter struct {
 	w         io.Writer
 	chunkSize int
+	buf       []byte // reusable write buffer to batch syscalls
 }
 
 // NewChunkWriter creates a new chunk writer.
@@ -195,6 +196,7 @@ func NewChunkWriter(w io.Writer, chunkSize int) *ChunkWriter {
 	return &ChunkWriter{
 		w:         w,
 		chunkSize: chunkSize,
+		buf:       make([]byte, 0, chunkSize+16),
 	}
 }
 
@@ -205,41 +207,37 @@ func (cw *ChunkWriter) SetChunkSize(size int) {
 
 // WriteMessage writes a complete message as one or more chunks.
 // Always uses fmt 0 for the first chunk and fmt 3 for continuation chunks.
+// All chunk headers and payload data are buffered and written in a single
+// syscall to minimize write overhead.
 func (cw *ChunkWriter) WriteMessage(csid uint32, msg *Message) error {
-	// First chunk: fmt 0 with full header
-	basicHeader := cw.encodeBasicHeader(chunkFmt0, csid)
-	if _, err := cw.w.Write(basicHeader); err != nil {
-		return err
+	// Estimate total size: headers + payload + continuation headers.
+	// Continuation header (1-3 bytes) every chunkSize bytes.
+	nChunks := (len(msg.Payload) + cw.chunkSize - 1) / cw.chunkSize
+	if nChunks == 0 {
+		nChunks = 1
 	}
+	estimatedSize := 3 + 11 + 4 + len(msg.Payload) + nChunks*3
+	cw.buf = cw.buf[:0]
+	if cap(cw.buf) < estimatedSize {
+		cw.buf = make([]byte, 0, estimatedSize)
+	}
+
+	// First chunk: fmt 0 with full header
+	cw.buf = appendBasicHeader(cw.buf, chunkFmt0, csid)
 
 	// Message header (11 bytes for fmt 0)
-	var header [11]byte
 	ts := msg.Timestamp
 	if ts >= 0xFFFFFF {
-		header[0] = 0xFF
-		header[1] = 0xFF
-		header[2] = 0xFF
+		cw.buf = append(cw.buf, 0xFF, 0xFF, 0xFF)
 	} else {
-		header[0] = byte(ts >> 16)
-		header[1] = byte(ts >> 8)
-		header[2] = byte(ts)
+		cw.buf = append(cw.buf, byte(ts>>16), byte(ts>>8), byte(ts))
 	}
-	header[3] = byte(msg.Length >> 16)
-	header[4] = byte(msg.Length >> 8)
-	header[5] = byte(msg.Length)
-	header[6] = msg.TypeID
-	binary.LittleEndian.PutUint32(header[7:11], msg.StreamID)
-
-	if _, err := cw.w.Write(header[:]); err != nil {
-		return err
-	}
+	cw.buf = append(cw.buf, byte(msg.Length>>16), byte(msg.Length>>8), byte(msg.Length))
+	cw.buf = append(cw.buf, msg.TypeID)
+	cw.buf = binary.LittleEndian.AppendUint32(cw.buf, msg.StreamID)
 
 	if ts >= 0xFFFFFF {
-		var ext [4]byte
-		binary.BigEndian.PutUint32(ext[:], ts)
-		if _, err := cw.w.Write(ext[:]); err != nil {
-			return err
-		}
+		cw.buf = binary.BigEndian.AppendUint32(cw.buf, ts)
 	}
 
 	// Write first chunk data
@@ -248,38 +246,31 @@ func (cw *ChunkWriter) WriteMessage(csid uint32, msg *Message) error {
 	if firstChunkSize > len(payload) {
 		firstChunkSize = len(payload)
 	}
-	if _, err := cw.w.Write(payload[:firstChunkSize]); err != nil {
-		return err
-	}
+	cw.buf = append(cw.buf, payload[:firstChunkSize]...)
 
 	// Write continuation chunks (fmt 3)
 	offset := firstChunkSize
 	for offset < len(payload) {
-		contHeader := cw.encodeBasicHeader(chunkFmt3, csid)
-		if _, err := cw.w.Write(contHeader); err != nil {
-			return err
-		}
+		cw.buf = appendBasicHeader(cw.buf, chunkFmt3, csid)
 
 		chunkLen := cw.chunkSize
 		if offset+chunkLen > len(payload) {
 			chunkLen = len(payload) - offset
 		}
-		if _, err := cw.w.Write(payload[offset : offset+chunkLen]); err != nil {
-			return err
-		}
+		cw.buf = append(cw.buf, payload[offset:offset+chunkLen]...)
 		offset += chunkLen
 	}
 
-	return nil
+	_, err := cw.w.Write(cw.buf)
+	return err
 }
 
-func (cw *ChunkWriter) encodeBasicHeader(fmt uint8, csid uint32) []byte {
+func appendBasicHeader(dst []byte, fmt uint8, csid uint32) []byte {
 	if csid >= 2 && csid <= 63 {
-		return []byte{(fmt << 6) | byte(csid)}
+		return append(dst, (fmt<<6)|byte(csid))
 	} else if csid >= 64 && csid <= 319 {
-		return []byte{fmt << 6, byte(csid - 64)}
-	} else {
-		id := csid - 64
-		return []byte{(fmt << 6) | 1, byte(id), byte(id >> 8)}
+		return append(dst, fmt<<6, byte(csid-64))
 	}
+	id := csid - 64
+	return append(dst, (fmt<<6)|1, byte(id), byte(id>>8))
 }

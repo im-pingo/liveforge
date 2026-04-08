@@ -22,6 +22,10 @@ type Subscriber struct {
 	opts    core.SubscribeOptions
 	skipCfg *config.SkipTrackerConfig
 	closed  chan struct{}
+
+	// Reusable per-frame encoding state to avoid heap allocations on the hot path.
+	flvBuf bytes.Buffer
+	muxer  *flvpkg.Muxer
 }
 
 // NewSubscriber creates a new RTMP subscriber.
@@ -34,6 +38,7 @@ func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *cor
 		opts:    core.DefaultSubscribeOptions(),
 		skipCfg: skipCfg,
 		closed:  make(chan struct{}),
+		muxer:   flvpkg.NewMuxer(),
 	}
 }
 
@@ -137,13 +142,14 @@ func (s *Subscriber) WriteLoop() {
 	}
 
 	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer, s.skipCfg)
-	for {
-		select {
-		case <-s.closed:
-			return
-		default:
-		}
 
+	// Watch for subscriber close and unblock any in-progress Read().
+	go func() {
+		<-s.closed
+		filter.Close()
+	}()
+
+	for {
 		frame, ok := filter.NextFrame()
 		if !ok {
 			return
@@ -165,28 +171,26 @@ func (s *Subscriber) WriteLoop() {
 // waitForSequenceHeaders blocks until at least one sequence header is available,
 // or returns false if the subscriber is closed while waiting.
 func (s *Subscriber) waitForSequenceHeaders() bool {
-	for {
-		if s.stream.VideoSeqHeader() != nil || s.stream.AudioSeqHeader() != nil {
-			return true
-		}
-		select {
-		case <-s.closed:
-			return false
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
+	// Fast path: already available
+	if s.stream.VideoSeqHeader() != nil || s.stream.AudioSeqHeader() != nil {
+		return true
+	}
+	select {
+	case <-s.stream.SeqHeaderReady():
+		return true
+	case <-s.closed:
+		return false
 	}
 }
 
 func (s *Subscriber) buildRTMPPayload(frame *avframe.AVFrame) ([]byte, error) {
-	var buf bytes.Buffer
-	muxer := flvpkg.NewMuxer()
-	if err := muxer.WriteFrame(&buf, frame); err != nil {
+	s.flvBuf.Reset()
+	if err := s.muxer.WriteFrame(&s.flvBuf, frame); err != nil {
 		return nil, err
 	}
 
 	// Extract the FLV tag body (skip tag header and trailing prev tag size)
-	tagData := buf.Bytes()
+	tagData := s.flvBuf.Bytes()
 	if len(tagData) < flvpkg.TagHeaderSize+4 {
 		return nil, nil
 	}

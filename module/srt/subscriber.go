@@ -100,13 +100,14 @@ func (s *Subscriber) Run() {
 	// prevents backward DTS jumps while tolerating small overlaps.
 	reader := stream.RingBuffer().NewReaderAt(stream.RingBuffer().WriteCursor())
 	filter := core.NewSlowConsumerFilter(reader, stream.Config().SlowConsumer, s.skipCfg)
-	for {
-		select {
-		case <-s.closed:
-			return
-		default:
-		}
 
+	// Watch for subscriber close and unblock any in-progress Read().
+	go func() {
+		<-s.closed
+		filter.Close()
+	}()
+
+	for {
 		frame, ok := filter.NextFrame()
 		if !ok {
 			return
@@ -158,15 +159,14 @@ func (s *Subscriber) sendFrame(muxer *ts.Muxer, frame *avframe.AVFrame) error {
 
 // waitForSequenceHeaders blocks until at least one sequence header is available.
 func (s *Subscriber) waitForSequenceHeaders(stream *core.Stream) bool {
-	for {
-		if stream.VideoSeqHeader() != nil || stream.AudioSeqHeader() != nil {
-			return true
-		}
-		select {
-		case <-s.closed:
-			return false
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
+	// Fast path: already available
+	if stream.VideoSeqHeader() != nil || stream.AudioSeqHeader() != nil {
+		return true
+	}
+	select {
+	case <-stream.SeqHeaderReady():
+		return true
+	case <-s.closed:
+		return false
 	}
 }

@@ -313,12 +313,13 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 	}
 
 	// Read loop
+	// Close the reader when the HTTP client disconnects so Read() unblocks.
+	go func() {
+		<-r.Context().Done()
+		reader.Close()
+	}()
+
 	for {
-		select {
-		case <-r.Context().Done():
-			return
-		default:
-		}
 		data, ok := reader.Read()
 		if !ok {
 			return
