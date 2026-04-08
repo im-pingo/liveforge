@@ -96,8 +96,11 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Send GOP cache if in GOP mode and track last DTS sent
-	var lastDTS int64
+	// Snapshot write cursor before sending GOP cache, so the live reader
+	// starts right after the cached frames and avoids duplicate/stale data.
+	startPos := s.stream.RingBuffer().WriteCursor()
+
+	// Send GOP cache if in GOP mode
 	if s.opts.StartMode == core.StartModeGOP {
 		for _, frame := range s.stream.GOPCache() {
 			// Skip audio from GOP cache when transcoding; transcoded audio
@@ -108,9 +111,6 @@ func (s *Subscriber) WriteLoop() {
 			if err := s.sendFrame(frame); err != nil {
 				slog.Error("GOP cache send error", "module", "rtmp", "subscriber", s.id, "error", err)
 				return
-			}
-			if frame.DTS > lastDTS {
-				lastDTS = frame.DTS
 			}
 		}
 	}
@@ -124,13 +124,13 @@ func (s *Subscriber) WriteLoop() {
 			reader, transcodeRelease, err = tm.GetOrCreateReader(avframe.CodecAAC)
 			if err != nil {
 				slog.Warn("rtmp: audio transcode unavailable", "subscriber", s.id, "error", err)
-				reader = s.stream.RingBuffer().NewReader()
+				reader = s.stream.RingBuffer().NewReaderAt(startPos)
 			}
 		} else {
-			reader = s.stream.RingBuffer().NewReader()
+			reader = s.stream.RingBuffer().NewReaderAt(startPos)
 		}
 	} else {
-		reader = s.stream.RingBuffer().NewReader()
+		reader = s.stream.RingBuffer().NewReaderAt(startPos)
 	}
 	if transcodeRelease != nil {
 		defer transcodeRelease()
@@ -149,8 +149,8 @@ func (s *Subscriber) WriteLoop() {
 			return
 		}
 
-		// Skip frames that were already covered by the GOP cache
-		if frame.FrameType == avframe.FrameTypeSequenceHeader || frame.DTS <= lastDTS {
+		// Skip sequence headers (already sent during init)
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
 
