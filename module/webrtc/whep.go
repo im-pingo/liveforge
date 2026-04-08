@@ -13,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -54,6 +55,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		Type: webrtc.SDPTypeOffer,
 		SDP:  string(offerBytes),
 	}
+
+	// Normalize H264 fmtp in the offer so pion can match it.
+	offer.SDP = normalizeH264Offer(offer.SDP)
 
 	// Find the stream.
 	stream, ok := m.server.StreamHub().Find(streamKey)
@@ -110,6 +114,23 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
 	m.storeSession(sess)
 
+	// Parse the offer SDP to determine which media types the client requests.
+	// Only add tracks that match an m-line in the offer; adding tracks without
+	// a corresponding offer m-line causes pion's SetLocalDescription to fail
+	// with "codec is not supported by remote".
+	var offerHasVideo, offerHasAudio bool
+	var parsedSDP sdp.SessionDescription
+	if err := parsedSDP.UnmarshalString(offer.SDP); err == nil {
+		for _, md := range parsedSDP.MediaDescriptions {
+			switch md.MediaName.Media {
+			case "video":
+				offerHasVideo = true
+			case "audio":
+				offerHasAudio = true
+			}
+		}
+	}
+
 	// Create TrackSenders for video and audio. Each TrackSender owns its
 	// RTCP read loop, keeping RTCP dispatch independent of this handler.
 	//
@@ -122,7 +143,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// resulting in Chrome receiving packets with an unexpected payload type.
 	var videoSender, audioSender *TrackSender
 
-	if info.HasVideo() {
+	if info.HasVideo() && offerHasVideo {
 		mime := codecToMime(info.VideoCodec)
 		if mime != "" {
 			vt, err := webrtc.NewTrackLocalStaticSample(
@@ -137,7 +158,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if info.HasAudio() {
+	if info.HasAudio() && offerHasAudio {
 		mime := codecToMime(info.AudioCodec)
 		if mime == "" && stream.TranscodeManager() != nil {
 			// Publisher codec not WebRTC-compatible; transcode to Opus.
@@ -290,5 +311,55 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(pc.LocalDescription().SDP))
 
 	slog.Info("WHEP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
+}
+
+// normalizeH264Offer adds packetization-mode=1 to H264 fmtp attributes that
+// don't specify it. Some WebRTC clients (e.g., GStreamer) omit
+// packetization-mode, but pion's codec matcher requires it on both sides.
+func normalizeH264Offer(offerSDP string) string {
+	var parsed sdp.SessionDescription
+	if err := parsed.UnmarshalString(offerSDP); err != nil {
+		return offerSDP
+	}
+
+	for _, md := range parsed.MediaDescriptions {
+		if md.MediaName.Media != "video" {
+			continue
+		}
+
+		// Collect H264 payload types from rtpmap attributes.
+		h264PTs := map[string]bool{}
+		for _, attr := range md.Attributes {
+			if attr.Key == "rtpmap" {
+				parts := strings.SplitN(attr.Value, " ", 2)
+				if len(parts) == 2 && strings.HasPrefix(strings.ToUpper(parts[1]), "H264/") {
+					h264PTs[parts[0]] = true
+				}
+			}
+		}
+
+		// Append packetization-mode=1 to H264 fmtp lines that lack it.
+		for i, attr := range md.Attributes {
+			if attr.Key != "fmtp" {
+				continue
+			}
+			parts := strings.SplitN(attr.Value, " ", 2)
+			if len(parts) != 2 || !h264PTs[parts[0]] {
+				continue
+			}
+			if !strings.Contains(parts[1], "packetization-mode") {
+				md.Attributes[i] = sdp.Attribute{
+					Key:   "fmtp",
+					Value: parts[0] + " " + parts[1] + ";packetization-mode=1",
+				}
+			}
+		}
+	}
+
+	result, err := parsed.Marshal()
+	if err != nil {
+		return offerSDP
+	}
+	return string(result)
 }
 
