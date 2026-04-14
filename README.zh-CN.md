@@ -180,7 +180,36 @@ graph LR
 
 ## 快速开始
 
-### 编译运行
+### Docker 部署（推荐）
+
+```bash
+docker run -d --name liveforge \
+  -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
+  -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
+  impingo/liveforge:latest
+```
+
+或使用 docker compose：
+
+```bash
+git clone https://github.com/im-pingo/liveforge.git
+cd liveforge
+docker compose up -d
+```
+
+打开 `http://localhost:8090/console` 访问 Web 控制台。
+
+使用自定义配置：
+
+```bash
+docker run -d --name liveforge \
+  -v /path/to/liveforge.yaml:/etc/liveforge/liveforge.yaml:ro \
+  -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
+  -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
+  impingo/liveforge:latest
+```
+
+### 源码编译
 
 ```bash
 git clone https://github.com/im-pingo/liveforge.git

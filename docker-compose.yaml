@@ -1,0 +1,23 @@
+services:
+  liveforge:
+    image: impingo/liveforge:latest
+    # build:
+    #   context: .
+    #   args:
+    #     VERSION: dev
+    ports:
+      - "1935:1935"       # RTMP
+      - "8554:8554"       # RTSP
+      - "8080:8080"       # HTTP (HLS/DASH/FLV/TS/FMP4)
+      - "8443:8443"       # WebRTC (WHIP/WHEP)
+      - "6000:6000"       # SRT
+      - "5060:5060/udp"   # SIP (GB28181)
+      - "8090:8090"       # API + Web Console
+      # - "9090:9090"     # Prometheus metrics (uncomment if needed)
+    volumes:
+      - ./configs/liveforge.yaml:/etc/liveforge/liveforge.yaml:ro
+      - liveforge-data:/data
+    restart: unless-stopped
+
+volumes:
+  liveforge-data:

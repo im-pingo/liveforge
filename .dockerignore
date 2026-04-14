@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.gitignore
+bin/
+liveforge
+liveforge-debug
+liveforge-patched
+third_party/ffmpeg/lib/darwin_*
+docs/superpowers/
+*.md
+!configs/liveforge.yaml
+LICENSE

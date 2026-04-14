@@ -180,7 +180,36 @@ graph LR
 
 ## Quick Start
 
-### Build and Run
+### Docker (Recommended)
+
+```bash
+docker run -d --name liveforge \
+  -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
+  -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
+  impingo/liveforge:latest
+```
+
+Or with docker compose:
+
+```bash
+git clone https://github.com/im-pingo/liveforge.git
+cd liveforge
+docker compose up -d
+```
+
+Open `http://localhost:8090/console` to access the web console.
+
+To use a custom config:
+
+```bash
+docker run -d --name liveforge \
+  -v /path/to/liveforge.yaml:/etc/liveforge/liveforge.yaml:ro \
+  -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
+  -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
+  impingo/liveforge:latest
+```
+
+### Build from Source
 
 ```bash
 git clone https://github.com/im-pingo/liveforge.git
