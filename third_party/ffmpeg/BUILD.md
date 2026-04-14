@@ -18,11 +18,94 @@
 | libmp3lame.a | /opt/homebrew/lib/ | MP3 encoding (used by RTMP/FLV) |
 | libspeex.a | /opt/homebrew/lib/ | Speex codec support |
 
-## Build Commands
+## Build Modes
 
-The core FFmpeg libraries (libavcodec, libavutil, libswresample) are built from
-source with a minimal configuration that includes only audio codecs. This avoids
-pulling in dozens of optional video/image library dependencies.
+### Linux — System Libraries (default)
+
+The default `make build` on Linux uses `pkg-config` to find system-installed FFmpeg
+shared libraries. Install the dev packages for your distro:
+
+```bash
+# Debian / Ubuntu
+sudo apt install pkg-config libavcodec-dev libswresample-dev libavutil-dev
+
+# RHEL / Fedora
+sudo dnf install pkgconf-pkg-config libavcodec-free-devel libswresample-free-devel libavutil-free-devel
+
+# Alpine
+sudo apk add ffmpeg-dev pkgconf
+```
+
+Then build normally:
+
+```bash
+make build
+```
+
+Run `make check-deps` to verify all required libraries are found.
+
+### Linux — Vendored Static Libraries
+
+To use vendored static `.a` files instead of system libraries:
+
+```bash
+make build-static
+```
+
+This requires static libraries in `third_party/ffmpeg/lib/linux_amd64/` (or
+`linux_arm64/`). Build them from source:
+
+```bash
+# Install build dependencies
+# Debian/Ubuntu:
+sudo apt install build-essential nasm libopus-dev libmp3lame-dev libspeex-dev
+
+# Download and extract FFmpeg source
+curl -sL https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz -o /tmp/ffmpeg-8.1.tar.xz
+tar -xf /tmp/ffmpeg-8.1.tar.xz -C /tmp/
+
+# Configure with audio-only codecs
+cd /tmp/ffmpeg-8.1
+./configure \
+  --disable-programs \
+  --disable-doc \
+  --disable-network \
+  --disable-everything \
+  --enable-decoder=pcm_mulaw,pcm_alaw,aac,libopus,mp3float,adpcm_g722,libspeex \
+  --enable-encoder=pcm_mulaw,pcm_alaw,aac,libopus,libmp3lame,adpcm_g722,libspeex \
+  --enable-libopus \
+  --enable-libmp3lame \
+  --enable-libspeex \
+  --enable-swresample \
+  --enable-avcodec \
+  --enable-static \
+  --disable-shared \
+  --enable-pic
+
+make -j$(nproc)
+
+# Determine target directory
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then DIR="linux_amd64"; else DIR="linux_arm64"; fi
+
+# Copy built libs (adjust path to your repo checkout)
+mkdir -p third_party/ffmpeg/lib/$DIR
+cp libavcodec/libavcodec.a   third_party/ffmpeg/lib/$DIR/
+cp libavutil/libavutil.a     third_party/ffmpeg/lib/$DIR/
+cp libswresample/libswresample.a third_party/ffmpeg/lib/$DIR/
+
+# Copy codec static libs (from system)
+cp /usr/lib/$(uname -m)-linux-gnu/libopus.a   third_party/ffmpeg/lib/$DIR/ 2>/dev/null || \
+cp /usr/lib64/libopus.a                        third_party/ffmpeg/lib/$DIR/
+cp /usr/lib/$(uname -m)-linux-gnu/libmp3lame.a third_party/ffmpeg/lib/$DIR/ 2>/dev/null || \
+cp /usr/lib64/libmp3lame.a                     third_party/ffmpeg/lib/$DIR/
+cp /usr/lib/$(uname -m)-linux-gnu/libspeex.a   third_party/ffmpeg/lib/$DIR/ 2>/dev/null || \
+cp /usr/lib64/libspeex.a                       third_party/ffmpeg/lib/$DIR/
+```
+
+### macOS — Vendored Static Libraries (default)
+
+macOS always uses vendored static libs from `third_party/ffmpeg/lib/darwin_{amd64,arm64}/`.
 
 ```bash
 # Download and extract FFmpeg source
@@ -65,12 +148,3 @@ cp -r /opt/homebrew/opt/ffmpeg/include/libavcodec third_party/ffmpeg/include/
 cp -r /opt/homebrew/opt/ffmpeg/include/libavutil third_party/ffmpeg/include/
 cp -r /opt/homebrew/opt/ffmpeg/include/libswresample third_party/ffmpeg/include/
 ```
-
-## Adding Other Platforms
-
-To add linux/amd64 support, build or obtain FFmpeg static libraries and place them in:
-```
-third_party/ffmpeg/lib/linux_amd64/
-```
-
-The CGo directives in `pkg/audiocodec/ff_cgo.go` already reference all platform paths.
