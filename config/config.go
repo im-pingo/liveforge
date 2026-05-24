@@ -170,18 +170,28 @@ type SRTConfig struct {
 
 // SIPConfig holds SIP module settings.
 type SIPConfig struct {
-	Enabled   bool     `yaml:"enabled"`
-	Listen    string   `yaml:"listen"`
-	Transport []string `yaml:"transport"`
-	ServerID  string   `yaml:"server_id"`
-	Domain    string   `yaml:"domain"`
-	Auth      SIPAuth  `yaml:"auth"`
+	Enabled   bool              `yaml:"enabled"`
+	Listen    string            `yaml:"listen"`
+	Transport []string          `yaml:"transport"`
+	ServerID  string            `yaml:"server_id"`
+	Domain    string            `yaml:"domain"`
+	Auth      SIPAuth           `yaml:"auth"`
+	Gateway   SIPGatewayConfig  `yaml:"gateway"`
 }
 
 // SIPAuth holds SIP digest authentication settings.
 type SIPAuth struct {
 	Enabled  bool   `yaml:"enabled"`
 	Password string `yaml:"password"`
+}
+
+// SIPGatewayConfig holds SIP-to-stream gateway settings.
+type SIPGatewayConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	StreamPrefix string   `yaml:"stream_prefix"`  // stream key prefix (default "sip")
+	RTPPortRange []int    `yaml:"rtp_port_range"` // [min, max] for RTP port allocation
+	Codecs       []string `yaml:"codecs"`         // preferred codecs (default: opus, PCMA, PCMU)
+	MaxCalls     int      `yaml:"max_calls"`      // max concurrent calls (default 100)
 }
 
 // GB28181Config holds GB28181 module settings.

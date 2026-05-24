@@ -23,6 +23,7 @@ import (
 	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
 	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	sipgwmod "github.com/im-pingo/liveforge/module/sipgateway"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
@@ -90,6 +91,13 @@ func main() {
 			log.Fatal("gb28181 requires sip to be enabled")
 		}
 		s.RegisterModule(gb28181mod.NewModule(sipModule.Service()))
+	}
+
+	if cfg.SIP.Gateway.Enabled {
+		if sipModule == nil {
+			log.Fatal("sip gateway requires sip to be enabled")
+		}
+		s.RegisterModule(sipgwmod.NewModule(sipModule.Service()))
 	}
 
 	// Notify must be registered before API so its WebSocket handler
