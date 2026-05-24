@@ -124,9 +124,24 @@ func main() {
 
 	// Block until signal
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
-	slog.Info("shutting down", "signal", sig.String())
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		sig := <-sigCh
+		if sig == syscall.SIGHUP {
+			slog.Info("received SIGHUP, reloading config", "path", *configPath)
+			newCfg, err := config.Load(*configPath)
+			if err != nil {
+				slog.Error("config reload failed", "error", err)
+				continue
+			}
+			logger.Init(newCfg.Server.LogLevel)
+			s.UpdateConfig(newCfg)
+			slog.Info("config reloaded successfully")
+			continue
+		}
+		slog.Info("shutting down", "signal", sig.String())
+		break
+	}
 
 	s.Shutdown()
 	slog.Info("server stopped")

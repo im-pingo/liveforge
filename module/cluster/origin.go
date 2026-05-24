@@ -17,6 +17,8 @@ type OriginPull struct {
 	servers     []string
 	stream      *core.Stream
 	registry    *TransportRegistry
+	health      *HealthTracker
+	pool        *RelayPool
 	retryMax    int
 	retryDelay  time.Duration
 	idleTimeout time.Duration
@@ -26,12 +28,14 @@ type OriginPull struct {
 }
 
 // NewOriginPull creates a new origin pull instance.
-func NewOriginPull(streamKey string, servers []string, stream *core.Stream, registry *TransportRegistry, retryMax int, retryDelay, idleTimeout time.Duration) *OriginPull {
+func NewOriginPull(streamKey string, servers []string, stream *core.Stream, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay, idleTimeout time.Duration) *OriginPull {
 	return &OriginPull{
 		streamKey:   streamKey,
 		servers:     servers,
 		stream:      stream,
 		registry:    registry,
+		health:      health,
+		pool:        pool,
 		retryMax:    retryMax,
 		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
@@ -114,7 +118,25 @@ func (op *OriginPull) pullOnce(sourceURL string) error {
 		}
 	}()
 
-	return transport.Pull(ctx, sourceURL, op.stream)
+	if op.pool != nil {
+		host := extractHost(sourceURL)
+		if err := op.pool.Acquire(ctx, host); err != nil {
+			return err
+		}
+		defer op.pool.Release(host)
+	}
+
+	err = transport.Pull(ctx, sourceURL, op.stream)
+	if err != nil {
+		if op.health != nil {
+			op.health.RecordFailure(sourceURL)
+		}
+		return err
+	}
+	if op.health != nil {
+		op.health.RecordSuccess(sourceURL)
+	}
+	return nil
 }
 
 // Close stops the origin pull.
@@ -144,6 +166,8 @@ type OriginManager struct {
 	eventBus    *core.EventBus
 	scheduler   *Scheduler
 	registry    *TransportRegistry
+	health      *HealthTracker
+	pool        *RelayPool
 	retryMax    int
 	retryDelay  time.Duration
 	idleTimeout time.Duration
@@ -154,7 +178,7 @@ type OriginManager struct {
 }
 
 // NewOriginManager creates a new origin manager.
-func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
+func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
@@ -169,6 +193,8 @@ func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Schedu
 		eventBus:    bus,
 		scheduler:   scheduler,
 		registry:    registry,
+		health:      health,
+		pool:        pool,
 		retryMax:    retryMax,
 		retryDelay:  retryDelay,
 		idleTimeout: idleTimeout,
@@ -215,7 +241,11 @@ func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {
 		return nil
 	}
 
-	op := NewOriginPull(ctx.StreamKey, servers, stream, om.registry, om.retryMax, om.retryDelay, om.idleTimeout)
+	if om.health != nil {
+		servers = om.health.FilterHealthy(servers)
+	}
+
+	op := NewOriginPull(ctx.StreamKey, servers, stream, om.registry, om.health, om.pool, om.retryMax, om.retryDelay, om.idleTimeout)
 	om.active[ctx.StreamKey] = op
 
 	om.eventBus.Emit(core.EventOriginPullStart, &core.EventContext{ //nolint:errcheck

@@ -79,8 +79,18 @@ type RTSPConfig struct {
 	Enabled      bool               `yaml:"enabled"`
 	Listen       string             `yaml:"listen"`
 	RTPPortRange []int              `yaml:"rtp_port_range"`
+	Multicast    MulticastConfig    `yaml:"multicast"`
 	TLS          *bool              `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 	SkipTracker  *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
+}
+
+// MulticastConfig holds RTSP multicast delivery settings.
+type MulticastConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Address   string `yaml:"address"`    // multicast group IP (e.g., "239.0.0.1")
+	BasePort  int    `yaml:"base_port"`  // starting port for multicast RTP (even number)
+	TTL       int    `yaml:"ttl"`        // multicast TTL (default 16)
+	Interface string `yaml:"interface"`  // network interface name (empty = default route)
 }
 
 // HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
@@ -317,12 +327,27 @@ type NotifyWSConfig struct {
 
 // ClusterConfig holds cluster settings.
 type ClusterConfig struct {
-	Forward ForwardConfig     `yaml:"forward"`
-	Origin  OriginConfig      `yaml:"origin"`
-	SRT     ClusterSRTConfig  `yaml:"srt"`
-	RTSP    ClusterRTSPConfig `yaml:"rtsp"`
-	RTP     ClusterRTPConfig  `yaml:"rtp"`
-	GB28181 ClusterGBConfig   `yaml:"gb28181"`
+	Forward     ForwardConfig     `yaml:"forward"`
+	Origin      OriginConfig      `yaml:"origin"`
+	HealthCheck HealthCheckConfig `yaml:"health_check"`
+	RelayPool   RelayPoolConfig   `yaml:"relay_pool"`
+	SRT         ClusterSRTConfig  `yaml:"srt"`
+	RTSP        ClusterRTSPConfig `yaml:"rtsp"`
+	RTP         ClusterRTPConfig  `yaml:"rtp"`
+	GB28181     ClusterGBConfig   `yaml:"gb28181"`
+}
+
+// HealthCheckConfig holds cluster node health monitoring settings.
+type HealthCheckConfig struct {
+	Enabled         bool          `yaml:"enabled"`
+	Interval        time.Duration `yaml:"interval"`         // probe interval for evicted nodes
+	Timeout         time.Duration `yaml:"timeout"`           // TCP dial timeout per probe
+	EvictThreshold  int           `yaml:"evict_threshold"`   // consecutive failures before eviction
+}
+
+// RelayPoolConfig holds cluster relay connection pool settings.
+type RelayPoolConfig struct {
+	MaxPerHost int `yaml:"max_per_host"` // max concurrent relay connections per peer host
 }
 
 // ClusterGBConfig holds GB28181 cluster relay settings.

@@ -25,7 +25,7 @@ var Version = "dev"
 
 // Server is the main application server that manages modules and lifecycle.
 type Server struct {
-	config    *config.Config
+	configPtr atomic.Pointer[config.Config]
 	eventBus  *EventBus
 	hub       *StreamHub
 	modules   []Module
@@ -43,19 +43,34 @@ type Server struct {
 // NewServer creates a new Server instance.
 func NewServer(cfg *config.Config) *Server {
 	bus := NewEventBus()
-	return &Server{
-		config:      cfg,
+	s := &Server{
 		eventBus:    bus,
 		hub:         NewStreamHub(cfg.Stream, cfg.Limits, bus),
 		startTime:   time.Now(),
 		done:        make(chan struct{}),
 		apiHandlers: make(map[string]http.Handler),
 	}
+	s.configPtr.Store(cfg)
+	return s
 }
 
 // Config returns the server configuration.
 func (s *Server) Config() *config.Config {
-	return s.config
+	return s.configPtr.Load()
+}
+
+// UpdateConfig atomically swaps the server configuration and notifies all
+// Reloadable modules. Errors from individual modules are logged but do not
+// stop the reload process.
+func (s *Server) UpdateConfig(cfg *config.Config) {
+	s.configPtr.Store(cfg)
+	for _, m := range s.modules {
+		if r, ok := m.(Reloadable); ok {
+			if err := r.OnReload(s); err != nil {
+				slog.Error("module reload failed", "module", m.Name(), "error", err)
+			}
+		}
+	}
 }
 
 // GetEventBus returns the server's event bus.
@@ -137,7 +152,7 @@ func (s *Server) APIHandlers() map[string]http.Handler {
 
 // AcquireConn increments the connection counter. Returns false if max_connections is exceeded.
 func (s *Server) AcquireConn() bool {
-	max := s.config.Limits.MaxConnections
+	max := s.Config().Limits.MaxConnections
 	if max > 0 {
 		if s.connCount.Load() >= int64(max) {
 			return false
@@ -164,16 +179,16 @@ func (s *Server) ConnectionCount() int64 {
 //   - true → force TLS on (error if global cert/key not configured)
 //   - false → force TLS off (plain TCP even if global cert/key are configured)
 func (s *Server) MakeListener(addr string, moduleTLS *bool) (net.Listener, error) {
-	useTLS := s.config.TLS.Configured() // default: follow global
+	useTLS := s.Config().TLS.Configured() // default: follow global
 	if moduleTLS != nil {
 		useTLS = *moduleTLS
 	}
 
 	if useTLS {
-		if !s.config.TLS.Configured() {
+		if !s.Config().TLS.Configured() {
 			return nil, fmt.Errorf("TLS enabled but tls.cert_file and tls.key_file are not configured")
 		}
-		cert, err := tls.LoadX509KeyPair(s.config.TLS.CertFile, s.config.TLS.KeyFile)
+		cert, err := tls.LoadX509KeyPair(s.Config().TLS.CertFile, s.Config().TLS.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
@@ -202,8 +217,8 @@ func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener
 	}
 
 	// If file-based TLS is configured, use it.
-	if s.config.TLS.Configured() {
-		cert, err := tls.LoadX509KeyPair(s.config.TLS.CertFile, s.config.TLS.KeyFile)
+	if s.Config().TLS.Configured() {
+		cert, err := tls.LoadX509KeyPair(s.Config().TLS.CertFile, s.Config().TLS.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
@@ -215,7 +230,7 @@ func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener
 	}
 
 	// Auto-generate self-signed cert only when tls.auto is enabled.
-	if s.config.TLS.Auto {
+	if s.Config().TLS.Auto {
 		autoCert := s.getOrCreateAutoCert()
 		if autoCert == nil {
 			return nil, fmt.Errorf("failed to generate self-signed TLS certificate")
@@ -233,10 +248,10 @@ func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener
 
 // HasTLS returns true if TLS is available (either file-based or auto-generated).
 func (s *Server) HasTLS() bool {
-	if s.config.TLS.Configured() {
+	if s.Config().TLS.Configured() {
 		return true
 	}
-	return s.config.TLS.Auto && s.getOrCreateAutoCert() != nil
+	return s.Config().TLS.Auto && s.getOrCreateAutoCert() != nil
 }
 
 // AutoCertPEM returns the auto-generated certificate in PEM format, or nil
@@ -316,7 +331,7 @@ func generateSelfSignedCert() (*tls.Certificate, error) {
 
 // aliveLoop periodically emits alive events for all active streams.
 func (s *Server) aliveLoop() {
-	interval := s.config.Notify.AliveInterval
+	interval := s.Config().Notify.AliveInterval
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}

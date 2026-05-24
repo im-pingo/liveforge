@@ -148,7 +148,7 @@ func newTestRegistry() *TransportRegistry {
 
 func TestForwardManagerDefaults(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), newTestRegistry(), 0, 0)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), newTestRegistry(), nil, nil, 0, 0)
 
 	if fm.retryMax != 3 {
 		t.Errorf("retryMax = %d, want 3", fm.retryMax)
@@ -163,7 +163,7 @@ func TestForwardManagerDefaults(t *testing.T) {
 
 func TestForwardManagerOnPublishNoStream(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://target/live/stream"}, "", 0), newTestRegistry(), nil, nil, 1, time.Millisecond)
 	defer fm.Close()
 
 	// Publish event for non-existent stream should not create targets
@@ -178,7 +178,7 @@ func TestForwardManagerOnPublishNoStream(t *testing.T) {
 
 func TestForwardManagerOnPublishStop(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), nil, nil, 1, time.Millisecond)
 
 	stream, _ := hub.GetOrCreate("live/test")
 	// Set a dummy publisher so the stream is in publishing state
@@ -205,7 +205,7 @@ func TestForwardManagerOnPublishStop(t *testing.T) {
 
 func TestForwardManagerDuplicatePublish(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), nil, nil, 1, time.Millisecond)
 	defer fm.Close()
 
 	stream, _ := hub.GetOrCreate("live/test")
@@ -222,7 +222,7 @@ func TestForwardManagerDuplicatePublish(t *testing.T) {
 
 func TestForwardManagerClose(t *testing.T) {
 	hub, bus := newTestHub()
-	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), nil, nil, 1, time.Millisecond)
 
 	stream, _ := hub.GetOrCreate("live/test")
 	pub := &originPublisher{id: "test", info: &avframe.MediaInfo{}}
@@ -239,7 +239,7 @@ func TestForwardManagerClose(t *testing.T) {
 
 func TestOriginManagerDefaults(t *testing.T) {
 	hub, bus := newTestHub()
-	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://origin/live"}, "", 0), newTestRegistry(), 0, 0, 0)
+	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://origin/live"}, "", 0), newTestRegistry(), nil, nil, 0, 0, 0)
 
 	if om.retryMax != 3 {
 		t.Errorf("retryMax = %d, want 3", om.retryMax)
@@ -254,7 +254,7 @@ func TestOriginManagerDefaults(t *testing.T) {
 
 func TestOriginManagerOnSubscribeNoStream(t *testing.T) {
 	hub, bus := newTestHub()
-	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), 1, time.Second, time.Second)
+	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 	defer om.Close()
 
 	err := om.onSubscribe(&core.EventContext{StreamKey: "nonexistent/stream"})
@@ -268,7 +268,7 @@ func TestOriginManagerOnSubscribeNoStream(t *testing.T) {
 
 func TestOriginManagerOnSubscribeWithPublisher(t *testing.T) {
 	hub, bus := newTestHub()
-	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), 1, time.Second, time.Second)
+	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 	defer om.Close()
 
 	stream, _ := hub.GetOrCreate("live/test")
@@ -284,7 +284,7 @@ func TestOriginManagerOnSubscribeWithPublisher(t *testing.T) {
 
 func TestOriginManagerOnSubscribeTriggersPull(t *testing.T) {
 	hub, bus := newTestHub()
-	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), 1, time.Second, time.Second)
+	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 
 	// Create stream without publisher
 	hub.GetOrCreate("live/test")
@@ -303,7 +303,7 @@ func TestOriginManagerOnSubscribeTriggersPull(t *testing.T) {
 
 func TestOriginManagerDuplicateSubscribe(t *testing.T) {
 	hub, bus := newTestHub()
-	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), 1, time.Second, time.Second)
+	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 	defer om.Close()
 
 	hub.GetOrCreate("live/test")
@@ -318,7 +318,7 @@ func TestOriginManagerDuplicateSubscribe(t *testing.T) {
 
 func TestOriginManagerClose(t *testing.T) {
 	hub, bus := newTestHub()
-	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), 1, time.Second, time.Second)
+	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 
 	hub.GetOrCreate("live/test")
 	om.onSubscribe(&core.EventContext{StreamKey: "live/test"})
@@ -353,7 +353,7 @@ func TestForwardTargetClose(t *testing.T) {
 	stream, _ := hub.GetOrCreate("live/test")
 	_ = bus
 
-	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, NewRTMPTransport(), 1, time.Millisecond)
+	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, NewRTMPTransport(), nil, nil, 1, time.Millisecond)
 
 	// Close before Run
 	ft.Close()
@@ -366,7 +366,7 @@ func TestOriginPullClose(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
 
-	op := NewOriginPull("live/test", []string{"rtmp://127.0.0.1:19999/live"}, stream, newTestRegistry(), 1, time.Second, time.Second)
+	op := NewOriginPull("live/test", []string{"rtmp://127.0.0.1:19999/live"}, stream, newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 
 	// Close before Run
 	op.Close()
@@ -379,7 +379,7 @@ func TestForwardTargetRunWithClosedTarget(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
 
-	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, NewRTMPTransport(), 1, time.Millisecond)
+	ft := NewForwardTarget("live/test", "rtmp://127.0.0.1:19999/live/test", stream, NewRTMPTransport(), nil, nil, 1, time.Millisecond)
 	ft.Close()
 
 	// Run should return immediately when already closed
@@ -400,7 +400,7 @@ func TestOriginPullRunWithClosedPull(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
 
-	op := NewOriginPull("live/test", []string{"rtmp://127.0.0.1:19999/live"}, stream, newTestRegistry(), 1, time.Second, time.Second)
+	op := NewOriginPull("live/test", []string{"rtmp://127.0.0.1:19999/live"}, stream, newTestRegistry(), nil, nil, 1, time.Second, time.Second)
 	op.Close()
 
 	done := make(chan struct{})

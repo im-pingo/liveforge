@@ -8,9 +8,11 @@ import (
 
 // Module implements core.Module for cluster forwarding and origin pull.
 type Module struct {
-	forward  *ForwardManager
-	origin   *OriginManager
-	registry *TransportRegistry
+	forward   *ForwardManager
+	origin    *OriginManager
+	health    *HealthTracker
+	relayPool *RelayPool
+	registry  *TransportRegistry
 }
 
 // NewModule creates a new cluster module.
@@ -34,6 +36,19 @@ func (m *Module) Init(s *core.Server) error {
 	m.registry.Register(NewRTPTransport(cfg.RTP, s))
 	m.registry.Register(NewGBTransport(cfg.GB28181, s))
 
+	if cfg.HealthCheck.Enabled {
+		m.health = NewHealthTracker(cfg.HealthCheck)
+		slog.Info("cluster health check enabled", "module", "cluster",
+			"evict_threshold", cfg.HealthCheck.EvictThreshold,
+			"interval", cfg.HealthCheck.Interval)
+	}
+
+	if cfg.RelayPool.MaxPerHost > 0 {
+		m.relayPool = NewRelayPool(cfg.RelayPool.MaxPerHost)
+		slog.Info("cluster relay pool enabled", "module", "cluster",
+			"max_per_host", cfg.RelayPool.MaxPerHost)
+	}
+
 	if cfg.Forward.Enabled && (len(cfg.Forward.Targets) > 0 || cfg.Forward.ScheduleURL != "") {
 		fwdScheduler := NewScheduler(
 			cfg.Forward.ScheduleURL,
@@ -45,6 +60,8 @@ func (m *Module) Init(s *core.Server) error {
 			hub, bus,
 			fwdScheduler,
 			m.registry,
+			m.health,
+			m.relayPool,
 			cfg.Forward.RetryMax,
 			cfg.Forward.RetryInterval,
 		)
@@ -64,6 +81,8 @@ func (m *Module) Init(s *core.Server) error {
 			hub, bus,
 			origScheduler,
 			m.registry,
+			m.health,
+			m.relayPool,
 			cfg.Origin.RetryMax,
 			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
@@ -95,6 +114,9 @@ func (m *Module) Close() error {
 	}
 	if m.origin != nil {
 		m.origin.Close()
+	}
+	if m.health != nil {
+		m.health.Close()
 	}
 	if m.registry != nil {
 		m.registry.Close()
