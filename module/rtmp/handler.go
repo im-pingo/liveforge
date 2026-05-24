@@ -11,6 +11,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/codec/aac"
 )
 
 // isConnClosed checks if an error indicates a closed connection.
@@ -345,8 +346,16 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 					mi := rp.MediaInfo()
 					if frame.MediaType.IsVideo() {
 						mi.VideoCodec = frame.Codec
+						mi.VideoSequenceHeader = append([]byte(nil), frame.Payload...)
 					} else if frame.MediaType.IsAudio() {
 						mi.AudioCodec = frame.Codec
+						mi.AudioSequenceHeader = append([]byte(nil), frame.Payload...)
+						if frame.Codec == avframe.CodecAAC && len(frame.Payload) >= 2 {
+							if ascInfo, err := aac.ParseAudioSpecificConfig(frame.Payload); err == nil {
+								mi.SampleRate = ascInfo.SampleRate
+								mi.Channels = ascInfo.Channels
+							}
+						}
 					}
 				}
 			}
