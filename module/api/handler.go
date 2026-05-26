@@ -70,7 +70,8 @@ type StreamsResponse struct {
 }
 
 func (h *Handlers) handleStreams(w http.ResponseWriter, r *http.Request) {
-	resp := buildStreamsResponse(h.server.StreamHub(), true)
+	query := r.URL.Query().Get("q")
+	resp := buildStreamsResponse(h.server.StreamHub(), true, query)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -118,11 +119,14 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 	return info
 }
 
-func buildStreamsResponse(hub *core.StreamHub, includeStats bool) StreamsResponse {
+func buildStreamsResponse(hub *core.StreamHub, includeStats bool, filter string) StreamsResponse {
 	keys := hub.Keys()
 	streams := make([]StreamInfo, 0, len(keys))
 
 	for _, key := range keys {
+		if filter != "" && !strings.Contains(key, filter) {
+			continue
+		}
 		stream, ok := hub.Find(key)
 		if !ok {
 			continue
@@ -257,4 +261,25 @@ func (h *Handlers) handleServerStats(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
+}
+
+// DVRStatusProvider is implemented by the DVR module to expose session status.
+type DVRStatusProvider interface {
+	SessionStatus() any
+}
+
+func (h *Handlers) handleDVRStatus(w http.ResponseWriter, r *http.Request) {
+	mod := h.server.ModuleByName("dvr")
+	if mod == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "sessions": []any{}})
+		return
+	}
+
+	provider, ok := mod.(DVRStatusProvider)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": []any{}})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": provider.SessionStatus()})
 }

@@ -670,6 +670,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div class="stat-label">Uptime</div>
       <div class="stat-value" id="stat-uptime" style="font-size:20px">-</div>
     </div>
+    <div class="stat-card" id="stat-dvr-card" style="display:none">
+      <div class="stat-label">DVR Sessions</div>
+      <div class="stat-value" id="stat-dvr" style="color:var(--blue)">0</div>
+    </div>
+  </div>
+
+  <div style="margin-bottom:16px">
+    <input type="text" id="stream-search" placeholder="Search streams..." oninput="refresh()"
+      style="width:100%;max-width:320px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px;outline:none;">
   </div>
 
   <div class="table-wrap">
@@ -1614,7 +1623,10 @@ function refreshServerInfo() {
 
 /* --- Stream list --- */
 function refresh() {
-  fetch("/api/v1/streams")
+  var q = (document.getElementById("stream-search") || {}).value || "";
+  var url = "/api/v1/streams";
+  if (q) url += "?q=" + encodeURIComponent(q);
+  fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(resp) {
       var streams = (resp.data && resp.data.streams) || [];
@@ -1709,6 +1721,21 @@ function refresh() {
           + "</tr>";
       }
       tbody.innerHTML = html;
+    })
+    .catch(function() {});
+}
+
+/* --- DVR Status --- */
+function refreshDVR() {
+  fetch("/api/v1/dvr/status")
+    .then(function(r) { return r.json(); })
+    .then(function(resp) {
+      var d = resp.data || {};
+      var card = document.getElementById("stat-dvr-card");
+      if (!d.enabled) { card.style.display = "none"; return; }
+      card.style.display = "";
+      var sessions = d.sessions || [];
+      document.getElementById("stat-dvr").textContent = sessions.length;
     })
     .catch(function() {});
 }
@@ -2387,8 +2414,10 @@ function showToast(msg) {
 /* === Init === */
 refreshServerInfo();
 refresh();
+refreshDVR();
 streamsInterval = setInterval(refresh, 2000);
 setInterval(refreshServerInfo, 5000);
+setInterval(refreshDVR, 5000);
 
 // Show self-signed cert banner when using HTTPS with auto-generated cert.
 if (location.protocol === "https:") {

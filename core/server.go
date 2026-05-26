@@ -131,6 +131,16 @@ func (s *Server) ModuleNames() []string {
 	return names
 }
 
+// ModuleByName returns the module with the given name, or nil if not found.
+func (s *Server) ModuleByName(name string) Module {
+	for _, m := range s.modules {
+		if m.Name() == name {
+			return m
+		}
+	}
+	return nil
+}
+
 // RegisterAPIHandler registers an HTTP handler for the given pattern on the API mux.
 // Modules call this during Init to expose HTTP/WebSocket endpoints on the API server.
 func (s *Server) RegisterAPIHandler(pattern string, h http.Handler) {
