@@ -224,6 +224,15 @@ record:
   on_file_complete:
     url: ""
 
+dvr:
+  enabled: false
+  listen: ":8070"
+  stream_pattern: "live/*"
+  path: "./dvr/{stream_key}"
+  window: 2h
+  segment_duration: 6s
+  cleanup_interval: 30s
+
 metrics:
   enabled: false
   listen: ":9090"

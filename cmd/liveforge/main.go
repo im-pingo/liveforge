@@ -24,6 +24,7 @@ import (
 	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	sipgwmod "github.com/im-pingo/liveforge/module/sipgateway"
+	dvrmod "github.com/im-pingo/liveforge/module/dvr"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
@@ -118,6 +119,10 @@ func main() {
 
 	if cfg.Record.Enabled {
 		s.RegisterModule(record.NewModule())
+	}
+
+	if cfg.DVR.Enabled {
+		s.RegisterModule(dvrmod.NewModule())
 	}
 
 	if cfg.Metrics.Enabled {

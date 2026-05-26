@@ -110,6 +110,13 @@ func defaults() *Config {
 			Listen: ":9090",
 			Path:   "/metrics",
 		},
+		DVR: DVRConfig{
+			Listen:          ":8070",
+			Path:            "./dvr/{stream_key}",
+			Window:          2 * time.Hour,
+			SegmentDuration: 6 * time.Second,
+			CleanupInterval: 30 * time.Second,
+		},
 		Cluster: ClusterConfig{
 			SRT: ClusterSRTConfig{
 				Latency:  120 * time.Millisecond,

@@ -20,6 +20,7 @@ type Config struct {
 	Notify NotifyConfig `yaml:"notify"`
 	Cluster ClusterConfig `yaml:"cluster"`
 	Record  RecordConfig  `yaml:"record"`
+	DVR     DVRConfig     `yaml:"dvr"`
 	API     APIConfig     `yaml:"api"`
 	Metrics    MetricsConfig    `yaml:"metrics"`
 	AudioCodec AudioCodecConfig `yaml:"audio_codec"`
@@ -431,6 +432,17 @@ type SegmentConfig struct {
 // FileCompleteConfig holds file completion callback settings.
 type FileCompleteConfig struct {
 	URL string `yaml:"url"`
+}
+
+// DVRConfig holds DVR/time-shift playback settings.
+type DVRConfig struct {
+	Enabled         bool          `yaml:"enabled"`
+	Listen          string        `yaml:"listen"`
+	StreamPattern   string        `yaml:"stream_pattern"`
+	Path            string        `yaml:"path"`
+	Window          time.Duration `yaml:"window"`
+	SegmentDuration time.Duration `yaml:"segment_duration"`
+	CleanupInterval time.Duration `yaml:"cleanup_interval"`
 }
 
 // MetricsConfig holds Prometheus metrics settings.
