@@ -157,7 +157,7 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 		Payload:   []byte{0x12, 0x10},
 	})
 
-	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), 1, time.Second)
+	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), nil, nil, 1, time.Second)
 
 	done := make(chan struct{})
 	go func() {
@@ -211,7 +211,7 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/pulltest")
 
-	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), 1, 2*time.Second, 5*time.Second)
+	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), nil, nil, 1, 2*time.Second, 5*time.Second)
 
 	done := make(chan struct{})
 	go func() {
@@ -251,7 +251,7 @@ func TestForwardManagerMultiProtocol(t *testing.T) {
 		"srt://127.0.0.1:19997/live/stream",
 	}
 	scheduler := NewScheduler("", targets, "", 0)
-	fm := NewForwardManager(hub, bus, scheduler, registry, 1, time.Millisecond)
+	fm := NewForwardManager(hub, bus, scheduler, registry, nil, nil, 1, time.Millisecond)
 
 	stream, _ := hub.GetOrCreate("live/multitest")
 	pub := &originPublisher{id: "test-pub", info: &avframe.MediaInfo{

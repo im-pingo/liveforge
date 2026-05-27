@@ -13,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/rtcp"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
@@ -564,4 +565,118 @@ func createMinimalOffer(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return offer.SDP
+}
+
+func TestOfferSupportsCodec(t *testing.T) {
+	offer := createMinimalOffer(t)
+	var parsed sdp.SessionDescription
+	if err := parsed.UnmarshalString(offer); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		media string
+		mime  string
+		want  bool
+	}{
+		{"video", webrtc.MimeTypeH264, true},
+		{"video", webrtc.MimeTypeVP8, true},
+		{"video", "video/NONEXISTENT", false},
+		{"audio", "audio/NONEXISTENT", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mime, func(t *testing.T) {
+			got := offerSupportsCodec(&parsed, tt.media, tt.mime)
+			if got != tt.want {
+				t.Errorf("offerSupportsCodec(%s, %s) = %v, want %v", tt.media, tt.mime, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestICEServersFromConfigWithTURN(t *testing.T) {
+	cfg := &config.Config{
+		Stream: config.StreamConfig{
+			RingBufferSize:     256,
+			GOPCache:           true,
+			GOPCacheNum:        1,
+			IdleTimeout:        30 * time.Second,
+			NoPublisherTimeout: 15 * time.Second,
+		},
+		WebRTC: config.WebRTCConfig{
+			Enabled:      true,
+			Listen:       ":0",
+			ICELite:      false,
+			TLS:          func() *bool { b := false; return &b }(),
+			UDPPortRange: []int{20000, 20100},
+			ICEServers: []config.ICEServer{
+				{URLs: []string{"stun:stun.l.google.com:19302"}},
+				{URLs: []string{"turn:turn.example.com:3478"}, Username: "user1", Credential: "pass1"},
+				{URLs: []string{"turns:turn.example.com:5349"}, Username: "user2", Credential: "pass2"},
+			},
+		},
+	}
+	s := core.NewServer(cfg)
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer m.Close()
+
+	servers := m.iceServersFromConfig()
+	if len(servers) != 3 {
+		t.Fatalf("expected 3 ICE servers, got %d", len(servers))
+	}
+
+	// STUN server (no credentials)
+	if servers[0].URLs[0] != "stun:stun.l.google.com:19302" {
+		t.Errorf("unexpected STUN URL: %s", servers[0].URLs[0])
+	}
+
+	// TURN server with credentials
+	if servers[1].URLs[0] != "turn:turn.example.com:3478" {
+		t.Errorf("unexpected TURN URL: %s", servers[1].URLs[0])
+	}
+	if servers[1].Username != "user1" || servers[1].Credential != "pass1" {
+		t.Errorf("TURN credentials not passed: user=%s cred=%v", servers[1].Username, servers[1].Credential)
+	}
+
+	// TURNS server
+	if servers[2].URLs[0] != "turns:turn.example.com:5349" {
+		t.Errorf("unexpected TURNS URL: %s", servers[2].URLs[0])
+	}
+}
+
+func TestICEServersSkippedWithICELite(t *testing.T) {
+	cfg := &config.Config{
+		Stream: config.StreamConfig{
+			RingBufferSize:     256,
+			GOPCache:           true,
+			GOPCacheNum:        1,
+			IdleTimeout:        30 * time.Second,
+			NoPublisherTimeout: 15 * time.Second,
+		},
+		WebRTC: config.WebRTCConfig{
+			Enabled:      true,
+			Listen:       ":0",
+			ICELite:      true,
+			TLS:          func() *bool { b := false; return &b }(),
+			UDPPortRange: []int{20000, 20100},
+			ICEServers: []config.ICEServer{
+				{URLs: []string{"turn:turn.example.com:3478"}, Username: "u", Credential: "p"},
+			},
+		},
+	}
+	s := core.NewServer(cfg)
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer m.Close()
+
+	servers := m.iceServersFromConfig()
+	if servers != nil {
+		t.Errorf("ICE Lite should return nil ICE servers, got %d", len(servers))
+	}
 }

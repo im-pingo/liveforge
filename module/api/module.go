@@ -106,8 +106,8 @@ func buildAuthHandler(mux *http.ServeMux, cfg config.APIConfig) http.Handler {
 			return
 		}
 
-		// API endpoints — Bearer Token OR valid session cookie
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		// API and debug endpoints — Bearer Token OR valid session cookie
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/debug/") {
 			if token := cfg.Auth.BearerToken; token != "" {
 				auth := r.Header.Get("Authorization")
 				hasBearerToken := strings.HasPrefix(auth, "Bearer ") && auth[7:] == token

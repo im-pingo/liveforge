@@ -20,6 +20,7 @@ type Config struct {
 	Notify NotifyConfig `yaml:"notify"`
 	Cluster ClusterConfig `yaml:"cluster"`
 	Record  RecordConfig  `yaml:"record"`
+	DVR     DVRConfig     `yaml:"dvr"`
 	API     APIConfig     `yaml:"api"`
 	Metrics    MetricsConfig    `yaml:"metrics"`
 	AudioCodec AudioCodecConfig `yaml:"audio_codec"`
@@ -79,8 +80,18 @@ type RTSPConfig struct {
 	Enabled      bool               `yaml:"enabled"`
 	Listen       string             `yaml:"listen"`
 	RTPPortRange []int              `yaml:"rtp_port_range"`
+	Multicast    MulticastConfig    `yaml:"multicast"`
 	TLS          *bool              `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 	SkipTracker  *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
+}
+
+// MulticastConfig holds RTSP multicast delivery settings.
+type MulticastConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Address   string `yaml:"address"`    // multicast group IP (e.g., "239.0.0.1")
+	BasePort  int    `yaml:"base_port"`  // starting port for multicast RTP (even number)
+	TTL       int    `yaml:"ttl"`        // multicast TTL (default 16)
+	Interface string `yaml:"interface"`  // network interface name (empty = default route)
 }
 
 // HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
@@ -160,18 +171,28 @@ type SRTConfig struct {
 
 // SIPConfig holds SIP module settings.
 type SIPConfig struct {
-	Enabled   bool     `yaml:"enabled"`
-	Listen    string   `yaml:"listen"`
-	Transport []string `yaml:"transport"`
-	ServerID  string   `yaml:"server_id"`
-	Domain    string   `yaml:"domain"`
-	Auth      SIPAuth  `yaml:"auth"`
+	Enabled   bool              `yaml:"enabled"`
+	Listen    string            `yaml:"listen"`
+	Transport []string          `yaml:"transport"`
+	ServerID  string            `yaml:"server_id"`
+	Domain    string            `yaml:"domain"`
+	Auth      SIPAuth           `yaml:"auth"`
+	Gateway   SIPGatewayConfig  `yaml:"gateway"`
 }
 
 // SIPAuth holds SIP digest authentication settings.
 type SIPAuth struct {
 	Enabled  bool   `yaml:"enabled"`
 	Password string `yaml:"password"`
+}
+
+// SIPGatewayConfig holds SIP-to-stream gateway settings.
+type SIPGatewayConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	StreamPrefix string   `yaml:"stream_prefix"`  // stream key prefix (default "sip")
+	RTPPortRange []int    `yaml:"rtp_port_range"` // [min, max] for RTP port allocation
+	Codecs       []string `yaml:"codecs"`         // preferred codecs (default: opus, PCMA, PCMU)
+	MaxCalls     int      `yaml:"max_calls"`      // max concurrent calls (default 100)
 }
 
 // GB28181Config holds GB28181 module settings.
@@ -317,12 +338,27 @@ type NotifyWSConfig struct {
 
 // ClusterConfig holds cluster settings.
 type ClusterConfig struct {
-	Forward ForwardConfig     `yaml:"forward"`
-	Origin  OriginConfig      `yaml:"origin"`
-	SRT     ClusterSRTConfig  `yaml:"srt"`
-	RTSP    ClusterRTSPConfig `yaml:"rtsp"`
-	RTP     ClusterRTPConfig  `yaml:"rtp"`
-	GB28181 ClusterGBConfig   `yaml:"gb28181"`
+	Forward     ForwardConfig     `yaml:"forward"`
+	Origin      OriginConfig      `yaml:"origin"`
+	HealthCheck HealthCheckConfig `yaml:"health_check"`
+	RelayPool   RelayPoolConfig   `yaml:"relay_pool"`
+	SRT         ClusterSRTConfig  `yaml:"srt"`
+	RTSP        ClusterRTSPConfig `yaml:"rtsp"`
+	RTP         ClusterRTPConfig  `yaml:"rtp"`
+	GB28181     ClusterGBConfig   `yaml:"gb28181"`
+}
+
+// HealthCheckConfig holds cluster node health monitoring settings.
+type HealthCheckConfig struct {
+	Enabled         bool          `yaml:"enabled"`
+	Interval        time.Duration `yaml:"interval"`         // probe interval for evicted nodes
+	Timeout         time.Duration `yaml:"timeout"`           // TCP dial timeout per probe
+	EvictThreshold  int           `yaml:"evict_threshold"`   // consecutive failures before eviction
+}
+
+// RelayPoolConfig holds cluster relay connection pool settings.
+type RelayPoolConfig struct {
+	MaxPerHost int `yaml:"max_per_host"` // max concurrent relay connections per peer host
 }
 
 // ClusterGBConfig holds GB28181 cluster relay settings.
@@ -396,6 +432,17 @@ type SegmentConfig struct {
 // FileCompleteConfig holds file completion callback settings.
 type FileCompleteConfig struct {
 	URL string `yaml:"url"`
+}
+
+// DVRConfig holds DVR/time-shift playback settings.
+type DVRConfig struct {
+	Enabled         bool          `yaml:"enabled"`
+	Listen          string        `yaml:"listen"`
+	StreamPattern   string        `yaml:"stream_pattern"`
+	Path            string        `yaml:"path"`
+	Window          time.Duration `yaml:"window"`
+	SegmentDuration time.Duration `yaml:"segment_duration"`
+	CleanupInterval time.Duration `yaml:"cleanup_interval"`
 }
 
 // MetricsConfig holds Prometheus metrics settings.

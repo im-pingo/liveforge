@@ -106,6 +106,9 @@ func buildMediaDesc(mediaType string, codec avframe.CodecType, sampleRate, chann
 	if clockRate == 0 {
 		clockRate = sampleRate
 	}
+	if clockRate == 0 && codec == avframe.CodecAAC {
+		clockRate = 44100
+	}
 
 	md := &MediaDescription{
 		Type:    mediaType,

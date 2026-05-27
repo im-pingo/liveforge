@@ -156,7 +156,7 @@ func TestNewRTSPSubscriberVideoOnly(t *testing.T) {
 }
 
 func TestHandleDescribeNoServer(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/test")
 	req := &Request{Method: "DESCRIBE", URL: "rtsp://host/live/test", Headers: make(map[string][]string)}
 	req.Headers.Set("CSeq", "1")
@@ -213,7 +213,7 @@ func TestNewResponseNilRequest(t *testing.T) {
 }
 
 func TestHandlePlayInvalidState(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/test")
 	// Init state -> cannot PLAY directly
 	req := &Request{Method: "PLAY", URL: "rtsp://host/live/test", Headers: make(map[string][]string)}
@@ -226,7 +226,7 @@ func TestHandlePlayInvalidState(t *testing.T) {
 
 func TestHandleSetupNoPortManager(t *testing.T) {
 	// TCP transport should work without port manager
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(map[string][]string)}
@@ -239,7 +239,7 @@ func TestHandleSetupNoPortManager(t *testing.T) {
 }
 
 func TestHandleSetupWithMediaInfo(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	session.MediaInfo = &avframe.MediaInfo{

@@ -40,7 +40,8 @@ type TrackSetup struct {
 	TrackID   int
 	Codec     avframe.CodecType
 	Transport TransportConfig
-	UDP       *UDPTransport // non-nil for UDP transport
+	UDP       *UDPTransport      // non-nil for UDP unicast
+	Multicast *MulticastTransport // non-nil for UDP multicast
 }
 
 // RTSPSession represents an RTSP session with state management.

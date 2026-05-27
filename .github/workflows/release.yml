@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ steps.tag.outputs.version }}
+          tags: |
+            impingo/liveforge:${{ steps.tag.outputs.version }}
+            impingo/liveforge:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+          for os_arch in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${os_arch%/*}"
+            arch="${os_arch#*/}"
+            output="dist/liveforge-${os}-${arch}"
+            [ "$os" = "linux" ] && cgo=1 || cgo=0
+            CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch \
+              go build -trimpath \
+              -ldflags "-s -w -X main.version=${{ steps.tag.outputs.version }}" \
+              -o "$output" ./cmd/liveforge
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

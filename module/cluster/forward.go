@@ -17,6 +17,8 @@ type ForwardTarget struct {
 	targetURL  string
 	stream     *core.Stream
 	transport  RelayTransport
+	health     *HealthTracker
+	pool       *RelayPool
 	retryMax   int
 	retryDelay time.Duration
 
@@ -25,12 +27,14 @@ type ForwardTarget struct {
 }
 
 // NewForwardTarget creates a new forward target.
-func NewForwardTarget(streamKey, targetURL string, stream *core.Stream, transport RelayTransport, retryMax int, retryDelay time.Duration) *ForwardTarget {
+func NewForwardTarget(streamKey, targetURL string, stream *core.Stream, transport RelayTransport, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay time.Duration) *ForwardTarget {
 	return &ForwardTarget{
 		streamKey:  streamKey,
 		targetURL:  targetURL,
 		stream:     stream,
 		transport:  transport,
+		health:     health,
+		pool:       pool,
 		retryMax:   retryMax,
 		retryDelay: retryDelay,
 		closed:     make(chan struct{}),
@@ -79,10 +83,25 @@ func (ft *ForwardTarget) Run() {
 			}
 		}()
 
+		if ft.pool != nil {
+			host := extractHost(ft.targetURL)
+			if err := ft.pool.Acquire(ctx, host); err != nil {
+				cancel()
+				continue
+			}
+		}
+
 		err := ft.transport.Push(ctx, ft.targetURL, ft.stream)
 		cancel()
 
+		if ft.pool != nil {
+			ft.pool.Release(extractHost(ft.targetURL))
+		}
+
 		if err != nil {
+			if ft.health != nil {
+				ft.health.RecordFailure(ft.targetURL)
+			}
 			if errors.Is(err, ErrCodecMismatch) {
 				slog.Warn("forward codec mismatch, not retrying", "module", "cluster",
 					"stream", ft.streamKey, "target", ft.targetURL, "error", err)
@@ -90,6 +109,8 @@ func (ft *ForwardTarget) Run() {
 			}
 			slog.Warn("forward connection error", "module", "cluster",
 				"stream", ft.streamKey, "target", ft.targetURL, "error", err)
+		} else if ft.health != nil {
+			ft.health.RecordSuccess(ft.targetURL)
 		}
 	}
 }
@@ -111,6 +132,8 @@ type ForwardManager struct {
 	eventBus  *core.EventBus
 	scheduler *Scheduler
 	registry  *TransportRegistry
+	health    *HealthTracker
+	pool      *RelayPool
 	retryMax  int
 	retryDel  time.Duration
 
@@ -120,7 +143,7 @@ type ForwardManager struct {
 }
 
 // NewForwardManager creates a new forward manager.
-func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, retryMax int, retryDelay time.Duration) *ForwardManager {
+func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay time.Duration) *ForwardManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
@@ -132,6 +155,8 @@ func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Sched
 		eventBus:  bus,
 		scheduler: scheduler,
 		registry:  registry,
+		health:    health,
+		pool:      pool,
 		retryMax:  retryMax,
 		retryDel:  retryDelay,
 		active:    make(map[string][]*ForwardTarget),
@@ -177,6 +202,10 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 		return nil
 	}
 
+	if fm.health != nil {
+		targets = fm.health.FilterHealthy(targets)
+	}
+
 	// Extract stream name from key (e.g. "live/cluster_test" → "cluster_test").
 	// Target URLs in config are base URLs (e.g. "rtmp://host/app"),
 	// so we append the stream name to form the full URL.
@@ -195,7 +224,7 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 			continue
 		}
 
-		ft := NewForwardTarget(ctx.StreamKey, fullURL, stream, transport, fm.retryMax, fm.retryDel)
+		ft := NewForwardTarget(ctx.StreamKey, fullURL, stream, transport, fm.health, fm.pool, fm.retryMax, fm.retryDel)
 		fts = append(fts, ft)
 		go ft.Run()
 	}

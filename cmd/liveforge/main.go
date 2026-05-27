@@ -23,6 +23,8 @@ import (
 	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
 	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	sipgwmod "github.com/im-pingo/liveforge/module/sipgateway"
+	dvrmod "github.com/im-pingo/liveforge/module/dvr"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
 )
@@ -92,6 +94,13 @@ func main() {
 		s.RegisterModule(gb28181mod.NewModule(sipModule.Service()))
 	}
 
+	if cfg.SIP.Gateway.Enabled {
+		if sipModule == nil {
+			log.Fatal("sip gateway requires sip to be enabled")
+		}
+		s.RegisterModule(sipgwmod.NewModule(sipModule.Service()))
+	}
+
 	// Notify must be registered before API so its WebSocket handler
 	// is available when the API module registers routes.
 	if cfg.Notify.HTTP.Enabled || cfg.Notify.WebSocket.Enabled {
@@ -112,6 +121,10 @@ func main() {
 		s.RegisterModule(record.NewModule())
 	}
 
+	if cfg.DVR.Enabled {
+		s.RegisterModule(dvrmod.NewModule())
+	}
+
 	if cfg.Metrics.Enabled {
 		s.RegisterModule(metricsmod.NewModule())
 	}
@@ -124,9 +137,24 @@ func main() {
 
 	// Block until signal
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
-	slog.Info("shutting down", "signal", sig.String())
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		sig := <-sigCh
+		if sig == syscall.SIGHUP {
+			slog.Info("received SIGHUP, reloading config", "path", *configPath)
+			newCfg, err := config.Load(*configPath)
+			if err != nil {
+				slog.Error("config reload failed", "error", err)
+				continue
+			}
+			logger.Init(newCfg.Server.LogLevel)
+			s.UpdateConfig(newCfg)
+			slog.Info("config reloaded successfully")
+			continue
+		}
+		slog.Info("shutting down", "signal", sig.String())
+		break
+	}
 
 	s.Shutdown()
 	slog.Info("server stopped")

@@ -3,6 +3,7 @@ package record
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,8 +247,8 @@ func TestNewFrameWriterFMP4(t *testing.T) {
 	}
 
 	w = newFrameWriter("mp4")
-	if _, ok := w.(*fmp4FrameWriter); !ok {
-		t.Errorf("mp4 should map to fmp4FrameWriter, got %T", w)
+	if _, ok := w.(*mp4FrameWriter); !ok {
+		t.Errorf("mp4 should map to mp4FrameWriter, got %T", w)
 	}
 }
 
@@ -591,6 +592,141 @@ func TestNotifyFileComplete(t *testing.T) {
 	}
 	// Should not panic
 	w.notifyFileComplete()
+}
+
+func TestNewFrameWriterTS(t *testing.T) {
+	w := newFrameWriter("ts")
+	if _, ok := w.(*tsFrameWriter); !ok {
+		t.Errorf("expected tsFrameWriter, got %T", w)
+	}
+	w = newFrameWriter("hls")
+	if _, ok := w.(*tsFrameWriter); !ok {
+		t.Errorf("hls should map to tsFrameWriter, got %T", w)
+	}
+}
+
+func TestTSRecordingCreatesSegmentsAndPlaylist(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.RecordConfig{
+		Format: "ts",
+		Path:   filepath.Join(dir, "{stream_key}", "{date}_{time}.ts"),
+		Segment: config.SegmentConfig{
+			Duration: 100 * time.Millisecond,
+		},
+	}
+
+	w, err := NewFileWriter("live/tstest", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write H.264 sequence header
+	seqHeader := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+	)
+	if err := w.WriteFrame(seqHeader); err != nil {
+		t.Fatalf("write seq header: %v", err)
+	}
+
+	// Write first GOP: keyframe + interframes
+	keyframe1 := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88},
+	)
+	if err := w.WriteFrame(keyframe1); err != nil {
+		t.Fatalf("write keyframe1: %v", err)
+	}
+
+	for i := 1; i <= 5; i++ {
+		inter := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			int64(i*33), int64(i*33), []byte{0x00, 0x00, 0x00, 0x02, 0x41, 0x9A},
+		)
+		if err := w.WriteFrame(inter); err != nil {
+			t.Fatalf("write interframe %d: %v", i, err)
+		}
+	}
+
+	// Write second GOP to trigger segment split
+	keyframe2 := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		200, 200, []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x89},
+	)
+	if err := w.WriteFrame(keyframe2); err != nil {
+		t.Fatalf("write keyframe2: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		inter := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			int64(200+i*33), int64(200+i*33), []byte{0x00, 0x00, 0x00, 0x02, 0x41, 0x9B},
+		)
+		if err := w.WriteFrame(inter); err != nil {
+			t.Fatalf("write interframe2 %d: %v", i, err)
+		}
+	}
+
+	w.Close()
+
+	// Verify: the TS writer should have created segment files and a playlist
+	parentDir := filepath.Dir(w.FilePath())
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+
+	var tsFiles, m3u8Files []string
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".ts" {
+			tsFiles = append(tsFiles, e.Name())
+		}
+		if filepath.Ext(e.Name()) == ".m3u8" {
+			m3u8Files = append(m3u8Files, e.Name())
+		}
+	}
+
+	if len(tsFiles) == 0 {
+		t.Error("expected at least one .ts segment file")
+	}
+	if len(m3u8Files) == 0 {
+		t.Error("expected index.m3u8 playlist file")
+	}
+
+	// Read playlist and verify VOD markers
+	if len(m3u8Files) > 0 {
+		playlist, err := os.ReadFile(filepath.Join(parentDir, m3u8Files[0]))
+		if err != nil {
+			t.Fatalf("read playlist: %v", err)
+		}
+		content := string(playlist)
+		if !strings.Contains(content, "#EXTM3U") {
+			t.Error("playlist missing #EXTM3U header")
+		}
+		if !strings.Contains(content, "#EXT-X-PLAYLIST-TYPE:VOD") {
+			t.Error("playlist missing VOD type")
+		}
+		if !strings.Contains(content, "#EXT-X-ENDLIST") {
+			t.Error("playlist missing #EXT-X-ENDLIST")
+		}
+		t.Logf("TS segments: %v, playlist:\n%s", tsFiles, content)
+	}
+}
+
+func TestFileWriterFormatTS(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.RecordConfig{
+		Format: "ts",
+		Path:   filepath.Join(dir, "{stream_key}", "{date}_{time}.ts"),
+	}
+	w, err := NewFileWriter("live/test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Format() != "ts" {
+		t.Errorf("Format = %q, want ts", w.Format())
+	}
+	w.Close()
 }
 
 func TestModuleHooks(t *testing.T) {

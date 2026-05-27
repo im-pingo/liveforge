@@ -30,6 +30,12 @@ rtsp:
   enabled: true
   listen: ":8554"
   rtp_port_range: [10000, 20000]
+  multicast:
+    enabled: false
+    address: "239.0.0.1"     # multicast group IP
+    base_port: 40000          # starting RTP port for multicast streams
+    ttl: 16                   # multicast TTL
+    interface: ""             # network interface (empty = default)
   # skip_tracker:
   #   max_count: 3
   #   window: 60s
@@ -61,6 +67,13 @@ webrtc:
   ice_lite: true
   ice_servers:
     - urls: ["stun:stun.l.google.com:19302"]
+    # TURN server example (uncomment for NAT traversal):
+    # - urls: ["turn:turn.example.com:3478"]
+    #   username: "user"
+    #   credential: "pass"
+    # - urls: ["turns:turn.example.com:5349"]
+    #   username: "user"
+    #   credential: "pass"
   udp_port_range: [20000, 30000]
   candidates: []
   gcc:
@@ -210,6 +223,15 @@ record:
     max_size: 512MB
   on_file_complete:
     url: ""
+
+dvr:
+  enabled: false
+  listen: ":8070"
+  stream_pattern: "live/*"
+  path: "./dvr/{stream_key}"
+  window: 2h
+  segment_duration: 6s
+  cleanup_interval: 30s
 
 metrics:
   enabled: false

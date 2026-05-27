@@ -369,3 +369,38 @@ func TestTLSConfigConfigured(t *testing.T) {
 		})
 	}
 }
+
+type reloadableMockModule struct {
+	mockModule
+	reloadCfgName string
+	reloadErr     error
+}
+
+func (m *reloadableMockModule) OnReload(s *Server) error {
+	m.reloadCfgName = s.Config().Server.Name
+	return m.reloadErr
+}
+
+func TestServerUpdateConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Server.Name = "original"
+	s := NewServer(cfg)
+
+	rm := &reloadableMockModule{mockModule: mockModule{name: "reloadable"}}
+	plain := &mockModule{name: "plain"}
+	s.RegisterModule(rm)
+	s.RegisterModule(plain)
+	_ = s.Init()
+	defer s.Shutdown()
+
+	newCfg := &config.Config{}
+	newCfg.Server.Name = "reloaded"
+	s.UpdateConfig(newCfg)
+
+	if s.Config().Server.Name != "reloaded" {
+		t.Errorf("expected config name 'reloaded', got %q", s.Config().Server.Name)
+	}
+	if rm.reloadCfgName != "reloaded" {
+		t.Errorf("expected reloadable module to see 'reloaded', got %q", rm.reloadCfgName)
+	}
+}

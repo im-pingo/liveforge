@@ -14,7 +14,7 @@ import (
 	pioncodecs "github.com/pion/rtp/v2/codecs"
 )
 
-// RTSPSubscriber implements RTSP playback via TCP interleaved or UDP transport.
+// RTSPSubscriber implements RTSP playback via TCP interleaved, UDP unicast, or UDP multicast.
 type RTSPSubscriber struct {
 	id      string
 	options core.SubscribeOptions
@@ -29,9 +29,13 @@ type RTSPSubscriber struct {
 	videoChannel uint8 // TCP interleaved channel for video RTP
 	audioChannel uint8 // TCP interleaved channel for audio RTP
 
-	// UDP transport (non-nil when client negotiated UDP transport)
+	// UDP unicast transport (non-nil when client negotiated UDP transport)
 	videoUDP *UDPTransport
 	audioUDP *UDPTransport
+
+	// UDP multicast transport (non-nil when client negotiated multicast)
+	videoMulticast *MulticastTransport
+	audioMulticast *MulticastTransport
 
 	prevVideoDTS    int64
 	prevAudioDTS    int64
@@ -184,7 +188,7 @@ func (s *RTSPSubscriber) sendVideo(frame *avframe.AVFrame) error {
 	}
 
 	pkts := s.videoPacketizer.Packetize(payload, samples)
-	return s.sendPackets(pkts, s.videoChannel, s.videoUDP)
+	return s.sendPackets(pkts, s.videoChannel, s.videoUDP, s.videoMulticast)
 }
 
 func (s *RTSPSubscriber) sendAudio(frame *avframe.AVFrame) error {
@@ -197,7 +201,7 @@ func (s *RTSPSubscriber) sendAudio(frame *avframe.AVFrame) error {
 		s.prevAudioDTS = frame.DTS
 		s.audioDTSInitialized = true
 		pkts := s.audioPacketizer.Packetize(frame.Payload, samples)
-		return s.sendPackets(pkts, s.audioChannel, s.audioUDP)
+		return s.sendPackets(pkts, s.audioChannel, s.audioUDP, s.audioMulticast)
 	}
 
 	// Fallback to custom packetizer
@@ -209,10 +213,10 @@ func (s *RTSPSubscriber) sendAudio(frame *avframe.AVFrame) error {
 		return err
 	}
 	wrapped := s.customAudioSes.WrapPackets(pkts, frame.DTS)
-	return s.sendPackets(wrapped, s.audioChannel, s.audioUDP)
+	return s.sendPackets(wrapped, s.audioChannel, s.audioUDP, s.audioMulticast)
 }
 
-func (s *RTSPSubscriber) sendPackets(pkts []*pionrtp.Packet, channel uint8, udp *UDPTransport) error {
+func (s *RTSPSubscriber) sendPackets(pkts []*pionrtp.Packet, channel uint8, udp *UDPTransport, mcast *MulticastTransport) error {
 	for _, pkt := range pkts {
 		data, err := pkt.Marshal()
 		if err != nil {
@@ -222,7 +226,11 @@ func (s *RTSPSubscriber) sendPackets(pkts []*pionrtp.Packet, channel uint8, udp 
 		s.packetCount.Add(1)
 		s.octetCount.Add(uint32(len(pkt.Payload)))
 		s.lastRTPTime.Store(pkt.Timestamp)
-		if udp != nil {
+		if mcast != nil {
+			if err := mcast.SendRTP(data); err != nil {
+				return err
+			}
+		} else if udp != nil {
 			if err := udp.SendRTP(data); err != nil {
 				return err
 			}
@@ -255,7 +263,9 @@ func (s *RTSPSubscriber) rtcpLoop() {
 
 			ntpTime := toNTP(time.Now())
 			sr := pkgrtp.BuildSR(s.videoSSRC, ntpTime, rtpTime, pktCount, octCount)
-			if s.videoUDP != nil {
+			if s.videoMulticast != nil {
+				s.videoMulticast.SendRTCP(sr)
+			} else if s.videoUDP != nil {
 				s.videoUDP.SendRTCP(sr)
 			} else {
 				rtcpChannel := s.videoChannel + 1 // odd channel = RTCP

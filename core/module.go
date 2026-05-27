@@ -58,3 +58,10 @@ type Module interface {
 	Hooks() []HookRegistration
 	Close() error
 }
+
+// Reloadable is an optional interface modules can implement to support
+// config hot-reload via SIGHUP. Only modules whose config has actually
+// changed need to do anything in OnReload.
+type Reloadable interface {
+	OnReload(s *Server) error
+}
