@@ -145,6 +145,13 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	if info.HasVideo() && offerHasVideo {
 		mime := codecToMime(info.VideoCodec)
+		if mime != "" && !offerSupportsCodec(&parsedSDP, "video", mime) {
+			// Publisher codec not in offer; H.265 publishers with H.264-only peers
+			// would need video transcoding (deferred). Log and skip video.
+			slog.Debug("WHEP video codec mismatch", "module", "webrtc",
+				"publisher", mime, "stream", streamKey)
+			mime = ""
+		}
 		if mime != "" {
 			vt, err := webrtc.NewTrackLocalStaticSample(
 				webrtc.RTPCodecCapability{MimeType: mime, ClockRate: 90000},
@@ -363,3 +370,22 @@ func normalizeH264Offer(offerSDP string) string {
 	return string(result)
 }
 
+// offerSupportsCodec checks whether the remote offer contains the given codec
+// MIME type (e.g., "video/H265") in its rtpmap attributes.
+func offerSupportsCodec(parsed *sdp.SessionDescription, media, mime string) bool {
+	codecName := strings.ToUpper(mime)
+	if idx := strings.LastIndex(codecName, "/"); idx >= 0 {
+		codecName = codecName[idx+1:]
+	}
+	for _, md := range parsed.MediaDescriptions {
+		if md.MediaName.Media != media {
+			continue
+		}
+		for _, attr := range md.Attributes {
+			if attr.Key == "rtpmap" && strings.Contains(strings.ToUpper(attr.Value), codecName+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}

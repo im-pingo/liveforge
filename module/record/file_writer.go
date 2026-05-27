@@ -15,6 +15,7 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/flv"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
+	"github.com/im-pingo/liveforge/pkg/muxer/mp4"
 )
 
 // frameWriter is the interface for format-specific frame writing.
@@ -117,6 +118,56 @@ func (w *fmp4FrameWriter) flush(f *os.File) error {
 	return nil
 }
 
+// mp4FrameWriter writes AVFrames as a classic MP4 with moov atom at end.
+type mp4FrameWriter struct {
+	muxer   *mp4.Muxer
+	started bool
+	prevDTS int64
+}
+
+func (w *mp4FrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+	return nil // defer until we have codec info
+}
+
+func (w *mp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
+	if frame.FrameType == avframe.FrameTypeSequenceHeader {
+		if w.muxer == nil {
+			videoCodec := avframe.CodecType(0)
+			audioCodec := avframe.CodecType(0)
+			if frame.MediaType.IsVideo() {
+				videoCodec = frame.Codec
+			} else {
+				audioCodec = frame.Codec
+			}
+			w.muxer = mp4.NewMuxer(videoCodec, audioCodec)
+		}
+		w.muxer.WriteFrame(f, frame, -1)
+
+		if !w.started {
+			w.muxer.WriteFtyp(f)
+			w.muxer.WriteMdatHeader(f)
+			w.started = true
+			w.prevDTS = -1
+		}
+		return nil
+	}
+
+	if !w.started || w.muxer == nil {
+		return nil
+	}
+
+	_, err := w.muxer.WriteFrame(f, frame, w.prevDTS)
+	w.prevDTS = frame.DTS
+	return err
+}
+
+func (w *mp4FrameWriter) finalize(f *os.File) error {
+	if w.muxer == nil || !w.started {
+		return nil
+	}
+	return w.muxer.Finalize(f)
+}
+
 // FileWriter manages writing AVFrames to files with optional segmentation.
 type FileWriter struct {
 	cfg          config.RecordConfig
@@ -135,7 +186,7 @@ func NewFileWriter(streamKey string, cfg config.RecordConfig) (*FileWriter, erro
 	w := &FileWriter{
 		cfg:       cfg,
 		streamKey: streamKey,
-		format:    newFrameWriter(cfg.Format),
+		format:    newFrameWriterWithContext(cfg.Format, streamKey, cfg),
 		startTime: time.Now(),
 	}
 
@@ -147,19 +198,31 @@ func NewFileWriter(streamKey string, cfg config.RecordConfig) (*FileWriter, erro
 
 // newFrameWriter creates a format-specific writer based on the config format string.
 func newFrameWriter(format string) frameWriter {
+	return newFrameWriterWithContext(format, "", config.RecordConfig{})
+}
+
+func newFrameWriterWithContext(format, streamKey string, cfg config.RecordConfig) frameWriter {
 	switch strings.ToLower(format) {
-	case "fmp4", "mp4":
+	case "mp4":
+		return &mp4FrameWriter{}
+	case "fmp4":
 		return &fmp4FrameWriter{}
+	case "ts", "hls":
+		return newTSFrameWriter(streamKey, cfg)
 	default:
 		return &flvFrameWriter{muxer: flv.NewMuxer()}
 	}
 }
 
-// Format returns the recording format string ("flv" or "fmp4").
+// Format returns the recording format string ("flv", "fmp4", "mp4", or "ts").
 func (w *FileWriter) Format() string {
 	switch w.format.(type) {
+	case *mp4FrameWriter:
+		return "mp4"
 	case *fmp4FrameWriter:
 		return "fmp4"
+	case *tsFrameWriter:
+		return "ts"
 	default:
 		return "flv"
 	}
@@ -200,9 +263,13 @@ func (w *FileWriter) WriteFrame(frame *avframe.AVFrame) error {
 // Close flushes and closes the current file.
 func (w *FileWriter) Close() {
 	if w.file != nil {
-		// Flush any buffered data for fMP4
-		if fmp4w, ok := w.format.(*fmp4FrameWriter); ok {
-			fmp4w.flush(w.file) //nolint:errcheck
+		switch fw := w.format.(type) {
+		case *fmp4FrameWriter:
+			fw.flush(w.file) //nolint:errcheck
+		case *mp4FrameWriter:
+			fw.finalize(w.file) //nolint:errcheck
+		case *tsFrameWriter:
+			fw.flush(w.file) //nolint:errcheck
 		}
 		w.file.Close()
 		w.notifyFileComplete()
@@ -238,9 +305,13 @@ func (w *FileWriter) openFile() error {
 }
 
 func (w *FileWriter) rotate() error {
-	// Flush any buffered data for fMP4
-	if fmp4w, ok := w.format.(*fmp4FrameWriter); ok {
-		fmp4w.flush(w.file) //nolint:errcheck
+	switch fw := w.format.(type) {
+	case *fmp4FrameWriter:
+		fw.flush(w.file) //nolint:errcheck
+	case *mp4FrameWriter:
+		fw.finalize(w.file) //nolint:errcheck
+	case *tsFrameWriter:
+		fw.flush(w.file) //nolint:errcheck
 	}
 
 	// Close current file

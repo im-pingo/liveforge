@@ -164,3 +164,32 @@ func (m *Module) onPublishStop(ctx *core.EventContext) error {
 	}
 	return nil
 }
+
+// SessionStatus returns the status of all DVR sessions (implements DVRStatusProvider for the API module).
+func (m *Module) SessionStatus() any {
+	m.mu.Lock()
+	result := make([]DVRSessionStatus, 0, len(m.sessions))
+	for key, session := range m.sessions {
+		segs := session.Index().Segments()
+		var totalDur float64
+		for _, seg := range segs {
+			totalDur += seg.Duration
+		}
+		result = append(result, DVRSessionStatus{
+			StreamKey: key,
+			Live:      session.IsLive(),
+			Segments:  len(segs),
+			Duration:  totalDur,
+		})
+	}
+	m.mu.Unlock()
+	return result
+}
+
+// DVRSessionStatus represents a single DVR session's status.
+type DVRSessionStatus struct {
+	StreamKey string  `json:"stream_key"`
+	Live      bool    `json:"live"`
+	Segments  int     `json:"segments"`
+	Duration  float64 `json:"duration_sec"`
+}

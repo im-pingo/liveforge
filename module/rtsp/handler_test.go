@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandleOptions(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	req := &Request{Method: "OPTIONS", URL: "*", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "1")
 	resp := h.HandleOptions(req)
@@ -28,7 +28,7 @@ func TestHandleOptions(t *testing.T) {
 }
 
 func TestHandleGetParameter(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	req := &Request{Method: "GET_PARAMETER", URL: "rtsp://host/live/test", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "2")
 	resp := h.HandleGetParameter(req)
@@ -38,7 +38,7 @@ func TestHandleGetParameter(t *testing.T) {
 }
 
 func TestHandleSetupTCPInterleaved(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
@@ -59,7 +59,7 @@ func TestHandleSetupTCPInterleaved(t *testing.T) {
 
 func TestHandleSetupUDP(t *testing.T) {
 	pa, _ := portalloc.New(10000, 10010)
-	h := NewHandler(nil, pa)
+	h := NewHandler(nil, pa, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
@@ -76,7 +76,7 @@ func TestHandleSetupUDP(t *testing.T) {
 }
 
 func TestHandleAnnounce(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	sdpBody := "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=test\r\nt=0 0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
 	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/test", Headers: make(http.Header), Body: []byte(sdpBody)}
@@ -91,7 +91,7 @@ func TestHandleAnnounce(t *testing.T) {
 }
 
 func TestHandleAnnounceNoBody(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/test", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "1")
@@ -102,7 +102,7 @@ func TestHandleAnnounceNoBody(t *testing.T) {
 }
 
 func TestHandleRecord(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateAnnounced)
 	session.Transition(StateReady)
@@ -118,7 +118,7 @@ func TestHandleRecord(t *testing.T) {
 }
 
 func TestHandleRecordInvalidState(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	// Init state -> cannot RECORD directly
 	req := &Request{Method: "RECORD", URL: "rtsp://host/live/test", Headers: make(http.Header)}
@@ -130,7 +130,7 @@ func TestHandleRecordInvalidState(t *testing.T) {
 }
 
 func TestHandlePlay(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	session.Transition(StateReady)
@@ -149,7 +149,7 @@ func TestHandlePlay(t *testing.T) {
 }
 
 func TestHandlePause(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	session.Transition(StateReady)
@@ -166,7 +166,7 @@ func TestHandlePause(t *testing.T) {
 }
 
 func TestHandleTeardown(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
 	session.Transition(StateReady)

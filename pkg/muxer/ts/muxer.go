@@ -109,7 +109,9 @@ func (m *Muxer) WriteFrame(frame *avframe.AVFrame) []byte {
 }
 
 func (m *Muxer) writeVideoFrame(frame *avframe.AVFrame) []byte {
-	var result []byte
+	// Estimate output size: PAT+PMT (376 bytes) + PES header + payload + TS overhead
+	estSize := len(frame.Payload)*2 + 1024
+	result := make([]byte, 0, estSize)
 
 	// Prepend PAT+PMT before keyframes
 	if frame.FrameType.IsKeyframe() {
@@ -123,18 +125,18 @@ func (m *Muxer) writeVideoFrame(frame *avframe.AVFrame) []byte {
 	case avframe.CodecH264:
 		annexB := h264.AVCCToAnnexB(frame.Payload)
 		if frame.FrameType.IsKeyframe() && m.videoSeqHeader != nil {
-			// Prepend SPS/PPS before keyframe
+			payload = make([]byte, 0, len(m.videoSeqHeader)+len(annexB))
 			payload = append(payload, m.videoSeqHeader...)
 		}
 		payload = append(payload, annexB...)
 	case avframe.CodecH265:
 		annexB := h265.HVCCToAnnexB(frame.Payload)
 		if frame.FrameType.IsKeyframe() && m.videoSeqHeader != nil {
+			payload = make([]byte, 0, len(m.videoSeqHeader)+len(annexB))
 			payload = append(payload, m.videoSeqHeader...)
 		}
 		payload = append(payload, annexB...)
 	case avframe.CodecAV1:
-		// AV1 OBUs passed through directly
 		payload = frame.Payload
 	default:
 		payload = frame.Payload
@@ -142,21 +144,19 @@ func (m *Muxer) writeVideoFrame(frame *avframe.AVFrame) []byte {
 
 	// Build PES
 	pesHeader := BuildPESHeader(0xE0, frame.PTS, frame.DTS, len(payload))
-	pesData := append(pesHeader, payload...)
+	pesData := make([]byte, 0, len(pesHeader)+len(payload))
+	pesData = append(pesData, pesHeader...)
+	pesData = append(pesData, payload...)
 
-	// Build packetization options: embed PCR in first TS packet if needed,
-	// set random_access_indicator for keyframes. This avoids separate
-	// PCR-only packets that cause continuity counter issues with demuxers.
 	opts := &PESPacketizeOptions{
 		RandomAccess: frame.FrameType.IsKeyframe(),
-		PCR:          -1, // no PCR by default
+		PCR:          -1,
 	}
 	if m.shouldInsertPCR(frame.DTS) {
 		opts.PCR = frame.DTS
 		m.lastPCR = frame.DTS
 	}
 
-	// Packetize into TS
 	tsPackets := PacketizePES(PIDVideo, pesData, &m.videoContinuity, opts)
 	result = append(result, tsPackets...)
 
@@ -169,13 +169,12 @@ func (m *Muxer) writeAudioFrame(frame *avframe.AVFrame) []byte {
 	switch m.audioCodec {
 	case avframe.CodecAAC:
 		if m.aacInfo != nil {
-			// Prepend ADTS header
 			adts := aac.BuildADTSHeader(m.aacInfo, len(frame.Payload))
+			payload = make([]byte, 0, len(adts)+len(frame.Payload))
 			payload = append(payload, adts...)
 		}
 		payload = append(payload, frame.Payload...)
 	case avframe.CodecMP3:
-		// MP3 is self-delimiting, pass through
 		payload = frame.Payload
 	case avframe.CodecOpus:
 		payload = frame.Payload
@@ -183,9 +182,10 @@ func (m *Muxer) writeAudioFrame(frame *avframe.AVFrame) []byte {
 		payload = frame.Payload
 	}
 
-	// Build PES (audio uses PTS only, no DTS)
 	pesHeader := BuildPESHeader(0xC0, frame.PTS, frame.PTS, len(payload))
-	pesData := append(pesHeader, payload...)
+	pesData := make([]byte, 0, len(pesHeader)+len(payload))
+	pesData = append(pesData, pesHeader...)
+	pesData = append(pesData, payload...)
 
 	tsPackets := PacketizePES(PIDAudio, pesData, &m.audioContinuity, nil)
 	return tsPackets

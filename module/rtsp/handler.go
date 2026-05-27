@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
@@ -15,13 +16,14 @@ import (
 
 // Handler processes RTSP requests.
 type Handler struct {
-	server *core.Server
-	ports  *portalloc.PortAllocator
+	server    *core.Server
+	ports     *portalloc.PortAllocator
+	multicast *config.MulticastConfig // nil if multicast disabled
 }
 
 // NewHandler creates a new RTSP handler.
-func NewHandler(server *core.Server, ports *portalloc.PortAllocator) *Handler {
-	return &Handler{server: server, ports: ports}
+func NewHandler(server *core.Server, ports *portalloc.PortAllocator, multicast *config.MulticastConfig) *Handler {
+	return &Handler{server: server, ports: ports, multicast: multicast}
 }
 
 // newResponse creates a base response with CSeq from request.
@@ -82,6 +84,7 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 // TransportConfig holds parsed Transport header data.
 type TransportConfig struct {
 	IsTCP       bool
+	IsMulticast bool
 	Interleaved [2]int // channel pair for TCP
 	ClientPorts [2]int // client ports for UDP
 	ServerPorts [2]int // allocated server ports for UDP
@@ -93,7 +96,19 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 	tc := parseTransportHeader(transport)
 
 	var udpTransport *UDPTransport
-	if !tc.IsTCP && h.ports != nil {
+	var mcastTransport *MulticastTransport
+
+	if tc.IsMulticast && h.multicast != nil {
+		mt, err := NewMulticastTransport(*h.multicast)
+		if err != nil {
+			return newResponse(500, "Internal Server Error", req)
+		}
+		rtpPort, rtcpPort := mt.ServerPorts()
+		tc.ServerPorts = [2]int{rtpPort, rtcpPort}
+		mcastTransport = mt
+	} else if tc.IsMulticast {
+		return newResponse(461, "Unsupported Transport", req)
+	} else if !tc.IsTCP && h.ports != nil {
 		ut, err := NewUDPTransport(h.ports)
 		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
@@ -102,7 +117,6 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 		tc.ServerPorts = [2]int{rtpPort, rtcpPort}
 		udpTransport = ut
 
-		// Set client address from client_port and remote IP.
 		host, _, _ := net.SplitHostPort(remoteAddr)
 		clientIP := net.ParseIP(host)
 		if clientIP != nil {
@@ -110,15 +124,14 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 		}
 	}
 
-	// Store transport config per track on the session.
 	if session != nil {
 		trackID, _ := extractTrackID(req.URL)
 		ts := TrackSetup{
 			TrackID:   trackID,
 			Transport: tc,
 			UDP:       udpTransport,
+			Multicast: mcastTransport,
 		}
-		// Assign codec from MediaInfo based on track order.
 		if session.MediaInfo != nil {
 			idx := len(session.Tracks)
 			if idx == 0 && session.MediaInfo.HasVideo() {
@@ -133,6 +146,9 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 	resp := newResponse(200, "OK", req)
 	if tc.IsTCP {
 		resp.Headers.Set("Transport", fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", tc.Interleaved[0], tc.Interleaved[1]))
+	} else if tc.IsMulticast && mcastTransport != nil {
+		resp.Headers.Set("Transport", fmt.Sprintf("RTP/AVP;multicast;destination=%s;port=%d-%d;ttl=%d",
+			mcastTransport.MulticastAddr(), tc.ServerPorts[0], tc.ServerPorts[1], h.multicast.TTL))
 	} else {
 		resp.Headers.Set("Transport", fmt.Sprintf("RTP/AVP;unicast;client_port=%d-%d;server_port=%d-%d",
 			tc.ClientPorts[0], tc.ClientPorts[1], tc.ServerPorts[0], tc.ServerPorts[1]))
@@ -281,6 +297,9 @@ func parseTransportHeader(transport string) TransportConfig {
 		part = strings.TrimSpace(part)
 		if part == "RTP/AVP/TCP" {
 			tc.IsTCP = true
+		}
+		if part == "multicast" {
+			tc.IsMulticast = true
 		}
 		if strings.HasPrefix(part, "interleaved=") {
 			fmt.Sscanf(part, "interleaved=%d-%d", &tc.Interleaved[0], &tc.Interleaved[1])

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
@@ -48,7 +49,13 @@ func (m *Module) Init(s *core.Server) error {
 		m.ports, _ = portalloc.New(30000, 40000) // default range
 	}
 
-	m.handler = NewHandler(s, m.ports)
+	var mcast *config.MulticastConfig
+	if cfg.Multicast.Enabled {
+		InitMulticastPorts(cfg.Multicast.BasePort)
+		mcast = &cfg.Multicast
+	}
+
+	m.handler = NewHandler(s, m.ports, mcast)
 
 	ln, err := s.MakeListener(cfg.Listen, cfg.TLS)
 	if err != nil {
@@ -269,13 +276,16 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		return
 	}
 
-	// Determine video/audio channels and optional UDP transports from track setup.
+	// Determine video/audio channels and optional UDP/multicast transports from track setup.
 	var videoChannel, audioChannel uint8
 	var videoUDP, audioUDP *UDPTransport
+	var videoMcast, audioMcast *MulticastTransport
 	for _, t := range session.Tracks {
 		if t.Codec.IsVideo() {
 			if t.Transport.IsTCP {
 				videoChannel = uint8(t.Transport.Interleaved[0])
+			} else if t.Multicast != nil {
+				videoMcast = t.Multicast
 			} else {
 				videoUDP = t.UDP
 			}
@@ -283,6 +293,8 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		if t.Codec.IsAudio() {
 			if t.Transport.IsTCP {
 				audioChannel = uint8(t.Transport.Interleaved[0])
+			} else if t.Multicast != nil {
+				audioMcast = t.Multicast
 			} else {
 				audioUDP = t.UDP
 			}
@@ -296,6 +308,8 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	}
 	sub.videoUDP = videoUDP
 	sub.audioUDP = audioUDP
+	sub.videoMulticast = videoMcast
+	sub.audioMulticast = audioMcast
 	session.Subscriber = sub
 	if err := session.Stream.AddSubscriber("rtsp"); err != nil {
 		slog.Warn("subscriber limit reached", "module", "rtsp", "session", session.ID, "error", err)
