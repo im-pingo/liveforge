@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,10 +78,10 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 
 	pub := &WHIPPublisher{
 		id:   sessionID,
-		info: &avframe.MediaInfo{},
 		pc:   pc,
 		done: make(chan struct{}),
 	}
+	pub.info.Store(&avframe.MediaInfo{})
 
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
 	m.storeSession(sess)
@@ -119,15 +120,19 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		pubMu.Lock()
+		// Copy-on-write under pubMu (serializes concurrent OnTrack callbacks);
+		// readers load the snapshot atomically without the lock.
+		mi := *pub.info.Load()
 		if avCodec.IsVideo() {
-			pub.info.VideoCodec = avCodec
+			mi.VideoCodec = avCodec
 			videoDetected = true
 		} else {
-			pub.info.AudioCodec = avCodec
-			pub.info.SampleRate = int(codec.ClockRate)
-			pub.info.Channels = int(codec.Channels)
+			mi.AudioCodec = avCodec
+			mi.SampleRate = int(codec.ClockRate)
+			mi.Channels = int(codec.Channels)
 			audioDetected = true
 		}
+		pub.info.Store(&mi)
 		pubMu.Unlock()
 
 		setPublisherOnce()
@@ -331,9 +336,12 @@ func mimeToCodecType(mime string) avframe.CodecType {
 }
 
 // WHIPPublisher implements core.Publisher for WebRTC WHIP ingest.
+//
+// MediaInfo is stored behind an atomic pointer: OnTrack callbacks publish
+// updated snapshots while subscriber goroutines read concurrently.
 type WHIPPublisher struct {
 	id   string
-	info *avframe.MediaInfo
+	info atomic.Pointer[avframe.MediaInfo]
 	pc   *webrtc.PeerConnection
 	done chan struct{}
 }
@@ -341,7 +349,7 @@ type WHIPPublisher struct {
 var _ core.Publisher = (*WHIPPublisher)(nil)
 
 func (p *WHIPPublisher) ID() string                    { return p.id }
-func (p *WHIPPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
+func (p *WHIPPublisher) MediaInfo() *avframe.MediaInfo { return p.info.Load() }
 func (p *WHIPPublisher) Close() error {
 	select {
 	case <-p.done:

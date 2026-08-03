@@ -241,10 +241,10 @@ func TestWHIPPublisherMethods(t *testing.T) {
 
 	pub := &WHIPPublisher{
 		id:   "test-whip-pub",
-		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
 		pc:   pc,
 		done: make(chan struct{}),
 	}
+	pub.info.Store(&avframe.MediaInfo{VideoCodec: avframe.CodecH264})
 
 	if pub.ID() != "test-whip-pub" {
 		t.Errorf("ID = %q", pub.ID())
