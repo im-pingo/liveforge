@@ -1,6 +1,6 @@
 // ff_cgo_darwin.go — vendored static FFmpeg libs for macOS.
 //
-//go:build darwin
+//go:build darwin && audiocodec
 
 package audiocodec
 

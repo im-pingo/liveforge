@@ -7,7 +7,7 @@
 //
 // To use vendored static libs instead, build with: go build -tags ffmpeg_static
 //
-//go:build linux && !ffmpeg_static
+//go:build linux && !ffmpeg_static && audiocodec
 
 package audiocodec
 

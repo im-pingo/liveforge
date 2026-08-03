@@ -1,3 +1,5 @@
+//go:build audiocodec
+
 package audiocodec
 
 import "github.com/im-pingo/liveforge/pkg/avframe"
@@ -33,6 +35,10 @@ func init() {
 
 	r.RegisterSequenceHeader(avframe.CodecAAC, func() SequenceHeaderFunc {
 		return aacSequenceHeader
+	})
+
+	r.RegisterResampler(func(inRate, inChannels, outRate, outChannels int) Resampler {
+		return NewFFmpegResampler(inRate, inChannels, outRate, outChannels)
 	})
 }
 

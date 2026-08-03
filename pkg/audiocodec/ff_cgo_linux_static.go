@@ -5,7 +5,7 @@
 // Requires static .a files in third_party/ffmpeg/lib/linux_{amd64,arm64}/.
 // See third_party/ffmpeg/BUILD.md for build instructions.
 //
-//go:build linux && ffmpeg_static
+//go:build linux && ffmpeg_static && audiocodec
 
 package audiocodec
 

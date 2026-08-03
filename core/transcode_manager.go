@@ -141,7 +141,7 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 	}
 
 	// Resampler is created lazily after the first successful decode
-	var resampler *audiocodec.FFmpegResampler
+	var resampler audiocodec.Resampler
 	resamplerInited := false
 
 	// Emit sequence header for target codec
@@ -173,7 +173,7 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 		if !resamplerInited {
 			if pcm.SampleRate != encoder.SampleRate() ||
 				pcm.Channels != encoder.Channels() {
-				resampler = audiocodec.NewFFmpegResampler(
+				resampler = tm.registry.NewResampler(
 					pcm.SampleRate, pcm.Channels,
 					encoder.SampleRate(), encoder.Channels(),
 				)
