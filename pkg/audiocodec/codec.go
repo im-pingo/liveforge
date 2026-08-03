@@ -30,3 +30,10 @@ type Encoder interface {
 // SequenceHeaderFunc returns an initial sequence header frame for the
 // target codec, or nil if the codec does not use sequence headers.
 type SequenceHeaderFunc func() []byte
+
+// Resampler converts PCM between different sample-rates and channel counts.
+// Instances are NOT safe for concurrent use.
+type Resampler interface {
+	Resample(pcm *PCMFrame) *PCMFrame
+	Close()
+}

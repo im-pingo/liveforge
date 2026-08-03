@@ -16,12 +16,17 @@ type EncoderFactory func() Encoder
 // SeqHeaderFactory creates a SequenceHeaderFunc for a codec.
 type SeqHeaderFactory func() SequenceHeaderFunc
 
+// ResamplerFactory creates a new Resampler that converts from
+// (inRate, inChannels) to (outRate, outChannels).
+type ResamplerFactory func(inRate, inChannels, outRate, outChannels int) Resampler
+
 // Registry manages available audio codecs.
 type Registry struct {
-	mu       sync.RWMutex
-	decoders map[avframe.CodecType]DecoderFactory
-	encoders map[avframe.CodecType]EncoderFactory
-	seqHdrs  map[avframe.CodecType]SeqHeaderFactory
+	mu        sync.RWMutex
+	decoders  map[avframe.CodecType]DecoderFactory
+	encoders  map[avframe.CodecType]EncoderFactory
+	seqHdrs   map[avframe.CodecType]SeqHeaderFactory
+	resampler ResamplerFactory
 }
 
 var (
@@ -57,6 +62,21 @@ func (r *Registry) RegisterSequenceHeader(codec avframe.CodecType, fn SeqHeaderF
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seqHdrs[codec] = fn
+}
+
+func (r *Registry) RegisterResampler(f ResamplerFactory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resampler = f
+}
+
+func (r *Registry) NewResampler(inRate, inChannels, outRate, outChannels int) Resampler {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.resampler == nil {
+		return nil
+	}
+	return r.resampler(inRate, inChannels, outRate, outChannels)
 }
 
 func (r *Registry) NewDecoder(codec avframe.CodecType) (Decoder, error) {
