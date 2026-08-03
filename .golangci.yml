@@ -1,21 +1,12 @@
+version: "2"
 run:
-  timeout: 5m
   go: "1.26"
-
 linters:
   enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - unused
-    - ineffassign
-    - gosimple
-    - typecheck
     - bodyclose
     - durationcheck
     - errname
     - errorlint
-    - exportloopref
     - gosec
     - makezero
     - nilerr
@@ -23,26 +14,41 @@ linters:
     - unconvert
     - unparam
     - wastedassign
-
-linters-settings:
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-  gosec:
-    excludes:
-      - G104  # unhandled errors (too noisy for streaming server)
-      - G304  # file path from variable (expected for config loading)
-  errcheck:
-    exclude-functions:
-      - (net.Conn).Close
-      - (io.Closer).Close
-      - (*os.File).Close
-
+  settings:
+    errcheck:
+      exclude-functions:
+        - (net.Conn).Close
+        - (io.Closer).Close
+        - (*os.File).Close
+    gosec:
+      excludes:
+        - G104
+        - G304
+    govet:
+      disable:
+        - fieldalignment
+      enable-all: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - vendor
+      - third_party
+      - tools
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-dirs:
-    - vendor
-    - third_party
-    - tools
   max-issues-per-linter: 50
   max-same-issues: 5
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

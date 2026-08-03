@@ -32,7 +32,7 @@ func parseVideoPayload(data []byte, dts int64) *avframe.AVFrame {
 		frameType = avframe.FrameTypeInterframe
 	}
 
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, copyBytes(data[5:]))
+	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, copyBytes(data[5:])) //nolint:gosec // len(data) >= 5 checked above
 }
 
 func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
@@ -53,7 +53,7 @@ func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
 		frameType = avframe.FrameTypeInterframe
 	}
 
-	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, copyBytes(data[2:]))
+	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, copyBytes(data[2:])) //nolint:gosec // len(data) >= 2 checked above
 }
 
 func copyBytes(b []byte) []byte {
