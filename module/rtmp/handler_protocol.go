@@ -32,7 +32,7 @@ func parseVideoPayload(data []byte, dts int64) *avframe.AVFrame {
 		frameType = avframe.FrameTypeInterframe
 	}
 
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, data[5:])
+	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, copyBytes(data[5:]))
 }
 
 func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
@@ -53,7 +53,13 @@ func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
 		frameType = avframe.FrameTypeInterframe
 	}
 
-	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, data[2:])
+	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, copyBytes(data[2:]))
+}
+
+func copyBytes(b []byte) []byte {
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
 }
 
 // splitNameParams splits "test?token=xxx&key=val" into ("test", {"token":"xxx","key":"val"}).

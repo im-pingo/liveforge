@@ -15,6 +15,7 @@ type RingBuffer[T any] struct {
 	closed      atomic.Bool
 	mu          sync.Mutex // protects cond for Read() blocking
 	cond        *sync.Cond // wakes blocked Read() callers on Write/Close
+	dataMu      sync.RWMutex // protects buf slot access against concurrent read/write
 }
 
 // NewRingBuffer creates a new ring buffer with the given capacity.
@@ -34,10 +35,10 @@ func (rb *RingBuffer[T]) Write(val T) {
 	if rb.closed.Load() {
 		return
 	}
-	// Single-producer: store value first, then advance cursor so readers
-	// never see an uninitialized slot.
 	pos := rb.writeCursor.Load()
+	rb.dataMu.Lock()
 	rb.buf[pos%rb.size] = val
+	rb.dataMu.Unlock()
 	rb.writeCursor.Store(pos + 1)
 
 	// Wake all Read() callers blocked on cond.Wait()
@@ -161,7 +162,9 @@ func (r *RingReader[T]) TryRead() (T, bool) {
 		r.readCursor = oldest
 	}
 
+	r.rb.dataMu.RLock()
 	val := r.rb.buf[r.readCursor%r.rb.size]
+	r.rb.dataMu.RUnlock()
 	r.readCursor++
 	return val, true
 }
