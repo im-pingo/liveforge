@@ -183,8 +183,8 @@ func TestPublisherIDAndMediaInfo(t *testing.T) {
 	// Use a mock connection (nil is fine for metadata tests)
 	pub := &Publisher{
 		streamKey: "live/test",
-		info:      &avframe.MediaInfo{},
 	}
+	pub.info.Store(&avframe.MediaInfo{})
 	if pub.ID() != "srt-pub-live/test" {
 		t.Errorf("ID = %q", pub.ID())
 	}

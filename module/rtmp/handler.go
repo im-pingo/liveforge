@@ -339,11 +339,14 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 	}
 
 	if frame != nil {
-		// Update publisher's MediaInfo when sequence headers arrive
+		// Update publisher's MediaInfo when sequence headers arrive.
+		// Copy-on-write: build a new snapshot and publish it atomically so
+		// concurrent readers (RTSP/WebRTC/HTTP subscribers) never observe a
+		// partially updated struct.
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			if pub := stream.Publisher(); pub != nil {
 				if rp, ok := pub.(*Publisher); ok {
-					mi := rp.MediaInfo()
+					mi := *rp.MediaInfo()
 					if frame.MediaType.IsVideo() {
 						mi.VideoCodec = frame.Codec
 						mi.VideoSequenceHeader = append([]byte(nil), frame.Payload...)
@@ -357,6 +360,7 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 							}
 						}
 					}
+					rp.SetMediaInfo(&mi)
 				}
 			}
 		}
