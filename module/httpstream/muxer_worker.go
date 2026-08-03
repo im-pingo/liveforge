@@ -86,12 +86,12 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 	inst.SetInitData(bufCopyAndReset(&buf))
 
-	// Snapshot write cursor before sending GOP cache, so the reader
-	// starts right after the cached frames and we avoid duplicates.
-	startPos := stream.RingBuffer().WriteCursor()
+	// Snapshot GOP cache and write cursor atomically so the reader starts
+	// right after the cached frames with no duplicates.
+	gopCache, startPos := stream.GOPCacheSnapshot()
 
 	// Send GOP cache (skip audio if transcoding)
-	for _, f := range stream.GOPCache() {
+	for _, f := range gopCache {
 		if !audioCompatible && f.MediaType.IsAudio() {
 			continue
 		}
@@ -162,11 +162,11 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 	// No init data needed for TS (PAT/PMT sent inline)
 
-	// Snapshot write cursor before sending GOP cache
-	startPos := stream.RingBuffer().WriteCursor()
+	// Snapshot GOP cache and write cursor atomically
+	gopCache, startPos := stream.GOPCacheSnapshot()
 
 	// Send GOP cache (skip audio if transcoding)
-	for _, f := range stream.GOPCache() {
+	for _, f := range gopCache {
 		if !audioCompatible && f.MediaType.IsAudio() {
 			continue
 		}
@@ -252,11 +252,10 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	initSeg := muxer.Init(videoSeqHeader, audioSeqHeader, videoWidth, videoHeight, audioSampleRate, audioChannels)
 	inst.SetInitData(initSeg)
 
-	// Snapshot write cursor before sending GOP cache
-	startPos := stream.RingBuffer().WriteCursor()
+	// Snapshot GOP cache and write cursor atomically
+	gopCache, startPos := stream.GOPCacheSnapshot()
 
 	// Send GOP cache as first segment (skip audio if transcoding)
-	gopCache := stream.GOPCache()
 	if len(gopCache) > 0 {
 		if !audioCompatible {
 			var filtered []*avframe.AVFrame

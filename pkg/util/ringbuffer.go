@@ -35,11 +35,15 @@ func (rb *RingBuffer[T]) Write(val T) {
 	if rb.closed.Load() {
 		return
 	}
+	// Slot store and cursor advance happen under the same lock so readers
+	// holding the read lock always see a cursor consistent with slot
+	// contents (otherwise a reader could fetch a just-overwritten slot
+	// before the cursor reveals the overwrite, breaking frame ordering).
 	pos := rb.writeCursor.Load()
 	rb.dataMu.Lock()
 	rb.buf[pos%rb.size] = val
-	rb.dataMu.Unlock()
 	rb.writeCursor.Store(pos + 1)
+	rb.dataMu.Unlock()
 
 	// Wake all Read() callers blocked on cond.Wait()
 	rb.cond.Broadcast()
@@ -149,24 +153,35 @@ func (r *RingReader[T]) Signal() <-chan struct{} {
 func (r *RingReader[T]) TryRead() (T, bool) {
 	r.lastSkipped = 0
 
-	wc := r.rb.writeCursor.Load()
-	if r.readCursor >= wc {
-		var zero T
-		return zero, false
-	}
+	for {
+		wc := r.rb.writeCursor.Load()
+		if r.readCursor >= wc {
+			var zero T
+			return zero, false
+		}
 
-	// Check if our position was overwritten (reader too slow)
-	oldest := wc - r.rb.size
-	if r.readCursor < oldest {
-		r.lastSkipped = oldest - r.readCursor
-		r.readCursor = oldest
-	}
+		// Check if our position was overwritten (reader too slow)
+		oldest := wc - r.rb.size
+		if r.readCursor < oldest {
+			r.lastSkipped += oldest - r.readCursor
+			r.readCursor = oldest
+		}
 
-	r.rb.dataMu.RLock()
-	val := r.rb.buf[r.readCursor%r.rb.size]
-	r.rb.dataMu.RUnlock()
-	r.readCursor++
-	return val, true
+		r.rb.dataMu.RLock()
+		val := r.rb.buf[r.readCursor%r.rb.size]
+		// Re-check under the lock: if the writer lapped us between loading
+		// the cursor and acquiring the lock, the slot now holds a newer
+		// frame and returning it would break ordering. Retry from the new
+		// oldest position instead.
+		lapped := r.readCursor < r.rb.writeCursor.Load()-r.rb.size
+		r.rb.dataMu.RUnlock()
+		if lapped {
+			continue
+		}
+
+		r.readCursor++
+		return val, true
+	}
 }
 
 // Skipped returns the number of frames skipped in the last TryRead call
