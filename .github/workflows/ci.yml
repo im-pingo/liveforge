@@ -45,7 +45,7 @@ jobs:
         run: CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
 
       - name: Test
-        run: CGO_ENABLED=1 go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage
         if: github.event_name == 'pull_request'

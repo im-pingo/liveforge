@@ -43,3 +43,14 @@ configs/liveforge.local.yaml
 node_modules/
 package.json
 package-lock.json
+
+# Local build artifacts
+/liveforge-patched
+
+# Claude Code local files
+.claude/
+
+# Session planning files
+/task_plan.md
+/findings.md
+/progress.md
