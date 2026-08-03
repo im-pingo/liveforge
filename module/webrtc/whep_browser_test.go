@@ -32,6 +32,9 @@ func TestWHEPBrowserJitterDiagnostic(t *testing.T) {
 			chromedp.Flag("headless", true),
 			chromedp.Flag("disable-gpu", true),
 			chromedp.Flag("no-sandbox", true),
+			// /dev/shm is tiny in CI containers; without this Chrome
+			// crashes or hangs during startup.
+			chromedp.Flag("disable-dev-shm-usage", true),
 			chromedp.Flag("autoplay-policy", "no-user-gesture-required"),
 			chromedp.Flag("use-fake-device-for-media-stream", true),
 		)...,
@@ -161,6 +164,12 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 		chromedp.Navigate(pageSrv.URL),
 		chromedp.WaitVisible("#status", chromedp.ByID),
 	); err != nil {
+		// Browser startup failures (no Chrome binary, devtools websocket
+		// timeout) are environment problems, not product bugs.
+		if strings.Contains(err.Error(), "websocket url timeout") ||
+			strings.Contains(err.Error(), "executable file not found") {
+			t.Skipf("headless Chrome unavailable in this environment: %v", err)
+		}
 		t.Fatalf("Failed to navigate to player: %v", err)
 	}
 

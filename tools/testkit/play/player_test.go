@@ -1172,6 +1172,7 @@ func TestDASHPlay(t *testing.T) {
 		_, err := pusher.Push(pushCtx, src, push.PushConfig{
 			Protocol: "rtmp",
 			Target:   pushURL,
+			Realtime: true, // segment windows must rotate at playback speed for DASH
 		})
 		pushDone <- err
 	}()

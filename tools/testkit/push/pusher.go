@@ -19,6 +19,7 @@ type PushConfig struct {
 	Target   string        // e.g. "rtmp://127.0.0.1:1935/live/test"
 	Duration time.Duration // maximum push duration; 0 = until source exhausted
 	Token    string        // optional auth token
+	Realtime bool          // pace frames by DTS (wall-clock) instead of sending as fast as possible
 }
 
 // Pusher publishes media frames to a remote server.

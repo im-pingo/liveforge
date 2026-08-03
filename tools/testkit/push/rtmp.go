@@ -101,6 +101,11 @@ func (p *rtmpPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 		deadline = start.Add(cfg.Duration)
 	}
 
+	// Realtime pacing state: map source DTS onto wall clock.
+	var paceBase time.Time
+	var paceBaseDTS int64
+	paceInit := false
+
 	for {
 		// Check context cancellation.
 		select {
@@ -121,6 +126,25 @@ func (p *rtmpPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 		if err != nil {
 			return buildPushReport(cfg, start, framesSent, bytesSent),
 				fmt.Errorf("read source frame: %w", err)
+		}
+
+		// Pace by DTS so the server receives frames at playback speed.
+		// Without this, segment-based outputs (DASH/HLS) rotate their
+		// windows far faster than real time and players cannot keep up.
+		if cfg.Realtime && frame.FrameType != avframe.FrameTypeSequenceHeader {
+			if !paceInit {
+				paceBase = time.Now()
+				paceBaseDTS = frame.DTS
+				paceInit = true
+			} else if wait := time.Duration(frame.DTS-paceBaseDTS)*time.Millisecond - time.Since(paceBase); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return buildPushReport(cfg, start, framesSent, bytesSent), ctx.Err()
+				case <-timer.C:
+				}
+			}
 		}
 
 		n, err := rc.sendMediaFrame(frame)
