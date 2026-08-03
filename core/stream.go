@@ -364,6 +364,24 @@ func (s *Stream) GOPCache() []*avframe.AVFrame {
 	return result
 }
 
+// GOPCacheSnapshot returns a flattened copy of all cached GOPs together
+// with the ring-buffer write cursor, captured atomically under the stream
+// lock. Subscribers must send the returned frames first and then read the
+// ring buffer starting at the returned cursor; capturing the two values
+// separately allows the publisher to write frames in between, which would
+// then be delivered twice (once from the GOP cache, once from the ring)
+// and break DTS monotonicity.
+func (s *Stream) GOPCacheSnapshot() ([]*avframe.AVFrame, int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*avframe.AVFrame
+	for _, gop := range s.gopCache {
+		result = append(result, gop...)
+	}
+	return result, s.ringBuffer.WriteCursor()
+}
+
 // AudioCache returns a copy of the current audio cache.
 func (s *Stream) AudioCache() []*avframe.AVFrame {
 	s.mu.RLock()

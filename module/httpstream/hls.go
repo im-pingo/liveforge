@@ -102,9 +102,8 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		buf.Reset()
 	}
 
-	// Process GOP cache into first segment
-	startPos := stream.RingBuffer().WriteCursor()
-	gopCache := stream.GOPCache()
+	// Process GOP cache into first segment (atomic snapshot with cursor)
+	gopCache, startPos := stream.GOPCacheSnapshot()
 	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {

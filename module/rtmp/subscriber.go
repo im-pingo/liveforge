@@ -101,13 +101,13 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Snapshot write cursor before sending GOP cache, so the live reader
-	// starts right after the cached frames and avoids duplicate/stale data.
-	startPos := s.stream.RingBuffer().WriteCursor()
+	// Snapshot GOP cache and write cursor atomically so no frame written
+	// between the two is delivered twice (GOP cache + ring buffer).
+	gopCache, startPos := s.stream.GOPCacheSnapshot()
 
 	// Send GOP cache if in GOP mode
 	if s.opts.StartMode == core.StartModeGOP {
-		for _, frame := range s.stream.GOPCache() {
+		for _, frame := range gopCache {
 			// Skip audio from GOP cache when transcoding; transcoded audio
 			// comes from the TranscodeManager reader.
 			if needsTranscode && frame.MediaType.IsAudio() {

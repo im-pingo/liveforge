@@ -284,9 +284,8 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		return carryOver
 	}
 
-	// Process GOP cache.
-	startPos := stream.RingBuffer().WriteCursor()
-	gopCache := stream.GOPCache()
+	// Process GOP cache (atomic snapshot with cursor).
+	gopCache, startPos := stream.GOPCacheSnapshot()
 	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {

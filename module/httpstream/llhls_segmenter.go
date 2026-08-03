@@ -63,9 +63,9 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 
 	// Process GOP cache to pre-populate the first segment so the playlist
 	// has content immediately when the first client connects (avoids
-	// cold-start stutter).
-	startPos := stream.RingBuffer().WriteCursor()
-	gopCache := stream.GOPCache()
+	// cold-start stutter). Snapshot cache and cursor atomically to avoid
+	// duplicating frames written in between.
+	gopCache, startPos := stream.GOPCacheSnapshot()
 	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {

@@ -327,9 +327,10 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	// Sending VideoSeqHeader as a separate RTP frame causes duplicate
 	// timestamps with the first keyframe. Skip it for RTSP.
 
-	// Send GOP cache for instant playback.
+	// Send GOP cache for instant playback (atomic snapshot with cursor).
 	// Skip SequenceHeader frames — SPS/PPS is delivered via SDP sprop-parameter-sets.
-	for _, frame := range session.Stream.GOPCache() {
+	gopCache, startPos := session.Stream.GOPCacheSnapshot()
+	for _, frame := range gopCache {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -338,8 +339,8 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		}
 	}
 
-	// Start reading from the current write position to avoid duplicating GOP frames.
-	ringReader := session.Stream.RingBuffer().NewReaderAt(session.Stream.RingBuffer().WriteCursor())
+	// Start reading right after the snapshot position to avoid duplicating GOP frames.
+	ringReader := session.Stream.RingBuffer().NewReaderAt(startPos)
 	filter := core.NewSlowConsumerFilter(ringReader, session.Stream.Config().SlowConsumer, m.server.Config().RTSP.SkipTracker)
 	for {
 		frame, ok := filter.NextFrame()
