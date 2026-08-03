@@ -20,6 +20,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install FFmpeg dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libavcodec-dev libswresample-dev libavutil-dev
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
@@ -69,7 +75,10 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec
-        run: gosec -exclude-generated ./...
+        # High-severity/high-confidence gate. G104 (unhandled errors) and
+        # G304 (file path from variable) are excluded to match .golangci.yml;
+        # tools/ is local test tooling excluded from lint as well.
+        run: gosec -exclude-generated -severity high -confidence high -exclude G104,G304 -exclude-dir tools ./...
 
   docker:
     name: Docker Build
