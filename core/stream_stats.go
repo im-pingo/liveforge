@@ -13,11 +13,12 @@ type StreamStats struct {
 	bytesIn     atomic.Int64
 	videoFrames atomic.Int64
 	audioFrames atomic.Int64
-	startTime   time.Time
 	lastFrame   atomic.Value // time.Time
 
-	// Sliding window for instantaneous bitrate/FPS.
+	// windowMu also guards startTime: initStats runs on the publisher
+	// goroutine while snapshot() runs on API handler goroutines.
 	windowMu    sync.Mutex
+	startTime   time.Time
 	windowBytes int64
 	windowVideo int64
 	windowStart time.Time
@@ -31,10 +32,12 @@ const statsWindowDuration = 2 * time.Second
 // initStats sets the start time. Called once when the stream begins publishing.
 func (s *StreamStats) initStats() {
 	now := time.Now()
-	s.startTime = now
 	s.lastFrame.Store(now)
+	s.windowMu.Lock()
+	s.startTime = now
 	s.windowStart = now
 	s.snapTime = now
+	s.windowMu.Unlock()
 }
 
 // recordFrame updates counters for an incoming frame.
@@ -71,18 +74,18 @@ type StreamStatsSnapshot struct {
 // BitrateKbps and FPS are instantaneous (sliding window), not cumulative averages.
 func (s *StreamStats) snapshot() StreamStatsSnapshot {
 	now := time.Now()
-	elapsed := now.Sub(s.startTime)
 
 	snap := StreamStatsSnapshot{
 		BytesIn:     s.bytesIn.Load(),
 		VideoFrames: s.videoFrames.Load(),
 		AudioFrames: s.audioFrames.Load(),
-		StartTime:   s.startTime,
-		Uptime:      elapsed,
 	}
 
 	// Compute instantaneous bitrate and FPS from sliding window.
 	s.windowMu.Lock()
+	snap.StartTime = s.startTime
+	elapsed := now.Sub(s.startTime)
+	snap.Uptime = elapsed
 	windowElapsed := now.Sub(s.windowStart)
 	if windowElapsed >= statsWindowDuration {
 		// Window has enough data: compute rates from current window,
