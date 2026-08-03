@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -41,18 +43,24 @@ func RunAuthTests(ctx context.Context, cfg AuthTestConfig) (*report.AuthReport, 
 
 	// Phase 2: Run all subscribe probes (need a background publisher).
 	if needsSubscribeProbes(cfg.Protocols) {
+		// Brief delay to let the server clean up the publisher from the valid
+		// publish probe — avoids "stream already has a publisher" errors.
+		select {
+		case <-ctx.Done():
+			return rpt, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+
 		cancel, err := startBackgroundPublisher(ctx, cfg)
 		if err != nil {
 			return rpt, fmt.Errorf("start background publisher for subscribe probes: %w", err)
 		}
 		defer cancel()
 
-		// Give the publisher time to establish the stream so subscribe probes
-		// find an active stream.
-		select {
-		case <-ctx.Done():
-			return rpt, ctx.Err()
-		case <-time.After(1 * time.Second):
+		// Wait until the stream is actually available before running subscribe
+		// probes. In CI environments the publisher may take longer to establish.
+		if err := waitForStream(ctx, cfg); err != nil {
+			return rpt, fmt.Errorf("stream not ready for subscribe probes: %w", err)
 		}
 
 		runProbes(ctx, cfg, "subscribe", rpt)
@@ -174,15 +182,71 @@ func startBackgroundPublisher(ctx context.Context, cfg AuthTestConfig) (context.
 
 	var wg sync.WaitGroup
 	wg.Add(1)
+	pushErrCh := make(chan error, 1)
 	go func() {
 		defer wg.Done()
-		// Ignore push errors — we only need the stream to exist long enough
-		// for subscribe probes.
-		pusher.Push(pubCtx, src, pushCfg) //nolint:errcheck
+		_, err := pusher.Push(pubCtx, src, pushCfg)
+		pushErrCh <- err
 	}()
+
+	// Wait briefly to detect immediate failure (e.g. "already has a publisher").
+	select {
+	case err := <-pushErrCh:
+		if err != nil && pubCtx.Err() == nil {
+			cancel()
+			wg.Wait()
+			return nil, fmt.Errorf("background publisher failed: %w", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		// Push is running — stream should be establishing.
+	}
 
 	return func() {
 		cancel()
 		wg.Wait()
 	}, nil
+}
+
+// waitForStream polls the HTTP-FLV endpoint with a valid token until the
+// server returns 200 (stream is live) or the context expires.
+func waitForStream(ctx context.Context, cfg AuthTestConfig) error {
+	httpAddr, ok := cfg.ServerAddrs["http"]
+	if !ok || httpAddr == "" {
+		// No HTTP addr — fall back to a fixed delay.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+			return nil
+		}
+	}
+
+	validToken := GenerateJWT(cfg.Secret, cfg.StreamKey, "subscribe", time.Now().Add(time.Minute))
+	targetURL := fmt.Sprintf("http://%s/%s.flv?token=%s", httpAddr, cfg.StreamKey, url.QueryEscape(validToken))
+
+	deadline := time.After(10 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("timed out waiting for stream at %s", targetURL)
+		case <-ticker.C:
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+			if err != nil {
+				continue
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+	}
 }
