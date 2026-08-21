@@ -226,6 +226,70 @@ func TestRegisterRoutesProtectsSettingsEndpoint(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutesComposesWithExistingRootHandler(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.API.Auth.Enabled = false
+	cfg.API.Console.Username = "admin"
+	cfg.API.Console.Password = "pass123"
+	server := core.NewServer(cfg)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				t.Fatalf("RegisterRoutes panicked with an existing root handler: %v", recovered)
+			}
+		}()
+		RegisterRoutes(mux, server)
+	}()
+
+	root := httptest.NewRecorder()
+	mux.ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/host-route", nil))
+	if root.Code != http.StatusNoContent {
+		t.Fatalf("host root status = %d, want 204", root.Code)
+	}
+
+	settings := httptest.NewRecorder()
+	mux.ServeHTTP(settings, httptest.NewRequest(http.MethodGet, "/api/v1/config", nil))
+	if settings.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated settings status = %d, want 401", settings.Code)
+	}
+}
+
+func TestRegisterRoutesEnforcesSettingsCSRFForConsoleSession(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.API.Auth.Enabled = false
+	cfg.API.Console.Username = "admin"
+	cfg.API.Console.Password = "pass123"
+	server := core.NewServer(cfg)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, server)
+
+	form := url.Values{"username": {"admin"}, "password": {"pass123"}}
+	login := httptest.NewRequest(http.MethodPost, "/console/login", strings.NewReader(form.Encode()))
+	login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(loginRecorder, login)
+	if loginRecorder.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303", loginRecorder.Code)
+	}
+	cookies := loginRecorder.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not return a session cookie")
+	}
+
+	patch := httptest.NewRequest(http.MethodPatch, "/api/v1/config", strings.NewReader(`{}`))
+	patch.AddCookie(cookies[0])
+	patchRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(patchRecorder, patch)
+	if patchRecorder.Code != http.StatusForbidden {
+		t.Fatalf("settings PATCH without CSRF status = %d, want 403", patchRecorder.Code)
+	}
+}
+
 func TestHealthEndpointRemainsPublicWhenAPIAuthEnabled(t *testing.T) {
 	for _, bearerToken := range []string{"", "configured-token"} {
 		name := "empty bearer"

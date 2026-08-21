@@ -100,7 +100,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		case "ts":
 			streamKey := app + "/" + key
 			// LL-HLS TS partial segment: segName = "MSN.partIdx"
-			if m.server.Config().HTTP.LLHLS.Enabled && m.server.Config().HTTP.LLHLS.Container == "ts" {
+			if cfg := m.server.RuntimeConfig().HTTP().LLHLS; cfg.Enabled && cfg.Container == "ts" {
 				if strings.Contains(segName, ".") {
 					tsParts := strings.SplitN(segName, ".", 2)
 					msn, err1 := strconv.Atoi(tsParts[0])
@@ -193,7 +193,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 				m.llhlsMu.Lock()
 				_, hasLLHLS := m.llhlsManagers[streamKey]
 				m.llhlsMu.Unlock()
-				if hasLLHLS && m.server.Config().HTTP.LLHLS.Container == "fmp4" {
+				if hasLLHLS && m.server.RuntimeConfig().HTTP().LLHLS.Container == "fmp4" {
 					m.serveLLHLSInit(w, r, streamKey)
 					return
 				}
@@ -332,7 +332,7 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 }
 
 func (m *Module) setCORSHeaders(w http.ResponseWriter) {
-	if m.server.Config().HTTP.CORS {
+	if m.server.RuntimeConfig().HTTP().CORS {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")

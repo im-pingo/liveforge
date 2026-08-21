@@ -46,7 +46,7 @@ func (m *Module) Authorize(_ context.Context, request core.AuthorizationRequest)
 	if m.server == nil {
 		return fmt.Errorf("auth module is not initialized")
 	}
-	cfg := m.server.Config().Auth
+	cfg := m.server.RuntimeConfig().Auth()
 	if !cfg.Enabled {
 		return nil
 	}

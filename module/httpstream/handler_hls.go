@@ -17,7 +17,7 @@ func (m *Module) serveHLSPlaylist(w http.ResponseWriter, r *http.Request, stream
 	}
 
 	// LL-HLS takes precedence when enabled
-	if m.server.Config().HTTP.LLHLS.Enabled {
+	if m.server.RuntimeConfig().HTTP().LLHLS.Enabled {
 		m.serveLLHLSPlaylist(w, r, streamKey, stream)
 		return
 	}
@@ -122,7 +122,7 @@ func (m *Module) serveLLHLSPartialSegment(w http.ResponseWriter, _ *http.Request
 	}
 
 	contentType := "video/mp4"
-	if m.server.Config().HTTP.LLHLS.Container == "ts" {
+	if m.server.RuntimeConfig().HTTP().LLHLS.Container == "ts" {
 		contentType = "video/mp2t"
 	}
 
@@ -150,7 +150,7 @@ func (m *Module) serveLLHLSFullSegment(w http.ResponseWriter, _ *http.Request, s
 	}
 
 	contentType := "video/mp4"
-	if m.server.Config().HTTP.LLHLS.Container == "ts" {
+	if m.server.RuntimeConfig().HTTP().LLHLS.Container == "ts" {
 		contentType = "video/mp2t"
 	}
 

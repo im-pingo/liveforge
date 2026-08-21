@@ -11,7 +11,12 @@ import (
 // This allows any HTTP server (httpstream, standalone API, etc.) to serve the management API.
 func RegisterRoutes(mux *http.ServeMux, s *core.Server) {
 	sessions := mustNewSessionManager()
-	mux.Handle("/", securedRoutes(s, sessions))
+	routes := http.NewServeMux()
+	patterns := registerRoutes(routes, s, sessions)
+	secured := buildDynamicAuthHandler(routes, s, sessions)
+	for _, pattern := range patterns {
+		mux.Handle(pattern, secured)
+	}
 }
 
 func securedRoutes(s *core.Server, sessions *sessionManager) http.Handler {
@@ -20,33 +25,53 @@ func securedRoutes(s *core.Server, sessions *sessionManager) http.Handler {
 	return buildDynamicAuthHandler(routes, s, sessions)
 }
 
-func registerRoutes(mux *http.ServeMux, s *core.Server, sessions *sessionManager) {
+type routeRegistrar struct {
+	mux      *http.ServeMux
+	patterns []string
+}
+
+func (r *routeRegistrar) HandleFunc(pattern string, handler http.HandlerFunc) {
+	r.patterns = append(r.patterns, pattern)
+	r.mux.HandleFunc(pattern, handler)
+}
+
+func (r *routeRegistrar) Handle(pattern string, handler http.Handler) {
+	r.patterns = append(r.patterns, pattern)
+	r.mux.Handle(pattern, handler)
+}
+
+func registerRoutes(mux *http.ServeMux, s *core.Server, sessions *sessionManager) []string {
+	routes := &routeRegistrar{mux: mux}
 	h := newHandlersWithSessions(s, sessions)
-	mux.HandleFunc("GET /api/v1/streams", h.handleStreams)
-	mux.HandleFunc("GET /api/v1/server/info", h.handleServerInfo)
-	mux.HandleFunc("GET /api/v1/server/stats", h.handleServerStats)
-	mux.HandleFunc("GET /api/v1/server/health", h.handleHealth)
-	mux.HandleFunc("GET /api/v1/dvr/status", h.handleDVRStatus)
-	mux.HandleFunc("GET /api/v1/config", h.handleConfigGet)
-	mux.HandleFunc("PATCH /api/v1/config", h.handleConfigPatch)
-	mux.HandleFunc("POST /api/v1/config/password", h.handlePasswordChange)
-	mux.HandleFunc("DELETE /api/v1/streams/", h.handleStreamDelete)
-	mux.HandleFunc("POST /api/v1/streams/", h.handleKick)
-	mux.HandleFunc("GET /api/v1/streams/", h.handleStreamDetail)
-	mux.HandleFunc("GET /console", h.handleConsole)
-	mux.HandleFunc("GET /console/cert.pem", h.handleCertDownload)
-	mux.HandleFunc("GET /debug/webrtc", h.handleDebugWebRTC)
-	mux.Handle("GET /console/static/", staticHandler())
+	routes.HandleFunc("GET /api/v1/streams", h.handleStreams)
+	routes.HandleFunc("GET /api/v1/server/info", h.handleServerInfo)
+	routes.HandleFunc("GET /api/v1/server/stats", h.handleServerStats)
+	routes.HandleFunc("GET /api/v1/server/health", h.handleHealth)
+	routes.HandleFunc("GET /api/v1/dvr/status", h.handleDVRStatus)
+	routes.HandleFunc("GET /api/v1/config", h.handleConfigGet)
+	routes.HandleFunc("PATCH /api/v1/config", h.handleConfigPatch)
+	routes.HandleFunc("POST /api/v1/config/password", h.handlePasswordChange)
+	routes.HandleFunc("DELETE /api/v1/streams/", h.handleStreamDelete)
+	routes.HandleFunc("POST /api/v1/streams/", h.handleKick)
+	routes.HandleFunc("GET /api/v1/streams/", h.handleStreamDetail)
+	routes.HandleFunc("GET /console", h.handleConsole)
+	routes.HandleFunc("GET /console/cert.pem", h.handleCertDownload)
+	routes.HandleFunc("GET /debug/webrtc", h.handleDebugWebRTC)
+	routes.Handle("GET /console/static/", staticHandler())
 
 	// pprof endpoints (protected by API auth middleware)
-	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
-	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	routes.HandleFunc("GET /debug/pprof/", pprof.Index)
+	routes.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	routes.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	routes.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	routes.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 
 	// Register cross-module API handlers (e.g., WebSocket notifications).
 	for pattern, handler := range s.APIHandlers() {
-		mux.Handle(pattern, handler)
+		routes.Handle(pattern, handler)
 	}
+
+	// Login is served directly by the auth middleware rather than the raw mux.
+	routes.patterns = append(routes.patterns, "/console/login")
+	return routes.patterns
 }

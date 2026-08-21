@@ -80,7 +80,7 @@ func (h *Handlers) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", strconv.Quote(snapshot.Revision))
-	console := h.server.Config().API.Console
+	console := h.server.RuntimeConfig().API().Console
 	writeJSON(w, http.StatusOK, buildConfigView(snapshot, h.sessions.csrfToken(r, console)))
 }
 

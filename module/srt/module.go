@@ -160,9 +160,9 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 		return gosrt.REJECT
 	}
 
-	cfg := m.server.Config()
-	if req.IsEncrypted() && cfg.SRT.Passphrase != "" {
-		if err := req.SetPassphrase(cfg.SRT.Passphrase); err != nil {
+	cfg := m.server.RuntimeConfig().SRT()
+	if req.IsEncrypted() && cfg.Passphrase != "" {
+		if err := req.SetPassphrase(cfg.Passphrase); err != nil {
 			slog.Warn("passphrase mismatch", "module", "srt", "remote", req.RemoteAddr(), "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
@@ -246,7 +246,7 @@ func (m *Module) handleSubscribe(conn gosrt.Conn) {
 		return
 	}
 
-	sub := NewSubscriber(conn, streamKey, m.hub, m.eventBus, m.server.Config().SRT.SkipTracker)
+	sub := NewSubscriber(conn, streamKey, m.hub, m.eventBus, m.server.RuntimeConfig().SRT().SkipTracker)
 
 	slog.Info("subscribe start", "module", "srt", "stream", streamKey, "remote", conn.RemoteAddr())
 	sub.Run()

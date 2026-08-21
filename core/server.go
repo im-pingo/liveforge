@@ -65,9 +65,12 @@ func NewServer(cfg *config.Config) *Server {
 	return s
 }
 
-// Config returns the immutable server-owned configuration snapshot. Callers
-// that need to modify configuration must clone it and call ApplyConfig.
+// Config returns a caller-owned deep copy of the current configuration.
 func (s *Server) Config() *config.Config {
+	return config.CloneConfig(s.currentConfig())
+}
+
+func (s *Server) currentConfig() *config.Config {
 	return s.configPtr.Load()
 }
 
@@ -89,7 +92,7 @@ func (s *Server) ConfigUpdater() ConfigUpdater {
 // module before publishing it. Once published, applying the prepared change
 // must not fail.
 func (s *Server) ApplyConfig(cfg *config.Config) error {
-	current := s.Config()
+	current := s.currentConfig()
 	next := config.CloneConfig(cfg)
 	for _, m := range s.modules {
 		if configurable, ok := m.(Configurable); ok {
@@ -197,7 +200,7 @@ func (s *Server) APIHandlers() map[string]http.Handler {
 
 // AcquireConn increments the connection counter. Returns false if max_connections is exceeded.
 func (s *Server) AcquireConn() bool {
-	max := s.Config().Limits.MaxConnections
+	max := s.currentConfig().Limits.MaxConnections
 	for {
 		current := s.connCount.Load()
 		if max > 0 && current >= int64(max) {
@@ -226,16 +229,17 @@ func (s *Server) ConnectionCount() int64 {
 //   - true → force TLS on (error if global cert/key not configured)
 //   - false → force TLS off (plain TCP even if global cert/key are configured)
 func (s *Server) MakeListener(addr string, moduleTLS *bool) (net.Listener, error) {
-	useTLS := s.Config().TLS.Configured() // default: follow global
+	cfg := s.currentConfig()
+	useTLS := cfg.TLS.Configured() // default: follow global
 	if moduleTLS != nil {
 		useTLS = *moduleTLS
 	}
 
 	if useTLS {
-		if !s.Config().TLS.Configured() {
+		if !cfg.TLS.Configured() {
 			return nil, fmt.Errorf("TLS enabled but tls.cert_file and tls.key_file are not configured")
 		}
-		cert, err := tls.LoadX509KeyPair(s.Config().TLS.CertFile, s.Config().TLS.KeyFile)
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
@@ -264,8 +268,9 @@ func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener
 	}
 
 	// If file-based TLS is configured, use it.
-	if s.Config().TLS.Configured() {
-		cert, err := tls.LoadX509KeyPair(s.Config().TLS.CertFile, s.Config().TLS.KeyFile)
+	cfg := s.currentConfig()
+	if cfg.TLS.Configured() {
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
 		}
@@ -277,7 +282,7 @@ func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener
 	}
 
 	// Auto-generate self-signed cert only when tls.auto is enabled.
-	if s.Config().TLS.Auto {
+	if cfg.TLS.Auto {
 		autoCert := s.getOrCreateAutoCert()
 		if autoCert == nil {
 			return nil, fmt.Errorf("failed to generate self-signed TLS certificate")
@@ -295,10 +300,11 @@ func (s *Server) MakeListenerAutoTLS(addr string, moduleTLS *bool) (net.Listener
 
 // HasTLS returns true if TLS is available (either file-based or auto-generated).
 func (s *Server) HasTLS() bool {
-	if s.Config().TLS.Configured() {
+	cfg := s.currentConfig()
+	if cfg.TLS.Configured() {
 		return true
 	}
-	return s.Config().TLS.Auto && s.getOrCreateAutoCert() != nil
+	return cfg.TLS.Auto && s.getOrCreateAutoCert() != nil
 }
 
 // AutoCertPEM returns the auto-generated certificate in PEM format, or nil
@@ -378,7 +384,7 @@ func generateSelfSignedCert() (*tls.Certificate, error) {
 
 // aliveLoop periodically emits alive events for all active streams.
 func (s *Server) aliveLoop() {
-	interval := s.Config().Notify.AliveInterval
+	interval := s.currentConfig().Notify.AliveInterval
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}

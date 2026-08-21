@@ -150,7 +150,7 @@ func (m *Module) getOrCreateHLS(streamKey string, stream *core.Stream) *HLSManag
 		return mgr
 	}
 
-	cfg := m.server.Config().HTTP.HLS
+	cfg := m.server.RuntimeConfig().HTTP().HLS
 	targetDur := cfg.SegmentDuration
 	playlistSize := cfg.PlaylistSize
 
@@ -171,7 +171,7 @@ func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHMan
 		return mgr
 	}
 
-	cfg := m.server.Config().HTTP.DASH
+	cfg := m.server.RuntimeConfig().HTTP().DASH
 	targetDur := cfg.SegmentDuration
 	playlistSize := cfg.PlaylistSize
 
@@ -192,7 +192,7 @@ func (m *Module) getOrCreateLLHLS(streamKey string, stream *core.Stream) *LLHLSM
 		return mgr
 	}
 
-	cfg := m.server.Config().HTTP.LLHLS
+	cfg := m.server.RuntimeConfig().HTTP().LLHLS
 	basePath := "/" + streamKey
 	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentCount, cfg.Container)
 	m.llhlsManagers[streamKey] = mgr

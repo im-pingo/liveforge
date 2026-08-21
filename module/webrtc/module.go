@@ -240,12 +240,12 @@ func (m *Module) findSession(id string) (*Session, bool) {
 // iceServersFromConfig converts config ICE servers to pion ICE server structs.
 // Returns nil when ICE Lite is enabled (lite agents use host candidates only).
 func (m *Module) iceServersFromConfig() []webrtc.ICEServer {
-	cfg := m.server.Config()
-	if cfg.WebRTC.ICELite {
+	cfg := m.server.RuntimeConfig().WebRTCICE()
+	if cfg.ICELite {
 		return nil
 	}
 	var servers []webrtc.ICEServer
-	for _, s := range cfg.WebRTC.ICEServers {
+	for _, s := range cfg.ICEServers {
 		servers = append(servers, webrtc.ICEServer{
 			URLs:       s.URLs,
 			Username:   s.Username,

@@ -341,7 +341,7 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 
 	// Start reading right after the snapshot position to avoid duplicating GOP frames.
 	ringReader := session.Stream.RingBuffer().NewReaderAt(startPos)
-	filter := core.NewSlowConsumerFilter(ringReader, session.Stream.Config().SlowConsumer, m.server.Config().RTSP.SkipTracker)
+	filter := core.NewSlowConsumerFilter(ringReader, session.Stream.Config().SlowConsumer, m.server.RuntimeConfig().RTSP().SkipTracker)
 	for {
 		frame, ok := filter.NextFrame()
 		if !ok {

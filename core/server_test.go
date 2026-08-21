@@ -495,3 +495,113 @@ func TestServerOwnsStoredConfigCopies(t *testing.T) {
 		t.Fatalf("ApplyConfig retained caller memory: name=%q ports=%v", got.Server.Name, got.WebRTC.UDPPortRange)
 	}
 }
+
+func TestServerConfigReturnsCallerOwnedDeepCopy(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	cfg.Auth.Enabled = true
+	cfg.WebRTC.UDPPortRange = []int{10000, 10001}
+	server := NewServer(cfg)
+
+	returned := server.Config()
+	returned.Auth.Enabled = false
+	returned.WebRTC.UDPPortRange[0] = 20000
+
+	current := server.Config()
+	if !current.Auth.Enabled || current.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("Config return mutation reached server snapshot: auth=%v ports=%v",
+			current.Auth.Enabled, current.WebRTC.UDPPortRange)
+	}
+}
+
+func TestServerRuntimeConfigViewTracksAtomicSnapshots(t *testing.T) {
+	initial := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	initial.Auth.Enabled = true
+	server := NewServer(initial)
+
+	before := server.RuntimeConfig()
+	if !before.Auth().Enabled {
+		t.Fatal("initial runtime auth is disabled")
+	}
+
+	next := config.CloneConfig(initial)
+	next.Auth.Enabled = false
+	if err := server.ApplyConfig(next); err != nil {
+		t.Fatal(err)
+	}
+	if !before.Auth().Enabled {
+		t.Fatal("previous runtime view changed after publication")
+	}
+	if server.RuntimeConfig().Auth().Enabled {
+		t.Fatal("current runtime view did not observe publication")
+	}
+}
+
+func TestServerRuntimeConfigViewCopiesReferencedValues(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	cfg.RTSP.SkipTracker = &config.SkipTrackerConfig{MaxCount: 3}
+	cfg.SRT.SkipTracker = &config.SkipTrackerConfig{MaxCount: 4}
+	cfg.WebRTC.ICEServers = []config.ICEServer{{URLs: []string{"stun:original"}}}
+	server := NewServer(cfg)
+
+	rtsp := server.RuntimeConfig().RTSP()
+	srt := server.RuntimeConfig().SRT()
+	ice := server.RuntimeConfig().WebRTCICE()
+	rtsp.SkipTracker.MaxCount = 30
+	srt.SkipTracker.MaxCount = 40
+	ice.ICEServers[0].URLs[0] = "stun:mutated"
+
+	currentRTSP := server.RuntimeConfig().RTSP()
+	currentSRT := server.RuntimeConfig().SRT()
+	currentICE := server.RuntimeConfig().WebRTCICE()
+	if currentRTSP.SkipTracker.MaxCount != 3 || currentSRT.SkipTracker.MaxCount != 4 ||
+		currentICE.ICEServers[0].URLs[0] != "stun:original" {
+		t.Fatalf("runtime view exposed aliases: rtsp=%+v srt=%+v ice=%+v", currentRTSP, currentSRT, currentICE)
+	}
+}
+
+func TestServerRuntimeScalarViewsAllocateNoMemory(t *testing.T) {
+	server := NewServer(&config.Config{Stream: config.StreamConfig{RingBufferSize: 16}})
+	allocations := testing.AllocsPerRun(100, func() {
+		view := server.RuntimeConfig()
+		_ = view.Auth()
+		_ = view.API()
+		_ = view.HTTP()
+		_ = view.Endpoints()
+	})
+	if allocations != 0 {
+		t.Fatalf("runtime scalar views allocated %.2f objects per read", allocations)
+	}
+}
+
+func TestServerConfigCopiesDoNotRaceRuntimeSnapshots(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	cfg.Auth.Enabled = true
+	cfg.WebRTC.UDPPortRange = []int{10000, 10001}
+	server := NewServer(cfg)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(port int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				returned := server.Config()
+				returned.Auth.Enabled = false
+				returned.WebRTC.UDPPortRange[0] = port
+			}
+		}(20000 + i)
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				if !server.RuntimeConfig().Auth().Enabled {
+					t.Error("runtime auth changed through a caller copy")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}

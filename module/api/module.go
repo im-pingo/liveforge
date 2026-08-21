@@ -105,7 +105,10 @@ func buildAuthHandler(mux *http.ServeMux, cfg config.APIConfig) http.Handler {
 }
 
 func buildDynamicAuthHandler(mux *http.ServeMux, server *core.Server, sessions *sessionManager) http.Handler {
-	return buildAuthHandlerWithConfig(mux, func() config.APIConfig { return server.Config().API }, sessions)
+	return buildAuthHandlerWithConfig(mux, func() config.APIConfig {
+		cfg := server.RuntimeConfig().API()
+		return config.APIConfig{PprofEnabled: cfg.PprofEnabled, Auth: cfg.Auth, Console: cfg.Console}
+	}, sessions)
 }
 
 func buildAuthHandlerWithConfig(mux *http.ServeMux, current func() config.APIConfig, sessions *sessionManager) http.Handler {

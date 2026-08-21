@@ -229,7 +229,7 @@ type ServerInfo struct {
 }
 
 func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
-	cfg := h.server.Config()
+	cfg := h.server.RuntimeConfig().Endpoints()
 	endpoints := make(map[string]string)
 	if cfg.HTTP.Enabled {
 		endpoints["http"] = cfg.HTTP.Listen
