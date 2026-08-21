@@ -131,6 +131,9 @@ func TestStartTestServer_WithAuth(t *testing.T) {
 	srv := StartTestServer(t, WithRTMP(), WithAuth(secret))
 
 	cfg := srv.Config()
+	if !cfg.Auth.Enabled {
+		t.Error("auth should be enabled in config")
+	}
 	if cfg.Auth.Publish.Mode != "token" {
 		t.Errorf("expected publish mode 'token', got %q", cfg.Auth.Publish.Mode)
 	}

@@ -566,6 +566,150 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .nav-tab:hover { color: var(--text); }
 .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* Settings workspace */
+.settings-status-strip {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(220px, 2fr) minmax(180px, 1fr);
+  gap: 20px;
+  padding: 14px 0;
+  margin-bottom: 28px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.settings-status-item { min-width: 0; }
+.settings-kicker {
+  display: block;
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+.settings-status-value {
+  display: block;
+  color: var(--text);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-status-value.warn { color: var(--yellow); }
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 28px 36px;
+}
+.settings-panel {
+  min-width: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.settings-panel.full { grid-column: 1 / -1; }
+.settings-panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 16px; }
+.settings-field { margin-bottom: 14px; }
+.settings-field > label,
+.settings-field-label {
+  display: block;
+  color: var(--text2);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.settings-field input[type=text],
+.settings-field input[type=password],
+.settings-field select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.settings-field input:focus,
+.settings-field select:focus { border-color: var(--accent); }
+.settings-field input[readonly] { color: var(--text2); cursor: default; }
+.settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.settings-toggle-row {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.settings-toggle-copy { font-size: 13px; color: var(--text); }
+.toggle { position: relative; width: 36px; height: 20px; flex: 0 0 auto; }
+.toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: #383838;
+  transition: background 0.15s;
+}
+.toggle-track::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: #c8c8c8;
+  transition: transform 0.15s, background 0.15s;
+}
+.toggle input:checked + .toggle-track { background: rgba(108,158,255,0.65); }
+.toggle input:checked + .toggle-track::after { transform: translateX(16px); background: #fff; }
+.toggle input:focus-visible + .toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.secret-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.secret-clear { display: inline-flex; align-items: center; gap: 6px; color: var(--text2); font-size: 12px; white-space: nowrap; }
+.secret-clear input { accent-color: var(--red); }
+.configured-state { color: var(--green); font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; }
+.configured-state.empty { color: var(--text2); }
+.auth-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px 18px;
+  padding: 16px 0 4px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.auth-rule:first-of-type { border-top: 0; padding-top: 0; }
+.auth-rule-title { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; }
+.auth-rule-title h3 { font-size: 13px; font-weight: 600; }
+.settings-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+.settings-save {
+  min-height: 36px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-save:hover { opacity: 0.9; }
+.settings-save:disabled { opacity: 0.45; cursor: default; }
+.settings-status { min-height: 18px; color: var(--text2); font-size: 12px; }
+.settings-status.ok { color: var(--green); }
+.settings-status.error { color: var(--red); }
+.pending-list { color: var(--yellow); white-space: normal; overflow: visible; text-overflow: clip; }
+
+@media (max-width: 760px) {
+  .container { padding: 20px 16px; }
+  header { align-items: flex-start; gap: 16px; }
+  .status-bar { flex-wrap: wrap; justify-content: flex-end; }
+  .nav-tabs { overflow-x: auto; }
+  .nav-tab { padding: 10px 14px; white-space: nowrap; }
+  .settings-status-strip, .settings-layout, .settings-row, .auth-rule { grid-template-columns: 1fr; }
+  .settings-panel.full, .auth-rule-title { grid-column: 1; }
+}
+
 /* GB28181 device badges */
 .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.3px; }
 .badge-online { background: rgba(74,222,128,0.15); color: var(--green); }
@@ -643,9 +787,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     To avoid browser warnings: <a href="/console/cert.pem" style="color:#6c9eff;text-decoration:underline;">Download cert.pem</a> and add it to your OS trust store, or launch Chrome with <code style="background:#221a00;padding:2px 6px;border-radius:3px;">--ignore-certificate-errors</code>
   </div>
 
-  <div class="nav-tabs" id="nav-tabs" style="display:none">
-    <button class="nav-tab active" onclick="switchTab('streams')">Streams</button>
-    <button class="nav-tab" onclick="switchTab('gb28181')">GB28181 Devices</button>
+  <div class="nav-tabs" id="nav-tabs">
+    <button class="nav-tab active" id="tab-streams" data-view="streams" onclick="switchTab('streams')">Streams</button>
+    <button class="nav-tab" id="tab-gb28181" data-view="gb28181" onclick="switchTab('gb28181')" style="display:none">GB28181 Devices</button>
+    <button class="nav-tab" id="tab-settings" data-view="settings" onclick="switchTab('settings')">Settings</button>
   </div>
 
   <div id="view-streams">
@@ -771,6 +916,219 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
     </div>
   </div><!-- /view-gb28181 -->
+
+  <div id="view-settings" style="display:none">
+    <div class="settings-status-strip">
+      <div class="settings-status-item">
+        <span class="settings-kicker">Revision</span>
+        <span class="settings-status-value" id="settings-revision">-</span>
+      </div>
+      <div class="settings-status-item">
+        <span class="settings-kicker">Source</span>
+        <span class="settings-status-value" id="settings-source">-</span>
+      </div>
+      <div class="settings-status-item">
+        <span class="settings-kicker">Restart status</span>
+        <span class="settings-status-value" id="settings-restart">Loading</span>
+      </div>
+    </div>
+
+    <form id="settings-form">
+      <div class="settings-layout">
+        <section class="settings-panel">
+          <h2>Runtime</h2>
+          <div class="settings-field">
+            <label for="settings-server-name">Server name</label>
+            <input type="text" id="settings-server-name" autocomplete="off">
+          </div>
+          <div class="settings-row">
+            <div class="settings-field">
+              <label for="settings-log-level">Log level</label>
+              <select id="settings-log-level">
+                <option value="debug">Debug</option>
+                <option value="info">Info</option>
+                <option value="warn">Warn</option>
+                <option value="error">Error</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-api-listen">API endpoint</label>
+              <input type="text" id="settings-api-listen" readonly>
+            </div>
+          </div>
+          <div class="settings-toggle-row">
+            <span class="settings-toggle-copy">Runtime profiling</span>
+            <label class="toggle">
+              <input type="checkbox" id="settings-pprof-enabled">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-panel">
+          <h2>Console access</h2>
+          <div class="settings-toggle-row">
+            <span class="settings-toggle-copy">API bearer authentication</span>
+            <label class="toggle">
+              <input type="checkbox" id="settings-api-auth-enabled">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="settings-field">
+            <label for="settings-bearer-token">Bearer token <span class="configured-state" id="settings-bearer-state"></span></label>
+            <div class="secret-line">
+              <input type="password" id="settings-bearer-token" autocomplete="new-password" placeholder="Replacement token">
+              <label class="secret-clear"><input type="checkbox" id="settings-bearer-clear"> Clear</label>
+            </div>
+          </div>
+          <div class="settings-field">
+            <label for="settings-console-username">Console username</label>
+            <input type="text" id="settings-console-username" autocomplete="username">
+          </div>
+          <div class="settings-toggle-row">
+            <span class="settings-toggle-copy">Allow remote admin/admin</span>
+            <label class="toggle">
+              <input type="checkbox" id="settings-allow-default">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-panel full">
+          <div class="settings-toggle-row">
+            <h2 style="margin:0">Media authorization</h2>
+            <label class="toggle">
+              <input type="checkbox" id="settings-media-auth-enabled">
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+
+          <div class="auth-rule">
+            <div class="auth-rule-title">
+              <h3>Publish</h3>
+            </div>
+            <div class="settings-field">
+              <label for="settings-publish-mode">Mode</label>
+              <select id="settings-publish-mode">
+                <option value="none">None</option>
+                <option value="token">Token</option>
+                <option value="callback">Callback</option>
+                <option value="token+callback">Token + callback</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-publish-stage">Stage</label>
+              <select id="settings-publish-stage">
+                <option value="pre_session">Pre-session</option>
+                <option value="post_connect">Post-connect</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-publish-algorithm">Token algorithm</label>
+              <select id="settings-publish-algorithm"><option value="HS256">HS256</option></select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-publish-token">Token secret <span class="configured-state" id="settings-publish-token-state"></span></label>
+              <div class="secret-line">
+                <input type="password" id="settings-publish-token" autocomplete="new-password" placeholder="Replacement secret">
+                <label class="secret-clear"><input type="checkbox" id="settings-publish-token-clear"> Clear</label>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="settings-publish-timeout">Callback timeout</label>
+              <input type="text" id="settings-publish-timeout" placeholder="3s">
+            </div>
+            <div class="settings-field">
+              <label for="settings-publish-callback">Callback URL <span class="configured-state" id="settings-publish-callback-state"></span></label>
+              <div class="secret-line">
+                <input type="password" id="settings-publish-callback" autocomplete="off" placeholder="Replacement URL">
+                <label class="secret-clear"><input type="checkbox" id="settings-publish-callback-clear"> Clear</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="auth-rule">
+            <div class="auth-rule-title">
+              <h3>Subscribe</h3>
+            </div>
+            <div class="settings-field">
+              <label for="settings-subscribe-mode">Mode</label>
+              <select id="settings-subscribe-mode">
+                <option value="none">None</option>
+                <option value="token">Token</option>
+                <option value="callback">Callback</option>
+                <option value="token+callback">Token + callback</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-subscribe-stage">Stage</label>
+              <select id="settings-subscribe-stage">
+                <option value="pre_session">Pre-session</option>
+                <option value="post_connect">Post-connect</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-subscribe-algorithm">Token algorithm</label>
+              <select id="settings-subscribe-algorithm"><option value="HS256">HS256</option></select>
+            </div>
+            <div class="settings-field">
+              <label for="settings-subscribe-token">Token secret <span class="configured-state" id="settings-subscribe-token-state"></span></label>
+              <div class="secret-line">
+                <input type="password" id="settings-subscribe-token" autocomplete="new-password" placeholder="Replacement secret">
+                <label class="secret-clear"><input type="checkbox" id="settings-subscribe-token-clear"> Clear</label>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="settings-subscribe-timeout">Callback timeout</label>
+              <input type="text" id="settings-subscribe-timeout" placeholder="3s">
+            </div>
+            <div class="settings-field">
+              <label for="settings-subscribe-callback">Callback URL <span class="configured-state" id="settings-subscribe-callback-state"></span></label>
+              <div class="secret-line">
+                <input type="password" id="settings-subscribe-callback" autocomplete="off" placeholder="Replacement URL">
+                <label class="secret-clear"><input type="checkbox" id="settings-subscribe-callback-clear"> Clear</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-row">
+            <div class="settings-field">
+              <label for="settings-current-password">Current password</label>
+              <input type="password" id="settings-current-password" autocomplete="current-password">
+            </div>
+          </div>
+          <div class="settings-actions">
+            <button type="submit" class="settings-save" id="settings-save">Save settings</button>
+            <span class="settings-status" id="settings-status"></span>
+          </div>
+        </section>
+      </div>
+    </form>
+
+    <form id="password-form" class="settings-panel" style="margin-top:32px">
+      <h2>Console password</h2>
+      <div class="settings-row">
+        <div class="settings-field">
+          <label for="password-current">Current password</label>
+          <input type="password" id="password-current" autocomplete="current-password" required>
+        </div>
+        <div class="settings-field">
+          <label for="password-new">New password</label>
+          <input type="password" id="password-new" autocomplete="new-password" minlength="8" required>
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-field">
+          <label for="password-confirm">Confirm new password</label>
+          <input type="password" id="password-confirm" autocomplete="new-password" minlength="8" required>
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button type="submit" class="settings-save" id="password-save">Change password</button>
+        <span class="settings-status" id="password-status"></span>
+      </div>
+    </form>
+  </div><!-- /view-settings -->
 </div>
 
 <!-- Confirm modal -->
@@ -2124,6 +2482,286 @@ function updatePublishButton() {
   if (btn) btn.style.display = endpoints.webrtc ? "inline-block" : "none";
 }
 
+/* === Settings Console === */
+var settingsETag = '';
+var settingsCSRF = '';
+var settingsData = null;
+
+function setSettingsStatus(id, message, kind) {
+  var el = document.getElementById(id);
+  el.textContent = message || '';
+  el.className = 'settings-status' + (kind ? ' ' + kind : '');
+}
+
+function setConfiguredState(id, configured) {
+  var el = document.getElementById(id);
+  el.textContent = configured ? 'Configured' : 'Not configured';
+  el.className = 'configured-state' + (configured ? '' : ' empty');
+}
+
+function setRuleFields(prefix, rule) {
+  rule = rule || {};
+  var token = rule.token || {};
+  var callback = rule.callback || {};
+  document.getElementById('settings-' + prefix + '-mode').value = rule.mode || 'none';
+  document.getElementById('settings-' + prefix + '-stage').value = rule.stage || 'post_connect';
+  document.getElementById('settings-' + prefix + '-algorithm').value = token.algorithm || 'HS256';
+  document.getElementById('settings-' + prefix + '-timeout').value = callback.timeout || '3s';
+  document.getElementById('settings-' + prefix + '-token').value = '';
+  document.getElementById('settings-' + prefix + '-callback').value = '';
+  document.getElementById('settings-' + prefix + '-token-clear').checked = false;
+  document.getElementById('settings-' + prefix + '-callback-clear').checked = false;
+  setConfiguredState('settings-' + prefix + '-token-state', !!token.secret_configured);
+  setConfiguredState('settings-' + prefix + '-callback-state', !!callback.url_configured);
+}
+
+function configValueAt(root, path) {
+  var current = root;
+  var parts = path.split('.');
+  for (var i = 0; i < parts.length; i++) {
+    if (current == null || typeof current !== 'object' || !(parts[i] in current)) return undefined;
+    current = current[parts[i]];
+  }
+  return current;
+}
+
+function displayConfigValue(value) {
+  if (value === undefined) return '?';
+  if (value === '') return '(empty)';
+  return String(value);
+}
+
+function applySettingsData(data, etag) {
+  settingsData = data;
+  if (etag) settingsETag = etag;
+  if (data.csrf_token) settingsCSRF = data.csrf_token;
+  var desired = data.desired || {};
+  var effective = data.effective || desired;
+  document.getElementById('settings-revision').textContent = data.revision || '-';
+  document.getElementById('settings-source').textContent = (data.source && data.source.name) || '-';
+  var pending = data.pending_restart || [];
+  var restart = document.getElementById('settings-restart');
+  restart.textContent = pending.length ? pending.map(function(path) {
+    var desiredValue = configValueAt(desired, path);
+    var effectiveValue = configValueAt(effective, path);
+    if (desiredValue === undefined && effectiveValue === undefined) return path;
+    return path + ': effective=' + displayConfigValue(effectiveValue) + ', desired=' + displayConfigValue(desiredValue);
+  }).join('; ') : 'No restart required';
+  restart.className = 'settings-status-value' + (pending.length ? ' warn pending-list' : '');
+
+  document.getElementById('settings-server-name').value = (effective.server && effective.server.name) || '';
+  document.getElementById('settings-log-level').value = (effective.server && effective.server.log_level) || 'info';
+  document.getElementById('settings-api-listen').value = (effective.api && effective.api.listen) || '';
+  document.getElementById('settings-pprof-enabled').checked = !!(effective.api && effective.api.pprof_enabled);
+  document.getElementById('settings-api-auth-enabled').checked = !!(effective.api && effective.api.auth && effective.api.auth.enabled);
+  document.getElementById('settings-console-username').value = (effective.api && effective.api.console && effective.api.console.username) || '';
+  document.getElementById('settings-allow-default').checked = !!(effective.api && effective.api.console && effective.api.console.allow_insecure_default_credentials);
+  document.getElementById('settings-bearer-token').value = '';
+  document.getElementById('settings-bearer-clear').checked = false;
+  setConfiguredState('settings-bearer-state', !!(effective.api && effective.api.auth && effective.api.auth.bearer_token_configured));
+
+  document.getElementById('settings-media-auth-enabled').checked = !!(effective.auth && effective.auth.enabled);
+  setRuleFields('publish', effective.auth && effective.auth.publish);
+  setRuleFields('subscribe', effective.auth && effective.auth.subscribe);
+}
+
+function refreshSettings() {
+  setSettingsStatus('settings-status', 'Loading');
+  return fetch('/api/v1/config', { credentials: 'same-origin' })
+    .then(function(response) {
+      if (response.status === 401) {
+        location.assign('/console/login');
+        return null;
+      }
+      return response.json().then(function(body) {
+        if (!response.ok || !body.data) throw new Error(body.message || 'Unable to load settings');
+        applySettingsData(body.data, response.headers.get('ETag'));
+        setSettingsStatus('settings-status', '');
+        return body.data;
+      });
+    })
+    .catch(function(error) {
+      setSettingsStatus('settings-status', error.message || 'Unable to load settings', 'error');
+    });
+}
+
+function buildRulePatch(prefix, currentRule) {
+  currentRule = currentRule || {};
+  var currentToken = currentRule.token || {};
+  var currentCallback = currentRule.callback || {};
+  var rule = {};
+  var token = {};
+  var callback = {};
+  var credentialsChanged = false;
+  var mode = document.getElementById('settings-' + prefix + '-mode').value;
+  var stage = document.getElementById('settings-' + prefix + '-stage').value;
+  var algorithm = document.getElementById('settings-' + prefix + '-algorithm').value;
+  if (mode !== (currentRule.mode || 'none')) rule.mode = mode;
+  if (stage !== (currentRule.stage || 'post_connect')) rule.stage = stage;
+  if (algorithm !== (currentToken.algorithm || 'HS256')) token.algorithm = algorithm;
+  var timeout = document.getElementById('settings-' + prefix + '-timeout').value.trim();
+  if (timeout && timeout !== (currentCallback.timeout || '3s')) callback.timeout = timeout;
+  var tokenValue = document.getElementById('settings-' + prefix + '-token').value;
+  if (document.getElementById('settings-' + prefix + '-token-clear').checked && currentToken.secret_configured) {
+    token.secret = '';
+    credentialsChanged = true;
+  } else if (tokenValue !== '') {
+    token.secret = tokenValue;
+    credentialsChanged = true;
+  }
+  var callbackValue = document.getElementById('settings-' + prefix + '-callback').value;
+  if (document.getElementById('settings-' + prefix + '-callback-clear').checked && currentCallback.url_configured) {
+    callback.url = '';
+    credentialsChanged = true;
+  } else if (callbackValue !== '') {
+    callback.url = callbackValue;
+    credentialsChanged = true;
+  }
+  if (Object.keys(token).length) rule.token = token;
+  if (Object.keys(callback).length) rule.callback = callback;
+  return { patch: rule, credentialsChanged: credentialsChanged };
+}
+
+document.getElementById('settings-form').addEventListener('submit', function(event) {
+  event.preventDefault();
+  if (!settingsETag || !settingsCSRF) {
+    setSettingsStatus('settings-status', 'Settings revision is unavailable', 'error');
+    return;
+  }
+  var current = (settingsData && settingsData.effective) || {};
+  var currentServer = current.server || {};
+  var currentAuth = current.auth || {};
+  var currentAPI = current.api || {};
+  var currentAPIAuth = currentAPI.auth || {};
+  var currentConsole = currentAPI.console || {};
+  var currentPassword = document.getElementById('settings-current-password').value;
+  var payload = {};
+  var credentialsChanged = false;
+  var serverPatch = {};
+  var serverName = document.getElementById('settings-server-name').value;
+  var logLevel = document.getElementById('settings-log-level').value;
+  if (serverName !== (currentServer.name || '')) serverPatch.name = serverName;
+  if (logLevel !== (currentServer.log_level || 'info')) serverPatch.log_level = logLevel;
+  if (Object.keys(serverPatch).length) payload.server = serverPatch;
+
+  var authPatch = {};
+  var authEnabled = document.getElementById('settings-media-auth-enabled').checked;
+  if (authEnabled !== !!currentAuth.enabled) authPatch.enabled = authEnabled;
+  var publish = buildRulePatch('publish', currentAuth.publish);
+  var subscribe = buildRulePatch('subscribe', currentAuth.subscribe);
+  if (Object.keys(publish.patch).length) authPatch.publish = publish.patch;
+  if (Object.keys(subscribe.patch).length) authPatch.subscribe = subscribe.patch;
+  credentialsChanged = publish.credentialsChanged || subscribe.credentialsChanged;
+  if (Object.keys(authPatch).length) payload.auth = authPatch;
+
+  var apiPatch = {};
+  var pprofEnabled = document.getElementById('settings-pprof-enabled').checked;
+  if (pprofEnabled !== !!currentAPI.pprof_enabled) apiPatch.pprof_enabled = pprofEnabled;
+  var apiAuthPatch = {};
+  var apiAuthEnabled = document.getElementById('settings-api-auth-enabled').checked;
+  if (apiAuthEnabled !== !!currentAPIAuth.enabled) apiAuthPatch.enabled = apiAuthEnabled;
+  var bearerValue = document.getElementById('settings-bearer-token').value;
+  if (document.getElementById('settings-bearer-clear').checked && currentAPIAuth.bearer_token_configured) {
+    apiAuthPatch.bearer_token = '';
+    credentialsChanged = true;
+  } else if (bearerValue !== '') {
+    apiAuthPatch.bearer_token = bearerValue;
+    credentialsChanged = true;
+  }
+  if (Object.keys(apiAuthPatch).length) apiPatch.auth = apiAuthPatch;
+  var consolePatch = {};
+  var consoleUsername = document.getElementById('settings-console-username').value;
+  var allowDefault = document.getElementById('settings-allow-default').checked;
+  if (consoleUsername !== (currentConsole.username || '')) {
+    consolePatch.username = consoleUsername;
+    credentialsChanged = true;
+  }
+  if (allowDefault !== !!currentConsole.allow_insecure_default_credentials) {
+    consolePatch.allow_insecure_default_credentials = allowDefault;
+  }
+  if (Object.keys(consolePatch).length) apiPatch.console = consolePatch;
+  if (Object.keys(apiPatch).length) payload.api = apiPatch;
+
+  if (!Object.keys(payload).length) {
+    setSettingsStatus('settings-status', 'No changes');
+    return;
+  }
+  if (credentialsChanged && !currentPassword) {
+    setSettingsStatus('settings-status', 'Current password is required for credential changes', 'error');
+    return;
+  }
+  if (currentPassword) payload.current_password = currentPassword;
+
+  var usernameChanged = Object.prototype.hasOwnProperty.call(consolePatch, 'username');
+  var save = document.getElementById('settings-save');
+  save.disabled = true;
+  setSettingsStatus('settings-status', 'Saving');
+  fetch('/api/v1/config', {
+    method: 'PATCH',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'If-Match': settingsETag,
+      'X-CSRF-Token': settingsCSRF
+    },
+    body: JSON.stringify(payload)
+  }).then(function(response) {
+    return response.json().then(function(body) {
+      if (!response.ok || !body.data) {
+        var error = new Error(body.message || 'Settings update failed');
+        error.status = response.status;
+        throw error;
+      }
+      applySettingsData(body.data, response.headers.get('ETag'));
+      document.getElementById('settings-current-password').value = '';
+      setSettingsStatus('settings-status', 'Saved', 'ok');
+      if (usernameChanged) location.assign('/console/login');
+    });
+  }).catch(function(error) {
+    setSettingsStatus('settings-status', error.message || 'Settings update failed', 'error');
+    if (error.status === 412) refreshSettings();
+  }).finally(function() {
+    save.disabled = false;
+  });
+});
+
+document.getElementById('password-form').addEventListener('submit', function(event) {
+  event.preventDefault();
+  var currentPassword = document.getElementById('password-current').value;
+  var newPassword = document.getElementById('password-new').value;
+  var confirmation = document.getElementById('password-confirm').value;
+  if (newPassword !== confirmation) {
+    setSettingsStatus('password-status', 'Passwords do not match', 'error');
+    return;
+  }
+  if (!settingsETag || !settingsCSRF) {
+    setSettingsStatus('password-status', 'Settings revision is unavailable', 'error');
+    return;
+  }
+  var save = document.getElementById('password-save');
+  save.disabled = true;
+  setSettingsStatus('password-status', 'Changing password');
+  fetch('/api/v1/config/password', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'If-Match': settingsETag,
+      'X-CSRF-Token': settingsCSRF
+    },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+  }).then(function(response) {
+    return response.json().then(function(body) {
+      if (!response.ok) throw new Error(body.message || 'Password change failed');
+      setSettingsStatus('password-status', 'Password changed', 'ok');
+      location.assign('/console/login');
+    });
+  }).catch(function(error) {
+    setSettingsStatus('password-status', error.message || 'Password change failed', 'error');
+    save.disabled = false;
+  });
+});
+
 /* === GB28181 Console === */
 var activeTab = 'streams';
 var gbInterval = null;
@@ -2136,28 +2774,34 @@ var gbDeviceChannels = {};
 
 function updateGB28181Tab(modules) {
   gbHasModule = modules && modules.indexOf("gb28181") >= 0;
-  var tabs = document.getElementById("nav-tabs");
-  if (tabs) tabs.style.display = gbHasModule ? "flex" : "none";
+  var tab = document.getElementById("tab-gb28181");
+  if (tab) tab.style.display = gbHasModule ? "block" : "none";
+  if (!gbHasModule && activeTab === 'gb28181') switchTab('streams');
 }
 
 function switchTab(name) {
   activeTab = name;
   var tabs = document.querySelectorAll(".nav-tab");
   for (var i = 0; i < tabs.length; i++) {
-    tabs[i].classList.toggle("active", tabs[i].textContent.toLowerCase().indexOf(name === 'streams' ? 'stream' : 'gb28181') >= 0);
+    tabs[i].classList.toggle("active", tabs[i].getAttribute("data-view") === name);
   }
   document.getElementById("view-streams").style.display = name === 'streams' ? 'block' : 'none';
   document.getElementById("view-gb28181").style.display = name === 'gb28181' ? 'block' : 'none';
+  document.getElementById("view-settings").style.display = name === 'settings' ? 'block' : 'none';
 
   // Manage polling
   if (name === 'streams') {
     if (gbInterval) { clearInterval(gbInterval); gbInterval = null; }
     if (!streamsInterval) { streamsInterval = setInterval(refresh, 2000); }
     refresh();
-  } else {
+  } else if (name === 'gb28181') {
     if (streamsInterval) { clearInterval(streamsInterval); streamsInterval = null; }
     if (!gbInterval) { gbInterval = setInterval(refreshGB28181, 3000); }
     refreshGB28181();
+  } else {
+    if (streamsInterval) { clearInterval(streamsInterval); streamsInterval = null; }
+    if (gbInterval) { clearInterval(gbInterval); gbInterval = null; }
+    refreshSettings();
   }
 }
 

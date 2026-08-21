@@ -12,12 +12,17 @@ import (
 // Handlers holds the API handler methods. It only depends on *core.Server,
 // so it can be registered on any http.ServeMux (httpstream, standalone API, etc.).
 type Handlers struct {
-	server *core.Server
+	server   *core.Server
+	sessions *sessionManager
 }
 
 // NewHandlers creates API handlers backed by the given server.
 func NewHandlers(s *core.Server) *Handlers {
-	return &Handlers{server: s}
+	return newHandlersWithSessions(s, mustNewSessionManager())
+}
+
+func newHandlersWithSessions(s *core.Server, sessions *sessionManager) *Handlers {
+	return &Handlers{server: s, sessions: sessions}
 }
 
 // apiResponse is the standard API response envelope.
@@ -41,17 +46,17 @@ func writeError(w http.ResponseWriter, httpCode int, msg string) {
 
 // StreamInfo represents a single stream in the API response.
 type StreamInfo struct {
-	Key         string              `json:"key"`
-	State       string              `json:"state"`
-	Publisher   string              `json:"publisher"`
-	VideoCodec  string              `json:"video_codec"`
-	AudioCodec  string              `json:"audio_codec"`
-	GOPCacheLen    int              `json:"gop_cache_len"`
-	GOPVideoFrames int             `json:"gop_video_frames"`
-	GOPAudioFrames int             `json:"gop_audio_frames"`
-	GOPDurationMs  int64           `json:"gop_duration_ms"`
-	Subscribers    map[string]int  `json:"subscribers"`
-	Stats       *StreamStatsDetail  `json:"stats,omitempty"`
+	Key            string             `json:"key"`
+	State          string             `json:"state"`
+	Publisher      string             `json:"publisher"`
+	VideoCodec     string             `json:"video_codec"`
+	AudioCodec     string             `json:"audio_codec"`
+	GOPCacheLen    int                `json:"gop_cache_len"`
+	GOPVideoFrames int                `json:"gop_video_frames"`
+	GOPAudioFrames int                `json:"gop_audio_frames"`
+	GOPDurationMs  int64              `json:"gop_duration_ms"`
+	Subscribers    map[string]int     `json:"subscribers"`
+	Stats          *StreamStatsDetail `json:"stats,omitempty"`
 }
 
 // StreamStatsDetail contains detailed stream statistics.
@@ -87,13 +92,13 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 	gopDetail := stream.GOPCacheDetail()
 
 	info := StreamInfo{
-		Key:         stream.Key(),
-		State:       state.String(),
+		Key:            stream.Key(),
+		State:          state.String(),
 		GOPCacheLen:    gopDetail.TotalFrames,
 		GOPVideoFrames: gopDetail.VideoFrames,
 		GOPAudioFrames: gopDetail.AudioFrames,
 		GOPDurationMs:  gopDetail.DurationMs,
-		Subscribers: subs,
+		Subscribers:    subs,
 	}
 
 	if pub := stream.Publisher(); pub != nil {

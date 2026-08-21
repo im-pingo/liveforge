@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,7 +28,7 @@ type mockModule struct {
 	hooks  []HookRegistration
 }
 
-func (m *mockModule) Name() string             { return m.name }
+func (m *mockModule) Name() string              { return m.name }
 func (m *mockModule) Init(s *Server) error      { m.inited = true; return nil }
 func (m *mockModule) Hooks() []HookRegistration { return m.hooks }
 func (m *mockModule) Close() error              { m.closed = true; return nil }
@@ -73,7 +75,7 @@ type orderTrackModule struct {
 	order *[]string
 }
 
-func (m *orderTrackModule) Name() string             { return m.name }
+func (m *orderTrackModule) Name() string              { return m.name }
 func (m *orderTrackModule) Init(s *Server) error      { return nil }
 func (m *orderTrackModule) Hooks() []HookRegistration { return nil }
 func (m *orderTrackModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
@@ -336,6 +338,36 @@ func TestServerConnectionTracking(t *testing.T) {
 	}
 }
 
+func TestServerConnectionLimitIsAtomic(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	cfg.Limits.MaxConnections = 1
+	s := NewServer(cfg)
+	start := make(chan struct{})
+	results := make(chan bool, 64)
+	var wg sync.WaitGroup
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- s.AcquireConn()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	succeeded := 0
+	for acquired := range results {
+		if acquired {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || s.ConnectionCount() != 1 {
+		t.Fatalf("successful acquisitions = %d, count = %d; want 1, 1", succeeded, s.ConnectionCount())
+	}
+	s.ReleaseConn()
+}
+
 func TestServerConnectionTrackingUnlimited(t *testing.T) {
 	cfg := &config.Config{} // MaxConnections = 0 (unlimited)
 	s := NewServer(cfg)
@@ -374,11 +406,16 @@ type reloadableMockModule struct {
 	mockModule
 	reloadCfgName string
 	reloadErr     error
+	validatedName string
 }
 
-func (m *reloadableMockModule) OnReload(s *Server) error {
-	m.reloadCfgName = s.Config().Server.Name
+func (m *reloadableMockModule) ValidateConfigChange(_ *config.Config, next *config.Config) error {
+	m.validatedName = next.Server.Name
 	return m.reloadErr
+}
+
+func (m *reloadableMockModule) ApplyConfigChange(_ *config.Config, next *config.Config) {
+	m.reloadCfgName = next.Server.Name
 }
 
 func TestServerUpdateConfig(t *testing.T) {
@@ -395,12 +432,41 @@ func TestServerUpdateConfig(t *testing.T) {
 
 	newCfg := &config.Config{}
 	newCfg.Server.Name = "reloaded"
-	s.UpdateConfig(newCfg)
+	if err := s.ApplyConfig(newCfg); err != nil {
+		t.Fatal(err)
+	}
 
 	if s.Config().Server.Name != "reloaded" {
 		t.Errorf("expected config name 'reloaded', got %q", s.Config().Server.Name)
 	}
 	if rm.reloadCfgName != "reloaded" {
 		t.Errorf("expected reloadable module to see 'reloaded', got %q", rm.reloadCfgName)
+	}
+}
+
+func TestServerApplyConfigValidatesBeforePublishing(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Server.Name = "original"
+	s := NewServer(cfg)
+	reject := &reloadableMockModule{
+		mockModule: mockModule{name: "reject"},
+		reloadErr:  errors.New("invalid reload"),
+	}
+	s.RegisterModule(reject)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+
+	next := &config.Config{}
+	next.Server.Name = "rejected"
+	if err := s.ApplyConfig(next); err == nil {
+		t.Fatal("expected validation error")
+	}
+	if got := s.Config().Server.Name; got != "original" {
+		t.Fatalf("rejected config was published: %q", got)
+	}
+	if reject.reloadCfgName != "" {
+		t.Fatalf("ApplyConfigChange ran after rejection: %q", reject.reloadCfgName)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -8,31 +9,94 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/logger"
 	"github.com/im-pingo/liveforge/module/api"
 	"github.com/im-pingo/liveforge/module/auth"
+	"github.com/im-pingo/liveforge/module/cluster"
+	dvrmod "github.com/im-pingo/liveforge/module/dvr"
+	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
 	"github.com/im-pingo/liveforge/module/httpstream"
+	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	"github.com/im-pingo/liveforge/module/notify"
 	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
-	"github.com/im-pingo/liveforge/module/cluster"
-	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
-	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	sipgwmod "github.com/im-pingo/liveforge/module/sipgateway"
-	dvrmod "github.com/im-pingo/liveforge/module/dvr"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
+	"github.com/im-pingo/liveforge/pkg/logger"
 )
 
 var version = "dev"
 
+const configPollInterval = 5 * time.Second
+
+type runtimeConfigManager interface {
+	Refresh(context.Context) (config.ApplyResult, error)
+	Run(context.Context, func(error))
+}
+
+func initializeConfigManager(ctx context.Context, path string, pollIntervals ...time.Duration) (*config.Manager, *config.Config, error) {
+	pollInterval := configPollInterval
+	if len(pollIntervals) > 0 {
+		pollInterval = pollIntervals[0]
+	}
+	source := config.NewFileSource(path, config.RuntimeOverridePath(path))
+	manager := config.NewManager(source, pollInterval, nil)
+	if _, err := manager.Refresh(ctx); err != nil {
+		return nil, nil, err
+	}
+	cfg := manager.Current().Effective
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("configuration source returned an empty snapshot")
+	}
+	return manager, cfg, nil
+}
+
+func waitForShutdown(ctx context.Context, manager runtimeConfigManager, sigCh <-chan os.Signal) os.Signal {
+	runCtx, cancel := context.WithCancel(ctx)
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		manager.Run(runCtx, func(err error) {
+			slog.Error("periodic config refresh failed", "error", err)
+		})
+	}()
+	defer func() {
+		cancel()
+		<-runDone
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case sig, ok := <-sigCh:
+			if !ok {
+				return nil
+			}
+			if sig == syscall.SIGHUP {
+				slog.Info("received SIGHUP, refreshing config")
+				result, err := manager.Refresh(runCtx)
+				if err != nil {
+					slog.Error("config refresh failed", "error", err)
+					continue
+				}
+				slog.Info("config refresh completed", "changed", result.Changed, "revision", result.Revision, "pending_restart", result.PendingRestart)
+				continue
+			}
+			return sig
+		}
+	}
+}
+
 func main() {
 	configPath := flag.String("c", "configs/liveforge.yaml", "config file path")
+	configPoll := flag.Duration("config-poll", configPollInterval, "configuration source polling interval")
 	showVersion := flag.Bool("v", false, "show version")
 	flag.Parse()
 
@@ -41,7 +105,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	cfg, err := config.Load(*configPath)
+	manager, cfg, err := initializeConfigManager(context.Background(), *configPath, *configPoll)
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
@@ -49,16 +113,14 @@ func main() {
 	logger.Init(cfg.Server.LogLevel)
 
 	s := core.NewServer(cfg)
+	s.SetConfigUpdater(manager)
 
 	if cfg.AudioCodec.Enabled {
 		s.StreamHub().SetAudioCodecEnabled(true)
 	}
 
-	// Auth module must be registered before protocol modules
-	// so its hooks are in place when connections arrive.
-	if cfg.Auth.Enabled {
-		s.RegisterModule(auth.NewModule())
-	}
+	// The unified authorizer is always installed so auth can be enabled at runtime.
+	s.RegisterModule(auth.NewModule())
 
 	if cfg.RTMP.Enabled {
 		s.RegisterModule(rtmp.NewModule())
@@ -132,28 +194,22 @@ func main() {
 	if err := s.Init(); err != nil {
 		log.Fatalf("server init failed: %v", err)
 	}
+	manager.SetApply(func(_ context.Context, _, next *config.Config, _ config.ChangeSet) error {
+		if err := s.ApplyConfig(next); err != nil {
+			return err
+		}
+		logger.Init(next.Server.LogLevel)
+		return nil
+	})
 
 	slog.Info("server started", "version", version, "name", cfg.Server.Name)
 
-	// Block until signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	for {
-		sig := <-sigCh
-		if sig == syscall.SIGHUP {
-			slog.Info("received SIGHUP, reloading config", "path", *configPath)
-			newCfg, err := config.Load(*configPath)
-			if err != nil {
-				slog.Error("config reload failed", "error", err)
-				continue
-			}
-			logger.Init(newCfg.Server.LogLevel)
-			s.UpdateConfig(newCfg)
-			slog.Info("config reloaded successfully")
-			continue
-		}
+	sig := waitForShutdown(context.Background(), manager, sigCh)
+	signal.Stop(sigCh)
+	if sig != nil {
 		slog.Info("shutting down", "signal", sig.String())
-		break
 	}
 
 	s.Shutdown()

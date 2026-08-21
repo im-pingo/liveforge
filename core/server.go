@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -25,19 +26,28 @@ var Version = "dev"
 
 // Server is the main application server that manages modules and lifecycle.
 type Server struct {
-	configPtr atomic.Pointer[config.Config]
-	eventBus  *EventBus
-	hub       *StreamHub
-	modules   []Module
-	startTime time.Time
-	connCount atomic.Int64
-	done      chan struct{}
+	configPtr  atomic.Pointer[config.Config]
+	authorizer atomic.Pointer[authorizerHolder]
+	eventBus   *EventBus
+	hub        *StreamHub
+	modules    []Module
+	startTime  time.Time
+	connCount  atomic.Int64
+	done       chan struct{}
 
-	apiMu       sync.RWMutex
-	apiHandlers map[string]http.Handler
+	apiMu         sync.RWMutex
+	apiHandlers   map[string]http.Handler
+	configMu      sync.RWMutex
+	configUpdater ConfigUpdater
 
 	autoCertOnce sync.Once
 	autoCert     *tls.Certificate // auto-generated self-signed cert (nil if file-based TLS configured)
+}
+
+// ConfigUpdater exposes cached configuration status and revision-checked updates.
+type ConfigUpdater interface {
+	Current() config.Snapshot
+	Update(context.Context, config.Patch, string) (config.ApplyResult, error)
 }
 
 // NewServer creates a new Server instance.
@@ -59,18 +69,40 @@ func (s *Server) Config() *config.Config {
 	return s.configPtr.Load()
 }
 
-// UpdateConfig atomically swaps the server configuration and notifies all
-// Reloadable modules. Errors from individual modules are logged but do not
-// stop the reload process.
-func (s *Server) UpdateConfig(cfg *config.Config) {
-	s.configPtr.Store(cfg)
+// SetConfigUpdater connects the server to its runtime configuration manager.
+func (s *Server) SetConfigUpdater(updater ConfigUpdater) {
+	s.configMu.Lock()
+	s.configUpdater = updater
+	s.configMu.Unlock()
+}
+
+// ConfigUpdater returns the runtime configuration manager, if configured.
+func (s *Server) ConfigUpdater() ConfigUpdater {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.configUpdater
+}
+
+// ApplyConfig validates a runtime configuration change with every affected
+// module before publishing it. Once published, applying the prepared change
+// must not fail.
+func (s *Server) ApplyConfig(cfg *config.Config) error {
+	current := s.Config()
 	for _, m := range s.modules {
-		if r, ok := m.(Reloadable); ok {
-			if err := r.OnReload(s); err != nil {
-				slog.Error("module reload failed", "module", m.Name(), "error", err)
+		if configurable, ok := m.(Configurable); ok {
+			if err := configurable.ValidateConfigChange(current, cfg); err != nil {
+				return fmt.Errorf("validate config for module %s: %w", m.Name(), err)
 			}
 		}
 	}
+
+	s.configPtr.Store(cfg)
+	for _, m := range s.modules {
+		if configurable, ok := m.(Configurable); ok {
+			configurable.ApplyConfigChange(current, cfg)
+		}
+	}
+	return nil
 }
 
 // GetEventBus returns the server's event bus.
@@ -163,13 +195,15 @@ func (s *Server) APIHandlers() map[string]http.Handler {
 // AcquireConn increments the connection counter. Returns false if max_connections is exceeded.
 func (s *Server) AcquireConn() bool {
 	max := s.Config().Limits.MaxConnections
-	if max > 0 {
-		if s.connCount.Load() >= int64(max) {
+	for {
+		current := s.connCount.Load()
+		if max > 0 && current >= int64(max) {
 			return false
 		}
+		if s.connCount.CompareAndSwap(current, current+1) {
+			return true
+		}
 	}
-	s.connCount.Add(1)
-	return true
 }
 
 // ReleaseConn decrements the connection counter.
@@ -369,12 +403,12 @@ func (s *Server) emitAliveEvents() {
 
 		stats := stream.Stats()
 		extra := map[string]any{
-			"bytes_in":      stats.BytesIn,
-			"video_frames":  stats.VideoFrames,
-			"audio_frames":  stats.AudioFrames,
-			"bitrate_kbps":  stats.BitrateKbps,
-			"fps":           stats.FPS,
-			"uptime_sec":    int64(stats.Uptime.Seconds()),
+			"bytes_in":     stats.BytesIn,
+			"video_frames": stats.VideoFrames,
+			"audio_frames": stats.AudioFrames,
+			"bitrate_kbps": stats.BitrateKbps,
+			"fps":          stats.FPS,
+			"uptime_sec":   int64(stats.Uptime.Seconds()),
 		}
 
 		ctx := &EventContext{StreamKey: key, Extra: extra}

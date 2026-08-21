@@ -1,32 +1,18 @@
 package config
 
 import (
-	"fmt"
-	"os"
+	"context"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Load reads and parses a YAML config file, expanding environment variables.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	doc, err := NewFileSource(path, "").Load(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("read config file: %w", err)
+		return nil, err
 	}
-
-	// Expand ${ENV_VAR} patterns
-	expanded := os.ExpandEnv(string(data))
-
-	cfg := defaults()
-	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-
-	normalize(cfg)
-
-	return cfg, nil
+	return doc.Config, nil
 }
 
 // defaults returns a Config with sensible default values.
@@ -104,7 +90,9 @@ func defaults() *Config {
 			},
 		},
 		API: APIConfig{
-			Listen: ":8090",
+			Listen:  "127.0.0.1:8090",
+			Auth:    APIAuthConfig{Enabled: true},
+			Console: ConsoleConfig{Username: "admin", Password: "admin"},
 		},
 		Metrics: MetricsConfig{
 			Listen: ":9090",
@@ -137,8 +125,23 @@ func defaults() *Config {
 
 // normalize canonicalizes config values (e.g. container name aliases).
 func normalize(cfg *Config) {
+	normalizeAuthRule(&cfg.Auth.Publish)
+	normalizeAuthRule(&cfg.Auth.Subscribe)
+	if cfg.Auth.Publish.Stage == "" {
+		cfg.Auth.Publish.Stage = "post_connect"
+	}
+	if cfg.Auth.Subscribe.Stage == "" {
+		cfg.Auth.Subscribe.Stage = "post_connect"
+	}
 	switch strings.ToLower(cfg.HTTP.LLHLS.Container) {
 	case "mpegts", "mpeg-ts":
 		cfg.HTTP.LLHLS.Container = "ts"
+	}
+}
+
+func normalizeAuthRule(rule *AuthRuleConfig) {
+	algorithm := strings.TrimSpace(rule.Token.Algorithm)
+	if algorithm == "" || strings.EqualFold(algorithm, "HS256") {
+		rule.Token.Algorithm = "HS256"
 	}
 }

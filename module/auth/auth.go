@@ -18,11 +18,11 @@ import (
 )
 
 var (
-	ErrUnauthorized    = errors.New("unauthorized")
-	ErrTokenExpired    = errors.New("token expired")
-	ErrTokenInvalid    = errors.New("invalid token")
-	ErrStreamMismatch  = errors.New("token stream key mismatch")
-	ErrActionMismatch  = errors.New("token action mismatch")
+	ErrUnauthorized     = errors.New("unauthorized")
+	ErrTokenExpired     = errors.New("token expired")
+	ErrTokenInvalid     = errors.New("invalid token")
+	ErrStreamMismatch   = errors.New("token stream key mismatch")
+	ErrActionMismatch   = errors.New("token action mismatch")
 	ErrCallbackRejected = errors.New("auth callback rejected")
 )
 
@@ -31,6 +31,10 @@ type jwtClaims struct {
 	Sub    string `json:"sub"`    // stream key (optional)
 	Action string `json:"action"` // "publish" or "subscribe"
 	Exp    int64  `json:"exp"`    // expiry unix timestamp
+}
+
+type jwtHeader struct {
+	Algorithm string `json:"alg"`
 }
 
 // callbackRequest is the JSON body sent to the auth callback URL.
@@ -72,6 +76,9 @@ func getParam(ctx *core.EventContext, key string) string {
 
 // checkToken verifies a JWT token using HMAC-SHA256.
 func checkToken(secret, token, action, streamKey string) error {
+	if secret == "" {
+		return ErrTokenInvalid
+	}
 	if token == "" {
 		return ErrUnauthorized
 	}
@@ -103,6 +110,14 @@ func checkToken(secret, token, action, streamKey string) error {
 func parseAndVerifyJWT(secret, token string) (*jwtClaims, error) {
 	parts := strings.SplitN(token, ".", 3)
 	if len(parts) != 3 {
+		return nil, ErrTokenInvalid
+	}
+	headerJSON, err := base64URLDecode(parts[0])
+	if err != nil {
+		return nil, ErrTokenInvalid
+	}
+	var header jwtHeader
+	if err := json.Unmarshal(headerJSON, &header); err != nil || header.Algorithm != "HS256" {
 		return nil, ErrTokenInvalid
 	}
 

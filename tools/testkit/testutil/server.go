@@ -101,6 +101,7 @@ func WithAPI() Option {
 // WithAuth enables token-based authentication for both publish and subscribe.
 func WithAuth(secret string) Option {
 	return func(c *config.Config) {
+		c.Auth.Enabled = true
 		c.Auth.Publish.Mode = "token"
 		c.Auth.Publish.Token.Secret = secret
 		c.Auth.Subscribe.Mode = "token"

@@ -1,15 +1,17 @@
 package auth
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
 
-// Module implements authentication for publish and subscribe events.
+// Module owns the single runtime authorizer installed on the server.
 type Module struct {
-	cfg config.AuthConfig
+	server *core.Server
 }
 
 // NewModule creates a new auth module.
@@ -20,46 +22,67 @@ func NewModule() *Module {
 // Name returns the module name.
 func (m *Module) Name() string { return "auth" }
 
-// Init reads auth config from the server.
-func (m *Module) Init(s *core.Server) error {
-	m.cfg = s.Config().Auth
-	slog.Info("enabled", "module", "auth", "publish_mode", m.cfg.Publish.Mode, "subscribe_mode", m.cfg.Subscribe.Mode)
+func (m *Module) Init(server *core.Server) error {
+	m.server = server
+	server.SetAuthorizer(m)
+	cfg := server.Config().Auth
+	slog.Info("initialized", "module", "auth", "enabled", cfg.Enabled,
+		"publish_mode", cfg.Publish.Mode, "subscribe_mode", cfg.Subscribe.Mode)
 	return nil
 }
 
-// Hooks returns sync hooks for EventPublish and EventSubscribe at priority 10.
-func (m *Module) Hooks() []core.HookRegistration {
-	return []core.HookRegistration{
-		{
-			Event:    core.EventPublish,
-			Mode:     core.HookSync,
-			Priority: 10,
-			Handler:  m.onPublish,
-		},
-		{
-			Event:    core.EventSubscribe,
-			Mode:     core.HookSync,
-			Priority: 10,
-			Handler:  m.onSubscribe,
-		},
+// Hooks is empty because publish/subscribe events describe committed state and
+// must not be used as authorization callbacks.
+func (m *Module) Hooks() []core.HookRegistration { return nil }
+
+func (m *Module) Close() error {
+	if m.server != nil {
+		m.server.SetAuthorizer(nil)
 	}
+	return nil
 }
 
-// Close is a no-op for the auth module.
-func (m *Module) Close() error { return nil }
+func (m *Module) Authorize(_ context.Context, request core.AuthorizationRequest) error {
+	if m.server == nil {
+		return fmt.Errorf("auth module is not initialized")
+	}
+	cfg := m.server.Config().Auth
+	if !cfg.Enabled {
+		return nil
+	}
 
-func (m *Module) onPublish(ctx *core.EventContext) error {
-	if err := checkAuth(m.cfg.Publish, ctx, "publish"); err != nil {
-		slog.Warn("publish rejected", "module", "auth", "stream", ctx.StreamKey, "remote", ctx.RemoteAddr, "error", err)
+	rule, action, err := authorizationRule(cfg, request.Action)
+	if err != nil {
+		return err
+	}
+	stage := rule.Stage
+	if stage == "" {
+		stage = string(core.AuthorizationPostConnect)
+	}
+	if string(request.Stage) != stage {
+		return nil
+	}
+
+	eventContext := &core.EventContext{
+		StreamKey: request.StreamKey, Protocol: request.Protocol,
+		RemoteAddr: request.RemoteAddr, Params: request.Params, Extra: request.Extra,
+	}
+	if err := checkAuth(rule, eventContext, action); err != nil {
+		slog.Warn("authorization rejected", "module", "auth", "action", action,
+			"stage", request.Stage, "stream", request.StreamKey,
+			"protocol", request.Protocol, "remote", request.RemoteAddr, "error", err)
 		return err
 	}
 	return nil
 }
 
-func (m *Module) onSubscribe(ctx *core.EventContext) error {
-	if err := checkAuth(m.cfg.Subscribe, ctx, "subscribe"); err != nil {
-		slog.Warn("subscribe rejected", "module", "auth", "stream", ctx.StreamKey, "remote", ctx.RemoteAddr, "error", err)
-		return err
+func authorizationRule(cfg config.AuthConfig, action core.AuthorizationAction) (config.AuthRuleConfig, string, error) {
+	switch action {
+	case core.AuthorizationPublish:
+		return cfg.Publish, string(core.AuthorizationPublish), nil
+	case core.AuthorizationSubscribe:
+		return cfg.Subscribe, string(core.AuthorizationSubscribe), nil
+	default:
+		return config.AuthRuleConfig{}, "", fmt.Errorf("unknown authorization action %q", action)
 	}
-	return nil
 }

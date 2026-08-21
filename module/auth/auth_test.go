@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -17,7 +18,12 @@ import (
 
 // makeJWT creates a HS256 JWT for testing.
 func makeJWT(secret string, claims jwtClaims) string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	return makeJWTWithAlgorithm(secret, "HS256", claims)
+}
+
+func makeJWTWithAlgorithm(secret, algorithm string, claims jwtClaims) string {
+	headerJSON, _ := json.Marshal(map[string]string{"alg": algorithm, "typ": "JWT"})
+	header := base64.RawURLEncoding.EncodeToString(headerJSON)
 	payload, _ := json.Marshal(claims)
 	payloadEnc := base64.RawURLEncoding.EncodeToString(payload)
 
@@ -27,6 +33,22 @@ func makeJWT(secret string, claims jwtClaims) string {
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	return signingInput + "." + sig
+}
+
+func TestCheckTokenRejectsEmptySecret(t *testing.T) {
+	token := makeJWT("", jwtClaims{Exp: time.Now().Add(time.Hour).Unix()})
+	if err := checkToken("", token, "publish", "live/test"); err != ErrTokenInvalid {
+		t.Fatalf("checkToken error = %v, want ErrTokenInvalid", err)
+	}
+}
+
+func TestCheckTokenRejectsNonHS256Header(t *testing.T) {
+	token := makeJWTWithAlgorithm("test-secret", "none", jwtClaims{
+		Exp: time.Now().Add(time.Hour).Unix(),
+	})
+	if err := checkToken("test-secret", token, "publish", "live/test"); err != ErrTokenInvalid {
+		t.Fatalf("checkToken error = %v, want ErrTokenInvalid", err)
+	}
 }
 
 func TestCheckToken_Valid(t *testing.T) {
@@ -259,47 +281,94 @@ func TestCheckAuth_ModeCombined_TokenSucceeds(t *testing.T) {
 	}
 }
 
-// TestEventBusAuthIntegration verifies that auth hooks reject EventPublish via the EventBus.
-func TestEventBusAuthIntegration(t *testing.T) {
-	bus := core.NewEventBus()
-
-	m := &Module{
-		cfg: config.AuthConfig{
-			Enabled: true,
-			Publish: config.AuthRuleConfig{
-				Mode:  "token",
-				Token: config.TokenConfig{Secret: "test-secret"},
-			},
-		},
+func TestModuleInstallsUnifiedAuthorizer(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	cfg.Auth.Enabled = true
+	cfg.Auth.Publish = config.AuthRuleConfig{
+		Mode:  "token",
+		Stage: "post_connect",
+		Token: config.TokenConfig{Secret: "test-secret"},
 	}
-
-	for _, h := range m.Hooks() {
-		bus.Register(h)
+	s := core.NewServer(cfg)
+	s.RegisterModule(NewModule())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
 	}
+	defer s.Shutdown()
 
-	// No token → should be rejected
-	err := bus.Emit(core.EventPublish, &core.EventContext{
+	request := core.AuthorizationRequest{
+		Action:     core.AuthorizationPublish,
+		Stage:      core.AuthorizationPostConnect,
 		StreamKey:  "live/test",
 		Protocol:   "rtmp",
 		RemoteAddr: "127.0.0.1:1234",
-	})
-	if err == nil {
-		t.Fatal("expected auth rejection, got nil")
+	}
+	if err := s.Authorize(context.Background(), request); err == nil {
+		t.Fatal("expected auth rejection without token")
 	}
 
-	// Valid token → should pass
-	token := makeJWT("test-secret", jwtClaims{
+	request.Params = map[string]string{"token": makeJWT("test-secret", jwtClaims{
 		Action: "publish",
 		Exp:    time.Now().Add(time.Hour).Unix(),
-	})
-	err = bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  "live/test",
-		Protocol:   "rtmp",
-		RemoteAddr: "127.0.0.1:1234",
-		Params:     map[string]string{"token": token},
-	})
-	if err != nil {
-		t.Fatalf("expected nil, got %v", err)
+	})}
+	if err := s.Authorize(context.Background(), request); err != nil {
+		t.Fatalf("valid token rejected: %v", err)
+	}
+	if hooks := NewModule().Hooks(); len(hooks) != 0 {
+		t.Fatalf("auth must not intercept committed lifecycle events, got %d hooks", len(hooks))
+	}
+}
+
+func TestModuleAuthorizationStageAndRuntimeRotation(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	cfg.Auth.Enabled = true
+	cfg.Auth.Subscribe = config.AuthRuleConfig{
+		Mode:  "token",
+		Stage: "post_connect",
+		Token: config.TokenConfig{Secret: "old-secret"},
+	}
+	s := core.NewServer(cfg)
+	s.RegisterModule(NewModule())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+
+	request := core.AuthorizationRequest{
+		Action:    core.AuthorizationSubscribe,
+		Stage:     core.AuthorizationPreSession,
+		StreamKey: "live/test",
+		Protocol:  "hls",
+	}
+	if err := s.Authorize(context.Background(), request); err != nil {
+		t.Fatalf("non-configured stage must not reject: %v", err)
+	}
+	request.Stage = core.AuthorizationPostConnect
+	if err := s.Authorize(context.Background(), request); err == nil {
+		t.Fatal("configured stage accepted missing token")
+	}
+
+	next := *cfg
+	next.Auth.Subscribe.Token.Secret = "new-secret"
+	if err := s.ApplyConfig(&next); err != nil {
+		t.Fatal(err)
+	}
+	request.Params = map[string]string{"token": makeJWT("new-secret", jwtClaims{
+		Action: "subscribe",
+		Exp:    time.Now().Add(time.Hour).Unix(),
+	})}
+	if err := s.Authorize(context.Background(), request); err != nil {
+		t.Fatalf("rotated token was not read dynamically: %v", err)
+	}
+
+	nextDisabled := next
+	nextDisabled.Auth.Enabled = false
+	if err := s.ApplyConfig(&nextDisabled); err != nil {
+		t.Fatal(err)
+	}
+	request.Params = nil
+	if err := s.Authorize(context.Background(), request); err != nil {
+		t.Fatalf("disabled auth rejected request: %v", err)
 	}
 }
 

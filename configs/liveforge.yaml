@@ -240,9 +240,12 @@ metrics:
 
 api:
   enabled: true
-  listen: ":8090"
+  listen: "127.0.0.1:8090"
+  pprof_enabled: false
   auth:
+    enabled: true
     bearer_token: "${API_TOKEN}"
   console:
     username: "admin"
     password: "admin"
+    allow_insecure_default_credentials: false

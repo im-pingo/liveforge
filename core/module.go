@@ -1,10 +1,12 @@
 package core
 
+import "github.com/im-pingo/liveforge/config"
+
 // EventType identifies a lifecycle or media event.
 type EventType uint16
 
 const (
-	EventStreamCreate    EventType = iota + 1
+	EventStreamCreate EventType = iota + 1
 	EventStreamDestroy
 	EventPublish
 	EventPublishStop
@@ -27,7 +29,7 @@ const (
 type HookMode uint8
 
 const (
-	HookSync  HookMode = iota + 1
+	HookSync HookMode = iota + 1
 	HookAsync
 )
 
@@ -59,9 +61,9 @@ type Module interface {
 	Close() error
 }
 
-// Reloadable is an optional interface modules can implement to support
-// config hot-reload via SIGHUP. Only modules whose config has actually
-// changed need to do anything in OnReload.
-type Reloadable interface {
-	OnReload(s *Server) error
+// Configurable is implemented by modules that need to prepare and apply
+// runtime configuration changes. Validation must not mutate runtime state.
+type Configurable interface {
+	ValidateConfigChange(current, next *config.Config) error
+	ApplyConfigChange(current, next *config.Config)
 }
