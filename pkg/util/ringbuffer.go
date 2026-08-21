@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
@@ -11,19 +12,17 @@ type RingBuffer[T any] struct {
 	buf         []T
 	size        int64
 	writeCursor atomic.Int64 // next write position (monotonically increasing)
-	signal      chan struct{}
 	closed      atomic.Bool
-	mu          sync.Mutex // protects cond for Read() blocking
-	cond        *sync.Cond // wakes blocked Read() callers on Write/Close
+	mu          sync.Mutex   // protects cond for Read() blocking
+	cond        *sync.Cond   // wakes blocked Read() callers on Write/Close
 	dataMu      sync.RWMutex // protects buf slot access against concurrent read/write
 }
 
 // NewRingBuffer creates a new ring buffer with the given capacity.
 func NewRingBuffer[T any](size int) *RingBuffer[T] {
 	rb := &RingBuffer[T]{
-		buf:    make([]T, size),
-		size:   int64(size),
-		signal: make(chan struct{}, 1),
+		buf:  make([]T, size),
+		size: int64(size),
 	}
 	rb.cond = sync.NewCond(&rb.mu)
 	return rb
@@ -32,6 +31,9 @@ func NewRingBuffer[T any](size int) *RingBuffer[T] {
 // Write adds a value to the ring buffer. If the buffer is full, the oldest
 // value is silently overwritten. No-op if the buffer is closed.
 func (rb *RingBuffer[T]) Write(val T) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
 	if rb.closed.Load() {
 		return
 	}
@@ -45,38 +47,24 @@ func (rb *RingBuffer[T]) Write(val T) {
 	rb.writeCursor.Store(pos + 1)
 	rb.dataMu.Unlock()
 
-	// Wake all Read() callers blocked on cond.Wait()
+	// The predicate update and notification share rb.mu so a reader cannot
+	// observe no data and then miss this wakeup before entering cond.Wait.
 	rb.cond.Broadcast()
-
-	// Non-blocking notify for select-based consumers using Signal()
-	select {
-	case rb.signal <- struct{}{}:
-	default:
-	}
 }
 
 // Close signals all blocked readers to return (zero, false).
 // After Close, Write is a no-op.
 func (rb *RingBuffer[T]) Close() {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
 	rb.closed.Store(true)
-	// Wake all Read() callers blocked on cond.Wait()
 	rb.cond.Broadcast()
-	// Wake select-based consumers using Signal()
-	select {
-	case rb.signal <- struct{}{}:
-	default:
-	}
 }
 
 // IsClosed returns whether the ring buffer has been closed.
 func (rb *RingBuffer[T]) IsClosed() bool {
 	return rb.closed.Load()
-}
-
-// Signal returns the notification channel that is signaled on each Write.
-// Useful for select-based consumers that need to multiplex with other channels.
-func (rb *RingBuffer[T]) Signal() <-chan struct{} {
-	return rb.signal
 }
 
 // WriteCursor returns the current write position (number of items written).
@@ -111,46 +99,118 @@ type RingReader[T any] struct {
 	readCursor  int64
 	lastSkipped int64
 	closed      atomic.Bool // per-reader close flag
+	contextMu   sync.Mutex
+	contextDone <-chan struct{}
+	stopContext func() bool
 }
 
 // Read returns the next value, blocking until data is available.
-// Returns (value, true) on success, or (zero, false) if the buffer or reader is closed and no data remains.
+// Returns (value, true) on success. Closing the reader stops reads immediately;
+// closing the buffer allows already-buffered values to be drained first.
 func (r *RingReader[T]) Read() (T, bool) {
+	return r.readContext(nil)
+}
+
+// ReadContext returns the next value, blocking until data is available or ctx
+// is canceled. Cancellation affects only this call and does not close the
+// reader or its ring buffer.
+func (r *RingReader[T]) ReadContext(ctx context.Context) (T, bool) {
+	if ctx == nil {
+		panic("nil context")
+	}
+	return r.readContext(ctx)
+}
+
+func (r *RingReader[T]) readContext(ctx context.Context) (T, bool) {
+	if r.closed.Load() || contextCanceled(ctx) {
+		var zero T
+		return zero, false
+	}
+
+	if val, ok := r.TryRead(); ok {
+		return val, true
+	}
+
+	r.ensureContextWake(ctx)
+
 	for {
-		val, ok := r.TryRead()
-		if ok {
+		if r.closed.Load() || contextCanceled(ctx) {
+			var zero T
+			return zero, false
+		}
+		if val, ok := r.TryRead(); ok {
 			return val, true
 		}
 		if r.rb.closed.Load() || r.closed.Load() {
 			var zero T
 			return zero, false
 		}
-		// Block until writer signals new data via cond.Broadcast().
-		// Using sync.Cond avoids the stale-signal busy-spin that occurred
-		// with the previous channel + re-broadcast approach.
 		r.rb.mu.Lock()
-		for r.readCursor >= r.rb.writeCursor.Load() && !r.rb.closed.Load() && !r.closed.Load() {
+		for r.readCursor >= r.rb.writeCursor.Load() &&
+			!r.rb.closed.Load() && !r.closed.Load() && !contextCanceled(ctx) {
 			r.rb.cond.Wait()
 		}
 		r.rb.mu.Unlock()
 	}
 }
 
+func contextCanceled(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() != nil
+}
+
+func (r *RingReader[T]) ensureContextWake(ctx context.Context) {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+	if r.closed.Load() {
+		return
+	}
+	if done == r.contextDone {
+		return
+	}
+	if r.stopContext != nil {
+		r.stopContext()
+		r.stopContext = nil
+	}
+	r.contextDone = done
+	if done != nil {
+		r.stopContext = context.AfterFunc(ctx, func() {
+			r.rb.mu.Lock()
+			r.rb.cond.Broadcast()
+			r.rb.mu.Unlock()
+		})
+	}
+}
+
 // Close marks this reader as closed, causing any blocking Read() to return (zero, false).
 // Safe to call concurrently and multiple times.
 func (r *RingReader[T]) Close() {
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+	if r.stopContext != nil {
+		r.stopContext()
+		r.stopContext = nil
+	}
+	r.contextDone = nil
+
+	r.rb.mu.Lock()
+	defer r.rb.mu.Unlock()
+
 	r.closed.Store(true)
 	r.rb.cond.Broadcast()
 }
 
-// Signal returns the notification channel of the underlying ring buffer.
-// Useful for select-based consumers that need to multiplex with other channels.
-func (r *RingReader[T]) Signal() <-chan struct{} {
-	return r.rb.signal
-}
-
 // TryRead attempts a non-blocking read. Returns (value, false) if no data available.
 func (r *RingReader[T]) TryRead() (T, bool) {
+	if r.closed.Load() {
+		var zero T
+		return zero, false
+	}
+
 	r.lastSkipped = 0
 
 	for {

@@ -3,6 +3,7 @@ package record
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,53 @@ func TestFileWriterCreatesFile(t *testing.T) {
 	}
 }
 
+func TestFileWriterRejectsUnsafeStreamKey(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.RecordConfig{Path: filepath.Join(root, "{stream_key}", "record.flv")}
+	for _, streamKey := range []string{"../../escape", "/absolute", `live\..\escape`} {
+		if writer, err := NewFileWriter(streamKey, cfg); err == nil {
+			writer.Close()
+			t.Errorf("NewFileWriter(%q) succeeded", streamKey)
+		}
+	}
+}
+
+func TestFLVFileWriterDeclaresBothTracks(t *testing.T) {
+	cfg := config.RecordConfig{Format: "flv", Path: filepath.Join(t.TempDir(), "both.flv")}
+	writer, err := NewFileWriter("live/both", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	videoHeader := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{1})
+	audioHeader := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x12, 0x10})
+	keyframe := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65})
+	for _, frame := range []*avframe.AVFrame{videoHeader, audioHeader, keyframe} {
+		if err := writer.WriteFrame(frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := writer.FilePath()
+	writer.Close()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 5 || data[4] != 0x05 {
+		t.Fatalf("FLV flags = %#x, want audio+video (0x05)", data[4])
+	}
+}
+
+func TestFileWriterExpandsShippedPlaceholders(t *testing.T) {
+	writer := &FileWriter{
+		cfg:       config.RecordConfig{Format: "flv", Path: filepath.Join(t.TempDir(), "{stream}_{time}.{ext}")},
+		streamKey: "live/camera", format: newFrameWriter("flv"),
+	}
+	path := writer.expandPath()
+	if strings.ContainsAny(path, "{}") || !strings.Contains(filepath.Base(path), "camera_") || filepath.Ext(path) != ".flv" {
+		t.Fatalf("expanded path = %q", path)
+	}
+}
+
 func TestRecordSessionEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := newTestConfig(dir)
@@ -161,6 +209,79 @@ func TestRecordSessionEndToEnd(t *testing.T) {
 		t.Error("expected non-empty recording file")
 	}
 	t.Logf("recorded %d bytes to %s", info.Size(), filePath)
+}
+
+func TestRecordSessionsEachReceiveSingleWrite(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	stream := core.NewStream(
+		"live/shared-signal",
+		config.StreamConfig{RingBufferSize: 16},
+		config.LimitsConfig{},
+		core.NewEventBus(),
+	)
+	first, err := NewRecordSession("live/shared-signal", stream, newTestConfig(t.TempDir()).Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewRecordSession("live/shared-signal", stream, newTestConfig(t.TempDir()).Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		close(firstStarted)
+		first.Run()
+		close(firstDone)
+	}()
+	go func() {
+		close(secondStarted)
+		second.Run()
+		close(secondDone)
+	}()
+	<-firstStarted
+	<-secondStarted
+	runtime.Gosched()
+
+	defer func() {
+		first.Stop()
+		second.Stop()
+		<-firstDone
+		<-secondDone
+	}()
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo,
+		avframe.CodecH264,
+		avframe.FrameTypeKeyframe,
+		0,
+		0,
+		[]byte{0x65, 0x88, 0x84},
+	))
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		firstInfo, firstErr := os.Stat(first.writer.FilePath())
+		secondInfo, secondErr := os.Stat(second.writer.FilePath())
+		firstWritten := firstErr == nil && firstInfo.Size() > 0
+		secondWritten := secondErr == nil && secondInfo.Size() > 0
+		if firstWritten && secondWritten {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"single write reached sessions first=%v second=%v; both sessions must wake",
+				firstWritten,
+				secondWritten,
+			)
+		}
+		runtime.Gosched()
+	}
 }
 
 func TestParseSize(t *testing.T) {

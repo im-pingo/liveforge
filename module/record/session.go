@@ -55,21 +55,19 @@ func (s *RecordSession) Run() {
 	}
 
 	for {
-		// Non-blocking read + done check to allow clean shutdown
-		frame, ok := s.reader.TryRead()
-		if ok {
-			if err := s.writer.WriteFrame(frame); err != nil {
-				slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
-				return
-			}
-			continue
-		}
-
-		// No data available — wait for signal or done
 		select {
 		case <-s.done:
 			return
-		case <-s.stream.RingBuffer().Signal():
+		default:
+		}
+
+		frame, ok := s.reader.Read()
+		if !ok {
+			return
+		}
+		if err := s.writer.WriteFrame(frame); err != nil {
+			slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
+			return
 		}
 	}
 }
@@ -81,4 +79,5 @@ func (s *RecordSession) Stop() {
 	default:
 		close(s.done)
 	}
+	s.reader.Close()
 }

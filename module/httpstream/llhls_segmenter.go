@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 
 	"github.com/im-pingo/liveforge/core"
@@ -41,16 +42,19 @@ type LLHLSSegmenter struct {
 	hasVideo         bool // stream contains video track
 	gotFirstKeyframe bool // first video keyframe received
 
-	done chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewLLHLSSegmenter creates a new segmenter.
 func NewLLHLSSegmenter(partDuration float64, container string, cb LLHLSSegmenterCallbacks) *LLHLSSegmenter {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &LLHLSSegmenter{
 		partDuration: partDuration,
 		container:    container,
 		callbacks:    cb,
-		done:         make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -81,16 +85,9 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 	}
 
 	reader := stream.RingBuffer().NewReaderAt(startPos)
+	defer reader.Close()
 	for {
-		select {
-		case <-s.done:
-			s.flushCurrentPart(s.partStartDTS)
-			s.flushCurrentSegment()
-			return
-		default:
-		}
-
-		frame, ok := reader.Read()
+		frame, ok := reader.ReadContext(s.ctx)
 		if !ok || frame == nil {
 			s.flushCurrentPart(s.partStartDTS)
 			s.flushCurrentSegment()
@@ -111,11 +108,7 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 
 // Stop signals the segmenter to shut down.
 func (s *LLHLSSegmenter) Stop() {
-	select {
-	case <-s.done:
-	default:
-		close(s.done)
-	}
+	s.cancel()
 }
 
 func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {

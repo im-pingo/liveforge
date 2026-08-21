@@ -1,6 +1,10 @@
 package util
 
 import (
+	"context"
+	"fmt"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -153,6 +157,24 @@ func TestRingBufferCloseStopsWrite(t *testing.T) {
 	}
 }
 
+func TestRingBufferCloseDrainsBufferedValues(t *testing.T) {
+	rb := NewRingBuffer[int](4)
+	rb.Write(10)
+	rb.Write(20)
+	reader := rb.NewReader()
+	rb.Close()
+
+	for _, want := range []int{10, 20} {
+		got, ok := reader.Read()
+		if !ok || got != want {
+			t.Fatalf("Read after buffer Close = (%d, %v), want (%d, true)", got, ok, want)
+		}
+	}
+	if _, ok := reader.Read(); ok {
+		t.Fatal("Read returned data after draining a closed buffer")
+	}
+}
+
 func TestRingBufferReadDoesNotSpin(t *testing.T) {
 	rb := NewRingBuffer[int](16)
 	reader := rb.NewReader()
@@ -294,47 +316,320 @@ func TestRingReaderClose(t *testing.T) {
 	rb := NewRingBuffer[int](16)
 	r1 := rb.NewReader()
 	r2 := rb.NewReader()
-
-	done1 := make(chan struct{})
-	done2 := make(chan struct{})
-	go func() {
-		_, ok := r1.Read()
-		if ok {
-			t.Error("r1.Read() should return false after reader close")
-		}
-		close(done1)
-	}()
-	go func() {
-		val, ok := r2.Read()
-		if !ok || val != 100 {
-			t.Errorf("r2 expected (100, true), got (%d, %v)", val, ok)
-		}
-		close(done2)
-	}()
-
-	time.Sleep(20 * time.Millisecond)
-
-	// Close only r1 — r2 should remain blocked
-	r1.Close()
-
-	select {
-	case <-done1:
-	case <-time.After(time.Second):
-		t.Fatal("r1.Read() did not unblock after reader Close()")
-	}
-
-	select {
-	case <-done2:
-		t.Fatal("r2.Read() should still be blocking")
-	case <-time.After(50 * time.Millisecond):
-		// Good: r2 is unaffected
-	}
-
-	// Now unblock r2 with a write
 	rb.Write(100)
+
+	r1.Close()
+	r1.Close() // Close is idempotent.
+	if _, ok := r1.Read(); ok {
+		t.Fatal("r1.Read() should return false after reader close")
+	}
+
+	// Closing r1 discards its pending value without affecting r2.
+	val, ok := r2.Read()
+	if !ok || val != 100 {
+		t.Fatalf("r2 expected (100, true), got (%d, %v)", val, ok)
+	}
+}
+
+func TestRingReaderCloseInterruptsBlockedRead(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	reader := NewRingBuffer[int](16).NewReader()
+	started := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() {
+		close(started)
+		_, ok := reader.Read()
+		result <- ok
+	}()
+
+	<-started
+	runtime.Gosched()
+	reader.Close()
+
 	select {
-	case <-done2:
+	case ok := <-result:
+		if ok {
+			t.Fatal("Read returned data after reader close")
+		}
 	case <-time.After(time.Second):
-		t.Fatal("r2.Read() did not unblock after Write")
+		t.Fatal("reader Close did not interrupt blocked Read")
+	}
+}
+
+func TestRingReaderCloseDoesNotLeaveContextWake(t *testing.T) {
+	rb := NewRingBuffer[int](16)
+	reader := rb.NewReader()
+	oldContext := newTrackedAfterContext()
+	reader.ensureContextWake(oldContext)
+	<-oldContext.registered
+
+	// Hold the predicate lock so Close pauses after removing the old watcher.
+	rb.mu.Lock()
+	closeDone := make(chan struct{})
+	go func() {
+		reader.Close()
+		close(closeDone)
+	}()
+	<-oldContext.stopped
+
+	newContext := newTrackedAfterContext()
+	readDone := make(chan struct{})
+	go func() {
+		reader.ReadContext(newContext)
+		close(readDone)
+	}()
+	runtime.Gosched()
+	rb.mu.Unlock()
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("reader Close did not finish")
+	}
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent ReadContext did not observe reader close")
+	}
+	select {
+	case <-newContext.registered:
+		select {
+		case <-newContext.stopped:
+		case <-time.After(time.Second):
+			t.Fatal("reader Close left a newly registered context wake active")
+		}
+	default:
+	}
+}
+
+func TestRingReaderReadContextCancellation(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	rb := NewRingBuffer[int](16)
+	reader := rb.NewReader()
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx := newPredicateBarrierContext(baseCtx, 3)
+
+	result := make(chan bool, 1)
+	go func() {
+		_, ok := reader.ReadContext(ctx)
+		result <- ok
+	}()
+
+	<-ctx.reached
+	close(ctx.release)
+	runtime.Gosched()
+	cancel()
+
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("ReadContext returned data after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadContext did not unblock after cancellation")
+	}
+
+	if rb.IsClosed() {
+		t.Fatal("canceling one reader context closed the ring buffer")
+	}
+
+	rb.Write(7)
+	if got, ok := reader.ReadContext(context.Background()); !ok || got != 7 {
+		t.Fatalf("reader was not reusable after call cancellation: got (%d, %v)", got, ok)
+	}
+}
+
+func TestRingBufferReadContextDoesNotLoseWakeups(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	rb := NewRingBuffer[int](1)
+	reader := rb.NewReaderAt(0)
+	ctx := newPredicateBarrierContext(context.Background(), 3)
+	result := make(chan int, 1)
+	go func() {
+		got, ok := reader.ReadContext(ctx)
+		if !ok {
+			result <- -1
+			return
+		}
+		result <- got
+	}()
+
+	// The reader has evaluated the no-data predicate while holding rb.mu and
+	// is paused immediately before cond.Wait. A correct writer must block on
+	// the same mutex until the reader registers its wait.
+	<-ctx.reached
+	writeDone := make(chan struct{})
+	go func() {
+		rb.Write(42)
+		close(writeDone)
+	}()
+	runtime.Gosched()
+	publishedBeforeWait := rb.WriteCursor() != 0
+	close(ctx.release)
+
+	if publishedBeforeWait {
+		// Let the reader enter Wait, then clean it up before reporting the
+		// synchronization violation.
+		runtime.Gosched()
+		rb.Close()
+	}
+
+	select {
+	case got := <-result:
+		if publishedBeforeWait {
+			t.Fatal("writer published between the predicate check and cond.Wait")
+		}
+		if got != 42 {
+			t.Fatalf("read got %d, want 42", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reader lost the write wakeup")
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not complete")
+	}
+}
+
+type predicateBarrierContext struct {
+	context.Context
+	blockAt int
+	calls   int
+	reached chan struct{}
+	release chan struct{}
+}
+
+type trackedAfterContext struct {
+	done       chan struct{}
+	registered chan struct{}
+	stopped    chan struct{}
+}
+
+func newTrackedAfterContext() *trackedAfterContext {
+	return &trackedAfterContext{
+		done:       make(chan struct{}),
+		registered: make(chan struct{}),
+		stopped:    make(chan struct{}),
+	}
+}
+
+func (c *trackedAfterContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *trackedAfterContext) Done() <-chan struct{}       { return c.done }
+func (c *trackedAfterContext) Err() error                  { return nil }
+func (c *trackedAfterContext) Value(any) any               { return nil }
+
+func (c *trackedAfterContext) AfterFunc(func()) func() bool {
+	close(c.registered)
+	var once sync.Once
+	return func() bool {
+		stopped := false
+		once.Do(func() {
+			stopped = true
+			close(c.stopped)
+		})
+		return stopped
+	}
+}
+
+func newPredicateBarrierContext(parent context.Context, blockAt int) *predicateBarrierContext {
+	return &predicateBarrierContext{
+		Context: parent,
+		blockAt: blockAt,
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (c *predicateBarrierContext) Err() error {
+	c.calls++
+	if c.calls == c.blockAt {
+		close(c.reached)
+		<-c.release
+	}
+	return c.Context.Err()
+}
+
+func BenchmarkRingBufferHighReaderCount(b *testing.B) {
+	benchmarkRingBufferHighReaderCount(b, false)
+}
+
+func BenchmarkRingBufferReadContextHighReaderCount(b *testing.B) {
+	benchmarkRingBufferHighReaderCount(b, true)
+}
+
+func benchmarkRingBufferHighReaderCount(b *testing.B, useContext bool) {
+	for _, readerCount := range []int{1, 16, 128} {
+		b.Run(fmt.Sprintf("readers-%d", readerCount), func(b *testing.B) {
+			rb := NewRingBuffer[int](b.N)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			start := make(chan struct{})
+			readers := make([]*RingReader[int], 0, readerCount)
+			var done sync.WaitGroup
+			done.Add(readerCount)
+
+			for range readerCount {
+				reader := rb.NewReaderAt(0)
+				readers = append(readers, reader)
+				go func() {
+					defer done.Done()
+					defer reader.Close()
+					<-start
+					for range b.N {
+						var ok bool
+						if useContext {
+							_, ok = reader.ReadContext(ctx)
+						} else {
+							_, ok = reader.Read()
+						}
+						if !ok {
+							return
+						}
+					}
+				}()
+			}
+
+			close(start)
+			if useContext {
+				waitForContextRegistration(b, readers, ctx.Done())
+			}
+			b.ResetTimer()
+			for value := range b.N {
+				rb.Write(value)
+			}
+			done.Wait()
+			b.StopTimer()
+		})
+	}
+}
+
+func waitForContextRegistration(b *testing.B, readers []*RingReader[int], done <-chan struct{}) {
+	b.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		allRegistered := true
+		for _, reader := range readers {
+			reader.contextMu.Lock()
+			registered := reader.contextDone == done && reader.stopContext != nil
+			reader.contextMu.Unlock()
+			if !registered {
+				allRegistered = false
+				break
+			}
+		}
+		if allRegistered {
+			return
+		}
+		if time.Now().After(deadline) {
+			b.Fatal("readers did not register their context wake")
+		}
+		runtime.Gosched()
 	}
 }

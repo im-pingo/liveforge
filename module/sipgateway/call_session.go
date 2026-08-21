@@ -1,6 +1,7 @@
 package sipgateway
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"sync"
@@ -14,10 +15,10 @@ import (
 
 // CallSession manages a single SIP call with RTP bridging to/from a stream.
 type CallSession struct {
-	callID     string
-	streamKey  string
-	codec      negotiatedCodec
-	direction  string // "inbound" or "outbound"
+	callID    string
+	streamKey string
+	codec     negotiatedCodec
+	direction string // "inbound" or "outbound"
 
 	rtpPort    int
 	rtcpPort   int
@@ -145,26 +146,21 @@ func (cs *CallSession) sendLoop() {
 	defer cs.stream.RemoveSubscriber("sipgateway")
 
 	reader := cs.stream.RingBuffer().NewReader()
-	rb := cs.stream.RingBuffer()
-
-	for {
+	defer reader.Close()
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	defer cancelRead()
+	go func() {
 		select {
 		case <-cs.closed:
-			return
-		default:
+			cancelRead()
+		case <-readCtx.Done():
 		}
+	}()
 
-		frame, ok := reader.TryRead()
+	for {
+		frame, ok := reader.ReadContext(readCtx)
 		if !ok {
-			if rb.IsClosed() {
-				return
-			}
-			select {
-			case <-cs.closed:
-				return
-			case <-rb.Signal():
-			}
-			continue
+			return
 		}
 
 		if frame.MediaType != avframe.MediaTypeAudio {

@@ -1,6 +1,7 @@
 package httpstream
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -42,7 +43,8 @@ type DASHManager struct {
 	basePath   string // e.g., "/live/stream1"
 	hasAudio   bool   // whether audio track is present
 	audioCodec string // e.g., "mp4a.40.2" for MPD codecs attribute
-	done       chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
 
 	// Video metadata extracted from sequence header for MPD Representation.
 	videoCodecStr string // e.g., "avc1.640028"
@@ -61,13 +63,15 @@ func NewDASHManager(streamKey, basePath string, targetDur float64, maxSegments i
 	if maxSegments <= 0 {
 		maxSegments = 30
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &DASHManager{
 		streamKey:   streamKey,
 		basePath:    basePath,
 		targetDur:   targetDur,
 		maxSegments: maxSegments,
 		startTime:   time.Now().UTC(),
-		done:        make(chan struct{}),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -305,15 +309,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 	// Read live frames
 	reader := stream.RingBuffer().NewReaderAt(startPos)
+	defer reader.Close()
 	for {
-		select {
-		case <-d.done:
-			finalize(segStartDTS)
-			return
-		default:
-		}
-
-		frame, ok := reader.Read()
+		frame, ok := reader.ReadContext(d.ctx)
 		if !ok || frame == nil {
 			finalize(segStartDTS)
 			return
@@ -350,11 +348,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 // Stop signals the manager to shut down.
 func (d *DASHManager) Stop() {
-	select {
-	case <-d.done:
-	default:
-		close(d.done)
-	}
+	d.cancel()
 }
 
 // GetInitSegment returns the video init segment (ftyp+moov).

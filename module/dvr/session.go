@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -43,6 +44,9 @@ type Session struct {
 
 // NewSession creates a DVR session for the given stream.
 func NewSession(streamKey string, stream *core.Stream, cfg config.DVRConfig, existingIndex *SegmentIndex, startSeq int) (*Session, error) {
+	if err := core.ValidateStreamKey(streamKey); err != nil {
+		return nil, fmt.Errorf("dvr: invalid stream key: %w", err)
+	}
 	segDir := resolvePath(cfg.Path, streamKey)
 	if err := os.MkdirAll(segDir, 0755); err != nil {
 		return nil, fmt.Errorf("dvr: create dir %s: %w", segDir, err)
@@ -81,21 +85,17 @@ func (s *Session) Run() {
 	}
 
 	for {
-		frame, ok := s.reader.TryRead()
-		if ok {
-			s.processFrame(frame)
-			continue
-		}
-
-		if s.stream.RingBuffer().IsClosed() {
-			return
-		}
-
 		select {
 		case <-s.done:
 			return
-		case <-s.stream.RingBuffer().Signal():
+		default:
 		}
+
+		frame, ok := s.reader.Read()
+		if !ok {
+			return
+		}
+		s.processFrame(frame)
 	}
 }
 
@@ -198,6 +198,7 @@ func (s *Session) Stop() {
 	default:
 		close(s.done)
 	}
+	s.reader.Close()
 	s.stopped.Store(true)
 }
 
@@ -213,5 +214,6 @@ func (s *Session) Index() *SegmentIndex {
 
 func resolvePath(pathTemplate, streamKey string) string {
 	p := strings.ReplaceAll(pathTemplate, "{stream_key}", streamKey)
+	p = strings.ReplaceAll(p, "{stream}", path.Base(streamKey))
 	return filepath.Clean(p)
 }

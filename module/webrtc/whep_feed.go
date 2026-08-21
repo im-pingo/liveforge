@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -319,71 +320,78 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	if transcodeRelease != nil {
 		defer transcodeRelease()
 	}
+	defer reader.Close()
+
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	defer cancelRead()
+	go func() {
+		select {
+		case <-done:
+			cancelRead()
+		case <-readCtx.Done():
+		}
+	}()
 
 	// Live frame loop: start reading only NEW frames (after snapshot).
 	// In realtime mode, skip all frames until the first video keyframe
 	// arrives, then start sending from that keyframe onward.
 	gotKeyframe := mode == "live" // live mode already has GOP cache, no need to wait
 	for {
-		frame, ok := reader.TryRead()
-		if ok {
-			// Realtime mode: discard frames until first keyframe.
-			if !gotKeyframe {
-				if frame.MediaType.IsVideo() && frame.FrameType == avframe.FrameTypeKeyframe {
-					gotKeyframe = true
-					slog.Info("realtime mode: got first keyframe", "module", "webrtc")
-				} else {
-					continue
-				}
-			}
+		frame, ok := reader.ReadContext(readCtx)
+		if !ok {
+			return
+		}
 
-			// Audio: deliver immediately without DTS pacing.
-			// Audio has its own fixed duration (e.g. 20ms for Opus) that drives
-			// RTP timestamp advancement. Chrome's audio jitter buffer handles
-			// arrival variance independently. Pacing audio would delay video
-			// frame reads in this goroutine, causing video jitter.
-			if frame.MediaType.IsAudio() {
-				writeAudioSample(frame)
+		// Realtime mode: discard frames until first keyframe.
+		if !gotKeyframe {
+			if frame.MediaType.IsVideo() && frame.FrameType == avframe.FrameTypeKeyframe {
+				gotKeyframe = true
+				slog.Info("realtime mode: got first keyframe", "module", "webrtc")
+			} else {
 				continue
 			}
+		}
 
-			// DTS-based pacing: sleep if we're sending video faster than real-time.
-			if frame.DTS > 0 {
-				if paceBaseWall.IsZero() {
-					paceBaseWall = time.Now()
-					paceBaseDTS = frame.DTS
-				} else {
-					dtsDelta := time.Duration(frame.DTS-paceBaseDTS) * time.Millisecond
-					targetTime := paceBaseWall.Add(dtsDelta)
-					sleepDur := time.Until(targetTime)
-
-					switch dtsPaceAction(sleepDur) {
-					case "sleep":
-						timer := time.NewTimer(sleepDur)
-						select {
-						case <-timer.C:
-						case <-done:
-							timer.Stop()
-							return
-						}
-					case "reset":
-						paceBaseWall = time.Now()
-						paceBaseDTS = frame.DTS
-					}
-					// "deliver": behind real-time, send immediately.
-					// GCC pacer smooths the RTP output.
-				}
-			}
-
-			if frame.MediaType.IsVideo() {
-				writeVideoSample(frame)
-			}
+		// Audio: deliver immediately without DTS pacing.
+		// Audio has its own fixed duration (e.g. 20ms for Opus) that drives
+		// RTP timestamp advancement. Chrome's audio jitter buffer handles
+		// arrival variance independently. Pacing audio would delay video
+		// frame reads in this goroutine, causing video jitter.
+		if frame.MediaType.IsAudio() {
+			writeAudioSample(frame)
 			continue
 		}
-		select {
-		case <-done:
-			return
-		case <-reader.Signal():
+
+		// DTS-based pacing: sleep if we're sending video faster than real-time.
+		if frame.DTS > 0 {
+			if paceBaseWall.IsZero() {
+				paceBaseWall = time.Now()
+				paceBaseDTS = frame.DTS
+			} else {
+				dtsDelta := time.Duration(frame.DTS-paceBaseDTS) * time.Millisecond
+				targetTime := paceBaseWall.Add(dtsDelta)
+				sleepDur := time.Until(targetTime)
+
+				switch dtsPaceAction(sleepDur) {
+				case "sleep":
+					timer := time.NewTimer(sleepDur)
+					select {
+					case <-timer.C:
+					case <-done:
+						timer.Stop()
+						return
+					}
+				case "reset":
+					paceBaseWall = time.Now()
+					paceBaseDTS = frame.DTS
+				}
+				// "deliver": behind real-time, send immediately.
+				// GCC pacer smooths the RTP output.
+			}
+		}
+
+		if frame.MediaType.IsVideo() {
+			writeVideoSample(frame)
 		}
 	}
 }

@@ -2,8 +2,12 @@ package httpstream
 
 import (
 	"bytes"
+	"runtime"
 	"testing"
+	"time"
 
+	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
@@ -140,5 +144,54 @@ func TestBufCopyAndReset(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Error("buffer should be reset")
+	}
+}
+
+func TestHLSManagerStopInterruptsIdleRun(t *testing.T) {
+	stream := newIdleHTTPStream()
+	mgr := NewHLSManager("live/idle", "/live/idle", 6, 3)
+	assertIdleSegmenterStops(t, stream, func() { mgr.Run(stream) }, mgr.Stop)
+}
+
+func TestDASHManagerStopInterruptsIdleRun(t *testing.T) {
+	stream := newIdleHTTPStream()
+	mgr := NewDASHManager("live/idle", "/live/idle", 6, 3)
+	assertIdleSegmenterStops(t, stream, func() { mgr.Run(stream) }, mgr.Stop)
+}
+
+func newIdleHTTPStream() *core.Stream {
+	return core.NewStream(
+		"live/idle",
+		config.StreamConfig{RingBufferSize: 16},
+		config.LimitsConfig{},
+		core.NewEventBus(),
+	)
+}
+
+func assertIdleSegmenterStops(t *testing.T, stream *core.Stream, run, stop func()) {
+	t.Helper()
+
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		close(started)
+		run()
+		close(stopped)
+	}()
+
+	<-started
+	// With one P, the segmenter runs until its idle ring read blocks.
+	runtime.Gosched()
+	stop()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		stream.Close()
+		<-stopped
+		t.Fatal("Stop did not interrupt the idle ring read")
 	}
 }

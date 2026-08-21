@@ -232,18 +232,15 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 	}
 
 	reader := tm.stream.RingBuffer().NewReaderAt(tm.stream.RingBuffer().WriteCursor())
+	defer reader.Close()
+	defer func() {
+		if resampler != nil {
+			resampler.Close()
+		}
+		track.ringBuffer.Close()
+	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			if resampler != nil {
-				resampler.Close()
-			}
-			track.ringBuffer.Close()
-			return
-		default:
-		}
-
 		// Inline processing: handle each frame as it arrives. Video passes
 		// through immediately; audio encodes inline. This limits the maximum
 		// video delivery delay to a single audio encode operation (~0.5ms)
@@ -251,38 +248,18 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 		// N × encode_time. Chrome's jitter estimator accumulates delivery
 		// irregularities via EWMA, so even small periodic delays from batch
 		// encoding compound over minutes into large jitter buffer growth.
-		drained := false
-		for {
-			frame, ok := reader.TryRead()
-			if !ok {
-				break
-			}
-			drained = true
-
-			if frame.MediaType.IsVideo() {
-				// Video passthrough: zero encoding delay.
-				track.ringBuffer.Write(frame)
-			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				// Skip source audio sequence headers.
-			} else {
-				encodeAudio(frame)
-			}
-		}
-
-		if drained {
-			// More frames may have arrived during encoding; loop back.
-			continue
-		}
-
-		// No frames available — wait for signal.
-		select {
-		case <-ctx.Done():
-			if resampler != nil {
-				resampler.Close()
-			}
-			track.ringBuffer.Close()
+		frame, ok := reader.ReadContext(ctx)
+		if !ok {
 			return
-		case <-tm.stream.RingBuffer().Signal():
+		}
+
+		if frame.MediaType.IsVideo() {
+			// Video passthrough: zero encoding delay.
+			track.ringBuffer.Write(frame)
+		} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			// Skip source audio sequence headers.
+		} else {
+			encodeAudio(frame)
 		}
 	}
 }

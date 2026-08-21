@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -24,14 +25,15 @@ type HLSSegment struct {
 type HLSManager struct {
 	mu          sync.RWMutex
 	segments    []*HLSSegment
-	seqBase     int     // sequence number of first segment in window
+	seqBase     int // sequence number of first segment in window
 	nextSeqNum  int
 	targetDur   float64 // target segment duration in seconds
 	maxSegments int     // max segments in sliding window
 
 	streamKey string
 	basePath  string // e.g., "/live/stream1"
-	done      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 // NewHLSManager creates a new HLS manager for a stream.
@@ -42,12 +44,14 @@ func NewHLSManager(streamKey, basePath string, targetDur float64, maxSegments in
 	if maxSegments <= 0 {
 		maxSegments = 5
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &HLSManager{
 		streamKey:   streamKey,
 		basePath:    basePath,
 		targetDur:   targetDur,
 		maxSegments: maxSegments,
-		done:        make(chan struct{}),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -126,15 +130,9 @@ func (h *HLSManager) Run(stream *core.Stream) {
 
 	// Read live frames
 	reader := stream.RingBuffer().NewReaderAt(startPos)
+	defer reader.Close()
 	for {
-		select {
-		case <-h.done:
-			finalize(segStartDTS) // flush any remaining data
-			return
-		default:
-		}
-
-		frame, ok := reader.Read()
+		frame, ok := reader.ReadContext(h.ctx)
 		if !ok || frame == nil {
 			finalize(segStartDTS)
 			return
@@ -167,11 +165,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 
 // Stop signals the manager to shut down.
 func (h *HLSManager) Stop() {
-	select {
-	case <-h.done:
-	default:
-		close(h.done)
-	}
+	h.cancel()
 }
 
 // GenerateM3U8 returns the current live m3u8 playlist.

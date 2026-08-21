@@ -193,6 +193,12 @@ func TestLLHLSSegmenter_SkipsFramesBeforeFirstKeyframe(t *testing.T) {
 	}
 }
 
+func TestLLHLSSegmenter_StopInterruptsIdleRun(t *testing.T) {
+	stream := newIdleHTTPStream()
+	segmenter := NewLLHLSSegmenter(0.2, "ts", LLHLSSegmenterCallbacks{})
+	assertIdleSegmenterStops(t, stream, func() { segmenter.Run(stream) }, segmenter.Stop)
+}
+
 // --- test helpers ---
 
 func makeTestFrames(count int, intervalMs int64) []*avframe.AVFrame {
