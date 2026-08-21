@@ -16,10 +16,10 @@ import (
 // TestConsolePublishFlow launches headless Chrome on the console page
 // (served over localhost HTTP — a secure context) and exercises the full
 // WebRTC Publish workflow:
-//   1. Open the publish modal
-//   2. Verify fake camera/mic devices are enumerated
-//   3. Enter a stream key and click "Start Publishing"
-//   4. Verify the WHIP session succeeds and the stream appears in the hub
+//  1. Open the publish modal
+//  2. Verify fake camera/mic devices are enumerated
+//  3. Enter a stream key and click "Start Publishing"
+//  4. Verify the WHIP session succeeds and the stream appears in the hub
 func TestConsolePublishFlow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping browser test in short mode")
@@ -61,10 +61,14 @@ func TestConsolePublishFlow(t *testing.T) {
 	apiAddr := apiMod.Addr().String()
 	consoleURL := "http://" + apiAddr + "/console"
 
-	// Patch the WebRTC listen address into the config so /api/v1/server/info
-	// returns the actual port (config stores the original ":0").
+	// Publish the WebRTC listen address so /api/v1/server/info returns the
+	// actual port (the server owns a copy of the original config).
 	webrtcAddr := webrtcMod.Addr().String()
-	cfg.WebRTC.Listen = webrtcAddr
+	next := config.CloneConfig(srv.Config())
+	next.WebRTC.Listen = webrtcAddr
+	if err := srv.ApplyConfig(next); err != nil {
+		t.Fatalf("publish WebRTC address: %v", err)
+	}
 
 	t.Logf("API:    %s", apiAddr)
 	t.Logf("WebRTC: %s", webrtcAddr)

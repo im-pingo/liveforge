@@ -10,7 +10,14 @@ import (
 // RegisterRoutes registers all API and console routes on the given mux.
 // This allows any HTTP server (httpstream, standalone API, etc.) to serve the management API.
 func RegisterRoutes(mux *http.ServeMux, s *core.Server) {
-	registerRoutes(mux, s, mustNewSessionManager())
+	sessions := mustNewSessionManager()
+	mux.Handle("/", securedRoutes(s, sessions))
+}
+
+func securedRoutes(s *core.Server, sessions *sessionManager) http.Handler {
+	routes := http.NewServeMux()
+	registerRoutes(routes, s, sessions)
+	return buildDynamicAuthHandler(routes, s, sessions)
 }
 
 func registerRoutes(mux *http.ServeMux, s *core.Server, sessions *sessionManager) {

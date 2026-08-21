@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var bracedEnvPattern = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
+var namedEnvPattern = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*`)
 
 // FileSource merges a user-owned base file with a machine-owned runtime
 // override file. Only the override file is written by Store.
@@ -207,13 +207,13 @@ func decodeYAMLMap(data []byte) (map[string]any, error) {
 }
 
 func decodeConfigMap(value map[string]any) (*Config, []byte, error) {
-	canonical, err := yaml.Marshal(value)
+	expanded := expandEnvLeaves(value).(map[string]any)
+	canonical, err := yaml.Marshal(expanded)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal merged config: %w", err)
 	}
-	expanded := []byte(expandBracedEnv(string(canonical)))
 	cfg := defaults()
-	if err := yaml.Unmarshal(expanded, cfg); err != nil {
+	if err := yaml.Unmarshal(canonical, cfg); err != nil {
 		return nil, nil, fmt.Errorf("parse merged config: %w", err)
 	}
 	normalize(cfg)
@@ -227,9 +227,37 @@ func decodeConfigMap(value map[string]any) (*Config, []byte, error) {
 	return cfg, validated, nil
 }
 
-func expandBracedEnv(value string) string {
-	return bracedEnvPattern.ReplaceAllStringFunc(value, func(token string) string {
-		return os.Getenv(token[2 : len(token)-1])
+func expandEnvLeaves(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return expandEnvString(typed)
+	case map[string]any:
+		expanded := make(map[string]any, len(typed))
+		for key, item := range typed {
+			expanded[key] = expandEnvLeaves(item)
+		}
+		return expanded
+	case []any:
+		expanded := make([]any, len(typed))
+		for i, item := range typed {
+			expanded[i] = expandEnvLeaves(item)
+		}
+		return expanded
+	default:
+		return value
+	}
+}
+
+func expandEnvString(value string) string {
+	if strings.HasPrefix(value, "$2a$") || strings.HasPrefix(value, "$2b$") || strings.HasPrefix(value, "$2y$") {
+		return value
+	}
+	return namedEnvPattern.ReplaceAllStringFunc(value, func(token string) string {
+		name := token[1:]
+		if strings.HasPrefix(token, "${") {
+			name = token[2 : len(token)-1]
+		}
+		return os.Getenv(name)
 	})
 }
 

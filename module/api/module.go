@@ -45,10 +45,7 @@ func (m *Module) Init(s *core.Server) error {
 	}
 	m.listener = ln
 
-	mux := http.NewServeMux()
-	registerRoutes(mux, s, sessions)
-
-	var handler http.Handler = buildDynamicAuthHandler(mux, s, sessions)
+	var handler http.Handler = securedRoutes(s, sessions)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
 		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
 		handler = m.limiter.Wrap(handler)
@@ -117,6 +114,10 @@ func buildAuthHandlerWithConfig(mux *http.ServeMux, current func() config.APICon
 		cfg := current()
 		if strings.HasPrefix(r.URL.Path, "/debug/pprof") && !cfg.PprofEnabled {
 			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/server/health" {
+			mux.ServeHTTP(w, r)
 			return
 		}
 		// Login endpoint — always accessible

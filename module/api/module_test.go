@@ -200,6 +200,59 @@ func TestEnabledAPIAuthFailsClosedWithoutBearerToken(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutesProtectsSettingsEndpoint(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.API.Auth.Enabled = false
+	cfg.API.Console.Username = "admin"
+	cfg.API.Console.Password = "pass123"
+	server := core.NewServer(cfg)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, server)
+
+	for _, request := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/v1/config"},
+		{method: http.MethodPatch, path: "/api/v1/config"},
+		{method: http.MethodPost, path: "/api/v1/config/password"},
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(request.method, request.path, nil))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Errorf("unauthenticated RegisterRoutes %s %s status = %d, want 401",
+				request.method, request.path, recorder.Code)
+		}
+	}
+}
+
+func TestHealthEndpointRemainsPublicWhenAPIAuthEnabled(t *testing.T) {
+	for _, bearerToken := range []string{"", "configured-token"} {
+		name := "empty bearer"
+		if bearerToken != "" {
+			name = "configured bearer"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := newTestConfig().API
+			cfg.Auth.Enabled = true
+			cfg.Auth.BearerToken = bearerToken
+			cfg.Console.Username = "admin"
+			cfg.Console.Password = "pass123"
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/v1/server/health", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})
+			handler := buildAuthHandler(mux, cfg)
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/server/health", nil))
+			if recorder.Code != http.StatusNoContent {
+				t.Fatalf("health status = %d, want 204", recorder.Code)
+			}
+		})
+	}
+}
+
 func TestDisabledAPIAuthIgnoresRetainedBearerForOrdinaryRoutes(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.API.Auth.Enabled = false

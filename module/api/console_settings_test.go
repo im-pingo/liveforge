@@ -35,10 +35,16 @@ func TestConsoleSettingsFlow(t *testing.T) {
 		}
 		t.Fatalf("start browser: %v", err)
 	}
-	browserCtx, cancel := context.WithTimeout(browserCtx, 20*time.Second)
-	defer cancel()
+	runPhase := func(name string, actions ...chromedp.Action) {
+		t.Helper()
+		phaseCtx, cancel := context.WithTimeout(browserCtx, 15*time.Second)
+		defer cancel()
+		if err := chromedp.Run(phaseCtx, actions...); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
 
-	if err := chromedp.Run(browserCtx,
+	runPhase("open settings",
 		chromedp.Navigate(testServer.addr+"/console/login"),
 		chromedp.WaitVisible("#username", chromedp.ByID),
 		chromedp.SendKeys("#username", "admin", chromedp.ByID),
@@ -48,25 +54,18 @@ func TestConsoleSettingsFlow(t *testing.T) {
 		chromedp.Click("#tab-settings", chromedp.ByID),
 		chromedp.WaitVisible("#view-settings", chromedp.ByID),
 		chromedp.Poll(`document.getElementById("settings-server-name").value === "Config Test"`, nil),
-	); err != nil {
-		if strings.Contains(err.Error(), "executable file not found") || strings.Contains(err.Error(), "websocket url timeout") {
-			t.Skipf("headless Chrome unavailable: %v", err)
-		}
-		t.Fatalf("open settings: %v", err)
-	}
+	)
 
-	if err := chromedp.Run(browserCtx,
+	runPhase("save non-credential settings",
 		chromedp.SetValue("#settings-server-name", "Console Updated", chromedp.ByID),
 		chromedp.Click("#settings-save", chromedp.ByID),
 		chromedp.Poll(`document.getElementById("settings-status").textContent.indexOf("Saved") >= 0`, nil),
-	); err != nil {
-		t.Fatalf("save non-credential settings without password: %v", err)
-	}
+	)
 	if got := testServer.server.Config().Server.Name; got != "Console Updated" {
 		t.Fatalf("server name = %q, want Console Updated", got)
 	}
 
-	if err := chromedp.Run(browserCtx,
+	runPhase("save credential settings",
 		chromedp.SetValue("#settings-publish-token", "ui-publish-secret", chromedp.ByID),
 		chromedp.SetValue("#settings-publish-callback", "https://ui.example/publish", chromedp.ByID),
 		chromedp.SetValue("#settings-subscribe-callback", "https://ui.example/subscribe", chromedp.ByID),
@@ -79,9 +78,7 @@ func TestConsoleSettingsFlow(t *testing.T) {
 		`, nil),
 		chromedp.Click("#settings-save", chromedp.ByID),
 		chromedp.Poll(`document.getElementById("settings-status").textContent.indexOf("Saved") >= 0`, nil),
-	); err != nil {
-		t.Fatalf("save settings: %v", err)
-	}
+	)
 
 	cfg := testServer.server.Config()
 	if cfg.Server.Name != "Console Updated" || cfg.Auth.Publish.Mode != "token" || cfg.Auth.Publish.Stage != "post_connect" ||
@@ -91,7 +88,7 @@ func TestConsoleSettingsFlow(t *testing.T) {
 		t.Fatalf("runtime settings were not updated: server=%q auth=%+v", cfg.Server.Name, cfg.Auth)
 	}
 
-	if err := chromedp.Run(browserCtx,
+	runPhase("clear publish credentials",
 		chromedp.Click("#settings-publish-token-clear", chromedp.ByID),
 		chromedp.Click("#settings-publish-callback-clear", chromedp.ByID),
 		chromedp.SetValue("#settings-current-password", testServer.password, chromedp.ByID),
@@ -101,9 +98,7 @@ func TestConsoleSettingsFlow(t *testing.T) {
 			document.getElementById("settings-publish-token-state").textContent === "Not configured" &&
 			document.getElementById("settings-publish-callback-state").textContent === "Not configured"
 		`, nil),
-	); err != nil {
-		t.Fatalf("clear publish credentials: %v", err)
-	}
+	)
 	cfg = testServer.server.Config()
 	if cfg.Auth.Publish.Token.Secret != "" || cfg.Auth.Publish.Callback.URL != "" || cfg.Auth.Subscribe.Token.Secret != "subscribe-token-secret" {
 		t.Fatalf("UI secret clear/keep result = publish token %q callback %q subscribe token %q",
@@ -111,31 +106,28 @@ func TestConsoleSettingsFlow(t *testing.T) {
 	}
 
 	snapshot := testServer.manager.Current()
-	if _, err := testServer.manager.Update(browserCtx, map[string]any{
+	updateCtx, cancelUpdate := context.WithTimeout(browserCtx, 15*time.Second)
+	_, updateErr := testServer.manager.Update(updateCtx, map[string]any{
 		"api": map[string]any{"listen": "127.0.0.1:19090"},
-	}, snapshot.Revision); err != nil {
-		t.Fatalf("set restart-required desired config: %v", err)
+	}, snapshot.Revision)
+	cancelUpdate()
+	if updateErr != nil {
+		t.Fatalf("set restart-required desired config: %v", updateErr)
 	}
-	if err := chromedp.Run(browserCtx,
+	runPhase("show pending desired and effective values",
 		chromedp.Evaluate(`refreshSettings()`, nil),
 		chromedp.Poll(`
 			document.getElementById("settings-restart").textContent.indexOf("api.listen") >= 0 &&
 			document.getElementById("settings-restart").textContent.indexOf("effective=127.0.0.1:0") >= 0 &&
 			document.getElementById("settings-restart").textContent.indexOf("desired=127.0.0.1:19090") >= 0
 		`, nil),
-	); err != nil {
-		t.Fatalf("show pending desired/effective values: %v", err)
-	}
+	)
 
-	if err := chromedp.Run(browserCtx,
+	runPhase("change password and return to login",
 		chromedp.SetValue("#password-current", testServer.password, chromedp.ByID),
 		chromedp.SetValue("#password-new", "browser-new-password", chromedp.ByID),
 		chromedp.SetValue("#password-confirm", "browser-new-password", chromedp.ByID),
 		chromedp.Click("#password-save", chromedp.ByID),
-	); err != nil {
-		t.Fatalf("change password: %v", err)
-	}
-	if err := chromedp.Run(browserCtx, chromedp.WaitVisible("#username", chromedp.ByID)); err != nil {
-		t.Fatalf("wait for login after password change: %v", err)
-	}
+		chromedp.WaitVisible("#username", chromedp.ByID),
+	)
 }

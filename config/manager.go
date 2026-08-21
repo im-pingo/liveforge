@@ -50,12 +50,13 @@ func (m *Manager) SetApply(apply ApplyFunc) {
 	m.refreshMu.Unlock()
 }
 
+// Current returns a caller-owned deep copy without reading the Source.
 func (m *Manager) Current() Snapshot {
 	snapshot := m.current.Load()
 	if snapshot == nil {
 		return Snapshot{}
 	}
-	return *snapshot
+	return cloneSnapshot(*snapshot)
 }
 
 func (m *Manager) Refresh(ctx context.Context) (ApplyResult, error) {
@@ -70,48 +71,67 @@ func (m *Manager) Refresh(ctx context.Context) (ApplyResult, error) {
 }
 
 func (m *Manager) refreshDocumentLocked(ctx context.Context, doc Document) (ApplyResult, error) {
-	if doc.Config != nil {
-		normalize(doc.Config)
+	desired := CloneConfig(doc.Config)
+	if desired != nil {
+		normalize(desired)
 	}
-	if err := Validate(doc.Config); err != nil {
+	if err := Validate(desired); err != nil {
 		return ApplyResult{}, fmt.Errorf("validate config revision %s: %w", doc.Revision, err)
 	}
 	previous := m.current.Load()
 	if previous != nil && previous.Revision == doc.Revision {
-		return ApplyResult{
-			Revision: previous.Revision, PendingRestart: append([]string(nil), previous.PendingRestart...),
-			Snapshot: *previous,
-		}, nil
+		return applyResult(false, *previous), nil
 	}
 
-	effective := doc.Config
+	effective := CloneConfig(desired)
 	changes := ChangeSet{}
 	var err error
 	if previous != nil {
-		changes, err = diffConfigs(previous.Effective, doc.Config)
+		changes, err = diffConfigs(previous.Effective, desired)
 		if err != nil {
 			return ApplyResult{}, err
 		}
-		effective, err = buildEffective(previous.Effective, doc.Config, changes)
+		effective, err = buildEffective(previous.Effective, desired, changes)
 		if err != nil {
 			return ApplyResult{}, err
 		}
 		if m.apply != nil {
-			if err := m.apply(ctx, previous.Effective, effective, changes); err != nil {
+			if err := m.apply(ctx, CloneConfig(previous.Effective), CloneConfig(effective), cloneChangeSet(changes)); err != nil {
 				return ApplyResult{}, fmt.Errorf("apply config revision %s: %w", doc.Revision, err)
 			}
 		}
 	}
 	pending := changes.Paths(ReloadRestart)
 	snapshot := &Snapshot{
-		Desired: doc.Config, Effective: effective, Revision: doc.Revision,
+		Desired: desired, Effective: effective, Revision: doc.Revision,
 		Source: doc.Source, LoadedAt: time.Now(), PendingRestart: pending,
 	}
 	m.current.Store(snapshot)
+	return applyResult(true, *snapshot), nil
+}
+
+func cloneSnapshot(snapshot Snapshot) Snapshot {
+	return Snapshot{
+		Desired: CloneConfig(snapshot.Desired), Effective: CloneConfig(snapshot.Effective),
+		Revision: snapshot.Revision, Source: snapshot.Source, LoadedAt: snapshot.LoadedAt,
+		PendingRestart: append([]string(nil), snapshot.PendingRestart...),
+	}
+}
+
+func applyResult(changed bool, snapshot Snapshot) ApplyResult {
 	return ApplyResult{
-		Changed: true, Revision: doc.Revision, PendingRestart: append([]string(nil), pending...),
-		Snapshot: *snapshot,
-	}, nil
+		Changed: changed, Revision: snapshot.Revision,
+		PendingRestart: append([]string(nil), snapshot.PendingRestart...),
+		Snapshot:       cloneSnapshot(snapshot),
+	}
+}
+
+func cloneChangeSet(changes ChangeSet) ChangeSet {
+	cloned := make(ChangeSet, len(changes))
+	for path, class := range changes {
+		cloned[path] = class
+	}
+	return cloned
 }
 
 func (m *Manager) Update(ctx context.Context, patch Patch, expectedRevision string) (ApplyResult, error) {

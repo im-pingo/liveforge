@@ -81,6 +81,144 @@ func TestManagerCurrentUsesCachedSnapshot(t *testing.T) {
 	}
 }
 
+func TestManagerCopiesSourceConfigBeforePublishing(t *testing.T) {
+	cfg := validTestConfig("source-owned")
+	cfg.WebRTC.UDPPortRange = []int{10000, 10001}
+	source := &fakeSource{doc: Document{Config: cfg, Revision: "r1", Source: "fake"}}
+	manager := NewManager(source, time.Hour, nil)
+	if _, err := manager.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Server.Name = "source-mutated"
+	cfg.WebRTC.UDPPortRange[0] = 20000
+	current := manager.Current()
+	if current.Effective.Server.Name != "source-owned" || current.Effective.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("source mutation reached manager snapshot: name=%q ports=%v",
+			current.Effective.Server.Name, current.Effective.WebRTC.UDPPortRange)
+	}
+}
+
+func TestManagerCurrentAndApplyResultAreDeepCopies(t *testing.T) {
+	initial := validTestConfig("owned")
+	initial.API.Listen = "127.0.0.1:8090"
+	initial.WebRTC.UDPPortRange = []int{10000, 10001}
+	source := &fakeSource{doc: Document{Config: initial, Revision: "r1", Source: "fake"}}
+	manager := NewManager(source, time.Hour, nil)
+	result, err := manager.Refresh(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result.Snapshot.Desired.Server.Name = "result-mutated"
+	result.Snapshot.Effective.WebRTC.UDPPortRange[0] = 20000
+	current := manager.Current()
+	if current.Desired.Server.Name != "owned" || current.Effective.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("ApplyResult mutation reached manager snapshot: name=%q ports=%v",
+			current.Desired.Server.Name, current.Effective.WebRTC.UDPPortRange)
+	}
+
+	returned := manager.Current()
+	returned.Desired.Server.Name = "desired-mutated"
+	returned.Effective.WebRTC.UDPPortRange[0] = 30000
+	if returned.Effective.Server.Name != "owned" || returned.Desired.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("desired/effective copies share memory: desired=%+v effective=%+v", returned.Desired, returned.Effective)
+	}
+	current = manager.Current()
+	if current.Desired.Server.Name != "owned" || current.Effective.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("Current mutation reached manager snapshot: name=%q ports=%v",
+			current.Desired.Server.Name, current.Effective.WebRTC.UDPPortRange)
+	}
+
+	next := validTestConfig("owned")
+	next.API.Listen = "127.0.0.1:9090"
+	next.WebRTC.UDPPortRange = []int{10000, 10001}
+	source.set(Document{Config: next, Revision: "r2", Source: "fake"}, nil)
+	result, err = manager.Refresh(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.PendingRestart) != 1 || len(result.Snapshot.PendingRestart) != 1 {
+		t.Fatalf("pending restart = %#v / %#v", result.PendingRestart, result.Snapshot.PendingRestart)
+	}
+	result.PendingRestart[0] = "result-mutated"
+	if result.Snapshot.PendingRestart[0] != "api.listen" {
+		t.Fatalf("ApplyResult pending slices share memory: %#v / %#v", result.PendingRestart, result.Snapshot.PendingRestart)
+	}
+	result.Snapshot.PendingRestart[0] = "snapshot-mutated"
+	if got := manager.Current().PendingRestart; len(got) != 1 || got[0] != "api.listen" {
+		t.Fatalf("returned pending mutation reached manager snapshot: %#v", got)
+	}
+}
+
+func TestManagerCurrentConcurrentMutationUsesNoSourceIO(t *testing.T) {
+	cfg := validTestConfig("concurrent")
+	cfg.WebRTC.UDPPortRange = []int{10000, 10001}
+	source := &fakeSource{doc: Document{Config: cfg, Revision: "r1", Source: "fake"}}
+	manager := NewManager(source, time.Hour, nil)
+	if _, err := manager.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loads := source.loadCount()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(port int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				snapshot := manager.Current()
+				snapshot.Desired.Server.Name = "caller-owned"
+				snapshot.Effective.WebRTC.UDPPortRange[0] = port
+			}
+		}(20000 + i)
+	}
+	wg.Wait()
+	current := manager.Current()
+	if current.Desired.Server.Name != "concurrent" || current.Effective.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("concurrent caller mutation reached manager snapshot: name=%q ports=%v",
+			current.Desired.Server.Name, current.Effective.WebRTC.UDPPortRange)
+	}
+	if source.loadCount() != loads {
+		t.Fatalf("Current performed source I/O: before=%d after=%d", loads, source.loadCount())
+	}
+}
+
+func TestManagerApplyCannotMutatePublishedSnapshot(t *testing.T) {
+	initial := validTestConfig("initial")
+	initial.API.Listen = "127.0.0.1:8090"
+	initial.WebRTC.UDPPortRange = []int{10000, 10001}
+	source := &fakeSource{doc: Document{Config: initial, Revision: "r1", Source: "fake"}}
+	manager := NewManager(source, time.Hour, nil)
+	if _, err := manager.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	manager.SetApply(func(_ context.Context, previous, effective *Config, changes ChangeSet) error {
+		previous.Server.Name = "mutated previous"
+		effective.Server.Name = "mutated effective"
+		effective.WebRTC.UDPPortRange[0] = 20000
+		delete(changes, "api.listen")
+		changes["injected"] = ReloadRestart
+		return nil
+	})
+
+	next := validTestConfig("next")
+	next.API.Listen = "127.0.0.1:9090"
+	next.WebRTC.UDPPortRange = []int{10000, 10001}
+	source.set(Document{Config: next, Revision: "r2", Source: "fake"}, nil)
+	if _, err := manager.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current := manager.Current()
+	if current.Effective.Server.Name != "next" || current.Effective.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("apply callback mutated effective snapshot: name=%q ports=%v",
+			current.Effective.Server.Name, current.Effective.WebRTC.UDPPortRange)
+	}
+	if len(current.PendingRestart) != 1 || current.PendingRestart[0] != "api.listen" {
+		t.Fatalf("apply callback mutated change set: %#v", current.PendingRestart)
+	}
+}
+
 func TestManagerNormalizesDocumentsFromCustomSource(t *testing.T) {
 	cfg := validTestConfig("custom source")
 	cfg.Auth.Publish.Token.Algorithm = " hs256 "

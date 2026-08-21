@@ -52,19 +52,21 @@ type ConfigUpdater interface {
 
 // NewServer creates a new Server instance.
 func NewServer(cfg *config.Config) *Server {
+	ownedConfig := config.CloneConfig(cfg)
 	bus := NewEventBus()
 	s := &Server{
 		eventBus:    bus,
-		hub:         NewStreamHub(cfg.Stream, cfg.Limits, bus),
+		hub:         NewStreamHub(ownedConfig.Stream, ownedConfig.Limits, bus),
 		startTime:   time.Now(),
 		done:        make(chan struct{}),
 		apiHandlers: make(map[string]http.Handler),
 	}
-	s.configPtr.Store(cfg)
+	s.configPtr.Store(ownedConfig)
 	return s
 }
 
-// Config returns the server configuration.
+// Config returns the immutable server-owned configuration snapshot. Callers
+// that need to modify configuration must clone it and call ApplyConfig.
 func (s *Server) Config() *config.Config {
 	return s.configPtr.Load()
 }
@@ -88,18 +90,19 @@ func (s *Server) ConfigUpdater() ConfigUpdater {
 // must not fail.
 func (s *Server) ApplyConfig(cfg *config.Config) error {
 	current := s.Config()
+	next := config.CloneConfig(cfg)
 	for _, m := range s.modules {
 		if configurable, ok := m.(Configurable); ok {
-			if err := configurable.ValidateConfigChange(current, cfg); err != nil {
+			if err := configurable.ValidateConfigChange(config.CloneConfig(current), config.CloneConfig(next)); err != nil {
 				return fmt.Errorf("validate config for module %s: %w", m.Name(), err)
 			}
 		}
 	}
 
-	s.configPtr.Store(cfg)
+	s.configPtr.Store(next)
 	for _, m := range s.modules {
 		if configurable, ok := m.(Configurable); ok {
-			configurable.ApplyConfigChange(current, cfg)
+			configurable.ApplyConfigChange(config.CloneConfig(current), config.CloneConfig(next))
 		}
 	}
 	return nil

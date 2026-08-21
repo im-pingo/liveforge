@@ -245,8 +245,8 @@ func TestServerAccessors(t *testing.T) {
 	s := NewServer(cfg)
 
 	// Config
-	if s.Config() != cfg {
-		t.Error("Config() should return the same config pointer")
+	if s.Config() == cfg || s.Config().Server.Name != cfg.Server.Name {
+		t.Error("Config() should return the server-owned config copy")
 	}
 
 	// EventBus
@@ -468,5 +468,30 @@ func TestServerApplyConfigValidatesBeforePublishing(t *testing.T) {
 	}
 	if reject.reloadCfgName != "" {
 		t.Fatalf("ApplyConfigChange ran after rejection: %q", reject.reloadCfgName)
+	}
+}
+
+func TestServerOwnsStoredConfigCopies(t *testing.T) {
+	initial := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	initial.WebRTC.UDPPortRange = []int{10000, 10001}
+	initial.Server.Name = "initial"
+	server := NewServer(initial)
+
+	initial.Server.Name = "caller-mutated"
+	initial.WebRTC.UDPPortRange[0] = 20000
+	if got := server.Config(); got.Server.Name != "initial" || got.WebRTC.UDPPortRange[0] != 10000 {
+		t.Fatalf("NewServer retained caller memory: name=%q ports=%v", got.Server.Name, got.WebRTC.UDPPortRange)
+	}
+
+	next := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	next.WebRTC.UDPPortRange = []int{30000, 30001}
+	next.Server.Name = "next"
+	if err := server.ApplyConfig(next); err != nil {
+		t.Fatal(err)
+	}
+	next.Server.Name = "next-caller-mutated"
+	next.WebRTC.UDPPortRange[0] = 40000
+	if got := server.Config(); got.Server.Name != "next" || got.WebRTC.UDPPortRange[0] != 30000 {
+		t.Fatalf("ApplyConfig retained caller memory: name=%q ports=%v", got.Server.Name, got.WebRTC.UDPPortRange)
 	}
 }

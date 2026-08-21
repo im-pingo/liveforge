@@ -153,10 +153,42 @@ func TestFileSourceExpandsEnvironmentAfterMerge(t *testing.T) {
 	}
 }
 
+func TestFileSourceExpandsStringLeavesWithoutReparsingYAML(t *testing.T) {
+	tests := []struct {
+		name   string
+		token  string
+		value  string
+		envVar string
+	}{
+		{name: "braced hash", token: "${LIVEFORGE_BRACED_SECRET}", value: "# not a comment", envVar: "LIVEFORGE_BRACED_SECRET"},
+		{name: "plain colon", token: "$LIVEFORGE_PLAIN_SECRET", value: "key: value", envVar: "LIVEFORGE_PLAIN_SECRET"},
+		{name: "braced newline", token: "${LIVEFORGE_MULTILINE_SECRET}", value: "first line\nsecond: line", envVar: "LIVEFORGE_MULTILINE_SECRET"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.envVar, test.value)
+			dir := t.TempDir()
+			basePath := filepath.Join(dir, "liveforge.yaml")
+			base := "stream:\n  ring_buffer_size: 1024\nauth:\n  publish:\n    token:\n      secret: '" + test.token + "'\n"
+			if err := os.WriteFile(basePath, []byte(base), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			doc, err := NewFileSource(basePath, "").Load(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := doc.Config.Auth.Publish.Token.Secret; got != test.value {
+				t.Fatalf("expanded secret = %q, want %q", got, test.value)
+			}
+		})
+	}
+}
+
 func TestFileSourcePreservesBcryptPasswordHash(t *testing.T) {
 	dir := t.TempDir()
 	basePath := filepath.Join(dir, "liveforge.yaml")
-	const passwordHash = "$2a$04$kVNzL2JmbM5pHjtDwvdfIuP7Kf0v6g3LDFnVdk0m1gQ5RZLHYQyMu"
+	const passwordHash = "$2b$04$kVNzL2JmbM5pHjtDwvdfIuP7Kf0v6g3LDFnVdk0m1gQ5RZLHYQyMu"
 	base := "stream:\n  ring_buffer_size: 1024\napi:\n  console:\n    username: admin\n    password_hash: '" + passwordHash + "'\n"
 	if err := os.WriteFile(basePath, []byte(base), 0o600); err != nil {
 		t.Fatal(err)
