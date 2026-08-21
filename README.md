@@ -4,9 +4,9 @@
 
 **High-performance multi-protocol live streaming server written in Go**
 
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-30%20packages%20passing-brightgreen)](#testing)
+[![CI](https://github.com/im-pingo/liveforge/actions/workflows/ci.yml/badge.svg)](https://github.com/im-pingo/liveforge/actions/workflows/ci.yml)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -20,7 +20,7 @@
 
 ---
 
-LiveForge is a modular live streaming media server that ingests, transmuxes, and delivers audio/video in real time. It supports RTMP, RTSP, SRT, WebRTC (WHIP/WHEP), HLS, LL-HLS, DASH, HTTP-FLV, FMP4, GB28181, and WebSocket streaming — all from a single binary with zero external dependencies.
+LiveForge is a modular live streaming media server that ingests, transmuxes, and delivers audio/video in real time. It supports RTMP, RTSP, SRT, WebRTC (WHIP/WHEP), HLS, LL-HLS, DASH, HTTP-FLV, FMP4, GB28181, and WebSocket streaming from one server binary. The default build has no native FFmpeg requirement; optional audio transcoding requires the `audiocodec` build tag, CGO, and FFmpeg/libav libraries.
 
 ## Highlights
 
@@ -57,7 +57,7 @@ LiveForge transparently bridges audio codecs between protocols. When a subscribe
 
 Transcoding is **shared per target codec** — multiple subscribers requesting the same codec share one transcode pipeline. When the publisher's codec matches the subscriber's, frames pass through with zero overhead.
 
-> Requires FFmpeg/libav libraries at build time (`CGO_ENABLED=1`). See [Wiki: Audio Transcoding](../../wiki/Audio-Transcoding) for build instructions and details.
+> Requires the `audiocodec` build tag, CGO, and FFmpeg/libav development libraries at build time. See [Wiki: Audio Transcoding](../../wiki/Audio-Transcoding) for build instructions and details.
 
 ### GB28181 Video Surveillance
 
@@ -180,13 +180,15 @@ graph LR
 
 ## Quick Start
 
-### Docker (Recommended)
+### Docker (released image)
+
+The release workflow publishes versioned images to `ghcr.io/im-pingo/liveforge` after a `v*` tag completes. Make the GHCR package Public for anonymous pulls, or authenticate with `docker login ghcr.io`. Use a concrete version rather than `latest`. Before the first release, use the local Compose build in [`docs/recipes/docker-local.md`](docs/recipes/docker-local.md).
 
 ```bash
 docker run -d --name liveforge \
   -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
   -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
-  impingo/liveforge:latest
+  ghcr.io/im-pingo/liveforge:vX.Y.Z
 ```
 
 Or with docker compose:
@@ -206,7 +208,7 @@ docker run -d --name liveforge \
   -v /path/to/liveforge.yaml:/etc/liveforge/liveforge.yaml:ro \
   -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
   -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
-  impingo/liveforge:latest
+  ghcr.io/im-pingo/liveforge:vX.Y.Z
 ```
 
 ### Build from Source
@@ -373,13 +375,14 @@ liveforge/
 
 ## Testing
 
-30 test packages, all passing:
+The repository has a quick package check and a complete FFmpeg-backed test suite:
 
 ```bash
 go test ./...
-go test -race ./...     # with race detector
-go test -cover ./...    # with coverage
+CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...
 ```
+
+The first command skips FFmpeg-tagged transcoding integration tests. The second command is the complete suite and requires Go 1.26 and FFmpeg development libraries.
 
 ## Comparison
 
@@ -412,6 +415,8 @@ go test -cover ./...    # with coverage
 ## Documentation
 
 > **📖 Full documentation is on the [GitHub Wiki](../../wiki).**
+
+For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](agent-manifest.json), and [`llms.txt`](llms.txt). The API contract, configuration schema, and runnable recipes are kept in `docs/` and checked by CI.
 
 | Topic | EN | 中文 |
 |-------|-----|------|

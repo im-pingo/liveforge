@@ -1,0 +1,581 @@
+openapi: 3.1.0
+info:
+  title: LiveForge Management API
+  version: 1.0.0
+  description: |
+    Management and WebRTC HTTP endpoints exposed by LiveForge. The API may be
+    mounted on the configured API listener or the HTTP stream listener. When
+    `api.auth.bearer_token` is configured, management and GB28181 endpoints
+    accept `Authorization: Bearer <token>` (or an authenticated console
+    session); the health endpoint remains public.
+servers:
+  - url: http://localhost:8090
+    description: Local development API listener
+tags:
+  - name: server
+  - name: streams
+  - name: dvr
+  - name: gb28181
+  - name: webrtc
+paths:
+  /api/v1/server/health:
+    get:
+      tags: [server]
+      operationId: getHealth
+      summary: Check server health
+      security: []
+      responses:
+        '200':
+          description: Healthy server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                code: 0
+                message: ok
+                data:
+                  status: healthy
+  /api/v1/server/info:
+    get:
+      tags: [server]
+      operationId: getServerInfo
+      summary: Read version, modules, and configured endpoints
+      responses:
+        '200':
+          description: Server information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerInfoResponse'
+  /api/v1/server/stats:
+    get:
+      tags: [server]
+      operationId: getServerStats
+      summary: Read aggregate stream and connection counts
+      responses:
+        '200':
+          description: Server statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerStatsResponse'
+  /api/v1/streams:
+    get:
+      tags: [streams]
+      operationId: listStreams
+      summary: List active streams
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Case-sensitive substring filter for stream keys.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Active streams
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamsResponse'
+  /api/v1/streams/{streamKey}:
+    parameters:
+      - $ref: '#/components/parameters/StreamKey'
+    get:
+      tags: [streams]
+      operationId: getStream
+      summary: Read one stream and its statistics
+      responses:
+        '200':
+          description: Stream details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [streams]
+      operationId: deleteStream
+      summary: Delete a stream
+      description: Destructive operation. Require explicit operator authorization.
+      responses:
+        '200':
+          description: Stream deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/streams/{streamKey}/kick:
+    parameters:
+      - $ref: '#/components/parameters/StreamKey'
+    post:
+      tags: [streams]
+      operationId: kickPublisher
+      summary: Disconnect the current publisher
+      description: Destructive operation. Require explicit operator authorization.
+      responses:
+        '200':
+          description: Publisher disconnected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Stream has no publisher
+  /api/v1/dvr/status:
+    get:
+      tags: [dvr]
+      operationId: getDVRStatus
+      summary: Read DVR session status
+      responses:
+        '200':
+          description: DVR status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+  /api/v1/gb28181/devices:
+    get:
+      tags: [gb28181]
+      operationId: listGB28181Devices
+      summary: List registered GB28181 devices
+      responses:
+        '200':
+          description: Registered devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GBDeviceSummary'
+  /api/v1/gb28181/devices/{deviceId}:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [gb28181]
+      operationId: getGB28181Device
+      summary: Read a device and its channels
+      responses:
+        '200':
+          description: Device details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBDevice'
+        '404':
+          description: Device not found
+    delete:
+      tags: [gb28181]
+      operationId: unregisterGB28181Device
+      summary: Unregister a device and close its sessions
+      description: Destructive operation. Require explicit operator authorization.
+      responses:
+        '200':
+          description: Device unregistered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBStatusResponse'
+        '404':
+          description: Device not found
+  /api/v1/gb28181/channels:
+    get:
+      tags: [gb28181]
+      operationId: listGB28181Channels
+      summary: List discovered GB28181 channels
+      parameters:
+        - name: device_id
+          in: query
+          required: false
+          schema: {type: string}
+      responses:
+        '200':
+          description: Discovered channels
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GBChannel'
+        '404':
+          description: Device not found when device_id is supplied
+  /api/v1/gb28181/channels/{channelId}/play:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+    post:
+      tags: [gb28181]
+      operationId: startGB28181LiveView
+      summary: Start live view for a channel
+      responses:
+        '200':
+          description: Live session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBSessionResponse'
+        '404':
+          description: Channel not found
+    delete:
+      tags: [gb28181]
+      operationId: stopGB28181LiveView
+      summary: Stop live view sessions for a channel
+      responses:
+        '200':
+          description: Live sessions stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBStatusResponse'
+        '404':
+          description: No active session or channel not found
+  /api/v1/gb28181/channels/{channelId}/playback:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+    post:
+      tags: [gb28181]
+      operationId: startGB28181Playback
+      summary: Start playback for an RFC3339 time range
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GBPlaybackRequest'
+      responses:
+        '200':
+          description: Playback session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBSessionResponse'
+        '400':
+          description: Invalid or missing RFC3339 time range
+        '404':
+          description: Channel not found
+    delete:
+      tags: [gb28181]
+      operationId: stopGB28181Playback
+      summary: Stop playback sessions for a channel
+      responses:
+        '200':
+          description: Playback sessions stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBStatusResponse'
+        '404':
+          description: No active session or channel not found
+  /api/v1/gb28181/channels/{channelId}/ptz:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+    post:
+      tags: [gb28181]
+      operationId: controlGB28181PTZ
+      summary: Send PTZ control to a channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GBPTZRequest'
+      responses:
+        '200':
+          description: PTZ command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBStatusResponse'
+        '400':
+          description: Unknown or missing command
+        '404':
+          description: Channel not found
+  /api/v1/gb28181/channels/{channelId}/catalog:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+    post:
+      tags: [gb28181]
+      operationId: queryGB28181Catalog
+      summary: Request a device catalog refresh
+      responses:
+        '200':
+          description: Catalog query sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBStatusResponse'
+        '404':
+          description: Device or channel not found
+  /api/v1/gb28181/sessions:
+    get:
+      tags: [gb28181]
+      operationId: listGB28181Sessions
+      summary: List active GB28181 media sessions
+      responses:
+        '200':
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GBSession'
+  /api/v1/gb28181/sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    delete:
+      tags: [gb28181]
+      operationId: stopGB28181Session
+      summary: Stop one GB28181 media session
+      responses:
+        '200':
+          description: Session stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GBStatusResponse'
+        '404':
+          description: Session not found
+  /webrtc/whip/{streamKey}:
+    parameters:
+      - $ref: '#/components/parameters/StreamKey'
+    post:
+      tags: [webrtc]
+      operationId: publishWHIP
+      summary: Publish a stream with a WHIP SDP offer
+      requestBody:
+        required: true
+        content:
+          application/sdp:
+            schema:
+              type: string
+      responses:
+        '201':
+          description: SDP answer; the Location header identifies the session.
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/sdp:
+              schema:
+                type: string
+        '400':
+          description: Invalid stream key or SDP
+        '415':
+          description: Content-Type is not application/sdp
+  /webrtc/whep/{streamKey}:
+    parameters:
+      - $ref: '#/components/parameters/StreamKey'
+    post:
+      tags: [webrtc]
+      operationId: playWHEP
+      summary: Play a stream with a WHEP SDP offer
+      requestBody:
+        required: true
+        content:
+          application/sdp:
+            schema:
+              type: string
+      responses:
+        '201':
+          description: SDP answer; the Location header identifies the session.
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/sdp:
+              schema:
+                type: string
+        '404':
+          description: Stream is not publishing
+        '415':
+          description: Content-Type is not application/sdp
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque token
+  parameters:
+    StreamKey:
+      name: streamKey
+      in: path
+      required: true
+      description: URL-decoded stream key such as live/demo.
+      schema:
+        type: string
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: {type: string}
+    ChannelId:
+      name: channelId
+      in: path
+      required: true
+      schema: {type: string}
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: {type: string}
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+  schemas:
+    ApiResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        data: {}
+    ServerInfo:
+      type: object
+      required: [version, uptime_sec, modules]
+      properties:
+        version: {type: string}
+        uptime_sec: {type: integer, format: int64}
+        modules: {type: array, items: {type: string}}
+        endpoints: {type: object, additionalProperties: {type: string}}
+    ServerInfoResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ServerInfo'
+    ServerStats:
+      type: object
+      required: [streams, connections]
+      properties:
+        streams: {type: integer}
+        connections: {type: integer, format: int64}
+    ServerStatsResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ServerStats'
+    StreamStats:
+      type: object
+      properties:
+        bytes_in: {type: integer, format: int64}
+        video_frames: {type: integer, format: int64}
+        audio_frames: {type: integer, format: int64}
+        uptime_sec: {type: integer, format: int64}
+        bitrate_kbps: {type: integer, format: int64}
+        fps: {type: number, format: double}
+    StreamInfo:
+      type: object
+      required: [key, state, subscribers]
+      properties:
+        key: {type: string}
+        state: {type: string}
+        publisher: {type: string}
+        video_codec: {type: string}
+        audio_codec: {type: string}
+        gop_cache_len: {type: integer}
+        gop_video_frames: {type: integer}
+        gop_audio_frames: {type: integer}
+        gop_duration_ms: {type: integer, format: int64}
+        subscribers: {type: object, additionalProperties: {type: integer}}
+        stats: {$ref: '#/components/schemas/StreamStats'}
+    StreamsResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [streams]
+              properties:
+                streams: {type: array, items: {$ref: '#/components/schemas/StreamInfo'}}
+    StreamResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/StreamInfo'
+    GBDeviceSummary:
+      type: object
+      required: [device_id, remote_addr, transport, status, channel_count]
+      properties:
+        device_id: {type: string}
+        remote_addr: {type: string}
+        transport: {type: string}
+        status: {type: string}
+        registered_at: {type: string, format: date-time}
+        last_keepalive: {type: string, format: date-time}
+        channel_count: {type: integer}
+    GBDevice:
+      allOf:
+        - $ref: '#/components/schemas/GBDeviceSummary'
+        - type: object
+          required: [channels]
+          properties:
+            channels: {type: array, items: {$ref: '#/components/schemas/GBChannel'}}
+    GBChannel:
+      type: object
+      required: [channel_id, name, manufacturer, status]
+      properties:
+        channel_id: {type: string}
+        name: {type: string}
+        manufacturer: {type: string}
+        status: {type: string}
+        ptz_type: {type: integer}
+        latitude: {type: number, format: double}
+        longitude: {type: number, format: double}
+    GBSession:
+      type: object
+      required: [id, device_id, channel_id, stream_key, direction, state, local_port, transport]
+      properties:
+        id: {type: string}
+        device_id: {type: string}
+        channel_id: {type: string}
+        stream_key: {type: string}
+        direction: {type: string, enum: [inbound, outbound]}
+        state: {type: string}
+        local_port: {type: integer}
+        transport: {type: string}
+    GBSessionResponse:
+      type: object
+      required: [stream_key, session_id]
+      properties:
+        stream_key: {type: string}
+        session_id: {type: string}
+    GBStatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string}
+    GBPlaybackRequest:
+      type: object
+      required: [start_time, end_time]
+      properties:
+        start_time: {type: string, format: date-time}
+        end_time: {type: string, format: date-time}
+    GBPTZRequest:
+      type: object
+      required: [command]
+      properties:
+        command:
+          type: string
+          enum: [up, down, left, right, upleft, upright, downleft, downright, zoomin, zoomout, stop]
+        h_speed: {type: integer, minimum: 0, maximum: 255}
+        v_speed: {type: integer, minimum: 0, maximum: 255}

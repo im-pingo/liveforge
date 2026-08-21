@@ -1,0 +1,87 @@
+# LiveForge Agent Context
+
+## What this project is
+
+LiveForge is an MIT-licensed Go 1.26+ live streaming server. It ingests, transmuxes, and delivers audio/video through multiple protocols from one server process. The core is organized as `core/`, protocol and feature modules live under `module/`, reusable media primitives live under `pkg/`, and integration tooling lives under `tools/`.
+
+## Capability matrix
+
+| Capability | Publish | Play | Default port or path | Prerequisites |
+| --- | --- | --- | --- | --- |
+| RTMP | Yes | Yes | 1935 | None beyond the Go build |
+| RTSP | Yes | Yes | 8554 plus RTP range | UDP transport needs reachable RTP ports |
+| SRT | Yes | Yes | 6000 | Optional AES passphrase |
+| WebRTC WHIP/WHEP | Yes | Yes | 8443 | ICE/TURN and secure browser context where applicable |
+| HLS | No | Yes | 8080, `/{stream}.m3u8` | HTTP stream module |
+| LL-HLS | No | Yes | 8080, `/{stream}.m3u8` | `http_stream.llhls.enabled=true` |
+| DASH | No | Yes | 8080, `/{stream}.mpd` | HTTP stream module |
+| HTTP-FLV | No | Yes | 8080, `/{stream}.flv` | HTTP stream module |
+| FMP4 | No | Yes | 8080, `/{stream}.mp4` | HTTP stream module |
+| GB28181 | Device ingest and server-initiated playback | Via the shared stream hub | SIP 5060 and RTP 40000-50000 by default | SIP/RTP reachability and device configuration |
+| WebSocket-FLV | No | Yes | 8080, `/ws/{stream}.{format}` | `websocket.enabled=true` |
+
+The implementation supports protocol bridging through the shared stream hub. Exact codec compatibility depends on the source, destination, and whether the audio transcoding build is enabled.
+
+## Build profiles
+
+The normal build is:
+
+```bash
+go build -o bin/liveforge ./cmd/liveforge
+```
+
+Audio transcoding is a separate build profile:
+
+```bash
+CGO_ENABLED=1 go build -tags audiocodec -o bin/liveforge ./cmd/liveforge
+```
+
+The tagged build needs `libavcodec`, `libswresample`, and `libavutil` development libraries. A build without the tag must be described as having audio transcoding disabled, even if FFmpeg is installed on the host.
+
+## Installation and release truth
+
+Source builds are available from the repository. Versioned binaries and the GHCR image are published by the release workflow only when a `v*` tag is pushed and the workflow succeeds. Release binaries use the portable default build and do not include optional audio transcoding; use a source or Docker `audiocodec` build for that capability. Until a release workflow succeeds, do not tell a user to pull an image or download a release asset.
+
+The local Docker Compose workflow builds the image from source by default. A released image can be selected with `LIVEFORGE_IMAGE=ghcr.io/im-pingo/liveforge:vX.Y.Z`, followed by `docker pull` and `docker compose up -d --no-build`; the GHCR package must be public for anonymous pulls, otherwise run `docker login ghcr.io` first.
+
+## Useful HTTP endpoints
+
+- Health: `GET /api/v1/server/health`
+- Server information: `GET /api/v1/server/info`
+- Server statistics: `GET /api/v1/server/stats`
+- Stream list: `GET /api/v1/streams?q=optional-filter`
+- Stream detail: `GET /api/v1/streams/{stream_key}`
+- Metrics: `GET /metrics` when the metrics module is enabled
+- WHIP publish: `POST /webrtc/whip/{stream_key}` with an SDP offer
+- WHEP play: `POST /webrtc/whep/{stream_key}` with an SDP offer
+- GB28181 API: `/api/v1/gb28181/*` when SIP and GB28181 are enabled
+
+The complete HTTP contract is [docs/api/openapi.yaml](docs/api/openapi.yaml). API responses use a JSON envelope with `code`, `message`, and optional `data` for the management API.
+
+## Verification
+
+The documentation contract is checked with:
+
+```bash
+tools/check-agent-docs_test.sh
+```
+
+The quick package check and complete CI build/test are:
+
+```bash
+go test ./...
+CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
+CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...
+```
+
+The first command skips FFmpeg-tagged transcoding integration tests. The tagged commands are the complete verification path and require Go 1.26 plus FFmpeg development libraries.
+
+The `lf-test` tool emits human-readable or JSON reports and uses exit code 0 for success, 1 for assertion failure, and 2 for an execution error.
+
+## Security boundaries
+
+`configs/liveforge.yaml` is a local-development sample. It disables authentication and TLS and uses `admin/admin` for the console. A production deployment must change credentials, enable TLS, enable API and stream authentication, limit exposed ports, configure ICE/TURN correctly, and enable rate limiting where appropriate.
+
+## Agent change rule
+
+Every source change must review and update the relevant AI-facing files in the same change. See [AGENTS.md](AGENTS.md) for the mandatory synchronization matrix and review checklist.

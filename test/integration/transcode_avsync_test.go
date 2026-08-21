@@ -1,3 +1,5 @@
+//go:build audiocodec
+
 package integration
 
 import (

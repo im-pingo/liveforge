@@ -22,7 +22,8 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath \
+  go build -trimpath \
+    -tags audiocodec \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /liveforge ./cmd/liveforge
 

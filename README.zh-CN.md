@@ -4,9 +4,9 @@
 
 **Go 语言编写的高性能多协议直播流媒体服务器**
 
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-30%20packages%20passing-brightgreen)](#测试)
+[![CI](https://github.com/im-pingo/liveforge/actions/workflows/ci.yml/badge.svg)](https://github.com/im-pingo/liveforge/actions/workflows/ci.yml)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -20,7 +20,7 @@
 
 ---
 
-LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频的接入、转封装和分发。支持 RTMP、RTSP、SRT、WebRTC（WHIP/WHEP）、HLS、LL-HLS、DASH、HTTP-FLV、FMP4、GB28181 和 WebSocket 推拉流 —— 单一可执行文件，零外部依赖。
+LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频的接入、转封装和分发。支持 RTMP、RTSP、SRT、WebRTC（WHIP/WHEP）、HLS、LL-HLS、DASH、HTTP-FLV、FMP4、GB28181 和 WebSocket 推拉流，使用单一服务进程运行。默认构建不需要原生 FFmpeg；启用音频转码时需要 `audiocodec` 构建标签、CGO 和 FFmpeg/libav 库。
 
 ## 亮点
 
@@ -57,7 +57,7 @@ LiveForge 在协议间自动桥接音频编解码器。当订阅者需要的音�
 
 转码实例**按目标编解码共享** —— 多个请求同一编解码的订阅者共享一个转码管线。当推流和拉流编解码一致时，帧零开销透传。
 
-> 编译时需要 FFmpeg/libav 库（`CGO_ENABLED=1`）。详见 [Wiki: 音频转码](../../wiki/Audio-Transcoding-zh)。
+> 编译时需要 `audiocodec` 构建标签、CGO 和 FFmpeg/libav 开发库。详见 [Wiki: 音频转码](../../wiki/Audio-Transcoding-zh)。
 
 ### GB28181 视频监控
 
@@ -180,13 +180,15 @@ graph LR
 
 ## 快速开始
 
-### Docker 部署（推荐）
+### Docker 部署（本地构建或已发布镜像）
+
+发布工作流在推送 `v*` 标签并成功完成后，才会将版本化镜像发布到 `ghcr.io/im-pingo/liveforge`。如需匿名拉取，请将 GHCR 包设为 Public；私有包需先执行 `docker login ghcr.io`。首次发布前请使用下方的 docker compose 本地构建；使用已发布镜像时请固定版本号，不要依赖 `latest`。
 
 ```bash
 docker run -d --name liveforge \
   -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
   -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
-  impingo/liveforge:latest
+  ghcr.io/im-pingo/liveforge:vX.Y.Z
 ```
 
 或使用 docker compose：
@@ -206,7 +208,7 @@ docker run -d --name liveforge \
   -v /path/to/liveforge.yaml:/etc/liveforge/liveforge.yaml:ro \
   -p 1935:1935 -p 8554:8554 -p 8080:8080 -p 8443:8443 \
   -p 6000:6000 -p 5060:5060/udp -p 8090:8090 \
-  impingo/liveforge:latest
+  ghcr.io/im-pingo/liveforge:vX.Y.Z
 ```
 
 ### 源码编译
@@ -373,13 +375,14 @@ liveforge/
 
 ## 测试
 
-30 个测试包，全部通过：
+仓库提供快速包级检查，以及完整的 FFmpeg 音频转码测试套件：
 
 ```bash
 go test ./...
-go test -race ./...     # 开启竞态检测
-go test -cover ./...    # 查看覆盖率
+CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...
 ```
+
+第一条命令会跳过带 FFmpeg 标签的转码集成测试。第二条命令是完整测试套件，需要 Go 1.26 和 FFmpeg 开发库。
 
 ## 对比
 
@@ -412,6 +415,8 @@ go test -cover ./...    # 查看覆盖率
 ## 文档
 
 > **📖 完整文档请访问 [GitHub Wiki](../../wiki/Home-zh)。**
+
+面向 AI Agent 的入口是 [`AGENTS.md`](AGENTS.md)、[`agent-manifest.json`](agent-manifest.json) 和 [`llms.txt`](llms.txt)。API 契约、配置 schema 和可执行场景文档位于 `docs/`，并由 CI 校验同步状态。
 
 | 主题 | 中文 | EN |
 |------|------|-----|

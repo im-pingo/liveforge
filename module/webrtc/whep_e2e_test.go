@@ -25,7 +25,7 @@ type testPublisher struct {
 	info *avframe.MediaInfo
 }
 
-func (p *testPublisher) ID() string                   { return p.id }
+func (p *testPublisher) ID() string                    { return p.id }
 func (p *testPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *testPublisher) Close() error                  { return nil }
 
@@ -39,7 +39,6 @@ func buildAVCCPayload(nal []byte) []byte {
 	copy(buf[4:], nal)
 	return buf
 }
-
 
 // TestWHEPPayloadTypeCorrectness verifies that the full WHEP negotiation path
 // produces RTP packets with the correct H264 payload type (not RTX).
@@ -809,9 +808,9 @@ func TestWHEPAudioTranscoding(t *testing.T) {
 //   - Sequence number gaps: indicates packet loss
 func TestWHEPJitterDiagnostic(t *testing.T) {
 	type scenario struct {
-		name           string
-		withAudio      bool
-		streamPath     string
+		name       string
+		withAudio  bool
+		streamPath string
 	}
 	scenarios := []scenario{
 		{"video_only", false, "live/jitter-video-only"},
@@ -1099,11 +1098,16 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 
 	// 2. RTP timestamp delta distribution (frame-level).
 	rtpDeltaCounts := make(map[uint32]int)
+	invalidTimestampDeltas := 0
 	for i := 1; i < len(frames); i++ {
-		delta := frames[i].Timestamp - frames[i-1].Timestamp
+		delta, ok := validVideoRTPDelta(frames[i].Timestamp, frames[i-1].Timestamp)
+		if !ok {
+			invalidTimestampDeltas++
+			continue
+		}
 		rtpDeltaCounts[delta]++
 	}
-	t.Logf("Video RTP timestamp deltas (frame-level): %v", rtpDeltaCounts)
+	t.Logf("Video RTP timestamp deltas (frame-level): %v (ignored invalid=%d)", rtpDeltaCounts, invalidTimestampDeltas)
 
 	// 3. Chrome-style jitter estimation.
 	// Chrome uses: jitter += (|arrival_delta - rtp_delta| - jitter) / 16
@@ -1119,10 +1123,16 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	windowStart := frames[0].WallTime
 	windowJitter := 0.0
 	windowSamples := 0
+	validIntervals := 0
 
 	for i := 1; i < len(frames); i++ {
 		arrivalDelta := frames[i].WallTime.Sub(frames[i-1].WallTime).Seconds()
-		rtpDelta := float64(frames[i].Timestamp-frames[i-1].Timestamp) / videoClockRate
+		delta, ok := validVideoRTPDelta(frames[i].Timestamp, frames[i-1].Timestamp)
+		if !ok {
+			continue
+		}
+		rtpDelta := float64(delta) / videoClockRate
+		validIntervals++
 
 		diff := math.Abs(arrivalDelta - rtpDelta)
 		jitter += (diff - jitter) / 16.0
@@ -1180,6 +1190,9 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	// 5. Arrival delta statistics.
 	var arrivalDeltas []float64
 	for i := 1; i < len(frames); i++ {
+		if _, ok := validVideoRTPDelta(frames[i].Timestamp, frames[i-1].Timestamp); !ok {
+			continue
+		}
 		d := frames[i].WallTime.Sub(frames[i-1].WallTime).Seconds() * 1000
 		arrivalDeltas = append(arrivalDeltas, d)
 	}
@@ -1202,13 +1215,13 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	// === Assertions ===
 	// Max jitter should stay below 100ms (Chrome's default max jitter buffer).
 	if maxJitter > 0.100 {
-		t.Errorf("max jitter %.1fms exceeds 100ms threshold — " +
+		t.Errorf("max jitter %.1fms exceeds 100ms threshold — "+
 			"Chrome would show buffer inflation and stuttering", maxJitter*1000)
 	}
 
 	// Jitter should not grow over time (slope should be near zero or negative).
 	if jitterSlope > 0.005 { // >5ms/s growth rate
-		t.Errorf("jitter is growing at %.2fms/s — indicates systematic drift " +
+		t.Errorf("jitter is growing at %.2fms/s — indicates systematic drift "+
 			"that will cause progressive stuttering", jitterSlope*1000)
 	}
 
@@ -1218,7 +1231,10 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	}
 
 	// No excessive bursts (batched delivery causes jitter spikes).
-	burstRatio := float64(burstCount) / float64(len(frames)-1)
+	burstRatio := 0.0
+	if validIntervals > 0 {
+		burstRatio = float64(burstCount) / float64(validIntervals)
+	}
 	if burstRatio > 0.2 {
 		t.Errorf("%.0f%% of frame intervals are bursts — indicates batched delivery",
 			burstRatio*100)
@@ -1227,6 +1243,41 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	// Arrival delta stdev should be reasonable (not high variance).
 	if stdev > 30 {
 		t.Errorf("arrival delta stdev %.1fms — high variance indicates irregular delivery", stdev)
+	}
+}
+
+// validVideoRTPDelta converts the modulo-2^32 timestamp difference to a
+// signed delta and rejects packet reordering or implausible discontinuities.
+// The diagnostic observes arrival order, so an out-of-order packet must not
+// be treated as millions of seconds of network jitter.
+func validVideoRTPDelta(current, previous uint32) (uint32, bool) {
+	delta := int64(int32(current - previous))
+	if delta <= 0 || delta > 2*90000 {
+		return 0, false
+	}
+	return uint32(delta), true
+}
+
+func TestValidVideoRTPDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		current  uint32
+		previous uint32
+		want     uint32
+		valid    bool
+	}{
+		{name: "one frame", current: 3600, previous: 0, want: 3600, valid: true},
+		{name: "out of order", current: 100, previous: 3600, valid: false},
+		{name: "large discontinuity", current: 250000, previous: 0, valid: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, valid := validVideoRTPDelta(tt.current, tt.previous)
+			if valid != tt.valid || got != tt.want {
+				t.Fatalf("validVideoRTPDelta(%d, %d) = (%d, %t), want (%d, %t)",
+					tt.current, tt.previous, got, valid, tt.want, tt.valid)
+			}
+		})
 	}
 }
 

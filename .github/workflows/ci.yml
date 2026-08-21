@@ -10,11 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  agent-docs:
+    name: Agent Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Agent documentation
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHECK_AGENT_DOCS_DIFF=1 BASE_REF="origin/${{ github.base_ref }}" tools/check-agent-docs.sh
+          else
+            CHECK_AGENT_DOCS_DIFF=1 BASE_REF=HEAD^ tools/check-agent-docs.sh
+          fi
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -37,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -66,6 +86,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -87,42 +109,24 @@ jobs:
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      # Push to Docker Hub only when credentials are configured; forks and
-      # repos without DOCKERHUB_* secrets still get a build-only smoke test.
-      - name: Check Docker Hub credentials
-        id: creds
-        run: |
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not set; building without push" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Login to Docker Hub
-        if: steps.creds.outputs.available == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract version
         id: version
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build image smoke test
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ steps.creds.outputs.available == 'true' }}
-          platforms: ${{ steps.creds.outputs.available == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: false
+          platforms: linux/amd64
           build-args: VERSION=${{ steps.version.outputs.sha_short }}
           tags: |
-            impingo/liveforge:latest
-            impingo/liveforge:${{ steps.version.outputs.sha_short }}
+            liveforge:ci-${{ steps.version.outputs.sha_short }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "1.0",
+  "project": {
+    "name": "LiveForge",
+    "slug": "liveforge",
+    "repository": "https://github.com/im-pingo/liveforge",
+    "license": "MIT",
+    "language": "Go",
+    "description": "A modular, self-hosted multi-protocol live streaming server with protocol bridging, a web console, REST API, cluster relay, GB28181, and optional audio transcoding."
+  },
+  "source_of_truth": {
+    "agent_contract": "AGENTS.md",
+    "short_summary": "llms.txt",
+    "full_summary": "llms-full.txt",
+    "api": "docs/api/openapi.yaml",
+    "config_schema": "docs/config/config.schema.json",
+    "recipes": "docs/recipes/"
+  },
+  "runtime": {
+    "go": ">=1.26",
+    "default_build": {
+      "cgo": false,
+      "tags": [],
+      "audio_transcoding": false,
+      "note": "The default build has no native FFmpeg requirement, but it still uses Go module dependencies."
+    },
+    "audio_transcoding_build": {
+      "cgo": true,
+      "tags": ["audiocodec"],
+      "native_dependencies": ["libavcodec", "libswresample", "libavutil"],
+      "audio_transcoding": true
+    }
+  },
+  "capabilities": [
+    {"id": "rtmp", "direction": ["publish", "play"], "status": "stable", "port": 1935, "url_templates": ["rtmp://HOST:1935/STREAM_KEY"]},
+    {"id": "rtsp", "direction": ["publish", "play"], "status": "stable", "port": 8554, "url_templates": ["rtsp://HOST:8554/STREAM_KEY"]},
+    {"id": "srt", "direction": ["publish", "play"], "status": "stable", "port": 6000, "url_templates": ["srt://HOST:6000?streamid=publish:STREAM_KEY", "srt://HOST:6000?streamid=subscribe:STREAM_KEY"]},
+    {"id": "webrtc", "direction": ["publish", "play"], "status": "stable", "port": 8443, "entrypoints": ["POST /webrtc/whip/{stream_key}", "POST /webrtc/whep/{stream_key}"], "requires": ["HTTPS or a browser-compatible secure context for browser camera and microphone access"]},
+    {"id": "hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"]},
+    {"id": "ll-hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"], "requires": ["llhls.enabled=true"]},
+    {"id": "dash", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mpd"]},
+    {"id": "http-flv", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.flv"]},
+    {"id": "fmp4", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mp4"]},
+    {"id": "gb28181", "direction": ["publish", "play"], "status": "stable", "ports": [5060, "40000-50000"], "entrypoints": ["SIP REGISTER/INVITE on 5060", "POST /api/v1/gb28181/channels/{channel_id}/play"], "requires": ["SIP and RTP network reachability"]},
+    {"id": "websocket", "direction": ["play"], "status": "stable", "default_enabled": false, "port": 8080, "url_templates": ["ws://HOST:8080/ws/STREAM_KEY.flv"]}
+  ],
+  "install": [
+    {"id": "source", "status": "available", "command": "go build -o bin/liveforge ./cmd/liveforge", "docs": "docs/recipes/source-build.md"},
+    {"id": "source-audiocodec", "status": "available", "command": "CGO_ENABLED=1 go build -tags audiocodec -o bin/liveforge ./cmd/liveforge", "docs": "docs/recipes/source-build.md"},
+    {"id": "docker", "status": "published_by_release_workflow", "image": "ghcr.io/im-pingo/liveforge:<version>", "availability": "Requires a v* tag and a completed GitHub Release workflow; set the GHCR package to Public for anonymous pulls or authenticate with docker login", "docs": "docs/recipes/docker-local.md"},
+    {"id": "binary", "status": "published_by_release_workflow", "platforms": ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"], "audio_transcoding": false, "availability": "Requires a v* tag and a completed GitHub Release workflow; use a source or Docker audiocodec build for audio transcoding"}
+  ],
+  "verification": {
+    "docs": "tools/check-agent-docs_test.sh",
+    "build": "CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge",
+    "tests": "CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...",
+    "integration_cli": "go build -o bin/lf-test ./tools/lf-test"
+  },
+  "api": {
+    "openapi": "docs/api/openapi.yaml",
+    "base_path": "/api/v1",
+    "authentication": "API bearer token is configured at api.auth.bearer_token; publish and subscribe auth are configured under auth."
+  },
+  "security": {
+    "sample_config_scope": "local_development_only",
+    "default_auth_enabled": false,
+    "default_tls_enabled": false,
+    "default_console_credentials": "admin/admin",
+    "production_requirements": ["Change console credentials", "Enable TLS", "Enable API and stream authentication", "Restrict exposed ports", "Configure rate limits"]
+  },
+  "limitations": [
+    "There is no current public release until a v* tag completes the release workflow.",
+    "The Docker image is only available after the release workflow publishes it.",
+    "A GHCR package may require public visibility or registry authentication before docker pull works.",
+    "Audio transcoding is unavailable unless the audiocodec build tag and FFmpeg libraries are present.",
+    "WebRTC browser publishing and playback require correct ICE/TURN and secure-context configuration in real deployments."
+  ],
+  "recipes": [
+    "docs/recipes/source-build.md",
+    "docs/recipes/docker-local.md",
+    "docs/recipes/rtmp-to-hls.md",
+    "docs/recipes/auth-and-tls.md"
+  ]
+}

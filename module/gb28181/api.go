@@ -106,6 +106,7 @@ func (m *Module) apiDeviceDetail(w http.ResponseWriter, r *http.Request) {
 		"status":         dev.Status.String(),
 		"registered_at":  dev.RegisteredAt,
 		"last_keepalive": dev.LastKeepalive,
+		"channel_count":  len(dev.Channels),
 		"channels":       channels,
 	})
 }

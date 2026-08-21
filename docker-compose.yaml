@@ -1,10 +1,10 @@
 services:
   liveforge:
-    image: impingo/liveforge:latest
-    # build:
-    #   context: .
-    #   args:
-    #     VERSION: dev
+    image: ${LIVEFORGE_IMAGE:-liveforge:local}
+    build:
+      context: .
+      args:
+        VERSION: ${LIVEFORGE_VERSION:-dev}
     ports:
       - "1935:1935"       # RTMP
       - "8554:8554"       # RTSP
