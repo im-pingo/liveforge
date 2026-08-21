@@ -81,6 +81,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		videoDetected bool
 		audioDetected bool
 		publisherSet  bool
+		sessionClosed bool
 		pubMu         sync.Mutex
 	)
 	mediaReady := make(chan struct{})
@@ -89,7 +90,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	setPublisherOnce := func() {
 		pubMu.Lock()
 		defer pubMu.Unlock()
-		if stream == nil || publisherSet || (!videoDetected && !audioDetected) {
+		if sessionClosed || stream == nil || publisherSet || (!videoDetected && !audioDetected) {
 			return
 		}
 		if err := stream.SetPublisher(pub); err != nil {
@@ -107,7 +108,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		select {
 		case <-mediaReady:
-		case <-pub.done:
+		case <-sess.done:
 			return
 		}
 		codec := track.Codec()
@@ -118,6 +119,10 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		pubMu.Lock()
+		if sessionClosed || stream == nil {
+			pubMu.Unlock()
+			return
+		}
 		// Copy-on-write under pubMu (serializes concurrent OnTrack callbacks);
 		// readers load the snapshot atomically without the lock.
 		mi := *pub.info.Load()
@@ -143,8 +148,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 
 		pubMu.Lock()
 		readyStream := stream
+		closed := sessionClosed
 		pubMu.Unlock()
-		if readyStream == nil {
+		if closed || readyStream == nil {
 			return
 		}
 		readTrackLoop(track, dp, readyStream, pub.done, avCodec)
@@ -154,10 +160,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
 			pubMu.Lock()
+			if sessionClosed {
+				pubMu.Unlock()
+				return
+			}
+			sessionClosed = true
 			wasPublisher := publisherSet
-			pubMu.Unlock()
-
-			pubMu.Lock()
 			readyStream := stream
 			pubMu.Unlock()
 			if wasPublisher && readyStream != nil {
@@ -199,18 +207,34 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	pubMu.Lock()
+	select {
+	case <-sess.done:
+		sessionClosed = true
+		pubMu.Unlock()
+		releaseConn()
+		http.Error(w, "session closed", http.StatusGone)
+		return
+	default:
+	}
+	if sessionClosed {
+		pubMu.Unlock()
+		releaseConn()
+		http.Error(w, "session closed", http.StatusGone)
+		return
+	}
 	newStream, err := m.server.StreamHub().GetOrCreate(streamKey)
 	if err != nil {
+		pubMu.Unlock()
 		sess.Close()
 		releaseConn()
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	pubMu.Lock()
 	stream = newStream
-	pubMu.Unlock()
 	m.storeSession(sess)
 	mediaReadyOnce.Do(func() { close(mediaReady) })
+	pubMu.Unlock()
 
 	// Wait for at least one ICE candidate or gathering complete,
 	// whichever comes first. Avoids blocking on slow STUN/TURN timeouts.

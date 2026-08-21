@@ -104,6 +104,8 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	sessionID := uuid.New().String()
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
 	var subscriberActive atomic.Bool
+	var subscriberMu sync.Mutex
+	sessionClosed := false
 
 	// Parse the offer SDP to determine which media types the client requests.
 	// Only add tracks that match an m-line in the offer; adding tracks without
@@ -222,7 +224,15 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				close(connected)
 			}
 		case webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
-			if subscriberActive.CompareAndSwap(true, false) {
+			subscriberMu.Lock()
+			if sessionClosed {
+				subscriberMu.Unlock()
+				return
+			}
+			sessionClosed = true
+			active := subscriberActive.Swap(false)
+			subscriberMu.Unlock()
+			if active {
 				stream.RemoveSubscriber("webrtc")
 				m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
 					StreamKey:  streamKey,
@@ -262,7 +272,24 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	subscriberMu.Lock()
+	select {
+	case <-sess.done:
+		sessionClosed = true
+		subscriberMu.Unlock()
+		releaseConn()
+		http.Error(w, "session closed", http.StatusGone)
+		return
+	default:
+	}
+	if sessionClosed {
+		subscriberMu.Unlock()
+		releaseConn()
+		http.Error(w, "session closed", http.StatusGone)
+		return
+	}
 	if err := stream.AddSubscriber("webrtc"); err != nil {
+		subscriberMu.Unlock()
 		sess.Close()
 		releaseConn()
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -270,6 +297,12 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	}
 	subscriberActive.Store(true)
 	m.storeSession(sess)
+	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "webrtc",
+		RemoteAddr: r.RemoteAddr,
+	})
+	subscriberMu.Unlock()
 
 	// Wait for at least one ICE candidate or gathering complete,
 	// whichever comes first. Avoids blocking on slow STUN/TURN
@@ -308,12 +341,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// Start the feed goroutine. It waits for ICE+DTLS to complete before
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
 	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, targetAudioCodec, bwe)
-
-	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "webrtc",
-		RemoteAddr: r.RemoteAddr,
-	})
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/webrtc/session/"+sessionID)
