@@ -57,6 +57,7 @@ The local Docker Compose workflow builds the image from source by default. A rel
 - GB28181 API: `/api/v1/gb28181/*` when SIP and GB28181 are enabled
 
 The complete HTTP contract is [docs/api/openapi.yaml](docs/api/openapi.yaml). API responses use a JSON envelope with `code`, `message`, and optional `data` for the management API.
+When `api.auth.bearer_token` is configured, management and GB28181 endpoints require a bearer token or authenticated console session; `GET /api/v1/server/health` remains public.
 
 ## Verification
 

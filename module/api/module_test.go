@@ -141,6 +141,16 @@ func TestBearerTokenAuth(t *testing.T) {
 		t.Errorf("no token: expected 401, got %d", resp.StatusCode)
 	}
 
+	// Health remains public so load balancers and container probes can use it.
+	resp, err = client.Get(addr + "/api/v1/server/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("health without token: expected 200, got %d", resp.StatusCode)
+	}
+
 	// With wrong token — should get 401
 	req, _ := http.NewRequest("GET", addr+"/api/v1/streams", nil)
 	req.Header.Set("Authorization", "Bearer wrong-token")

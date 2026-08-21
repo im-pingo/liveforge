@@ -60,7 +60,7 @@
   "api": {
     "openapi": "docs/api/openapi.yaml",
     "base_path": "/api/v1",
-    "authentication": "API bearer token is configured at api.auth.bearer_token; publish and subscribe auth are configured under auth."
+    "authentication": "API bearer token is configured at api.auth.bearer_token; management and GB28181 endpoints require a token or console session when configured, while GET /api/v1/server/health remains public; publish and subscribe auth are configured under auth."
   },
   "security": {
     "sample_config_scope": "local_development_only",

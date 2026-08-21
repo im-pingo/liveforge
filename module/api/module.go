@@ -108,6 +108,11 @@ func buildAuthHandler(mux *http.ServeMux, cfg config.APIConfig) http.Handler {
 
 		// API and debug endpoints — Bearer Token OR valid session cookie
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/debug/") {
+			// Keep health probes available without credentials.
+			if r.URL.Path == "/api/v1/server/health" {
+				mux.ServeHTTP(w, r)
+				return
+			}
 			if token := cfg.Auth.BearerToken; token != "" {
 				auth := r.Header.Get("Authorization")
 				hasBearerToken := strings.HasPrefix(auth, "Bearer ") && auth[7:] == token

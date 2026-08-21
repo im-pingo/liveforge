@@ -32,6 +32,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 
 - Do not assume a Docker image or binary exists before a `v*` release workflow completes.
 - Do not claim audio transcoding for a build without the `audiocodec` tag and FFmpeg libraries.
+- The health endpoint remains public when API bearer authentication is configured; other management and GB28181 endpoints require a token or console session.
 - Treat release binaries as the portable default profile; use a source or Docker `audiocodec` build for audio transcoding.
 - Do not expose the sample configuration publicly: it disables auth and TLS and uses `admin/admin`.
 - Do not use `latest` when a versioned image or commit SHA is available.

@@ -3,8 +3,8 @@ info:
   title: LiveForge Management API
   version: 1.0.0
   description: |
-    Management and WebRTC HTTP endpoints exposed by LiveForge. The API may be
-    mounted on the configured API listener or the HTTP stream listener. When
+    Management and WebRTC HTTP endpoints exposed by LiveForge. Management
+    endpoints are served on the configured API listener. When
     `api.auth.bearer_token` is configured, management and GB28181 endpoints
     accept `Authorization: Bearer <token>` (or an authenticated console
     session); the health endpoint remains public.

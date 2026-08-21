@@ -39,6 +39,7 @@ Do not claim a feature is supported until there is a source implementation and a
 ## Safety and review rules
 
 - The sample configuration is for local development. It disables authentication and TLS and uses the development console credentials `admin/admin`; never recommend it for public exposure.
+- When `api.auth.bearer_token` is configured, management and GB28181 API endpoints require a bearer token or console session; `GET /api/v1/server/health` remains public for probes.
 - Never commit secrets, tokens, private URLs, recordings, generated binaries, or local configuration.
 - Keep destructive API operations such as stream deletion and publisher kicking out of automated workflows unless the user explicitly requests them.
 - Prefer a versioned release or a commit SHA over `latest`. Verify that an image, tag, or release asset exists before documenting it as available.

@@ -120,7 +120,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 ### Management & Operations
 
 - **Web console** — Real-time dashboard: stream list, codecs, bitrate, FPS, GOP cache, multi-protocol preview, WebRTC browser publish
-- **REST API** — List/inspect/delete streams, kick publishers, server stats, health checks
+- **REST API** — List/inspect/delete streams, kick publishers, server stats, health checks (the health endpoint remains public when API bearer auth is enabled)
 - **Auth** — JWT token verification and HTTP callback authentication for publish and subscribe
 - **Recording** — FLV file recording with duration-based segmentation and path templates
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
