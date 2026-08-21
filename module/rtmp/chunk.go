@@ -16,10 +16,15 @@ const (
 
 // chunkHeader stores per-CSID state for delta encoding/decoding.
 type chunkHeader struct {
-	timestamp uint32
-	length    uint32
-	typeID    uint8
-	streamID  uint32
+	timestamp                uint32
+	timestampDelta           uint32
+	length                   uint32
+	typeID                   uint8
+	streamID                 uint32
+	hasExtendedTimestamp     bool
+	timestampDeltaIsRelative bool
+	initialized              bool
+	messageActive            bool
 }
 
 // ChunkReader reads RTMP chunks from a stream and reassembles messages.
@@ -53,18 +58,31 @@ func (cr *ChunkReader) ReadMessage() (*Message, error) {
 			return nil, err
 		}
 
-		prev := cr.headers[csid]
-		if prev == nil {
-			prev = &chunkHeader{}
-			cr.headers[csid] = prev
+		header := cr.headers[csid]
+		if header == nil {
+			if chunkFmt != chunkFmt0 {
+				return nil, fmt.Errorf("chunk stream %d: compressed header without previous chunk", csid)
+			}
+			header = &chunkHeader{}
+			cr.headers[csid] = header
 		}
 
-		if err := cr.readMessageHeader(chunkFmt, prev); err != nil {
+		continuation := header.messageActive
+		if continuation && chunkFmt != chunkFmt3 {
+			return nil, fmt.Errorf("chunk stream %d: received fmt %d while message is incomplete", csid, chunkFmt)
+		}
+		if err := cr.readMessageHeader(chunkFmt, header, continuation); err != nil {
 			return nil, err
+		}
+		if !continuation {
+			header.messageActive = true
 		}
 
 		// Read chunk data
-		remaining := int(prev.length) - len(cr.buffers[csid])
+		remaining := int(header.length) - len(cr.buffers[csid])
+		if remaining < 0 {
+			return nil, fmt.Errorf("chunk stream %d: message payload exceeds declared length", csid)
+		}
 		toRead := remaining
 		if toRead > cr.chunkSize {
 			toRead = cr.chunkSize
@@ -77,15 +95,16 @@ func (cr *ChunkReader) ReadMessage() (*Message, error) {
 		cr.buffers[csid] = append(cr.buffers[csid], data...)
 
 		// Check if message is complete
-		if len(cr.buffers[csid]) >= int(prev.length) {
-			payload := cr.buffers[csid][:prev.length]
+		if len(cr.buffers[csid]) >= int(header.length) {
+			payload := cr.buffers[csid][:header.length]
 			cr.buffers[csid] = nil
+			header.messageActive = false
 
 			return &Message{
-				TypeID:    prev.typeID,
-				Length:    prev.length,
-				Timestamp: prev.timestamp,
-				StreamID:  prev.streamID,
+				TypeID:    header.typeID,
+				Length:    header.length,
+				Timestamp: header.timestamp,
+				StreamID:  header.streamID,
 				Payload:   payload,
 			}, nil
 		}
@@ -120,7 +139,7 @@ func (cr *ChunkReader) readBasicHeader() (csid uint32, chunkFormat uint8, err er
 	return csid, chunkFormat, nil
 }
 
-func (cr *ChunkReader) readMessageHeader(chunkFmt uint8, h *chunkHeader) error {
+func (cr *ChunkReader) readMessageHeader(chunkFmt uint8, h *chunkHeader, continuation bool) error {
 	switch chunkFmt {
 	case chunkFmt0:
 		// 11 bytes: timestamp(3) + length(3) + type(1) + streamID(4)
@@ -128,18 +147,23 @@ func (cr *ChunkReader) readMessageHeader(chunkFmt uint8, h *chunkHeader) error {
 		if _, err := io.ReadFull(cr.r, buf[:]); err != nil {
 			return err
 		}
-		h.timestamp = uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2])
+		timestamp := uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2])
 		h.length = uint32(buf[3])<<16 | uint32(buf[4])<<8 | uint32(buf[5])
 		h.typeID = buf[6]
 		h.streamID = binary.LittleEndian.Uint32(buf[7:11])
 
-		if h.timestamp == 0xFFFFFF {
+		h.hasExtendedTimestamp = timestamp == 0xFFFFFF
+		if h.hasExtendedTimestamp {
 			var ext [4]byte
 			if _, err := io.ReadFull(cr.r, ext[:]); err != nil {
 				return err
 			}
-			h.timestamp = binary.BigEndian.Uint32(ext[:])
+			timestamp = binary.BigEndian.Uint32(ext[:])
 		}
+		h.timestamp = timestamp
+		h.timestampDelta = 0
+		h.timestampDeltaIsRelative = false
+		h.initialized = true
 
 	case chunkFmt1:
 		// 7 bytes: timestamp delta(3) + length(3) + type(1)
@@ -151,14 +175,18 @@ func (cr *ChunkReader) readMessageHeader(chunkFmt uint8, h *chunkHeader) error {
 		h.length = uint32(buf[3])<<16 | uint32(buf[4])<<8 | uint32(buf[5])
 		h.typeID = buf[6]
 
-		if delta == 0xFFFFFF {
+		h.hasExtendedTimestamp = delta == 0xFFFFFF
+		if h.hasExtendedTimestamp {
 			var ext [4]byte
 			if _, err := io.ReadFull(cr.r, ext[:]); err != nil {
 				return err
 			}
 			delta = binary.BigEndian.Uint32(ext[:])
 		}
+		h.timestampDelta = delta
+		h.timestampDeltaIsRelative = true
 		h.timestamp += delta
+		h.initialized = true
 
 	case chunkFmt2:
 		// 3 bytes: timestamp delta(3)
@@ -168,17 +196,36 @@ func (cr *ChunkReader) readMessageHeader(chunkFmt uint8, h *chunkHeader) error {
 		}
 		delta := uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2])
 
-		if delta == 0xFFFFFF {
+		h.hasExtendedTimestamp = delta == 0xFFFFFF
+		if h.hasExtendedTimestamp {
 			var ext [4]byte
 			if _, err := io.ReadFull(cr.r, ext[:]); err != nil {
 				return err
 			}
 			delta = binary.BigEndian.Uint32(ext[:])
 		}
+		h.timestampDelta = delta
+		h.timestampDeltaIsRelative = true
 		h.timestamp += delta
+		h.initialized = true
 
 	case chunkFmt3:
-		// No message header
+		if !h.initialized {
+			return fmt.Errorf("fmt 3 chunk without previous header")
+		}
+		delta := h.timestampDelta
+		if h.hasExtendedTimestamp {
+			var ext [4]byte
+			if _, err := io.ReadFull(cr.r, ext[:]); err != nil {
+				return err
+			}
+			if !continuation && h.timestampDeltaIsRelative {
+				delta = binary.BigEndian.Uint32(ext[:])
+			}
+		}
+		if !continuation {
+			h.timestamp += delta
+		}
 	}
 
 	return nil
@@ -252,6 +299,9 @@ func (cw *ChunkWriter) WriteMessage(csid uint32, msg *Message) error {
 	offset := firstChunkSize
 	for offset < len(payload) {
 		cw.buf = appendBasicHeader(cw.buf, chunkFmt3, csid)
+		if ts >= 0xFFFFFF {
+			cw.buf = binary.BigEndian.AppendUint32(cw.buf, ts)
+		}
 
 		chunkLen := cw.chunkSize
 		if offset+chunkLen > len(payload) {

@@ -15,7 +15,7 @@ import (
 type StreamState uint8
 
 const (
-	StreamStateIdle        StreamState = iota + 1
+	StreamStateIdle StreamState = iota + 1
 	StreamStateWaitingPull
 	StreamStatePublishing
 	StreamStateNoPublisher
@@ -328,8 +328,8 @@ func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 		return d
 	}
 
-	var firstDTS, lastDTS int64
-	firstSet := false
+	var minDTS, maxDTS int64
+	dtsSet := false
 	for _, gop := range s.gopCache {
 		for _, f := range gop {
 			if f.MediaType.IsVideo() {
@@ -337,17 +337,22 @@ func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 			} else if f.MediaType.IsAudio() {
 				d.AudioFrames++
 			}
-			if f.DTS > 0 {
-				if !firstSet {
-					firstDTS = f.DTS
-					firstSet = true
+			if !dtsSet {
+				minDTS = f.DTS
+				maxDTS = f.DTS
+				dtsSet = true
+			} else {
+				if f.DTS < minDTS {
+					minDTS = f.DTS
 				}
-				lastDTS = f.DTS
+				if f.DTS > maxDTS {
+					maxDTS = f.DTS
+				}
 			}
 		}
 	}
-	if firstSet {
-		d.DurationMs = lastDTS - firstDTS
+	if dtsSet {
+		d.DurationMs = maxDTS - minDTS
 	}
 	return d
 }
