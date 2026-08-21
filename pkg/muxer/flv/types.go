@@ -1,6 +1,10 @@
 package flv
 
-import "github.com/im-pingo/liveforge/pkg/avframe"
+import (
+	"fmt"
+
+	"github.com/im-pingo/liveforge/pkg/avframe"
+)
 
 // FLV tag types.
 const (
@@ -18,52 +22,164 @@ const (
 // FLV video codec IDs (lower 4 bits of first video data byte).
 const (
 	VideoCodecH264 uint8 = 7
-	VideoCodecH265 uint8 = 12 // Enhanced RTMP
-	VideoCodecAV1  uint8 = 13 // Enhanced RTMP
+	VideoCodecH265 uint8 = 12
+	VideoCodecAV1  uint8 = 13
 )
 
 // Enhanced FLV FourCC codes.
 var (
+	FourCCVP8  = [4]byte{'v', 'p', '0', '8'}
+	FourCCVP9  = [4]byte{'v', 'p', '0', '9'}
 	FourCCAVC  = [4]byte{'a', 'v', 'c', '1'}
 	FourCCHEVC = [4]byte{'h', 'v', 'c', '1'}
 	FourCCAV1  = [4]byte{'a', 'v', '0', '1'}
-	FourCCVP9  = [4]byte{'v', 'p', '0', '9'}
+)
+
+// Enhanced audio FourCC codes.
+var (
+	FourCCAAC  = [4]byte{'m', 'p', '4', 'a'}
+	FourCCOpus = [4]byte{'O', 'p', 'u', 's'}
+	FourCCMP3  = [4]byte{'.', 'm', 'p', '3'}
 )
 
 // Enhanced video packet types (ExVideoTagHeader).
 const (
-	ExVideoPacketSequenceStart  uint8 = 0
-	ExVideoPacketCodedFrames    uint8 = 1
-	ExVideoPacketSequenceEnd    uint8 = 2
-	ExVideoPacketCodedFramesX   uint8 = 3
+	ExVideoPacketSequenceStart uint8 = 0
+	ExVideoPacketCodedFrames   uint8 = 1
+	ExVideoPacketSequenceEnd   uint8 = 2
+	ExVideoPacketCodedFramesX  uint8 = 3
+	ExVideoPacketMetadata      uint8 = 4
+	ExVideoPacketMPEG2TSStart  uint8 = 5
+	ExVideoPacketMultitrack    uint8 = 6
+	ExVideoPacketModEx         uint8 = 7
 )
 
-// IsEnhancedVideoCodec returns true for codecs that use the Enhanced FLV format.
+// Enhanced audio packet types.
+const (
+	ExAudioPacketSequenceStart uint8 = 0
+	ExAudioPacketCodedFrames   uint8 = 1
+	ExAudioPacketSequenceEnd   uint8 = 2
+	ExAudioPacketMultichannel  uint8 = 4
+	ExAudioPacketMultitrack    uint8 = 5
+	ExAudioPacketModEx         uint8 = 7
+)
+
+// EncodingMode selects the media header format emitted by Muxer.
+type EncodingMode uint8
+
+const (
+	EncodingAuto EncodingMode = iota
+	EncodingClassic
+	EncodingEnhanced
+)
+
+// IsEnhancedVideoCodec returns true when the codec has a Phase 1 FourCC form.
 func IsEnhancedVideoCodec(c avframe.CodecType) bool {
-	return c == avframe.CodecH265 || c == avframe.CodecAV1 || c == avframe.CodecVP9
+	return VideoFourCC(c) != ""
+}
+
+// IsEnhancedAudioCodec returns true when the codec has a Phase 1 FourCC form.
+func IsEnhancedAudioCodec(c avframe.CodecType) bool {
+	return AudioFourCC(c) != ""
 }
 
 // VideoCodecToFourCC returns the FourCC for an enhanced video codec.
 func VideoCodecToFourCC(c avframe.CodecType) [4]byte {
 	switch c {
+	case avframe.CodecVP8:
+		return FourCCVP8
+	case avframe.CodecVP9:
+		return FourCCVP9
 	case avframe.CodecH264:
 		return FourCCAVC
 	case avframe.CodecH265:
 		return FourCCHEVC
 	case avframe.CodecAV1:
 		return FourCCAV1
-	case avframe.CodecVP9:
-		return FourCCVP9
 	default:
 		return [4]byte{}
 	}
 }
 
+// VideoFourCC returns the FourCC string for a video codec.
+func VideoFourCC(c avframe.CodecType) string {
+	bytes := VideoCodecToFourCC(c)
+	return string(bytes[:])
+}
+
+// AudioCodecToFourCC returns the FourCC string for an audio codec.
+func AudioCodecToFourCC(c avframe.CodecType) string {
+	switch c {
+	case avframe.CodecAAC:
+		return string(FourCCAAC[:])
+	case avframe.CodecOpus:
+		return string(FourCCOpus[:])
+	case avframe.CodecMP3:
+		return string(FourCCMP3[:])
+	default:
+		return ""
+	}
+}
+
+// AudioFourCC returns the FourCC string for an audio codec.
+func AudioFourCC(c avframe.CodecType) string {
+	return AudioCodecToFourCC(c)
+}
+
+// VideoFourCCToCodec converts an enhanced video FourCC to an AVFrame codec.
+func VideoFourCCToCodec(fourCC string) avframe.CodecType {
+	switch fourCC {
+	case string(FourCCVP8[:]):
+		return avframe.CodecVP8
+	case string(FourCCVP9[:]):
+		return avframe.CodecVP9
+	case string(FourCCAVC[:]):
+		return avframe.CodecH264
+	case string(FourCCHEVC[:]):
+		return avframe.CodecH265
+	case string(FourCCAV1[:]):
+		return avframe.CodecAV1
+	default:
+		return 0
+	}
+}
+
+// AudioFourCCToCodec converts an enhanced audio FourCC to an AVFrame codec.
+func AudioFourCCToCodec(fourCC string) avframe.CodecType {
+	switch fourCC {
+	case string(FourCCAAC[:]):
+		return avframe.CodecAAC
+	case string(FourCCOpus[:]):
+		return avframe.CodecOpus
+	case string(FourCCMP3[:]):
+		return avframe.CodecMP3
+	default:
+		return 0
+	}
+}
+
+func encodeSI24(value int64) ([3]byte, error) {
+	if value < -8388608 || value > 8388607 {
+		return [3]byte{}, fmt.Errorf("signed SI24 overflow: %d", value)
+	}
+	encoded := uint32(value) & 0x00ffffff
+	return [3]byte{byte(encoded >> 16), byte(encoded >> 8), byte(encoded)}, nil
+}
+
+func decodeSI24(data []byte) int64 {
+	value := int32(uint32(data[0])<<16 | uint32(data[1])<<8 | uint32(data[2]))
+	if value&0x00800000 != 0 {
+		value |= ^int32(0x00ffffff)
+	}
+	return int64(value)
+}
+
 // FLV audio format IDs (upper 4 bits of first audio data byte).
 const (
-	AudioFormatAAC  uint8 = 10
-	AudioFormatOpus uint8 = 13 // Enhanced RTMP
-	AudioFormatMP3  uint8 = 2
+	AudioFormatAAC      uint8 = 10
+	AudioFormatExHeader uint8 = 9
+	AudioFormatOpus     uint8 = 13 // Legacy draft value retained for callers.
+	AudioFormatMP3      uint8 = 2
 )
 
 // AVC packet types (second byte of video data for H.264).

@@ -41,7 +41,7 @@
 - Produces `func ParseAudioPayload(data []byte, dts int64) (*avframe.AVFrame, error)`.
 - Produces `func VideoFourCC(codec avframe.CodecType) string`, `func AudioFourCC(codec avframe.CodecType) string`, and inverse FourCC lookup helpers used by RTMP capability selection.
 
-- [ ] **Step 1: Write failing golden tests for enhanced video bytes**
+- [x] **Step 1: Write failing golden tests for enhanced video bytes**
 
 Add table-driven tests that construct one sequence header and one coded frame
 for each of `avc1`, `hvc1`, `av01`, `vp08`, and `vp09`. Assert the exact media
@@ -60,7 +60,7 @@ Add cases for positive and zero CTS, and assert that AV1/VP8/VP9 coded bodies
 contain no three-byte CTS field. Add a case with nonzero AV1 CTS that expects
 an encoding error.
 
-- [ ] **Step 2: Run the focused tests and verify the expected red failure**
+- [x] **Step 2: Run the focused tests and verify the expected red failure**
 
 Run:
 
@@ -71,7 +71,7 @@ GOTOOLCHAIN=auto GOPATH=/tmp/liveforge-gopath GOMODCACHE=/tmp/liveforge-gomodcac
 Expected: FAIL because the current muxer emits CTS for every enhanced video
 codec, lacks VP8 mapping, and has no explicit mode API.
 
-- [ ] **Step 3: Add codec and header constants plus signed SI24 helpers**
+- [x] **Step 3: Add codec and header constants plus signed SI24 helpers**
 
 Extend `types.go` with `vp08`, `avc1`, `hvc1`, `av01`, `vp09`, `mp4a`, `Opus`,
 and `.mp3` mappings, the ExAudio packet constants, and helpers that convert a
@@ -79,7 +79,7 @@ three-byte big-endian value to a signed `int32` and back using sign extension.
 Keep legacy public constants needed by existing callers, but route new output
 through the E-RTMP constants.
 
-- [ ] **Step 4: Implement mode-aware video and audio writers**
+- [x] **Step 4: Implement mode-aware video and audio writers**
 
 Change `Muxer` to store independent video and audio modes. `NewMuxer()` uses
 `EncodingAuto`; `NewMuxerWithModes` stores the explicit modes. Implement these
@@ -102,19 +102,19 @@ For enhanced audio, put packet type in the low nibble of the first byte and
 write the FourCC immediately after it. Do not append the old extra packet-type
 byte.
 
-- [ ] **Step 5: Run the focused golden tests and verify green**
+- [x] **Step 5: Run the focused golden tests and verify green**
 
 Run the command from Step 2. Expected: all new exact-byte tests and the
 existing classic muxer tests pass.
 
-- [ ] **Step 6: Write failing parser and round-trip tests**
+- [x] **Step 6: Write failing parser and round-trip tests**
 
 Add tests for classic H.264/AAC/MP3 and enhanced single-track media. Assert
 codec, frame type, DTS, PTS, and copied payload. Include negative CTS (`-33`),
 sequence-end skipping, truncated FourCC/header input, unknown FourCC input, and
 unsupported multitrack/modifier packet input.
 
-- [ ] **Step 7: Run parser tests to verify red, then implement parsers**
+- [x] **Step 7: Run parser tests to verify red, then implement parsers**
 
 Run:
 
@@ -126,7 +126,7 @@ Expected: new enhanced parser tests fail before implementation. Then implement
 `ParseVideoPayload` and `ParseAudioPayload`, make the demuxer delegate to them,
 copy payload bytes, sign-extend CTS, and skip tags with no `AVFrame` equivalent.
 
-- [ ] **Step 8: Run all FLV tests and commit the wire layer**
+- [x] **Step 8: Run all FLV tests and commit the wire layer**
 
 Run:
 

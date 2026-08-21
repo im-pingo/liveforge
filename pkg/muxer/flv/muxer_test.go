@@ -115,9 +115,9 @@ func TestMuxRoundTripBFrameCTS(t *testing.T) {
 	// Simulate decode order: I, P, B, B with varying CTS values
 	frames := []*avframe.AVFrame{
 		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x01, 0x64, 0x00, 0x28}),
-		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 66, []byte{0x65, 0x88}),    // CTS=66
-		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 33, 132, []byte{0x41, 0x01}), // CTS=99
-		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 66, 33, []byte{0x41, 0x02}),  // CTS=-33
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 66, []byte{0x65, 0x88}),      // CTS=66
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 33, 132, []byte{0x41, 0x01}),  // CTS=99
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 66, 33, []byte{0x41, 0x02}),   // CTS=-33
 		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 100, 100, []byte{0x41, 0x03}), // CTS=0
 	}
 
@@ -236,10 +236,10 @@ func TestMuxEnhancedAudioOpus(t *testing.T) {
 		t.Errorf("tag type = %d, want %d", data[0], TagTypeAudio)
 	}
 
-	// Enhanced audio: first data byte should be 0x90
+	// Enhanced audio: first data byte carries ExHeader and CodedFrames.
 	audioByte := data[TagHeaderSize]
-	if audioByte != 0x90 {
-		t.Errorf("enhanced audio byte = 0x%02X, want 0x90", audioByte)
+	if audioByte != 0x91 {
+		t.Errorf("enhanced audio byte = 0x%02X, want 0x91", audioByte)
 	}
 
 	// FourCC should be "Opus"
