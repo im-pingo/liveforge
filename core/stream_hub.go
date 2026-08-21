@@ -10,11 +10,11 @@ import (
 
 // StreamHub manages all active streams.
 type StreamHub struct {
-	mu               sync.RWMutex
-	streams          map[string]*Stream
-	config           config.StreamConfig
-	limits           config.LimitsConfig
-	eventBus         *EventBus
+	mu                sync.RWMutex
+	streams           map[string]*Stream
+	config            config.StreamConfig
+	limits            config.LimitsConfig
+	eventBus          *EventBus
 	audioCodecEnabled bool
 }
 
@@ -35,9 +35,23 @@ func (h *StreamHub) SetAudioCodecEnabled(enabled bool) {
 	h.audioCodecEnabled = enabled
 }
 
+// UpdateNewSessionConfig changes the factory settings used for streams created
+// after the update. Existing streams retain their buffers, limits, and
+// transcode state for the lifetime of their current session.
+func (h *StreamHub) UpdateNewSessionConfig(cfg config.StreamConfig, limits config.LimitsConfig, audioCodecEnabled bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.config = cfg
+	h.limits = limits
+	h.audioCodecEnabled = audioCodecEnabled
+}
+
 // GetOrCreate returns an existing stream or creates a new one.
 // Returns an error if max_streams limit is reached and the stream does not already exist.
 func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
+	if err := ValidateStreamKey(key); err != nil {
+		return nil, err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -66,6 +80,9 @@ func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 
 // Find returns a stream by key, or nil if not found.
 func (h *StreamHub) Find(key string) (*Stream, bool) {
+	if ValidateStreamKey(key) != nil {
+		return nil, false
+	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	s, ok := h.streams[key]

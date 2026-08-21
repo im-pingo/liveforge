@@ -1,10 +1,22 @@
 package core
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/im-pingo/liveforge/config"
 )
+
+func TestStreamHubRejectsUnsafeStreamKeys(t *testing.T) {
+	hub := NewStreamHub(newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	for _, key := range []string{"", "/absolute", "../escape", "live/../escape", "live//camera", `live\..\escape`, "live/camera?token=x", "live/\x00camera"} {
+		t.Run(strings.ReplaceAll(key, "/", "_"), func(t *testing.T) {
+			if _, err := hub.GetOrCreate(key); err == nil {
+				t.Fatalf("GetOrCreate(%q) succeeded", key)
+			}
+		})
+	}
+}
 
 func TestStreamHubCreateAndFind(t *testing.T) {
 	bus := NewEventBus()
@@ -116,5 +128,32 @@ func TestStreamHubMaxStreams(t *testing.T) {
 	}
 	if _, err := hub.GetOrCreate("live/c"); err == nil {
 		t.Error("expected error when exceeding max_streams limit")
+	}
+}
+
+func TestStreamHubRuntimeConfigAppliesToNewStreamsOnly(t *testing.T) {
+	bus := NewEventBus()
+	initial := config.StreamConfig{RingBufferSize: 16, AudioCacheMs: 100}
+	hub := NewStreamHub(initial, config.LimitsConfig{MaxStreams: 2}, bus)
+	old, err := hub.GetOrCreate("live/old")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next := config.StreamConfig{RingBufferSize: 64, AudioCacheMs: 900}
+	hub.UpdateNewSessionConfig(next, config.LimitsConfig{MaxStreams: 3}, true)
+
+	if got := old.Config(); got.RingBufferSize != 16 || got.AudioCacheMs != 100 {
+		t.Fatalf("existing stream config changed: %#v", got)
+	}
+	newStream, err := hub.GetOrCreate("live/new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := newStream.Config(); got.RingBufferSize != 64 || got.AudioCacheMs != 900 {
+		t.Fatalf("new stream config = %#v, want updated config", got)
+	}
+	if _, err := hub.GetOrCreate("live/third"); err != nil {
+		t.Fatalf("updated max streams was not applied: %v", err)
 	}
 }

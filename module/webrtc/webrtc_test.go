@@ -2,9 +2,12 @@ package webrtc
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +20,18 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
+
+type webrtcAuthorizerFunc func(context.Context, core.AuthorizationRequest) error
+
+func (f webrtcAuthorizerFunc) Authorize(ctx context.Context, request core.AuthorizationRequest) error {
+	return f(ctx, request)
+}
+
+type authorizationTestPublisher struct{ info *avframe.MediaInfo }
+
+func (p authorizationTestPublisher) ID() string                    { return "authorization-test" }
+func (p authorizationTestPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
+func (p authorizationTestPublisher) Close() error                  { return nil }
 
 func newTestServer(t *testing.T) *core.Server {
 	t.Helper()
@@ -56,6 +71,31 @@ func TestModuleName(t *testing.T) {
 	}
 }
 
+func TestConnectionReleaseIsExactlyOnce(t *testing.T) {
+	server := newTestServer(t)
+	if !server.AcquireConn() {
+		t.Fatal("AcquireConn failed")
+	}
+	release := newConnectionRelease(server)
+	const callers = 32
+	var done sync.WaitGroup
+	done.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer done.Done()
+			release()
+		}()
+	}
+	done.Wait()
+	if got := server.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d, want 0 after concurrent release", got)
+	}
+	release()
+	if got := server.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d after repeated release", got)
+	}
+}
+
 func TestModuleInitAndClose(t *testing.T) {
 	m, _ := newTestModule(t)
 	if m.Addr() == nil {
@@ -89,6 +129,138 @@ func TestWHIPBadContentType(t *testing.T) {
 	if rr.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("expected 415, got %d", rr.Code)
 	}
+}
+
+func TestWHIPWHEPPreSessionAuthorizationRejectsWithoutResources(t *testing.T) {
+	for _, endpoint := range []struct {
+		path   string
+		action core.AuthorizationAction
+	}{
+		{path: "/webrtc/whip/live/denied?token=no", action: core.AuthorizationPublish},
+		{path: "/webrtc/whep/live/denied?token=no", action: core.AuthorizationSubscribe},
+	} {
+		t.Run(string(endpoint.action), func(t *testing.T) {
+			m, server := newTestModule(t)
+			server.SetAuthorizer(webrtcAuthorizerFunc(func(_ context.Context, request core.AuthorizationRequest) error {
+				if request.Action != endpoint.action || request.Stage != core.AuthorizationPreSession {
+					t.Errorf("authorization request = %#v", request)
+				}
+				if request.StreamKey != "live/denied" || request.Params["token"] != "no" {
+					t.Errorf("authorization context = %#v", request)
+				}
+				return errors.New("denied")
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, endpoint.path, strings.NewReader("invalid"))
+			req.Header.Set("Content-Type", "application/sdp")
+			rr := httptest.NewRecorder()
+			m.httpSrv.Handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rr.Code)
+			}
+			if got := server.ConnectionCount(); got != 0 {
+				t.Errorf("connection count = %d, want 0", got)
+			}
+			if got := server.StreamHub().Count(); got != 0 {
+				t.Errorf("stream count = %d, want 0", got)
+			}
+			sessions := 0
+			m.sessions.Range(func(_, _ any) bool { sessions++; return true })
+			if sessions != 0 {
+				t.Errorf("session count = %d, want 0", sessions)
+			}
+		})
+	}
+}
+
+func TestWHIPPostConnectAuthorizationRejectsWithoutCommittedStream(t *testing.T) {
+	m, server := newTestModule(t)
+	server.SetAuthorizer(postConnectDenyAuthorizer(t, core.AuthorizationPublish))
+
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whip/live/denied?token=no", strings.NewReader(createPublishOffer(t)))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rr.Code, rr.Body.String())
+	}
+	if _, exists := server.StreamHub().Find("live/denied"); exists {
+		t.Fatal("post-connect rejection left a stream in the hub")
+	}
+	assertNoWebRTCResources(t, m, server)
+}
+
+func TestWHEPPostConnectAuthorizationRejectsWithoutCommittedSubscriber(t *testing.T) {
+	m, server := newTestModule(t)
+	stream, err := server.StreamHub().GetOrCreate("live/denied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(authorizationTestPublisher{info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}); err != nil {
+		t.Fatal(err)
+	}
+	server.SetAuthorizer(postConnectDenyAuthorizer(t, core.AuthorizationSubscribe))
+
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/denied?token=no", strings.NewReader(createMinimalOffer(t)))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rr.Code, rr.Body.String())
+	}
+	if subscribers := stream.Subscribers(); len(subscribers) != 0 {
+		t.Fatalf("post-connect rejection left subscribers: %v", subscribers)
+	}
+	assertNoWebRTCResources(t, m, server)
+}
+
+func postConnectDenyAuthorizer(t *testing.T, action core.AuthorizationAction) core.Authorizer {
+	t.Helper()
+	return webrtcAuthorizerFunc(func(_ context.Context, request core.AuthorizationRequest) error {
+		if request.Action != action {
+			t.Errorf("action = %q, want %q", request.Action, action)
+		}
+		if request.Stage == core.AuthorizationPostConnect {
+			return errors.New("denied")
+		}
+		return nil
+	})
+}
+
+func assertNoWebRTCResources(t *testing.T, m *Module, server *core.Server) {
+	t.Helper()
+	if got := server.ConnectionCount(); got != 0 {
+		t.Errorf("connection count = %d, want 0", got)
+	}
+	sessions := 0
+	m.sessions.Range(func(_, _ any) bool { sessions++; return true })
+	if sessions != 0 {
+		t.Errorf("session count = %d, want 0", sessions)
+	}
+}
+
+func createPublishOffer(t *testing.T) string {
+	t.Helper()
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000},
+		"video", "authorization-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pc.AddTrack(track); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offer.SDP
 }
 
 func TestWHEPStreamNotFound(t *testing.T) {

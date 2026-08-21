@@ -62,6 +62,7 @@ func NewServer(cfg *config.Config) *Server {
 		apiHandlers: make(map[string]http.Handler),
 	}
 	s.configPtr.Store(ownedConfig)
+	s.hub.UpdateNewSessionConfig(ownedConfig.Stream, ownedConfig.Limits, ownedConfig.AudioCodec.Enabled)
 	return s
 }
 
@@ -103,6 +104,7 @@ func (s *Server) ApplyConfig(cfg *config.Config) error {
 	}
 
 	s.configPtr.Store(next)
+	s.hub.UpdateNewSessionConfig(next.Stream, next.Limits, next.AudioCodec.Enabled)
 	for _, m := range s.modules {
 		if configurable, ok := m.(Configurable); ok {
 			configurable.ApplyConfigChange(config.CloneConfig(current), config.CloneConfig(next))

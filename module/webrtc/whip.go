@@ -25,18 +25,16 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
 		return
 	}
+	if err := m.authorizeRequest(r, core.AuthorizationPublish, core.AuthorizationPreSession, streamKey); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
 	if !m.server.AcquireConn() {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
 		return
 	}
-	connAcquired := true
-	releaseConn := func() {
-		if connAcquired {
-			connAcquired = false
-			m.server.ReleaseConn()
-		}
-	}
+	releaseConn := newConnectionRelease(m.server)
 
 	contentType := r.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "application/sdp") {
@@ -45,7 +43,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offerBytes, err := io.ReadAll(r.Body)
+	offerBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		releaseConn()
 		http.Error(w, "failed to read offer", http.StatusBadRequest)
@@ -68,13 +66,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := uuid.New().String()
 
-	stream, err := m.server.StreamHub().GetOrCreate(streamKey)
-	if err != nil {
-		pc.Close()
-		releaseConn()
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
+	var stream *core.Stream
 
 	pub := &WHIPPublisher{
 		id:   sessionID,
@@ -84,7 +76,6 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	pub.info.Store(&avframe.MediaInfo{})
 
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
-	m.storeSession(sess)
 
 	var (
 		videoDetected bool
@@ -92,11 +83,13 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		publisherSet  bool
 		pubMu         sync.Mutex
 	)
+	mediaReady := make(chan struct{})
+	var mediaReadyOnce sync.Once
 
 	setPublisherOnce := func() {
 		pubMu.Lock()
 		defer pubMu.Unlock()
-		if publisherSet || (!videoDetected && !audioDetected) {
+		if stream == nil || publisherSet || (!videoDetected && !audioDetected) {
 			return
 		}
 		if err := stream.SetPublisher(pub); err != nil {
@@ -112,6 +105,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		select {
+		case <-mediaReady:
+		case <-pub.done:
+			return
+		}
 		codec := track.Codec()
 		avCodec := mimeToCodecType(codec.MimeType)
 		if avCodec == 0 {
@@ -143,7 +141,13 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		readTrackLoop(track, dp, stream, pub.done, avCodec)
+		pubMu.Lock()
+		readyStream := stream
+		pubMu.Unlock()
+		if readyStream == nil {
+			return
+		}
+		readTrackLoop(track, dp, readyStream, pub.done, avCodec)
 	})
 
 	// Cleanup on ICE disconnect.
@@ -153,8 +157,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			wasPublisher := publisherSet
 			pubMu.Unlock()
 
-			if wasPublisher {
-				stream.RemovePublisher()
+			pubMu.Lock()
+			readyStream := stream
+			pubMu.Unlock()
+			if wasPublisher && readyStream != nil {
+				readyStream.RemovePublisher()
 				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
 					StreamKey:  streamKey,
 					Protocol:   "webrtc",
@@ -186,6 +193,24 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("set local description: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if err := m.authorizeRequest(r, core.AuthorizationPublish, core.AuthorizationPostConnect, streamKey); err != nil {
+		sess.Close()
+		releaseConn()
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	newStream, err := m.server.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		sess.Close()
+		releaseConn()
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	pubMu.Lock()
+	stream = newStream
+	pubMu.Unlock()
+	m.storeSession(sess)
+	mediaReadyOnce.Do(func() { close(mediaReady) })
 
 	// Wait for at least one ICE candidate or gathering complete,
 	// whichever comes first. Avoids blocking on slow STUN/TURN timeouts.

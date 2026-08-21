@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,18 +25,16 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
 		return
 	}
+	if err := m.authorizeRequest(r, core.AuthorizationSubscribe, core.AuthorizationPreSession, streamKey); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
 	if !m.server.AcquireConn() {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
 		return
 	}
-	connAcquired := true
-	releaseConn := func() {
-		if connAcquired {
-			connAcquired = false
-			m.server.ReleaseConn()
-		}
-	}
+	releaseConn := newConnectionRelease(m.server)
 
 	contentType := r.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "application/sdp") {
@@ -44,7 +43,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offerBytes, err := io.ReadAll(r.Body)
+	offerBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		releaseConn()
 		http.Error(w, "failed to read offer", http.StatusBadRequest)
@@ -75,13 +74,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	}
 	info := pub.MediaInfo()
 
-	// Track subscriber limit.
-	if err := stream.AddSubscriber("webrtc"); err != nil {
-		releaseConn()
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-
 	// Set GCC initial bitrate to the stream's actual bitrate (with 20% headroom)
 	// so the pacer doesn't throttle at startup. The factory closure reads this
 	// value when pion creates the BWE for this PeerConnection.
@@ -95,7 +87,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		ICEServers: m.iceServersFromConfig(),
 	})
 	if err != nil {
-		stream.RemoveSubscriber("webrtc")
 		releaseConn()
 		http.Error(w, "failed to create peer connection", http.StatusInternalServerError)
 		return
@@ -112,7 +103,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := uuid.New().String()
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
-	m.storeSession(sess)
+	var subscriberActive atomic.Bool
 
 	// Parse the offer SDP to determine which media types the client requests.
 	// Only add tracks that match an m-line in the offer; adding tracks without
@@ -198,7 +189,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	if videoSender == nil && audioSender == nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
 		releaseConn()
 		http.Error(w, "no compatible tracks for WebRTC", http.StatusUnsupportedMediaType)
 		return
@@ -232,12 +222,14 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				close(connected)
 			}
 		case webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
-			stream.RemoveSubscriber("webrtc")
-			m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
-				StreamKey:  streamKey,
-				Protocol:   "webrtc",
-				RemoteAddr: r.RemoteAddr,
-			})
+			if subscriberActive.CompareAndSwap(true, false) {
+				stream.RemoveSubscriber("webrtc")
+				m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
+					StreamKey:  streamKey,
+					Protocol:   "webrtc",
+					RemoteAddr: r.RemoteAddr,
+				})
+			}
 			releaseConn()
 			sess.Close()
 		}
@@ -245,7 +237,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
 		releaseConn()
 		http.Error(w, fmt.Sprintf("set remote description: %v", err), http.StatusBadRequest)
 		return
@@ -254,7 +245,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
 		releaseConn()
 		http.Error(w, fmt.Sprintf("create answer: %v", err), http.StatusInternalServerError)
 		return
@@ -262,11 +252,24 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
 		releaseConn()
 		http.Error(w, fmt.Sprintf("set local description: %v", err), http.StatusInternalServerError)
 		return
 	}
+	if err := m.authorizeRequest(r, core.AuthorizationSubscribe, core.AuthorizationPostConnect, streamKey); err != nil {
+		sess.Close()
+		releaseConn()
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := stream.AddSubscriber("webrtc"); err != nil {
+		sess.Close()
+		releaseConn()
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	subscriberActive.Store(true)
+	m.storeSession(sess)
 
 	// Wait for at least one ICE candidate or gathering complete,
 	// whichever comes first. Avoids blocking on slow STUN/TURN
