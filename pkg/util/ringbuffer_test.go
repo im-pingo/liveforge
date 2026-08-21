@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -332,30 +333,30 @@ func TestRingReaderClose(t *testing.T) {
 }
 
 func TestRingReaderCloseInterruptsBlockedRead(t *testing.T) {
-	previousProcs := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(previousProcs)
+	synctest.Test(t, func(t *testing.T) {
+		reader := NewRingBuffer[int](16).NewReader()
+		result := make(chan bool, 1)
+		go func() {
+			_, ok := reader.Read()
+			result <- ok
+		}()
 
-	reader := NewRingBuffer[int](16).NewReader()
-	started := make(chan struct{})
-	result := make(chan bool, 1)
-	go func() {
-		close(started)
-		_, ok := reader.Read()
-		result <- ok
-	}()
+		// Wait proves the reader is durably blocked in sync.Cond.Wait.
+		synctest.Wait()
+		reader.Close()
+		synctest.Wait()
 
-	<-started
-	runtime.Gosched()
-	reader.Close()
-
-	select {
-	case ok := <-result:
-		if ok {
-			t.Fatal("Read returned data after reader close")
+		select {
+		case ok := <-result:
+			if ok {
+				t.Fatal("Read returned data after reader close")
+			}
+		default:
+			reader.rb.Close()
+			synctest.Wait()
+			t.Fatal("reader Close did not interrupt blocked Read")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("reader Close did not interrupt blocked Read")
-	}
+	})
 }
 
 func TestRingReaderCloseDoesNotLeaveContextWake(t *testing.T) {

@@ -2,9 +2,8 @@ package httpstream
 
 import (
 	"bytes"
-	"runtime"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -171,27 +170,24 @@ func newIdleHTTPStream() *core.Stream {
 func assertIdleSegmenterStops(t *testing.T, stream *core.Stream, run, stop func()) {
 	t.Helper()
 
-	previousProcs := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(previousProcs)
+	synctest.Test(t, func(t *testing.T) {
+		stopped := make(chan struct{})
+		go func() {
+			run()
+			close(stopped)
+		}()
 
-	started := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		close(started)
-		run()
-		close(stopped)
-	}()
+		// Wait proves Run reached the idle reader's sync.Cond.Wait.
+		synctest.Wait()
+		stop()
+		synctest.Wait()
 
-	<-started
-	// With one P, the segmenter runs until its idle ring read blocks.
-	runtime.Gosched()
-	stop()
-
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		stream.Close()
-		<-stopped
-		t.Fatal("Stop did not interrupt the idle ring read")
-	}
+		select {
+		case <-stopped:
+		default:
+			stream.Close()
+			synctest.Wait()
+			t.Fatal("Stop did not interrupt the idle ring read")
+		}
+	})
 }

@@ -3,9 +3,9 @@ package record
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -212,76 +212,78 @@ func TestRecordSessionEndToEnd(t *testing.T) {
 }
 
 func TestRecordSessionsEachReceiveSingleWrite(t *testing.T) {
-	previousProcs := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(previousProcs)
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		stream := core.NewStream(
+			"live/shared-signal",
+			config.StreamConfig{RingBufferSize: 16},
+			config.LimitsConfig{},
+			core.NewEventBus(),
+		)
+		first, err := NewRecordSession("live/shared-signal", stream, newTestConfig(firstDir).Record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := NewRecordSession("live/shared-signal", stream, newTestConfig(secondDir).Record)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	stream := core.NewStream(
-		"live/shared-signal",
-		config.StreamConfig{RingBufferSize: 16},
-		config.LimitsConfig{},
-		core.NewEventBus(),
-	)
-	first, err := NewRecordSession("live/shared-signal", stream, newTestConfig(t.TempDir()).Record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := NewRecordSession("live/shared-signal", stream, newTestConfig(t.TempDir()).Record)
-	if err != nil {
-		t.Fatal(err)
-	}
+		firstDone := make(chan struct{})
+		secondDone := make(chan struct{})
+		go func() {
+			first.Run()
+			close(firstDone)
+		}()
+		go func() {
+			second.Run()
+			close(secondDone)
+		}()
 
-	firstStarted := make(chan struct{})
-	secondStarted := make(chan struct{})
-	firstDone := make(chan struct{})
-	secondDone := make(chan struct{})
-	go func() {
-		close(firstStarted)
-		first.Run()
-		close(firstDone)
-	}()
-	go func() {
-		close(secondStarted)
-		second.Run()
-		close(secondDone)
-	}()
-	<-firstStarted
-	<-secondStarted
-	runtime.Gosched()
+		// Both sessions are durably blocked in their independent ring reads.
+		synctest.Wait()
+		frame := avframe.NewAVFrame(
+			avframe.MediaTypeVideo,
+			avframe.CodecH264,
+			avframe.FrameTypeKeyframe,
+			0,
+			0,
+			[]byte{0x65, 0x88, 0x84},
+		)
+		stream.WriteFrame(frame)
+		synctest.Wait()
 
-	defer func() {
+		wantCursor := stream.RingBuffer().WriteCursor()
+		if got := first.reader.ReadCursor(); got != wantCursor {
+			t.Errorf("first session read cursor = %d, want %d", got, wantCursor)
+		}
+		if got := second.reader.ReadCursor(); got != wantCursor {
+			t.Errorf("second session read cursor = %d, want %d", got, wantCursor)
+		}
+		wantBytes := int64(len(frame.Payload))
+		if got := first.writer.bytesWritten; got != wantBytes {
+			t.Errorf("first session bytes written = %d, want %d", got, wantBytes)
+		}
+		if got := second.writer.bytesWritten; got != wantBytes {
+			t.Errorf("second session bytes written = %d, want %d", got, wantBytes)
+		}
+
 		first.Stop()
 		second.Stop()
-		<-firstDone
-		<-secondDone
-	}()
-
-	stream.WriteFrame(avframe.NewAVFrame(
-		avframe.MediaTypeVideo,
-		avframe.CodecH264,
-		avframe.FrameTypeKeyframe,
-		0,
-		0,
-		[]byte{0x65, 0x88, 0x84},
-	))
-
-	deadline := time.Now().Add(time.Second)
-	for {
-		firstInfo, firstErr := os.Stat(first.writer.FilePath())
-		secondInfo, secondErr := os.Stat(second.writer.FilePath())
-		firstWritten := firstErr == nil && firstInfo.Size() > 0
-		secondWritten := secondErr == nil && secondInfo.Size() > 0
-		if firstWritten && secondWritten {
-			break
+		stream.Close()
+		synctest.Wait()
+		select {
+		case <-firstDone:
+		default:
+			t.Error("first session did not stop")
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"single write reached sessions first=%v second=%v; both sessions must wake",
-				firstWritten,
-				secondWritten,
-			)
+		select {
+		case <-secondDone:
+		default:
+			t.Error("second session did not stop")
 		}
-		runtime.Gosched()
-	}
+	})
 }
 
 func TestParseSize(t *testing.T) {

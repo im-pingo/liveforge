@@ -52,8 +52,9 @@ func (rb *RingBuffer[T]) Write(val T) {
 	rb.cond.Broadcast()
 }
 
-// Close signals all blocked readers to return (zero, false).
-// After Close, Write is a no-op.
+// Close prevents future writes and wakes blocked readers. Readers may still
+// drain values written before Close; closing an individual reader discards its
+// unread values immediately.
 func (rb *RingBuffer[T]) Close() {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
