@@ -35,6 +35,7 @@ Do not claim a feature is supported until there is a source implementation and a
 - Release binaries are built with the portable no-CGO profile; audio transcoding is available in source builds with FFmpeg or in the tagged Docker image.
 - Run `tools/check-agent-docs_test.sh` after every change. Run `tools/check-agent-docs.sh` with `CHECK_AGENT_DOCS_DIFF=1` in CI or before opening a pull request.
 - Run focused package tests for the changed module, then the tagged baseline suite when the environment has Go 1.26 and FFmpeg available.
+- GitHub Actions workflows must use action versions whose declared runtime is Node 24 or newer. Keep the current Node 24-compatible majors in `.github/workflows/ci.yml` and `.github/workflows/release.yml`; do not restore deprecated Node 20 action versions or add `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION`.
 
 ## Safety and review rules
 
