@@ -177,6 +177,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			releaseConn()
+			sess.Close()
 		}
 	})
 

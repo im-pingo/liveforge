@@ -96,6 +96,26 @@ func TestConnectionReleaseIsExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestSessionCloseCancelsMediaWait(t *testing.T) {
+	m, _ := newTestModule(t)
+	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newSession("cancel-test", pc, "live/test", "whip", m)
+	closed := make(chan struct{})
+	go func() {
+		<-sess.done
+		close(closed)
+	}()
+	sess.Close()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("session close did not cancel media wait")
+	}
+}
+
 func TestModuleInitAndClose(t *testing.T) {
 	m, _ := newTestModule(t)
 	if m.Addr() == nil {
