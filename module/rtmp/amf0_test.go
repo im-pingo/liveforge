@@ -134,3 +134,59 @@ func TestAMF0EncodeDeterministic(t *testing.T) {
 		t.Error("encoding should be deterministic")
 	}
 }
+
+func TestAMF0StrictArrayRoundTrip(t *testing.T) {
+	want := []any{"vp08", "vp09", "av01", "hvc1", "Opus"}
+	encoded, err := AMF0Encode(map[string]any{"fourCcList": want})
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+	decoded, err := AMF0Decode(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	obj, ok := decoded[0].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded object type = %T", decoded[0])
+	}
+	got, ok := obj["fourCcList"].([]any)
+	if !ok {
+		t.Fatalf("decoded array type = %T", obj["fourCcList"])
+	}
+	if len(got) != len(want) {
+		t.Fatalf("array length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("array[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestAMF0ECMAArrayDecode(t *testing.T) {
+	data := []byte{
+		0x08,                   // ECMA array
+		0x00, 0x00, 0x00, 0x01, // one property
+		0x00, 0x12, // videoFourCcInfoMap
+		'v', 'i', 'd', 'e', 'o', 'F', 'o', 'u', 'r', 'C', 'c', 'I', 'n', 'f', 'o', 'M', 'a', 'p',
+		0x03, // object value
+		0x00, 0x04, 'v', 'p', '0', '9',
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // number 0
+		0x00, 0x00, 0x09, // nested object end
+		0x00, 0x00, 0x09, // ECMA array end
+	}
+	decoded, err := AMF0Decode(data)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("decoded values = %d, want 1", len(decoded))
+	}
+	obj, ok := decoded[0].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded type = %T", decoded[0])
+	}
+	if _, ok := obj["videoFourCcInfoMap"].(map[string]any); !ok {
+		t.Fatalf("nested ECMA/object type = %T", obj["videoFourCcInfoMap"])
+	}
+}

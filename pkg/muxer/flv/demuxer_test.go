@@ -174,3 +174,25 @@ func TestDemuxSequenceHeader(t *testing.T) {
 		t.Errorf("expected sequence header, got %v", frame.FrameType)
 	}
 }
+
+func TestDemuxSkipsEnhancedVideoMetadata(t *testing.T) {
+	metadata := []byte{0x94, 'v', 'p', '0', '9', 0x01, 0x02}
+	videoData := []byte{0x91, 'v', 'p', '0', '9', 0x9d, 0x01}
+
+	var buf bytes.Buffer
+	buf.Write(FLVHeader)
+	buf.Write(PreviousTagSize0)
+	buf.Write(buildFLVTag(TagTypeVideo, 1000, metadata))
+	buf.Write(buildFLVTag(TagTypeVideo, 1033, videoData))
+
+	frame, err := NewDemuxer(&buf).ReadTag()
+	if err != nil {
+		t.Fatalf("ReadTag error: %v", err)
+	}
+	if frame == nil {
+		t.Fatal("expected the media tag after metadata")
+	}
+	if frame.Codec != avframe.CodecVP9 || frame.DTS != 1033 {
+		t.Fatalf("unexpected frame after metadata: codec=%v dts=%d", frame.Codec, frame.DTS)
+	}
+}

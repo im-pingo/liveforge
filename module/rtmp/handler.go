@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 
@@ -38,9 +39,10 @@ type Handler struct {
 	streamKey   string
 	isPublisher bool
 	appParams   map[string]string // params from connect (app field query string)
+	caps        PeerCapabilities
 
-	chunkSize   int
-	skipCfg     *config.SkipTrackerConfig
+	chunkSize int
+	skipCfg   *config.SkipTrackerConfig
 }
 
 // NewHandler creates a new RTMP connection handler.
@@ -154,6 +156,7 @@ func (h *Handler) onConnect(vals []any) error {
 	// Extract app name from command object
 	if len(vals) >= 3 {
 		if obj, ok := vals[2].(map[string]any); ok {
+			h.caps = ParsePeerCapabilities(obj)
 			if app, ok := obj["app"].(string); ok {
 				// Parse query string from app field (e.g. "live?token=xxx")
 				if parts := strings.SplitN(app, "?", 2); len(parts) == 2 {
@@ -295,7 +298,9 @@ func (h *Handler) onPlay(vals []any) error {
 		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
 		return fmt.Errorf("play %s: %w", h.streamKey, err)
 	}
-	sub := NewSubscriber(h.streamKey, h.conn, h.cw, stream, h.skipCfg)
+	sub := NewSubscriberWithCapabilities(h.streamKey, h.conn, h.cw, stream, h.skipCfg, h.caps, func(err error) {
+		slog.Warn("rtmp subscriber cannot represent stream codec", "subscriber", "rtmp-sub-"+h.streamKey, "error", err)
+	})
 	go func() {
 		defer func() {
 			stream.RemoveSubscriber("rtmp")
@@ -330,12 +335,19 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 
 	// Convert RTMP message to AVFrame using FLV parsing
 	// RTMP video/audio payloads use the same format as FLV tag data
-	var frame *avframe.AVFrame
+	var (
+		frame    *avframe.AVFrame
+		parseErr error
+	)
 
 	if msg.TypeID == MsgVideo {
-		frame = parseVideoPayload(msg.Payload, int64(msg.Timestamp))
+		frame, parseErr = parseVideoPayloadWithError(msg.Payload, int64(msg.Timestamp))
 	} else {
-		frame = parseAudioPayload(msg.Payload, int64(msg.Timestamp))
+		frame, parseErr = parseAudioPayloadWithError(msg.Payload, int64(msg.Timestamp))
+	}
+	if parseErr != nil {
+		slog.Debug("drop invalid RTMP media payload", "type", msg.TypeID, "error", parseErr)
+		return nil
 	}
 
 	if frame != nil {
@@ -368,4 +380,3 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 	}
 	return nil
 }
-

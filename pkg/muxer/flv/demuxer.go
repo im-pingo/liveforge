@@ -1,7 +1,6 @@
 package flv
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 
@@ -90,54 +89,9 @@ func (d *Demuxer) readOneTag() (*avframe.AVFrame, error) {
 }
 
 func (d *Demuxer) parseVideoTag(data []byte, dts int64) (*avframe.AVFrame, error) {
-	if len(data) < 5 {
-		return nil, fmt.Errorf("video tag data too short: %d bytes", len(data))
-	}
-
-	frameTypeID := (data[0] >> 4) & 0x0F
-	codecID := data[0] & 0x0F
-	avcPacketType := data[1]
-	cts := int64(int32(binary.BigEndian.Uint32([]byte{data[2], data[3], data[4], 0})) >> 8)
-
-	codec := FLVVideoCodecToAVFrame(codecID)
-	if codec == 0 {
-		return nil, fmt.Errorf("unsupported video codec ID: %d", codecID)
-	}
-
-	var frameType avframe.FrameType
-	if avcPacketType == AVCPacketSequenceHeader {
-		frameType = avframe.FrameTypeSequenceHeader
-	} else if frameTypeID == VideoFrameKeyframe {
-		frameType = avframe.FrameTypeKeyframe
-	} else {
-		frameType = avframe.FrameTypeInterframe
-	}
-
-	pts := dts + cts
-	payload := data[5:]
-
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, pts, payload), nil
+	return ParseVideoPayload(data, dts)
 }
 
 func (d *Demuxer) parseAudioTag(data []byte, dts int64) (*avframe.AVFrame, error) {
-	if len(data) < 2 {
-		return nil, fmt.Errorf("audio tag data too short: %d bytes", len(data))
-	}
-
-	formatID := (data[0] >> 4) & 0x0F
-	codec := FLVAudioCodecToAVFrame(formatID)
-	if codec == 0 {
-		return nil, fmt.Errorf("unsupported audio format ID: %d", formatID)
-	}
-
-	var frameType avframe.FrameType
-	if codec == avframe.CodecAAC && data[1] == AACPacketSequenceHeader {
-		frameType = avframe.FrameTypeSequenceHeader
-	} else {
-		frameType = avframe.FrameTypeInterframe
-	}
-
-	payload := data[2:]
-
-	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, payload), nil
+	return ParseAudioPayload(data, dts)
 }

@@ -9,12 +9,14 @@ import (
 
 // AMF0 type markers.
 const (
-	amf0Number    byte = 0x00
-	amf0Boolean   byte = 0x01
-	amf0String    byte = 0x02
-	amf0Object    byte = 0x03
-	amf0Null      byte = 0x05
-	amf0ObjectEnd byte = 0x09
+	amf0Number      byte = 0x00
+	amf0Boolean     byte = 0x01
+	amf0String      byte = 0x02
+	amf0Object      byte = 0x03
+	amf0Null        byte = 0x05
+	amf0ECMAArray   byte = 0x08
+	amf0ObjectEnd   byte = 0x09
+	amf0StrictArray byte = 0x0A
 )
 
 // AMF0Encode encodes Go values to AMF0 bytes.
@@ -56,7 +58,9 @@ func amf0EncodeValue(v any) ([]byte, error) {
 	case nil:
 		return []byte{amf0Null}, nil
 	case map[string]any:
-		return amf0EncodeObject(val), nil
+		return amf0EncodeObject(val)
+	case []any:
+		return amf0EncodeStrictArray(val)
 	default:
 		return nil, fmt.Errorf("unsupported AMF0 type: %T", v)
 	}
@@ -85,7 +89,7 @@ func amf0EncodeBool(b bool) []byte {
 	return buf
 }
 
-func amf0EncodeObject(obj map[string]any) []byte {
+func amf0EncodeObject(obj map[string]any) ([]byte, error) {
 	var buf []byte
 	buf = append(buf, amf0Object)
 
@@ -101,13 +105,33 @@ func amf0EncodeObject(obj map[string]any) []byte {
 		buf = append(buf, byte(len(k)>>8), byte(len(k)))
 		buf = append(buf, k...)
 		// Property value
-		encoded, _ := amf0EncodeValue(obj[k])
+		encoded, err := amf0EncodeValue(obj[k])
+		if err != nil {
+			return nil, fmt.Errorf("AMF0 object property %q: %w", k, err)
+		}
 		buf = append(buf, encoded...)
 	}
 
 	// Object end marker: 0x00 0x00 0x09
 	buf = append(buf, 0x00, 0x00, amf0ObjectEnd)
-	return buf
+	return buf, nil
+}
+
+func amf0EncodeStrictArray(values []any) ([]byte, error) {
+	if len(values) > math.MaxInt32 {
+		return nil, fmt.Errorf("AMF0 strict array: too many elements: %d", len(values))
+	}
+	buf := make([]byte, 0, 5)
+	buf = append(buf, amf0StrictArray, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(values))) //nolint:gosec // len is bounded to MaxInt32 above.
+	for i, value := range values {
+		encoded, err := amf0EncodeValue(value)
+		if err != nil {
+			return nil, fmt.Errorf("AMF0 strict array element %d: %w", i, err)
+		}
+		buf = append(buf, encoded...)
+	}
+	return buf, nil
 }
 
 func amf0DecodeValue(data []byte) (any, int, error) {
@@ -145,30 +169,88 @@ func amf0DecodeValue(data []byte) (any, int, error) {
 	case amf0Object:
 		return amf0DecodeObject(data[1:])
 
+	case amf0ECMAArray:
+		return amf0DecodeECMAArray(data[1:])
+
+	case amf0StrictArray:
+		return amf0DecodeStrictArray(data[1:])
+
 	default:
 		return nil, 0, fmt.Errorf("AMF0: unsupported type marker 0x%02x", data[0])
 	}
 }
 
 func amf0DecodeObject(data []byte) (map[string]any, int, error) {
+	obj, n, err := amf0DecodeObjectProperties(data, "object")
+	if err != nil {
+		return nil, 0, err
+	}
+	return obj, n + 1, nil // +1 for the initial amf0Object marker
+}
+
+func amf0DecodeECMAArray(data []byte) (map[string]any, int, error) {
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("AMF0 ECMA array: need 4-byte count, got %d", len(data))
+	}
+
+	// The associative count is advisory; the object-end marker is the
+	// authoritative boundary for an ECMA array.
+	obj, n, err := amf0DecodeObjectProperties(data[4:], "ECMA array")
+	if err != nil {
+		return nil, 0, err
+	}
+	return obj, n + 5, nil // marker and associative count
+}
+
+func amf0DecodeStrictArray(data []byte) ([]any, int, error) {
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("AMF0 strict array: need 4-byte count, got %d", len(data))
+	}
+
+	count := binary.BigEndian.Uint32(data[:4])
+	remaining := len(data) - 4
+	if remaining > math.MaxInt32 || int64(count) > int64(remaining) {
+		return nil, 0, fmt.Errorf("AMF0 strict array: count %d exceeds available data", count)
+	}
+
+	values := make([]any, int(count))
+	offset := 4
+	for i := range values {
+		if offset < 4 || offset >= len(data) {
+			return nil, 0, fmt.Errorf("AMF0 strict array element %d: unexpected end", i)
+		}
+		value, n, err := amf0DecodeValue(data[offset:]) //nolint:gosec // offset is bounds-checked above.
+		if err != nil {
+			return nil, 0, fmt.Errorf("AMF0 strict array element %d: %w", i, err)
+		}
+		if n <= 0 || n > len(data)-offset {
+			return nil, 0, fmt.Errorf("AMF0 strict array element %d: invalid length %d", i, n)
+		}
+		values[i] = value
+		offset += n
+	}
+	return values, offset + 1, nil // +1 for the initial strict-array marker
+}
+
+func amf0DecodeObjectProperties(data []byte, kind string) (map[string]any, int, error) {
 	obj := make(map[string]any)
 	offset := 0
 
 	for {
 		if offset+3 > len(data) {
-			return nil, 0, fmt.Errorf("AMF0 object: unexpected end")
+			return nil, 0, fmt.Errorf("AMF0 %s: unexpected end", kind)
 		}
 
 		// Check for object end marker
 		if data[offset] == 0x00 && data[offset+1] == 0x00 && data[offset+2] == amf0ObjectEnd {
-			return obj, 1 + offset + 3, nil // +1 for the initial amf0Object marker
+			return obj, offset + 3, nil
 		}
 
 		// Property name
 		nameLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
 		offset += 2
 		if offset+nameLen > len(data) {
-			return nil, 0, fmt.Errorf("AMF0 object: property name overflow")
+			return nil, 0, fmt.Errorf("AMF0 %s: property name overflow", kind)
 		}
 		name := string(data[offset : offset+nameLen])
 		offset += nameLen
@@ -176,7 +258,7 @@ func amf0DecodeObject(data []byte) (map[string]any, int, error) {
 		// Property value
 		val, n, err := amf0DecodeValue(data[offset:])
 		if err != nil {
-			return nil, 0, fmt.Errorf("AMF0 object property %q: %w", name, err)
+			return nil, 0, fmt.Errorf("AMF0 %s property %q: %w", kind, name, err)
 		}
 		obj[name] = val
 		offset += n

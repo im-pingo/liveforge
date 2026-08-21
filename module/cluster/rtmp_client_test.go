@@ -87,9 +87,9 @@ func TestParseRTMPURL(t *testing.T) {
 func TestParseVideoPayload(t *testing.T) {
 	// Keyframe H.264 NALU
 	data := []byte{
-		0x17,                   // keyframe (1) + H.264 (7)
-		0x01,                   // AVC NALU
-		0x00, 0x00, 0x00,      // CTS = 0
+		0x17,             // keyframe (1) + H.264 (7)
+		0x01,             // AVC NALU
+		0x00, 0x00, 0x00, // CTS = 0
 		0x65, 0x88, 0x00, 0x01, // NALU data
 	}
 	frame := parseVideoPayload(data, 1000)
@@ -123,9 +123,9 @@ func TestParseVideoPayload(t *testing.T) {
 
 	// Interframe
 	interData := []byte{
-		0x27,                   // interframe (2) + H.264 (7)
-		0x01,                   // AVC NALU
-		0x00, 0x00, 0x00,      // CTS = 0
+		0x27,             // interframe (2) + H.264 (7)
+		0x01,             // AVC NALU
+		0x00, 0x00, 0x00, // CTS = 0
 		0x41, 0x9A, 0x00, 0x01,
 	}
 	frame = parseVideoPayload(interData, 2000)
@@ -188,6 +188,36 @@ func TestParseAudioPayload(t *testing.T) {
 	frame = parseAudioPayload([]byte{0x0F, 0x01}, 0)
 	if frame != nil {
 		t.Error("expected nil for unknown format")
+	}
+}
+
+func TestParseEnhancedRTMPPayloads(t *testing.T) {
+	video := []byte{
+		0x91, 'h', 'v', 'c', '1',
+		0xff, 0xff, 0xdf,
+		0x26, 0x01,
+	}
+	videoFrame := parseVideoPayload(video, 100)
+	if videoFrame == nil {
+		t.Fatal("expected enhanced video frame")
+	}
+	if videoFrame.Codec != avframe.CodecH265 || videoFrame.PTS != 67 {
+		t.Errorf("enhanced video = codec %v, PTS %d; want H265, 67", videoFrame.Codec, videoFrame.PTS)
+	}
+
+	audio := []byte{0x91, 'O', 'p', 'u', 's', 0xde, 0xad}
+	audioFrame := parseAudioPayload(audio, 200)
+	if audioFrame == nil {
+		t.Fatal("expected enhanced audio frame")
+	}
+	if audioFrame.Codec != avframe.CodecOpus || len(audioFrame.Payload) != 2 {
+		t.Errorf("enhanced audio = codec %v, payload %x; want Opus, dead", audioFrame.Codec, audioFrame.Payload)
+	}
+
+	negativeCTS := []byte{0x27, 0x01, 0xff, 0xff, 0xdf, 0x41}
+	negativeFrame := parseVideoPayload(negativeCTS, 100)
+	if negativeFrame == nil || negativeFrame.PTS != 67 {
+		t.Fatalf("negative CTS frame = %#v, want PTS 67", negativeFrame)
 	}
 }
 

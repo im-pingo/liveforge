@@ -2,6 +2,7 @@ package rtmp
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"net"
 	"testing"
@@ -80,6 +81,77 @@ func TestHandlerConnect(t *testing.T) {
 	}
 	if vals[0] != "_result" {
 		t.Errorf("expected _result, got %v", vals[0])
+	}
+
+	clientConn.Close()
+	<-errCh
+}
+
+func TestHandlerConnectCapabilities(t *testing.T) {
+	hub, bus := newTestHub()
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handler.Handle()
+	}()
+
+	cw := NewChunkWriter(clientConn, DefaultChunkSize)
+	cr := NewChunkReader(clientConn, DefaultChunkSize)
+	connectObject := map[string]any{
+		"app":                "live",
+		"fourCcList":         []any{"vp09", "Opus"},
+		"videoFourCcInfoMap": map[string]any{"vp09": float64(CanDecode)},
+	}
+	connectPayload, err := AMF0Encode("connect", float64(1), connectObject)
+	if err != nil {
+		t.Fatalf("encode connect: %v", err)
+	}
+	if writeErr := cw.WriteMessage(3, &Message{
+		TypeID:  MsgAMF0Command,
+		Length:  uint32(len(connectPayload)), //nolint:gosec // the in-memory test payload is bounded.
+		Payload: connectPayload,
+	}); writeErr != nil {
+		t.Fatalf("write connect: %v", writeErr)
+	}
+
+	var result *Message
+	for range 4 {
+		msg, readErr := cr.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
+		}
+		if msg.TypeID == MsgSetChunkSize && len(msg.Payload) >= 4 {
+			cr.SetChunkSize(int(binary.BigEndian.Uint32(msg.Payload)))
+		}
+		if msg.TypeID == MsgAMF0Command {
+			result = msg
+		}
+	}
+	if result == nil {
+		t.Fatal("expected connect result")
+	}
+	vals, err := AMF0Decode(result.Payload)
+	if err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(vals) < 3 {
+		t.Fatalf("response values = %d, want at least 3", len(vals))
+	}
+	properties, ok := vals[2].(map[string]any)
+	if !ok {
+		t.Fatalf("response properties type = %T", vals[2])
+	}
+	for _, key := range []string{"fourCcList", "videoFourCcInfoMap", "audioFourCcInfoMap", "capsEx"} {
+		if _, ok := properties[key]; !ok {
+			t.Errorf("response properties missing %q", key)
+		}
+	}
+	if !handler.caps.Enhanced() {
+		t.Error("handler did not retain peer capabilities")
 	}
 
 	clientConn.Close()
@@ -177,8 +249,8 @@ func TestHandlerMediaMessage(t *testing.T) {
 
 	// Send video keyframe
 	videoData := []byte{
-		0x17,       // keyframe + H.264
-		0x01,       // AVC NALU
+		0x17,             // keyframe + H.264
+		0x01,             // AVC NALU
 		0x00, 0x00, 0x00, // CTS = 0
 		0x65, 0x88, 0x00, 0x01, // NALU data
 	}
