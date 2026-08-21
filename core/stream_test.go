@@ -24,7 +24,7 @@ type testPublisher struct {
 	info *avframe.MediaInfo
 }
 
-func (p *testPublisher) ID() string                   { return p.id }
+func (p *testPublisher) ID() string                    { return p.id }
 func (p *testPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *testPublisher) Close() error                  { return nil }
 
@@ -510,12 +510,12 @@ func TestStreamGOPCacheDetail(t *testing.T) {
 		t.Errorf("expected 0 total frames, got %d", d.TotalFrames)
 	}
 
-	// Write keyframe + interframe + audio
+	// Write keyframe + interframe + late-arriving audio with an older DTS.
 	kf := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 100, 100, []byte{0x65})
 	s.WriteFrame(kf)
 	inter := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 140, 140, []byte{0x41})
 	s.WriteFrame(inter)
-	af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 120, 120, []byte{0xFF})
+	af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 80, 80, []byte{0xFF})
 	s.WriteFrame(af)
 
 	d = s.GOPCacheDetail()
@@ -528,10 +528,36 @@ func TestStreamGOPCacheDetail(t *testing.T) {
 	if d.AudioFrames != 1 {
 		t.Errorf("expected 1 audio frame, got %d", d.AudioFrames)
 	}
-	// GOP order: keyframe(100), interframe(140), audio(120)
-	// DurationMs = lastDTS - firstDTS = 120 - 100 = 20 (audio is last in sequence)
-	if d.DurationMs != 20 {
-		t.Errorf("expected duration 20ms, got %d", d.DurationMs)
+	if d.DurationMs != 60 {
+		t.Errorf("expected duration 60ms, got %d", d.DurationMs)
+	}
+}
+
+func TestStreamGOPCacheDetailIncludesZeroDTS(t *testing.T) {
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = true
+	cfg.GOPCacheNum = 1
+	stream := NewStream("live/gop-zero-dts", cfg, config.LimitsConfig{}, NewEventBus())
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo,
+		avframe.CodecH264,
+		avframe.FrameTypeKeyframe,
+		0,
+		0,
+		[]byte{0x65},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo,
+		avframe.CodecH264,
+		avframe.FrameTypeInterframe,
+		40,
+		40,
+		[]byte{0x41},
+	))
+
+	if got := stream.GOPCacheDetail().DurationMs; got != 40 {
+		t.Errorf("duration = %dms, want 40ms", got)
 	}
 }
 
