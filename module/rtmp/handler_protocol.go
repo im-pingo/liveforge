@@ -9,57 +9,21 @@ import (
 )
 
 func parseVideoPayload(data []byte, dts int64) *avframe.AVFrame {
-	if len(data) < 5 {
-		return nil
-	}
-
-	frameTypeID := (data[0] >> 4) & 0x0F
-	codecID := data[0] & 0x0F
-	avcPacketType := data[1]
-	cts := int64(int32(binary.BigEndian.Uint32([]byte{data[2], data[3], data[4], 0})) >> 8)
-
-	codec := flvpkg.FLVVideoCodecToAVFrame(codecID)
-	if codec == 0 {
-		return nil
-	}
-
-	var frameType avframe.FrameType
-	if avcPacketType == flvpkg.AVCPacketSequenceHeader {
-		frameType = avframe.FrameTypeSequenceHeader
-	} else if frameTypeID == flvpkg.VideoFrameKeyframe {
-		frameType = avframe.FrameTypeKeyframe
-	} else {
-		frameType = avframe.FrameTypeInterframe
-	}
-
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, copyBytes(data[5:])) //nolint:gosec // len(data) >= 5 checked above
+	frame, _ := parseVideoPayloadWithError(data, dts)
+	return frame
 }
 
 func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
-	if len(data) < 2 {
-		return nil
-	}
-
-	formatID := (data[0] >> 4) & 0x0F
-	codec := flvpkg.FLVAudioCodecToAVFrame(formatID)
-	if codec == 0 {
-		return nil
-	}
-
-	var frameType avframe.FrameType
-	if codec == avframe.CodecAAC && data[1] == flvpkg.AACPacketSequenceHeader {
-		frameType = avframe.FrameTypeSequenceHeader
-	} else {
-		frameType = avframe.FrameTypeInterframe
-	}
-
-	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, copyBytes(data[2:])) //nolint:gosec // len(data) >= 2 checked above
+	frame, _ := parseAudioPayloadWithError(data, dts)
+	return frame
 }
 
-func copyBytes(b []byte) []byte {
-	c := make([]byte, len(b))
-	copy(c, b)
-	return c
+func parseVideoPayloadWithError(data []byte, dts int64) (*avframe.AVFrame, error) {
+	return flvpkg.ParseVideoPayload(data, dts)
+}
+
+func parseAudioPayloadWithError(data []byte, dts int64) (*avframe.AVFrame, error) {
+	return flvpkg.ParseAudioPayload(data, dts)
 }
 
 // splitNameParams splits "test?token=xxx&key=val" into ("test", {"token":"xxx","key":"val"}).
@@ -136,13 +100,18 @@ func (h *Handler) sendSetChunkSize(size int) error {
 }
 
 func (h *Handler) sendConnectResult(txID float64) error {
+	properties := map[string]any{
+		"fmsVer":       "FMS/3,5,7,7009",
+		"capabilities": float64(31),
+	}
+	for key, value := range ServerCapabilitiesObject() {
+		properties[key] = value
+	}
+
 	payload, err := AMF0Encode(
 		"_result",
 		txID,
-		map[string]any{
-			"fmsVer":       "FMS/3,5,7,7009",
-			"capabilities": float64(31),
-		},
+		properties,
 		map[string]any{
 			"level":       "status",
 			"code":        "NetConnection.Connect.Success",

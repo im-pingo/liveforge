@@ -2,6 +2,7 @@ package rtmp
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"net"
 	"time"
@@ -15,13 +16,15 @@ import (
 
 // Subscriber implements core.Subscriber for RTMP connections.
 type Subscriber struct {
-	id      string
-	conn    net.Conn
-	cw      *ChunkWriter
-	stream  *core.Stream
-	opts    core.SubscribeOptions
-	skipCfg *config.SkipTrackerConfig
-	closed  chan struct{}
+	id        string
+	conn      net.Conn
+	cw        *ChunkWriter
+	stream    *core.Stream
+	opts      core.SubscribeOptions
+	skipCfg   *config.SkipTrackerConfig
+	caps      PeerCapabilities
+	onFailure func(error)
+	closed    chan struct{}
 
 	// Reusable per-frame encoding state to avoid heap allocations on the hot path.
 	flvBuf bytes.Buffer
@@ -30,15 +33,23 @@ type Subscriber struct {
 
 // NewSubscriber creates a new RTMP subscriber.
 func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream, skipCfg *config.SkipTrackerConfig) *Subscriber {
+	return NewSubscriberWithCapabilities(streamKey, conn, cw, stream, skipCfg, PeerCapabilities{}, nil)
+}
+
+// NewSubscriberWithCapabilities creates an RTMP subscriber with peer codec
+// negotiation state.
+func NewSubscriberWithCapabilities(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream, skipCfg *config.SkipTrackerConfig, caps PeerCapabilities, onFailure func(error)) *Subscriber {
 	return &Subscriber{
-		id:      "rtmp-sub-" + streamKey,
-		conn:    conn,
-		cw:      cw,
-		stream:  stream,
-		opts:    core.DefaultSubscribeOptions(),
-		skipCfg: skipCfg,
-		closed:  make(chan struct{}),
-		muxer:   flvpkg.NewMuxer(),
+		id:        "rtmp-sub-" + streamKey,
+		conn:      conn,
+		cw:        cw,
+		stream:    stream,
+		opts:      core.DefaultSubscribeOptions(),
+		skipCfg:   skipCfg,
+		caps:      caps,
+		onFailure: onFailure,
+		closed:    make(chan struct{}),
+		muxer:     flvpkg.NewMuxer(),
 	}
 }
 
@@ -74,16 +85,19 @@ func (s *Subscriber) WriteLoop() {
 		return
 	}
 
-	// Determine if audio transcoding is needed.
-	// RTMP/FLV supports AAC and MP3; other codecs (Opus, G.711, etc.) need transcoding.
-	var transcodeRelease func()
-	needsTranscode := false
+	var mediaInfo *avframe.MediaInfo
 	if pub := s.stream.Publisher(); pub != nil {
-		ac := pub.MediaInfo().AudioCodec
-		if ac != 0 && ac != avframe.CodecAAC && ac != avframe.CodecMP3 {
-			needsTranscode = true
-		}
+		mediaInfo = pub.MediaInfo()
 	}
+	policy, err := chooseOutputPolicy(mediaInfo, s.caps)
+	if err != nil {
+		s.fail(err)
+		return
+	}
+	s.muxer = flvpkg.NewMuxerWithModes(policy.videoMode, policy.audioMode)
+
+	var transcodeRelease func()
+	needsTranscode := policy.transcodeAudio
 
 	// Send sequence headers
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
@@ -128,11 +142,12 @@ func (s *Subscriber) WriteLoop() {
 			var err error
 			reader, transcodeRelease, err = tm.GetOrCreateReader(avframe.CodecAAC)
 			if err != nil {
-				slog.Warn("rtmp: audio transcode unavailable", "subscriber", s.id, "error", err)
-				reader = s.stream.RingBuffer().NewReaderAt(startPos)
+				s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
+				return
 			}
 		} else {
-			reader = s.stream.RingBuffer().NewReaderAt(startPos)
+			s.fail(fmt.Errorf("rtmp: audio transcode unavailable"))
+			return
 		}
 	} else {
 		reader = s.stream.RingBuffer().NewReaderAt(startPos)
@@ -200,6 +215,12 @@ func (s *Subscriber) buildRTMPPayload(frame *avframe.AVFrame) ([]byte, error) {
 		return nil, nil
 	}
 	return tagData[flvpkg.TagHeaderSize : flvpkg.TagHeaderSize+dataSize], nil
+}
+
+func (s *Subscriber) fail(err error) {
+	if s.onFailure != nil {
+		s.onFailure(err)
+	}
 }
 
 func (s *Subscriber) sendFrame(frame *avframe.AVFrame) error {

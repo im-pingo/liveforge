@@ -108,9 +108,9 @@ func TestIsConnClosed(t *testing.T) {
 func TestParseVideoPayload(t *testing.T) {
 	// Valid H.264 keyframe
 	data := []byte{
-		0x17,                   // keyframe (1) + H.264 (7)
-		0x01,                   // AVC NALU
-		0x00, 0x00, 0x00,      // CTS = 0
+		0x17,             // keyframe (1) + H.264 (7)
+		0x01,             // AVC NALU
+		0x00, 0x00, 0x00, // CTS = 0
 		0x65, 0x88, 0x00, 0x01, // NALU data
 	}
 	frame := parseVideoPayload(data, 1000)
@@ -144,9 +144,9 @@ func TestParseVideoPayload(t *testing.T) {
 
 	// Interframe
 	interData := []byte{
-		0x27,                   // interframe (2) + H.264 (7)
-		0x01,                   // AVC NALU
-		0x00, 0x00, 0x00,      // CTS = 0
+		0x27,             // interframe (2) + H.264 (7)
+		0x01,             // AVC NALU
+		0x00, 0x00, 0x00, // CTS = 0
 		0x41, 0x9A, 0x00, 0x01, // NALU data
 	}
 	frame = parseVideoPayload(interData, 2000)
@@ -188,8 +188,8 @@ func TestParseVideoPayloadBFrameCTS(t *testing.T) {
 				byte(tt.cts),
 			}
 			data := []byte{
-				0x27,            // interframe (2) + H.264 (7)
-				0x01,            // AVC NALU
+				0x27, // interframe (2) + H.264 (7)
+				0x01, // AVC NALU
 				ctsBytes[0], ctsBytes[1], ctsBytes[2],
 				0x41, 0x9A, 0x00, 0x01, // NALU data
 			}
@@ -205,6 +205,42 @@ func TestParseVideoPayloadBFrameCTS(t *testing.T) {
 				t.Errorf("PTS = %d, want %d", frame.PTS, tt.wantPTS)
 			}
 		})
+	}
+}
+
+func TestParseEnhancedPayload(t *testing.T) {
+	video := []byte{
+		0x91, 'h', 'v', 'c', '1',
+		0xff, 0xff, 0xdf,
+		0x26, 0x01,
+	}
+	videoFrame := parseVideoPayload(video, 100)
+	if videoFrame == nil {
+		t.Fatal("expected enhanced video frame")
+	}
+	if videoFrame.Codec != avframe.CodecH265 {
+		t.Errorf("video codec = %v, want H265", videoFrame.Codec)
+	}
+	if videoFrame.PTS != 67 {
+		t.Errorf("video PTS = %d, want 67", videoFrame.PTS)
+	}
+	if videoFrame.FrameType != avframe.FrameTypeKeyframe {
+		t.Errorf("video frame type = %v, want keyframe", videoFrame.FrameType)
+	}
+
+	audio := []byte{0x91, 'O', 'p', 'u', 's', 0xde, 0xad}
+	audioFrame := parseAudioPayload(audio, 200)
+	if audioFrame == nil {
+		t.Fatal("expected enhanced audio frame")
+	}
+	if audioFrame.Codec != avframe.CodecOpus {
+		t.Errorf("audio codec = %v, want Opus", audioFrame.Codec)
+	}
+	if audioFrame.FrameType != avframe.FrameTypeInterframe {
+		t.Errorf("audio frame type = %v, want interframe", audioFrame.FrameType)
+	}
+	if len(audioFrame.Payload) != 2 || audioFrame.Payload[0] != 0xde || audioFrame.Payload[1] != 0xad {
+		t.Errorf("audio payload = %x, want dead", audioFrame.Payload)
 	}
 }
 
