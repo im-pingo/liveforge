@@ -44,7 +44,7 @@ func dialRTMP(addr string) (*rtmpConn, error) {
 	return &rtmpConn{
 		conn: conn,
 		cr:   rtmp.NewChunkReader(conn, rtmp.DefaultChunkSize),
-		cw:   rtmp.NewChunkWriter(conn, defaultChunkSize),
+		cw:   rtmp.NewChunkWriter(conn, rtmp.DefaultChunkSize),
 	}, nil
 }
 
@@ -76,15 +76,20 @@ func clientHandshake(conn net.Conn) error {
 
 // sendConnect sends RTMP connect command.
 func (rc *rtmpConn) sendConnect(app string) error {
+	properties := map[string]any{
+		"app":      app,
+		"type":     "nonprivate",
+		"flashVer": "FMLE/3.0",
+		"tcUrl":    "rtmp://localhost/" + app,
+	}
+	for key, value := range rtmp.ClientCapabilitiesObject() {
+		properties[key] = value
+	}
+
 	payload, err := rtmp.AMF0Encode(
 		"connect",
 		float64(1),
-		map[string]any{
-			"app":      app,
-			"type":     "nonprivate",
-			"flashVer": "FMLE/3.0",
-			"tcUrl":    "rtmp://localhost/" + app,
-		},
+		properties,
 	)
 	if err != nil {
 		return fmt.Errorf("encode connect: %w", err)
@@ -154,6 +159,7 @@ func (rc *rtmpConn) readResponses(targetTxnID float64) error {
 			if len(msg.Payload) >= 4 {
 				size := int(binary.BigEndian.Uint32(msg.Payload))
 				rc.cr.SetChunkSize(size)
+				rc.cw.SetChunkSize(size)
 			}
 			continue
 		case rtmp.MsgWindowAckSize, rtmp.MsgSetPeerBandwidth, rtmp.MsgAck, rtmp.MsgUserControl:
@@ -208,11 +214,15 @@ func (rc *rtmpConn) readResponses(targetTxnID float64) error {
 func (rc *rtmpConn) setChunkSize(size int) error {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, uint32(size))
-	return rc.cw.WriteMessage(2, &rtmp.Message{
+	if err := rc.cw.WriteMessage(2, &rtmp.Message{
 		TypeID:  rtmp.MsgSetChunkSize,
 		Length:  4,
 		Payload: payload,
-	})
+	}); err != nil {
+		return err
+	}
+	rc.cw.SetChunkSize(size)
+	return nil
 }
 
 // sendMediaFrame sends an AVFrame as an RTMP media message.
@@ -297,63 +307,12 @@ func parseRTMPURL(rawURL string) (host, app, streamName string, err error) {
 
 // parseVideoPayload parses FLV video tag body into an AVFrame.
 func parseVideoPayload(data []byte, dts int64) *avframe.AVFrame {
-	if len(data) < 5 {
-		return nil
-	}
-
-	frameType := (data[0] >> 4) & 0x0F
-	codecID := data[0] & 0x0F
-
-	codec := flvpkg.FLVVideoCodecToAVFrame(codecID)
-	if codec == 0 {
-		return nil
-	}
-
-	ft := avframe.FrameTypeInterframe
-	if frameType == flvpkg.VideoFrameKeyframe {
-		if data[1] == flvpkg.AVCPacketSequenceHeader {
-			ft = avframe.FrameTypeSequenceHeader
-		} else {
-			ft = avframe.FrameTypeKeyframe
-		}
-	}
-
-	cts := int64(data[2])<<16 | int64(data[3])<<8 | int64(data[4])
-
-	return &avframe.AVFrame{
-		MediaType: avframe.MediaTypeVideo,
-		Codec:     codec,
-		FrameType: ft,
-		DTS:       dts,
-		PTS:       dts + cts,
-		Payload:   data[5:],
-	}
+	frame, _ := flvpkg.ParseVideoPayload(data, dts)
+	return frame
 }
 
 // parseAudioPayload parses FLV audio tag body into an AVFrame.
 func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
-	if len(data) < 2 {
-		return nil
-	}
-
-	formatID := (data[0] >> 4) & 0x0F
-	codec := flvpkg.FLVAudioCodecToAVFrame(formatID)
-	if codec == 0 {
-		return nil
-	}
-
-	ft := avframe.FrameTypeInterframe
-	if codec == avframe.CodecAAC && data[1] == flvpkg.AACPacketSequenceHeader {
-		ft = avframe.FrameTypeSequenceHeader
-	}
-
-	return &avframe.AVFrame{
-		MediaType: avframe.MediaTypeAudio,
-		Codec:     codec,
-		FrameType: ft,
-		DTS:       dts,
-		PTS:       dts,
-		Payload:   data[2:],
-	}
+	frame, _ := flvpkg.ParseAudioPayload(data, dts)
+	return frame
 }
-

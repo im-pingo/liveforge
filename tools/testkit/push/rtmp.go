@@ -177,7 +177,7 @@ func dialRTMP(ctx context.Context, addr string) (*rtmpConn, error) {
 	return &rtmpConn{
 		conn: conn,
 		cr:   rtmp.NewChunkReader(conn, rtmp.DefaultChunkSize),
-		cw:   rtmp.NewChunkWriter(conn, defaultChunkSize),
+		cw:   rtmp.NewChunkWriter(conn, rtmp.DefaultChunkSize),
 	}, nil
 }
 
@@ -209,15 +209,20 @@ func clientHandshake(conn net.Conn) error {
 
 // sendConnect sends the RTMP connect command.
 func (rc *rtmpConn) sendConnect(app, host string) error {
+	properties := map[string]any{
+		"app":      app,
+		"type":     "nonprivate",
+		"flashVer": "FMLE/3.0",
+		"tcUrl":    "rtmp://" + host + "/" + app,
+	}
+	for key, value := range rtmp.ClientCapabilitiesObject() {
+		properties[key] = value
+	}
+
 	payload, err := rtmp.AMF0Encode(
 		"connect",
 		float64(1),
-		map[string]any{
-			"app":      app,
-			"type":     "nonprivate",
-			"flashVer": "FMLE/3.0",
-			"tcUrl":    "rtmp://" + host + "/" + app,
-		},
+		properties,
 	)
 	if err != nil {
 		return fmt.Errorf("encode connect: %w", err)
@@ -287,6 +292,7 @@ func (rc *rtmpConn) readResponses(targetTxnID float64) error {
 			if len(msg.Payload) >= 4 {
 				size := int(binary.BigEndian.Uint32(msg.Payload))
 				rc.cr.SetChunkSize(size)
+				rc.cw.SetChunkSize(size)
 			}
 			continue
 		case rtmp.MsgWindowAckSize, rtmp.MsgSetPeerBandwidth, rtmp.MsgAck, rtmp.MsgUserControl:
@@ -341,11 +347,15 @@ func (rc *rtmpConn) readResponses(targetTxnID float64) error {
 func (rc *rtmpConn) setChunkSize(size int) error {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, uint32(size))
-	return rc.cw.WriteMessage(2, &rtmp.Message{
+	if err := rc.cw.WriteMessage(2, &rtmp.Message{
 		TypeID:  rtmp.MsgSetChunkSize,
 		Length:  4,
 		Payload: payload,
-	})
+	}); err != nil {
+		return err
+	}
+	rc.cw.SetChunkSize(size)
+	return nil
 }
 
 // sendMediaFrame sends an AVFrame as an RTMP media message.

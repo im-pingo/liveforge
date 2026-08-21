@@ -165,7 +165,7 @@ func dialRTMP(ctx context.Context, addr string) (*rtmpConn, error) {
 	return &rtmpConn{
 		conn: conn,
 		cr:   rtmp.NewChunkReader(conn, rtmp.DefaultChunkSize),
-		cw:   rtmp.NewChunkWriter(conn, defaultChunkSize),
+		cw:   rtmp.NewChunkWriter(conn, rtmp.DefaultChunkSize),
 	}, nil
 }
 
@@ -199,15 +199,20 @@ func clientHandshake(conn net.Conn) error {
 
 // sendConnect sends the RTMP connect command (transaction ID 1).
 func (rc *rtmpConn) sendConnect(app, host string) error {
+	properties := map[string]any{
+		"app":      app,
+		"type":     "nonprivate",
+		"flashVer": "FMLE/3.0",
+		"tcUrl":    "rtmp://" + host + "/" + app,
+	}
+	for key, value := range rtmp.ClientCapabilitiesObject() {
+		properties[key] = value
+	}
+
 	payload, err := rtmp.AMF0Encode(
 		"connect",
 		float64(1),
-		map[string]any{
-			"app":      app,
-			"type":     "nonprivate",
-			"flashVer": "FMLE/3.0",
-			"tcUrl":    "rtmp://" + host + "/" + app,
-		},
+		properties,
 	)
 	if err != nil {
 		return fmt.Errorf("encode connect: %w", err)
@@ -257,6 +262,7 @@ func (rc *rtmpConn) readResponses(targetTxnID float64) error {
 			if len(msg.Payload) >= 4 {
 				size := int(binary.BigEndian.Uint32(msg.Payload))
 				rc.cr.SetChunkSize(size)
+				rc.cw.SetChunkSize(size)
 			}
 			continue
 		case rtmp.MsgWindowAckSize, rtmp.MsgSetPeerBandwidth, rtmp.MsgAck, rtmp.MsgUserControl:
@@ -324,54 +330,14 @@ func (rc *rtmpConn) setChunkSize(size int) error {
 
 // parseVideoPayload parses an FLV video tag body into an AVFrame.
 func parseVideoPayload(data []byte, dts int64) *avframe.AVFrame {
-	if len(data) < 5 {
-		return nil
-	}
-
-	frameTypeID := (data[0] >> 4) & 0x0F
-	codecID := data[0] & 0x0F
-
-	codec := flvpkg.FLVVideoCodecToAVFrame(codecID)
-	if codec == 0 {
-		return nil
-	}
-
-	avcPacketType := data[1]
-
-	var frameType avframe.FrameType
-	if avcPacketType == flvpkg.AVCPacketSequenceHeader {
-		frameType = avframe.FrameTypeSequenceHeader
-	} else if frameTypeID == flvpkg.VideoFrameKeyframe {
-		frameType = avframe.FrameTypeKeyframe
-	} else {
-		frameType = avframe.FrameTypeInterframe
-	}
-
-	cts := int64(int32(binary.BigEndian.Uint32([]byte{0, data[2], data[3], data[4]})) >> 8)
-
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frameType, dts, dts+cts, data[5:])
+	frame, _ := flvpkg.ParseVideoPayload(data, dts)
+	return frame
 }
 
 // parseAudioPayload parses an FLV audio tag body into an AVFrame.
 func parseAudioPayload(data []byte, dts int64) *avframe.AVFrame {
-	if len(data) < 2 {
-		return nil
-	}
-
-	formatID := (data[0] >> 4) & 0x0F
-	codec := flvpkg.FLVAudioCodecToAVFrame(formatID)
-	if codec == 0 {
-		return nil
-	}
-
-	var frameType avframe.FrameType
-	if codec == avframe.CodecAAC && data[1] == flvpkg.AACPacketSequenceHeader {
-		frameType = avframe.FrameTypeSequenceHeader
-	} else {
-		frameType = avframe.FrameTypeInterframe
-	}
-
-	return avframe.NewAVFrame(avframe.MediaTypeAudio, codec, frameType, dts, dts, data[2:])
+	frame, _ := flvpkg.ParseAudioPayload(data, dts)
+	return frame
 }
 
 // parseRTMPURL parses an RTMP URL into host:port, app, and stream name.
