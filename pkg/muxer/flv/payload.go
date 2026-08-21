@@ -85,6 +85,8 @@ func parseEnhancedVideoPayload(data []byte, dts int64) (*avframe.AVFrame, error)
 		// Composition offset is implicitly zero.
 	case ExVideoPacketSequenceEnd:
 		return nil, nil
+	case ExVideoPacketMetadata:
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("%w: enhanced video packet type %d", ErrUnsupportedPacket, packetType)
 	}

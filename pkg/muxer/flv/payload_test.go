@@ -247,6 +247,18 @@ func TestParseEnhancedVideoPayload(t *testing.T) {
 	}
 }
 
+func TestParseEnhancedVideoMetadataSkipsPacket(t *testing.T) {
+	body := []byte{0x94, 'v', 'p', '0', '9', 0x01, 0x02, 0x03}
+
+	frame, err := ParseVideoPayload(body, 100)
+	if err != nil {
+		t.Fatalf("ParseVideoPayload: %v", err)
+	}
+	if frame != nil {
+		t.Fatalf("metadata packet returned frame: %+v", frame)
+	}
+}
+
 func TestParseClassicVideoAndAudioPayload(t *testing.T) {
 	video, err := ParseVideoPayload([]byte{(VideoFrameInterframe << 4) | VideoCodecH264, 0x01, 0xff, 0xff, 0xdf, 0x41}, 100)
 	if err != nil {
