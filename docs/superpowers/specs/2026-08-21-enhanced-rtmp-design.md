@@ -327,4 +327,3 @@ The Phase 1 change is ready when:
 6. The implementation and issue response clearly document that E-RTMP is
    transport-compatible with RTMP but not automatically media-compatible with
    every legacy decoder.
-

@@ -118,9 +118,12 @@ func amf0EncodeObject(obj map[string]any) ([]byte, error) {
 }
 
 func amf0EncodeStrictArray(values []any) ([]byte, error) {
-	buf := make([]byte, 5)
-	buf[0] = amf0StrictArray
-	binary.BigEndian.PutUint32(buf[1:5], uint32(len(values)))
+	if len(values) > math.MaxInt32 {
+		return nil, fmt.Errorf("AMF0 strict array: too many elements: %d", len(values))
+	}
+	buf := make([]byte, 0, 5)
+	buf = append(buf, amf0StrictArray, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(values))) //nolint:gosec // len is bounded to MaxInt32 above.
 	for i, value := range values {
 		encoded, err := amf0EncodeValue(value)
 		if err != nil {
@@ -206,16 +209,22 @@ func amf0DecodeStrictArray(data []byte) ([]any, int, error) {
 
 	count := binary.BigEndian.Uint32(data[:4])
 	remaining := len(data) - 4
-	if uint64(count) > uint64(remaining) {
+	if remaining > math.MaxInt32 || int64(count) > int64(remaining) {
 		return nil, 0, fmt.Errorf("AMF0 strict array: count %d exceeds available data", count)
 	}
 
 	values := make([]any, int(count))
 	offset := 4
 	for i := range values {
-		value, n, err := amf0DecodeValue(data[offset:])
+		if offset < 4 || offset >= len(data) {
+			return nil, 0, fmt.Errorf("AMF0 strict array element %d: unexpected end", i)
+		}
+		value, n, err := amf0DecodeValue(data[offset:]) //nolint:gosec // offset is bounds-checked above.
 		if err != nil {
 			return nil, 0, fmt.Errorf("AMF0 strict array element %d: %w", i, err)
+		}
+		if n <= 0 || n > len(data)-offset {
+			return nil, 0, fmt.Errorf("AMF0 strict array element %d: invalid length %d", i, n)
 		}
 		values[i] = value
 		offset += n

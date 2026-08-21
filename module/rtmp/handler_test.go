@@ -110,19 +110,19 @@ func TestHandlerConnectCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode connect: %v", err)
 	}
-	if err := cw.WriteMessage(3, &Message{
+	if writeErr := cw.WriteMessage(3, &Message{
 		TypeID:  MsgAMF0Command,
-		Length:  uint32(len(connectPayload)),
+		Length:  uint32(len(connectPayload)), //nolint:gosec // the in-memory test payload is bounded.
 		Payload: connectPayload,
-	}); err != nil {
-		t.Fatalf("write connect: %v", err)
+	}); writeErr != nil {
+		t.Fatalf("write connect: %v", writeErr)
 	}
 
 	var result *Message
 	for range 4 {
-		msg, err := cr.ReadMessage()
-		if err != nil {
-			t.Fatalf("read response: %v", err)
+		msg, readErr := cr.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
 		}
 		if msg.TypeID == MsgSetChunkSize && len(msg.Payload) >= 4 {
 			cr.SetChunkSize(int(binary.BigEndian.Uint32(msg.Payload)))

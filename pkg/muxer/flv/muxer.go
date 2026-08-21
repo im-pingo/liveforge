@@ -221,7 +221,8 @@ func (m *Muxer) writeEnhancedAudioTag(w io.Writer, frame *avframe.AVFrame) error
 	}
 
 	// Enhanced audio header: ExHeader + packet type + FourCC + payload.
-	headerBytes := []byte{(AudioFormatExHeader << 4) | packetType}
+	headerBytes := make([]byte, 1, 1+len(fourcc))
+	headerBytes[0] = (AudioFormatExHeader << 4) | packetType
 	headerBytes = append(headerBytes, fourcc...)
 	dataSize := len(headerBytes) + len(frame.Payload)
 

@@ -98,6 +98,15 @@ func TestEnhancedVideoWireLayout(t *testing.T) {
 	}
 }
 
+func TestUnknownVideoCodecHasNoEnhancedFourCC(t *testing.T) {
+	if got := VideoFourCC(avframe.CodecG711A); got != "" {
+		t.Fatalf("VideoFourCC(CodecG711A) = %q, want empty", got)
+	}
+	if IsEnhancedVideoCodec(avframe.CodecG711A) {
+		t.Fatal("audio codec should not be reported as an enhanced video codec")
+	}
+}
+
 func TestEnhancedVideoRejectsCompositionOffsetWithoutField(t *testing.T) {
 	muxer := NewMuxerWithModes(EncodingEnhanced, EncodingClassic)
 	frame := avframe.NewAVFrame(

@@ -104,6 +104,9 @@ func VideoCodecToFourCC(c avframe.CodecType) [4]byte {
 // VideoFourCC returns the FourCC string for a video codec.
 func VideoFourCC(c avframe.CodecType) string {
 	bytes := VideoCodecToFourCC(c)
+	if bytes == [4]byte{} {
+		return ""
+	}
 	return string(bytes[:])
 }
 
@@ -162,16 +165,23 @@ func encodeSI24(value int64) ([3]byte, error) {
 	if value < -8388608 || value > 8388607 {
 		return [3]byte{}, fmt.Errorf("signed SI24 overflow: %d", value)
 	}
-	encoded := uint32(value) & 0x00ffffff
-	return [3]byte{byte(encoded >> 16), byte(encoded >> 8), byte(encoded)}, nil
+	encoded := value
+	if encoded < 0 {
+		encoded += 1 << 24
+	}
+	return [3]byte{ //nolint:gosec // encoded is range-checked to 24 bits above.
+		byte(encoded >> 16),
+		byte(encoded >> 8),
+		byte(encoded), //nolint:gosec // encoded is range-checked to 24 bits above.
+	}, nil
 }
 
 func decodeSI24(data []byte) int64 {
-	value := int32(uint32(data[0])<<16 | uint32(data[1])<<8 | uint32(data[2]))
-	if value&0x00800000 != 0 {
-		value |= ^int32(0x00ffffff)
+	value := int64(data[0])<<16 | int64(data[1])<<8 | int64(data[2])
+	if data[0]&0x80 != 0 {
+		value -= 1 << 24
 	}
-	return int64(value)
+	return value
 }
 
 // FLV audio format IDs (upper 4 bits of first audio data byte).
