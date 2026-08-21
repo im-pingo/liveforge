@@ -1,9 +1,12 @@
 package dvr
 
 import (
+	"context"
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/im-pingo/liveforge/core"
 )
 
 func (m *Module) handlePlaylist(w http.ResponseWriter, r *http.Request) {
@@ -17,6 +20,10 @@ func (m *Module) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 
 	if session == nil {
 		http.NotFound(w, r)
+		return
+	}
+	if err := m.authorizeSubscribe(r, streamKey); err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -45,6 +52,10 @@ func (m *Module) handleSegment(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if err := m.authorizeSubscribe(r, streamKey); err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
 	seqNum := parseSeqNum(filename)
 	if seqNum < 0 {
@@ -60,6 +71,39 @@ func (m *Module) handleSegment(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	http.ServeFile(w, r, seg.DiskPath)
+}
+
+func (m *Module) authorizeSubscribe(r *http.Request, streamKey string) error {
+	if m.server == nil {
+		return nil
+	}
+	request := core.AuthorizationRequest{
+		Action:     core.AuthorizationSubscribe,
+		StreamKey:  streamKey,
+		Protocol:   "dvr",
+		RemoteAddr: r.RemoteAddr,
+		Params:     queryParams(r),
+	}
+	request.Stage = core.AuthorizationPreSession
+	if err := m.server.Authorize(context.Background(), request); err != nil {
+		return err
+	}
+	request.Stage = core.AuthorizationPostConnect
+	return m.server.Authorize(context.Background(), request)
+}
+
+func queryParams(r *http.Request) map[string]string {
+	values := r.URL.Query()
+	if len(values) == 0 {
+		return nil
+	}
+	params := make(map[string]string, len(values))
+	for key, items := range values {
+		if len(items) > 0 {
+			params[key] = items[0]
+		}
+	}
+	return params
 }
 
 func parseSeqNum(filename string) int {

@@ -29,7 +29,7 @@ func TestInitializeConfigManagerLoadsRuntimeOverride(t *testing.T) {
 	if cfg.Server.Name != "runtime" {
 		t.Fatalf("effective server name = %q, want runtime", cfg.Server.Name)
 	}
-	if got := manager.Current(); got.Effective != cfg || got.Source == "" || got.Revision == "" {
+	if got := manager.Current(); got.Effective == nil || got.Effective.Server.Name != cfg.Server.Name || got.Source == "" || got.Revision == "" {
 		t.Fatalf("initial snapshot = %#v", got)
 	}
 }

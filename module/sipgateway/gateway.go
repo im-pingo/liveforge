@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/emiago/sipgo/sip"
@@ -18,6 +19,7 @@ import (
 // Gateway manages SIP-to-stream call bridging.
 type Gateway struct {
 	sipService sipmod.SIPService
+	server     *core.Server
 	hub        *core.StreamHub
 	eventBus   *core.EventBus
 	portAlloc  *portalloc.PortAllocator
@@ -31,7 +33,7 @@ type Gateway struct {
 }
 
 // NewGateway creates and starts a SIP gateway.
-func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core.StreamHub, bus *core.EventBus) (*Gateway, error) {
+func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core.StreamHub, bus *core.EventBus, servers ...*core.Server) (*Gateway, error) {
 	if len(cfg.RTPPortRange) != 2 {
 		return nil, fmt.Errorf("sipgateway: rtp_port_range must have exactly 2 elements [min, max]")
 	}
@@ -57,9 +59,14 @@ func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core
 	}
 
 	localIP := localAddress(sipSvc.LocalAddr())
+	var server *core.Server
+	if len(servers) > 0 {
+		server = servers[0]
+	}
 
 	gw := &Gateway{
 		sipService: sipSvc,
+		server:     server,
 		hub:        hub,
 		eventBus:   bus,
 		portAlloc:  pa,
@@ -80,7 +87,15 @@ func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core
 }
 
 func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
-	callID := req.CallID().Value()
+	callID := ""
+	if header := req.CallID(); header != nil {
+		callID = header.Value()
+	}
+	streamKey := gw.streamKeyFromRequest(req)
+	if err := gw.authorizeInbound(core.AuthorizationPreSession, req, streamKey, callID); err != nil {
+		tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil)) //nolint:errcheck
+		return
+	}
 
 	gw.mu.Lock()
 	if _, exists := gw.sessions[callID]; exists {
@@ -101,6 +116,12 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	if len(body) == 0 {
 		resp := sip.NewResponseFromRequest(req, 400, "Bad Request", nil)
 		tx.Respond(resp)
+		return
+	}
+	// GB28181 owns video INVITEs. SIP dispatch invokes all registered
+	// handlers, so the audio gateway must leave video requests untouched for
+	// the GB handler instead of sending a competing 488 response.
+	if strings.Contains(strings.ToLower(string(body)), "m=video") {
 		return
 	}
 
@@ -131,6 +152,10 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		tx.Respond(resp)
 		return
 	}
+	if err := gw.authorizeInbound(core.AuthorizationPostConnect, req, streamKey, callID); err != nil {
+		tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil)) //nolint:errcheck
+		return
+	}
 
 	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
 	if err != nil {
@@ -140,14 +165,25 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	streamKey := gw.streamKeyFromRequest(req)
-	stream, _ := gw.hub.GetOrCreate(streamKey)
+	stream, streamExisted := gw.hub.Find(streamKey)
+	if !streamExisted {
+		stream, err = gw.hub.GetOrCreate(streamKey)
+	}
+	if err != nil {
+		gw.portAlloc.Free(rtpPort, rtcpPort)
+		resp := sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil)
+		tx.Respond(resp)
+		return
+	}
 
 	cs := newCallSession(callID, streamKey, nc, "inbound", rtpPort, rtcpPort)
 
 	remoteIP := remoteAddress(offerSDP)
 	if err := cs.startInbound(stream, remoteIP, audioMedia.Port); err != nil {
 		gw.portAlloc.Free(rtpPort, rtcpPort)
+		if !streamExisted {
+			gw.hub.Destroy(streamKey, stream)
+		}
 		slog.Error("failed to start inbound session", "module", "sipgateway",
 			"call", callID, "error", err)
 		resp := sip.NewResponseFromRequest(req, 500, "Server Error", nil)
@@ -170,7 +206,10 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 }
 
 func (gw *Gateway) handleBye(req *sip.Request, tx sip.ServerTransaction) {
-	callID := req.CallID().Value()
+	callID := ""
+	if header := req.CallID(); header != nil {
+		callID = header.Value()
+	}
 
 	gw.mu.Lock()
 	cs, ok := gw.sessions[callID]
@@ -187,7 +226,7 @@ func (gw *Gateway) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 	gw.portAlloc.Free(cs.rtpPort, cs.rtcpPort)
 
 	if cs.stream != nil {
-		cs.stream.RemovePublisher()
+		cs.stream.RemovePublisherIfGeneration(cs.publisherGeneration)
 	}
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", nil)
@@ -320,7 +359,7 @@ func (gw *Gateway) Hangup(callID string) error {
 	gw.portAlloc.Free(cs.rtpPort, cs.rtcpPort)
 
 	if cs.direction == "inbound" && cs.stream != nil {
-		cs.stream.RemovePublisher()
+		cs.stream.RemovePublisherIfGeneration(cs.publisherGeneration)
 	}
 
 	return nil
@@ -346,7 +385,45 @@ func (gw *Gateway) Close() {
 	for _, cs := range sessions {
 		cs.Close()
 		gw.portAlloc.Free(cs.rtpPort, cs.rtcpPort)
+		if cs.direction == "inbound" && cs.stream != nil {
+			cs.stream.RemovePublisherIfGeneration(cs.publisherGeneration)
+		}
 	}
+}
+
+func (gw *Gateway) authorizeInbound(stage core.AuthorizationStage, req *sip.Request, streamKey, callID string) error {
+	if gw.server == nil {
+		return nil
+	}
+	return gw.server.Authorize(context.Background(), core.AuthorizationRequest{
+		Action:     core.AuthorizationPublish,
+		Stage:      stage,
+		StreamKey:  streamKey,
+		Protocol:   "sipgateway",
+		RemoteAddr: req.Source(),
+		Params:     sipRequestParams(req),
+		Extra: map[string]any{
+			"sip_call_id": callID,
+		},
+	})
+}
+
+func sipRequestParams(req *sip.Request) map[string]string {
+	params := make(map[string]string)
+	for key, value := range req.Recipient.UriParams.Items() {
+		params[key] = value
+	}
+	for key, value := range req.Recipient.Headers.Items() {
+		params[key] = value
+	}
+	if header := req.GetHeader("Authorization"); header != nil {
+		value := header.Value()
+		params["authorization"] = value
+		if strings.HasPrefix(strings.ToLower(value), "bearer ") {
+			params["token"] = strings.TrimSpace(value[len("Bearer "):])
+		}
+	}
+	return params
 }
 
 func (gw *Gateway) streamKeyFromRequest(req *sip.Request) string {

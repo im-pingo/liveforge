@@ -1,11 +1,33 @@
 package core
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+func TestStreamHubConcurrentConfigAndCreation(t *testing.T) {
+	hub := NewStreamHub(newTestStreamConfig(), config.LimitsConfig{MaxStreams: 1000}, NewEventBus())
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				cfg := newTestStreamConfig()
+				cfg.RingBufferSize = 16 + j%4
+				hub.UpdateNewSessionConfig(cfg, config.LimitsConfig{MaxStreams: 1000}, j%2 == 0)
+				_, _ = hub.GetOrCreate(fmt.Sprintf("live/concurrent-%d-%d", worker, j))
+			}
+		}(i)
+	}
+	wg.Wait()
+}
 
 func TestStreamHubRejectsUnsafeStreamKeys(t *testing.T) {
 	hub := NewStreamHub(newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
@@ -155,5 +177,71 @@ func TestStreamHubRuntimeConfigAppliesToNewStreamsOnly(t *testing.T) {
 	}
 	if _, err := hub.GetOrCreate("live/third"); err != nil {
 		t.Fatalf("updated max streams was not applied: %v", err)
+	}
+}
+
+func TestStreamHubDestroyIsConditionalAndExactlyOnce(t *testing.T) {
+	bus := NewEventBus()
+	destroyed := make(chan struct{}, 2)
+	bus.Register(HookRegistration{Event: EventStreamDestroy, Mode: HookSync, Handler: func(*EventContext) error {
+		destroyed <- struct{}{}
+		return nil
+	}})
+	hub := NewStreamHub(newTestStreamConfig(), config.LimitsConfig{}, bus)
+	stream, err := hub.GetOrCreate("live/destroy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := NewStream("live/other", newTestStreamConfig(), config.LimitsConfig{}, bus)
+	if hub.Destroy("live/destroy", other) {
+		t.Fatal("destroy accepted a non-incumbent stream")
+	}
+	if !hub.Destroy("live/destroy", stream) {
+		t.Fatal("destroy rejected the incumbent stream")
+	}
+	if hub.Destroy("live/destroy", stream) {
+		t.Fatal("destroy emitted a second removal")
+	}
+	if hub.Count() != 0 {
+		t.Fatalf("hub count = %d, want 0", hub.Count())
+	}
+	select {
+	case <-destroyed:
+	case <-time.After(time.Second):
+		t.Fatal("stream destroy event was not emitted")
+	}
+	select {
+	case <-destroyed:
+		t.Fatal("stream destroy event emitted more than once")
+	default:
+	}
+}
+
+func TestStreamHubReclaimsTimedOutStream(t *testing.T) {
+	bus := NewEventBus()
+	cfg := newTestStreamConfig()
+	cfg.NoPublisherTimeout = 20 * time.Millisecond
+	hub := NewStreamHub(cfg, config.LimitsConfig{MaxStreams: 1}, bus)
+	stream, err := hub.GetOrCreate("live/timeout-reclaim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &testPublisher{id: "pub", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if _, err := stream.SetPublisherWithGeneration(pub); err != nil {
+		t.Fatal(err)
+	}
+	stream.RemovePublisher()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if hub.Count() == 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if hub.Count() != 0 {
+		t.Fatal("timed out stream remained in hub")
+	}
+	if _, err := hub.GetOrCreate("live/reclaimed"); err != nil {
+		t.Fatalf("max-stream slot was not reclaimed: %v", err)
 	}
 }

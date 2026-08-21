@@ -129,10 +129,11 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 		id:   fmt.Sprintf("rtmp-pull-%s", stream.Key()),
 		info: &avframe.MediaInfo{},
 	}
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIfGeneration(generation)
 
 	for {
 		select {

@@ -245,10 +245,11 @@ func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 		id:   fmt.Sprintf("rtsp-pull-%s", stream.Key()),
 		info: mi,
 	}
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIfGeneration(generation)
 
 	// Build depacketizers
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)

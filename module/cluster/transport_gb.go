@@ -230,10 +230,11 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 		id:   fmt.Sprintf("gb-pull-%s", stream.Key()),
 		info: &avframe.MediaInfo{},
 	}
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIfGeneration(generation)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte
@@ -352,11 +353,12 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 		id:   fmt.Sprintf("gb-push-%s", stream.Key()),
 		info: &avframe.MediaInfo{},
 	}
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		slog.Error("gb push set publisher failed", "module", "cluster", "error", err)
 		return
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIfGeneration(generation)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte

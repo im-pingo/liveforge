@@ -311,6 +311,31 @@ func TestResolvePath(t *testing.T) {
 	}
 }
 
+func TestNewSessionRejectsUnsafeStreamKey(t *testing.T) {
+	cfg := config.DVRConfig{Path: filepath.Join(t.TempDir(), "{stream_key}")}
+	stream := core.NewStream("live/test", config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	for _, streamKey := range []string{"../../escape", "/absolute", `live\..\escape`} {
+		if session, err := NewSession(streamKey, stream, cfg, nil, 0); err == nil {
+			session.Stop()
+			t.Errorf("NewSession(%q) succeeded", streamKey)
+		}
+	}
+}
+
+func TestNewSessionRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "live")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := config.DVRConfig{Path: filepath.Join(root, "{stream_key}")}
+	stream := core.NewStream("live/test", config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	if session, err := NewSession("live/camera", stream, cfg, nil, 0); err == nil {
+		session.Stop()
+		t.Fatal("session accepted a symlink escape")
+	}
+}
+
 func TestParseSeqNum(t *testing.T) {
 	tests := []struct {
 		filename string

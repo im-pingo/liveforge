@@ -127,7 +127,7 @@ func (m *Module) handleConn(conn net.Conn, chunkSize int, skipCfg *config.SkipTr
 		return
 	}
 
-	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize, skipCfg)
+	handler := NewHandler(conn, m.hub, m.eventBus, chunkSize, skipCfg, m.server)
 	if err := handler.Handle(); err != nil {
 		slog.Error("handler error", "module", "rtmp", "error", err)
 	}

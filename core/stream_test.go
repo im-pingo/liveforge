@@ -581,3 +581,74 @@ func TestStreamRepublishBeforeTimeout(t *testing.T) {
 		t.Errorf("expected publishing after republish, got %v", s.State())
 	}
 }
+
+func TestStreamConditionalPublisherRemovalProtectsRepublish(t *testing.T) {
+	s := NewStream("live/generation", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pub1 := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	gen1, err := s.SetPublisherWithGeneration(pub1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.RemovePublisherIfGeneration(gen1 + 1) {
+		t.Fatal("stale generation removed the active publisher")
+	}
+	if s.Publisher() != pub1 {
+		t.Fatal("active publisher changed after stale removal")
+	}
+	if !s.RemovePublisherIfGeneration(gen1) {
+		t.Fatal("current generation was not removed")
+	}
+
+	pub2 := &testPublisher{id: "pub2", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	gen2, err := s.SetPublisherWithGeneration(pub2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen2 == gen1 {
+		t.Fatal("publisher generation did not advance")
+	}
+	if s.RemovePublisherIfGeneration(gen1) {
+		t.Fatal("stale cleanup removed the republished publisher")
+	}
+	if s.Publisher() != pub2 {
+		t.Fatal("republished publisher was removed by stale cleanup")
+	}
+}
+
+func TestStreamRepublishResetsMediaState(t *testing.T) {
+	cfg := newTestStreamConfig()
+	cfg.GOPCache = true
+	cfg.AudioCacheMs = 1000
+	s := NewStream("live/reset", cfg, config.LimitsConfig{}, NewEventBus())
+	pub1 := &testPublisher{id: "pub1", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC}}
+	if _, err := s.SetPublisherWithGeneration(pub1); err != nil {
+		t.Fatal(err)
+	}
+	s.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{1}))
+	s.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{2}))
+	s.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 0, 0, []byte{3}))
+	oldRing := s.RingBuffer()
+	if s.GOPCacheLen() == 0 || len(s.AudioCache()) == 0 || s.VideoSeqHeader() == nil || s.Stats().BytesIn == 0 {
+		t.Fatal("test setup did not populate stream media state")
+	}
+	if _, _ = s.MuxerManager().GetOrCreateMuxer("ts"); len(s.MuxerManager().Formats()) != 1 {
+		t.Fatal("test setup did not create muxer")
+	}
+	s.RemovePublisher()
+	pub2 := &testPublisher{id: "pub2", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC}}
+	if _, err := s.SetPublisherWithGeneration(pub2); err != nil {
+		t.Fatal(err)
+	}
+	if oldRing == s.RingBuffer() || !oldRing.IsClosed() {
+		t.Fatal("republish did not replace and close the previous ring")
+	}
+	if s.GOPCacheLen() != 0 || len(s.AudioCache()) != 0 || s.VideoSeqHeader() != nil || s.AudioSeqHeader() != nil {
+		t.Fatal("republish retained media caches")
+	}
+	if stats := s.Stats(); stats.BytesIn != 0 || stats.VideoFrames != 0 || stats.AudioFrames != 0 {
+		t.Fatalf("republish retained stats: %#v", stats)
+	}
+	if len(s.MuxerManager().Formats()) != 0 {
+		t.Fatal("republish retained muxer instances")
+	}
+}

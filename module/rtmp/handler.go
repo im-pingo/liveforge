@@ -1,6 +1,7 @@
 package rtmp
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,19 +34,21 @@ type Handler struct {
 	cw       *ChunkWriter
 	hub      *core.StreamHub
 	eventBus *core.EventBus
+	server   *core.Server
 
-	app         string
-	streamKey   string
-	isPublisher bool
-	appParams   map[string]string // params from connect (app field query string)
+	app                 string
+	streamKey           string
+	isPublisher         bool
+	publisherGeneration uint64
+	appParams           map[string]string // params from connect (app field query string)
 
-	chunkSize   int
-	skipCfg     *config.SkipTrackerConfig
+	chunkSize int
+	skipCfg   *config.SkipTrackerConfig
 }
 
 // NewHandler creates a new RTMP connection handler.
-func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chunkSize int, skipCfg *config.SkipTrackerConfig) *Handler {
-	return &Handler{
+func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chunkSize int, skipCfg *config.SkipTrackerConfig, servers ...*core.Server) *Handler {
+	handler := &Handler{
 		conn:      conn,
 		cr:        NewChunkReader(conn, DefaultChunkSize),
 		cw:        NewChunkWriter(conn, DefaultChunkSize),
@@ -54,6 +57,10 @@ func NewHandler(conn net.Conn, hub *core.StreamHub, eventBus *core.EventBus, chu
 		chunkSize: chunkSize,
 		skipCfg:   skipCfg,
 	}
+	if len(servers) > 0 {
+		handler.server = servers[0]
+	}
+	return handler
 }
 
 // Handle processes the RTMP connection after handshake.
@@ -78,16 +85,31 @@ func (h *Handler) Handle() error {
 
 // cleanup releases the publisher when the connection closes for any reason.
 func (h *Handler) cleanup() {
+	h.detachPublisher()
+}
+
+// detachPublisher removes this handler's publisher, if any. The generation
+// check keeps a late connection cleanup from removing a newer publisher that
+// has taken over the same stream.
+func (h *Handler) detachPublisher() {
 	if h.streamKey == "" || !h.isPublisher {
 		return
 	}
-	if stream, ok := h.hub.Find(h.streamKey); ok {
-		stream.RemovePublisher()
-		h.eventBus.Emit(core.EventPublishStop, &core.EventContext{
-			StreamKey:  h.streamKey,
-			Protocol:   "rtmp",
-			RemoteAddr: h.conn.RemoteAddr().String(),
-		})
+	streamKey := h.streamKey
+	generation := h.publisherGeneration
+	remoteAddr := h.conn.RemoteAddr().String()
+	h.streamKey = ""
+	h.isPublisher = false
+	h.publisherGeneration = 0
+
+	if stream, ok := h.hub.Find(streamKey); ok {
+		if stream.RemovePublisherIfGeneration(generation) {
+			h.eventBus.Emit(core.EventPublishStop, &core.EventContext{
+				StreamKey:  streamKey,
+				Protocol:   "rtmp",
+				RemoteAddr: remoteAddr,
+			})
+		}
 	}
 }
 
@@ -212,21 +234,15 @@ func (h *Handler) onCreateStream(vals []any) error {
 }
 
 func (h *Handler) onPublish(vals []any) error {
+	var mergedParams map[string]string
 	if len(vals) >= 4 {
 		if name, ok := vals[3].(string); ok {
 			// Parse query string from stream name (e.g. "test?token=xxx")
 			cleanName, params := splitNameParams(name)
 			h.streamKey = h.app + "/" + cleanName
 			// Merge app-level params with stream-level params (stream-level wins)
-			mergedParams := mergeParams(h.appParams, params)
-
-			// Emit publish event BEFORE action — auth hooks can reject
-			if err := h.eventBus.Emit(core.EventPublish, &core.EventContext{
-				StreamKey:  h.streamKey,
-				Protocol:   "rtmp",
-				RemoteAddr: h.conn.RemoteAddr().String(),
-				Params:     mergedParams,
-			}); err != nil {
+			mergedParams = mergeParams(h.appParams, params)
+			if err := h.authorize(core.AuthorizationPublish, mergedParams); err != nil {
 				_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
 				return fmt.Errorf("publish %s: %w", h.streamKey, err)
 			}
@@ -242,30 +258,30 @@ func (h *Handler) onPublish(vals []any) error {
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
 	}
 	pub := NewPublisher(h.streamKey, h.conn)
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
 	}
 	h.isPublisher = true
+	h.publisherGeneration = generation
+	h.eventBus.Emit(core.EventPublish, &core.EventContext{ //nolint:errcheck
+		StreamKey: h.streamKey, Protocol: "rtmp",
+		RemoteAddr: h.conn.RemoteAddr().String(), Params: mergedParams,
+	})
 
 	// Send onStatus(NetStream.Publish.Start)
 	return h.sendOnStatus("status", "NetStream.Publish.Start", "Publishing started")
 }
 
 func (h *Handler) onPlay(vals []any) error {
+	var mergedParams map[string]string
 	if len(vals) >= 4 {
 		if name, ok := vals[3].(string); ok {
 			// Parse query string from stream name
 			cleanName, params := splitNameParams(name)
 			h.streamKey = h.app + "/" + cleanName
-			mergedParams := mergeParams(h.appParams, params)
-
-			// Emit subscribe event BEFORE action — auth hooks can reject
-			if err := h.eventBus.Emit(core.EventSubscribe, &core.EventContext{
-				StreamKey:  h.streamKey,
-				Protocol:   "rtmp",
-				RemoteAddr: h.conn.RemoteAddr().String(),
-				Params:     mergedParams,
-			}); err != nil {
+			mergedParams = mergeParams(h.appParams, params)
+			if err := h.authorize(core.AuthorizationSubscribe, mergedParams); err != nil {
 				_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
 				return fmt.Errorf("play %s: %w", h.streamKey, err)
 			}
@@ -295,6 +311,10 @@ func (h *Handler) onPlay(vals []any) error {
 		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
 		return fmt.Errorf("play %s: %w", h.streamKey, err)
 	}
+	h.eventBus.Emit(core.EventSubscribe, &core.EventContext{ //nolint:errcheck
+		StreamKey: h.streamKey, Protocol: "rtmp",
+		RemoteAddr: h.conn.RemoteAddr().String(), Params: mergedParams,
+	})
 	sub := NewSubscriber(h.streamKey, h.conn, h.cw, stream, h.skipCfg)
 	go func() {
 		defer func() {
@@ -311,10 +331,27 @@ func (h *Handler) onPlay(vals []any) error {
 	return nil
 }
 
+func (h *Handler) authorize(action core.AuthorizationAction, params map[string]string) error {
+	if h.server == nil {
+		return nil
+	}
+	request := core.AuthorizationRequest{
+		Action: action, StreamKey: h.streamKey, Protocol: "rtmp",
+		RemoteAddr: h.conn.RemoteAddr().String(), Params: params,
+	}
+	request.Stage = core.AuthorizationPreSession
+	if err := h.server.Authorize(context.Background(), request); err != nil {
+		return err
+	}
+	request.Stage = core.AuthorizationPostConnect
+	return h.server.Authorize(context.Background(), request)
+}
+
 func (h *Handler) onDeleteStream() error {
-	// Cleanup is handled by the deferred cleanup() call in Handle().
-	// Clear streamKey so cleanup knows this was a graceful disconnect
-	// and the publisher was already logically removed.
+	h.detachPublisher()
+	// Stop processing media for this stream. The connection remains available
+	// for a subsequent createStream/publish sequence.
+	h.streamKey = ""
 	return nil
 }
 
@@ -368,4 +405,3 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 	}
 	return nil
 }
-

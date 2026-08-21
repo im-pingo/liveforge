@@ -330,10 +330,11 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		id:   fmt.Sprintf("rtp-pull-%s", stream.Key()),
 		info: mi,
 	}
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIfGeneration(generation)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -468,7 +469,7 @@ func (t *RTPTransport) handleSignalingPush(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -534,7 +535,7 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -602,12 +603,13 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 		id:   fmt.Sprintf("rtp-push-%s", streamKey),
 		info: mi,
 	}
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		slog.Warn("rtp receive: set publisher failed", "module", "cluster",
 			"stream", streamKey, "error", err)
 		return
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIfGeneration(generation)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)

@@ -3,6 +3,7 @@ package sip
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
 )
@@ -39,7 +40,8 @@ func TestDigestAuthVerify(t *testing.T) {
 	auth := NewDigestAuth(realm, password)
 
 	username := "34020000001320000001"
-	nonce := "abc123"
+	challengeReq := sip.NewRequest(sip.REGISTER, sip.Uri{Host: "192.168.1.100", Port: 5060})
+	nonce := parseDigestParams(auth.Challenge(challengeReq).GetHeader("WWW-Authenticate").Value())["nonce"]
 	uri := "sip:34020000002000000001@3402000000"
 	method := "REGISTER"
 
@@ -64,6 +66,48 @@ func TestDigestAuthVerify(t *testing.T) {
 	if auth2.Verify(req) {
 		t.Error("expected verification to fail with wrong password")
 	}
+}
+
+func TestDigestAuthRejectsUnknownAndReplayedNonce(t *testing.T) {
+	auth := NewDigestAuth("realm", "password")
+	request := digestRequest("alice", "realm", "password", "unknown", "sip:server@realm")
+	if auth.Verify(request) {
+		t.Fatal("accepted a nonce that was not issued by this server")
+	}
+
+	challenge := auth.Challenge(request)
+	nonce := parseDigestParams(challenge.GetHeader("WWW-Authenticate").Value())["nonce"]
+	request = digestRequest("alice", "realm", "password", nonce, "sip:server@realm")
+	if !auth.Verify(request) {
+		t.Fatal("issued nonce was rejected")
+	}
+	if auth.Verify(request) {
+		t.Fatal("replayed digest response was accepted")
+	}
+}
+
+func TestDigestAuthRejectsExpiredNonce(t *testing.T) {
+	now := time.Unix(100, 0)
+	auth := newDigestAuthWithClock("realm", "password", time.Minute, func() time.Time { return now })
+	request := sip.NewRequest(sip.REGISTER, sip.Uri{Host: "server", Port: 5060})
+	nonce := parseDigestParams(auth.Challenge(request).GetHeader("WWW-Authenticate").Value())["nonce"]
+	now = now.Add(time.Minute + time.Nanosecond)
+	request = digestRequest("alice", "realm", "password", nonce, "sip:server@realm")
+	if auth.Verify(request) {
+		t.Fatal("expired nonce was accepted")
+	}
+}
+
+func digestRequest(username, realm, password, nonce, uri string) *sip.Request {
+	ha1 := md5Hex(username + ":" + realm + ":" + password)
+	ha2 := md5Hex(string(sip.REGISTER) + ":" + uri)
+	response := md5Hex(ha1 + ":" + nonce + ":" + ha2)
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{Host: "server", Port: 5060})
+	req.AppendHeader(sip.NewHeader("Authorization", fmt.Sprintf(
+		`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s", algorithm=MD5`,
+		username, realm, nonce, uri, response,
+	)))
+	return req
 }
 
 func TestDigestAuthVerifyMissingHeader(t *testing.T) {

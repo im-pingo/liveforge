@@ -26,7 +26,7 @@ func (m *Module) Init(s *core.Server) error {
 		return nil
 	}
 
-	gw, err := NewGateway(cfg, m.sipService, s.StreamHub(), s.GetEventBus())
+	gw, err := NewGateway(cfg, m.sipService, s.StreamHub(), s.GetEventBus(), s)
 	if err != nil {
 		return err
 	}

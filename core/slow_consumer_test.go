@@ -257,7 +257,7 @@ func TestSlowConsumerFilterHysteresis(t *testing.T) {
 	// Test hysteresis: in DropNonKey, lag 0.6 should NOT recover (0.6 > 0.5 recover threshold)
 	t.Run("drop_stays_in_dead_zone", func(t *testing.T) {
 		rb := util.NewRingBuffer[*avframe.AVFrame](100)
-		writeFrames(rb, 60) // writer at 60
+		writeFrames(rb, 60)         // writer at 60
 		reader := rb.NewReaderAt(0) // reader at 0, lag = 0.6
 		filter := NewSlowConsumerFilter(reader, cfg, nil)
 		filter.state = ConsumerStateDropNonKey // force into DropNonKey
@@ -273,7 +273,7 @@ func TestSlowConsumerFilterHysteresis(t *testing.T) {
 	// Test hysteresis: in DropNonKey, lag 0.4 should recover (0.4 < 0.5 recover threshold)
 	t.Run("drop_recovers_below_threshold", func(t *testing.T) {
 		rb := util.NewRingBuffer[*avframe.AVFrame](100)
-		writeFrames(rb, 40) // writer at 40
+		writeFrames(rb, 40)         // writer at 40
 		reader := rb.NewReaderAt(0) // reader at 0, lag = 0.4
 		filter := NewSlowConsumerFilter(reader, cfg, nil)
 		filter.state = ConsumerStateDropNonKey

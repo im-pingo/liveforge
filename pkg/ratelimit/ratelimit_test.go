@@ -68,6 +68,44 @@ func TestLimiterWrapMiddleware(t *testing.T) {
 	}
 }
 
+func TestLimiterIgnoresForwardedHeadersFromUntrustedPeer(t *testing.T) {
+	l := New(100, 1, "10.0.0.0/8")
+	defer l.Close()
+	handler := l.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	for i, forwarded := range []string{"203.0.113.1", "198.51.100.2"} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		want := http.StatusOK
+		if i == 1 {
+			want = http.StatusTooManyRequests
+		}
+		if w.Code != want {
+			t.Fatalf("untrusted forwarded request %d status = %d, want %d", i+1, w.Code, want)
+		}
+	}
+}
+
+func TestLimiterUsesForwardedHeadersFromTrustedPeer(t *testing.T) {
+	l := New(100, 1, "10.0.0.0/8")
+	defer l.Close()
+	handler := l.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	for _, forwarded := range []string{"203.0.113.1", "198.51.100.2"} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "10.0.0.5:1234"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("trusted forwarded client %q status = %d, want 200", forwarded, w.Code)
+		}
+	}
+}
+
 func TestExtractIP(t *testing.T) {
 	tests := []struct {
 		name       string

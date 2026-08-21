@@ -48,6 +48,9 @@ func NewSession(streamKey string, stream *core.Stream, cfg config.DVRConfig, exi
 		return nil, fmt.Errorf("dvr: invalid stream key: %w", err)
 	}
 	segDir := resolvePath(cfg.Path, streamKey)
+	if err := core.ValidatePathWithinRoot(dvrPathRoot(cfg.Path, segDir), segDir); err != nil {
+		return nil, fmt.Errorf("dvr: path escapes configured root: %w", err)
+	}
 	if err := os.MkdirAll(segDir, 0755); err != nil {
 		return nil, fmt.Errorf("dvr: create dir %s: %w", segDir, err)
 	}
@@ -213,7 +216,24 @@ func (s *Session) Index() *SegmentIndex {
 }
 
 func resolvePath(pathTemplate, streamKey string) string {
+	if pathTemplate == "" {
+		pathTemplate = "./dvr/{stream_key}"
+	}
 	p := strings.ReplaceAll(pathTemplate, "{stream_key}", streamKey)
 	p = strings.ReplaceAll(p, "{stream}", path.Base(streamKey))
 	return filepath.Clean(p)
+}
+
+func dvrPathRoot(template, expanded string) string {
+	if template == "" {
+		template = "./dvr/{stream_key}"
+	}
+	if index := strings.IndexByte(template, '{'); index >= 0 {
+		prefix := template[:index]
+		if prefix == "" {
+			return "."
+		}
+		return filepath.Clean(filepath.Dir(prefix))
+	}
+	return filepath.Dir(expanded)
 }

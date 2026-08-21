@@ -99,6 +99,10 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		switch ext {
 		case "ts":
 			streamKey := app + "/" + key
+			if err := m.authorizeHTTPSubscribe(r, streamKey, "hls"); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			// LL-HLS TS partial segment: segName = "MSN.partIdx"
 			if cfg := m.server.RuntimeConfig().HTTP().LLHLS; cfg.Enabled && cfg.Container == "ts" {
 				if strings.Contains(segName, ".") {
@@ -132,6 +136,10 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		case "m4s":
 			streamKey := app + "/" + key
+			if err := m.authorizeHTTPSubscribe(r, streamKey, "dash"); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			// LL-HLS partial segment: segName = "MSN.partIdx"
 			if strings.Contains(segName, ".") {
 				m4sParts := strings.SplitN(segName, ".", 2)
@@ -184,6 +192,10 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			//   /app/key/vinit.mp4      — DASH video-only init
 			//   /app/key/audio_init.mp4 — DASH audio-only init
 			streamKey := app + "/" + key
+			if err := m.authorizeHTTPSubscribe(r, streamKey, "dash"); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			if segName == "vinit" {
 				m.serveDASHInit(w, r, streamKey)
 				return
@@ -218,26 +230,26 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	switch format {
 	case "m3u8":
+		if err := m.authorizeHTTPSubscribe(r, streamKey, "hls"); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		m.serveHLSPlaylist(w, r, streamKey)
 		return
 	case "mpd":
+		if err := m.authorizeHTTPSubscribe(r, streamKey, "dash"); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		m.serveDASHManifest(w, r, streamKey)
 		return
 	case "flv", "ts", "mp4":
-		// Continue to chunked streaming below
+		if err := m.authorizeHTTPSubscribe(r, streamKey, "http-"+format); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	default:
 		http.Error(w, "unsupported format: "+format, http.StatusBadRequest)
-		return
-	}
-
-	// Emit subscribe event (auth hooks can reject)
-	if err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "http-" + format,
-		RemoteAddr: r.RemoteAddr,
-		Params:     queryToMap(r.URL.Query()),
-	}); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -247,6 +259,18 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stream not found or not publishing", http.StatusNotFound)
 		return
 	}
+	if err := stream.AddSubscriber("http-" + format); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer stream.RemoveSubscriber("http-" + format)
+
+	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "http-" + format,
+		RemoteAddr: r.RemoteAddr,
+		Params:     queryToMap(r.URL.Query()),
+	}) //nolint:errcheck
 
 	slog.Info("subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveStream(w, r, format, stream)
@@ -256,6 +280,19 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		Protocol:   "http-" + format,
 		RemoteAddr: r.RemoteAddr,
 	}) //nolint:errcheck
+}
+
+func (m *Module) authorizeHTTPSubscribe(r *http.Request, streamKey, protocol string) error {
+	request := core.AuthorizationRequest{
+		Action: core.AuthorizationSubscribe, StreamKey: streamKey,
+		Protocol: protocol, RemoteAddr: r.RemoteAddr, Params: queryToMap(r.URL.Query()),
+	}
+	request.Stage = core.AuthorizationPreSession
+	if err := m.server.Authorize(r.Context(), request); err != nil {
+		return err
+	}
+	request.Stage = core.AuthorizationPostConnect
+	return m.server.Authorize(r.Context(), request)
 }
 
 // queryToMap converts url.Values to a flat map (first value wins).

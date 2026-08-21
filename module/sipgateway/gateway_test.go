@@ -2,6 +2,7 @@ package sipgateway
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -13,21 +14,35 @@ import (
 	"github.com/im-pingo/liveforge/pkg/sdp"
 )
 
-type mockSIPService struct {
-	mu              sync.Mutex
-	inviteHandlers  []sipmod.InviteHandler
-	byeHandlers     []sipmod.ByeHandler
-	localAddr       string
-	serverID        string
-	domain          string
+type authorizerFunc func(context.Context, core.AuthorizationRequest) error
+
+func (f authorizerFunc) Authorize(ctx context.Context, req core.AuthorizationRequest) error {
+	return f(ctx, req)
 }
 
-func (m *mockSIPService) OnRegister(h sipmod.RegisterHandler)     {}
-func (m *mockSIPService) OnInvite(h sipmod.InviteHandler)         { m.mu.Lock(); m.inviteHandlers = append(m.inviteHandlers, h); m.mu.Unlock() }
-func (m *mockSIPService) OnBye(h sipmod.ByeHandler)               { m.mu.Lock(); m.byeHandlers = append(m.byeHandlers, h); m.mu.Unlock() }
-func (m *mockSIPService) OnMessage(h sipmod.MessageHandler)       {}
-func (m *mockSIPService) OnSubscribe(h sipmod.SubscribeHandler)   {}
-func (m *mockSIPService) OnNotify(h sipmod.NotifyHandler)         {}
+type mockSIPService struct {
+	mu             sync.Mutex
+	inviteHandlers []sipmod.InviteHandler
+	byeHandlers    []sipmod.ByeHandler
+	localAddr      string
+	serverID       string
+	domain         string
+}
+
+func (m *mockSIPService) OnRegister(h sipmod.RegisterHandler) {}
+func (m *mockSIPService) OnInvite(h sipmod.InviteHandler) {
+	m.mu.Lock()
+	m.inviteHandlers = append(m.inviteHandlers, h)
+	m.mu.Unlock()
+}
+func (m *mockSIPService) OnBye(h sipmod.ByeHandler) {
+	m.mu.Lock()
+	m.byeHandlers = append(m.byeHandlers, h)
+	m.mu.Unlock()
+}
+func (m *mockSIPService) OnMessage(h sipmod.MessageHandler)     {}
+func (m *mockSIPService) OnSubscribe(h sipmod.SubscribeHandler) {}
+func (m *mockSIPService) OnNotify(h sipmod.NotifyHandler)       {}
 func (m *mockSIPService) SendRequest(ctx context.Context, req *sip.Request) (*sip.Response, error) {
 	return nil, nil
 }
@@ -50,12 +65,12 @@ func (tx *mockServerTx) Respond(resp *sip.Response) error {
 	return nil
 }
 
-func (tx *mockServerTx) Acks() <-chan *sip.Request                { return nil }
-func (tx *mockServerTx) Done() <-chan struct{}                    { return nil }
-func (tx *mockServerTx) Terminate()                               {}
-func (tx *mockServerTx) Err() error                               { return nil }
-func (tx *mockServerTx) OnTerminate(f sip.FnTxTerminate) bool     { return true }
-func (tx *mockServerTx) OnCancel(f sip.FnTxCancel) bool           { return true }
+func (tx *mockServerTx) Acks() <-chan *sip.Request            { return nil }
+func (tx *mockServerTx) Done() <-chan struct{}                { return nil }
+func (tx *mockServerTx) Terminate()                           {}
+func (tx *mockServerTx) Err() error                           { return nil }
+func (tx *mockServerTx) OnTerminate(f sip.FnTxTerminate) bool { return true }
+func (tx *mockServerTx) OnCancel(f sip.FnTxCancel) bool       { return true }
 
 func (tx *mockServerTx) getResponse() *sip.Response {
 	tx.mu.Lock()
@@ -196,9 +211,9 @@ func TestNegotiateCodec(t *testing.T) {
 
 func TestBuildAnswerSDP(t *testing.T) {
 	nc := negotiatedCodec{
-		Codec:       8, // CodecG711A
-		PT:          8,
-		ClockRate:   8000,
+		Codec:        8, // CodecG711A
+		PT:           8,
+		ClockRate:    8000,
 		EncodingName: "PCMA",
 	}
 
@@ -294,7 +309,81 @@ func TestGatewayHandleInviteSuccess(t *testing.T) {
 	}
 }
 
-func TestGatewayHandleInviteNoAudio(t *testing.T) {
+func TestGatewayHandleInviteAuthorizationRejectsBeforeResources(t *testing.T) {
+	cfg := config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	server := core.NewServer(&cfg)
+	var stages []core.AuthorizationStage
+	server.SetAuthorizer(authorizerFunc(func(_ context.Context, req core.AuthorizationRequest) error {
+		stages = append(stages, req.Stage)
+		return fmt.Errorf("denied")
+	}))
+	sipSvc := &mockSIPService{localAddr: "127.0.0.1:5060", serverID: "test", domain: "test.local"}
+	hub := server.StreamHub()
+	bus := server.GetEventBus()
+	gateway, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus, server)
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	defer gateway.Close()
+
+	req := sip.NewRequest(sip.INVITE, sip.Uri{User: "denied", Host: "test.local"})
+	req.AppendHeader(sip.NewHeader("Call-ID", "denied-call"))
+	req.SetBody([]byte("v=0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n"))
+	tx := &mockServerTx{}
+	gateway.handleInvite(req, tx)
+
+	if resp := tx.getResponse(); resp == nil || resp.StatusCode != 401 {
+		t.Fatalf("response = %+v, want 401", resp)
+	}
+	if len(stages) != 1 || stages[0] != core.AuthorizationPreSession {
+		t.Fatalf("authorization stages = %v, want [%s]", stages, core.AuthorizationPreSession)
+	}
+	if hub.Count() != 0 || gateway.ActiveCalls() != 0 {
+		t.Fatalf("rejected INVITE committed streams=%d calls=%d", hub.Count(), gateway.ActiveCalls())
+	}
+	rtpPort, rtcpPort, err := gateway.portAlloc.AllocatePair()
+	if err != nil {
+		t.Fatalf("rejected INVITE leaked RTP ports: %v", err)
+	}
+	gateway.portAlloc.Free(rtpPort, rtcpPort)
+}
+
+func TestGatewayHandleInvitePostConnectAuthorizationRejectsBeforeResources(t *testing.T) {
+	cfg := config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	server := core.NewServer(&cfg)
+	var stages []core.AuthorizationStage
+	server.SetAuthorizer(authorizerFunc(func(_ context.Context, req core.AuthorizationRequest) error {
+		stages = append(stages, req.Stage)
+		if req.Stage == core.AuthorizationPostConnect {
+			return fmt.Errorf("denied")
+		}
+		return nil
+	}))
+	sipSvc := &mockSIPService{localAddr: "127.0.0.1:5060", serverID: "test", domain: "test.local"}
+	gateway, err := NewGateway(newTestGatewayConfig(), sipSvc, server.StreamHub(), server.GetEventBus(), server)
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	defer gateway.Close()
+
+	req := sip.NewRequest(sip.INVITE, sip.Uri{User: "denied-post", Host: "test.local"})
+	req.AppendHeader(sip.NewHeader("Call-ID", "denied-post-call"))
+	req.SetBody([]byte("v=0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n"))
+	tx := &mockServerTx{}
+	gateway.handleInvite(req, tx)
+
+	if resp := tx.getResponse(); resp == nil || resp.StatusCode != 401 {
+		t.Fatalf("response = %+v, want 401", resp)
+	}
+	if got := fmt.Sprint(stages); got != fmt.Sprint([]core.AuthorizationStage{core.AuthorizationPreSession, core.AuthorizationPostConnect}) {
+		t.Fatalf("authorization stages = %v, want pre and post", stages)
+	}
+	if server.StreamHub().Count() != 0 || gateway.ActiveCalls() != 0 {
+		t.Fatalf("rejected INVITE committed streams=%d calls=%d", server.StreamHub().Count(), gateway.ActiveCalls())
+	}
+}
+
+func TestGatewayIgnoresVideoInviteForGB28181(t *testing.T) {
 	sipSvc := &mockSIPService{localAddr: "127.0.0.1:5060", serverID: "test", domain: "test.local"}
 	hub := newTestHub()
 	bus := core.NewEventBus()
@@ -322,13 +411,8 @@ func TestGatewayHandleInviteNoAudio(t *testing.T) {
 		h(req, tx)
 	}
 
-	resp := tx.getResponse()
-	if resp == nil || resp.StatusCode != 488 {
-		status := 0
-		if resp != nil {
-			status = resp.StatusCode
-		}
-		t.Errorf("status = %d, want 488", status)
+	if resp := tx.getResponse(); resp != nil {
+		t.Fatalf("video INVITE response = %d, want no response from audio gateway", resp.StatusCode)
 	}
 }
 
@@ -473,6 +557,9 @@ func TestGatewayClose(t *testing.T) {
 
 	if gw.ActiveCalls() != 0 {
 		t.Errorf("ActiveCalls after close = %d, want 0", gw.ActiveCalls())
+	}
+	if stream, ok := hub.Find("sip/closetest"); ok && stream.Publisher() != nil {
+		t.Fatal("gateway close left inbound publisher attached")
 	}
 }
 

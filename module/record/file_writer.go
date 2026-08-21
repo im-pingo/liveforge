@@ -2,16 +2,19 @@ package record
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/flv"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
@@ -20,8 +23,8 @@ import (
 
 // frameWriter is the interface for format-specific frame writing.
 type frameWriter interface {
-	// writeHeader writes format-specific file header on the first frame.
-	writeHeader(f *os.File, frame *avframe.AVFrame) error
+	// writeHeader writes the container header with all known tracks.
+	writeHeader(f *os.File, videoSeq, audioSeq, firstMedia *avframe.AVFrame) error
 	// writeFrame writes a single frame.
 	writeFrame(f *os.File, frame *avframe.AVFrame) error
 }
@@ -31,9 +34,9 @@ type flvFrameWriter struct {
 	muxer *flv.Muxer
 }
 
-func (w *flvFrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
-	hasVideo := frame.MediaType.IsVideo()
-	hasAudio := frame.MediaType.IsAudio()
+func (w *flvFrameWriter) writeHeader(f *os.File, videoSeq, audioSeq, firstMedia *avframe.AVFrame) error {
+	hasVideo := videoSeq != nil || firstMedia.MediaType.IsVideo()
+	hasAudio := audioSeq != nil || firstMedia.MediaType.IsAudio()
 	return w.muxer.WriteHeader(f, hasVideo, hasAudio)
 }
 
@@ -50,7 +53,7 @@ type fmp4FrameWriter struct {
 	audioSeq  *avframe.AVFrame
 }
 
-func (w *fmp4FrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *fmp4FrameWriter) writeHeader(_ *os.File, _, _, _ *avframe.AVFrame) error {
 	// fMP4 init segment requires codec info; defer until we have sequence headers.
 	return nil
 }
@@ -64,29 +67,26 @@ func (w *fmp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
 			w.audioSeq = frame
 		}
 
-		// Write init segment once we have at least one sequence header
-		if !w.initDone && (w.videoSeq != nil || w.audioSeq != nil) {
-			videoCodec := avframe.CodecType(0)
-			audioCodec := avframe.CodecType(0)
-			if w.videoSeq != nil {
-				videoCodec = w.videoSeq.Codec
-			}
-			if w.audioSeq != nil {
-				audioCodec = w.audioSeq.Codec
-			}
-
-			w.muxer = fmp4.NewMuxer(videoCodec, audioCodec)
-			initData := w.muxer.Init(w.videoSeq, w.audioSeq, 0, 0, 0, 0)
-			if _, err := f.Write(initData); err != nil {
-				return fmt.Errorf("write fMP4 init segment: %w", err)
-			}
-			w.initDone = true
-		}
 		return nil
 	}
 
 	if !w.initDone {
-		return nil // skip media frames before init
+		if w.videoSeq == nil && w.audioSeq == nil {
+			return nil
+		}
+		var videoCodec, audioCodec avframe.CodecType
+		if w.videoSeq != nil {
+			videoCodec = w.videoSeq.Codec
+		}
+		if w.audioSeq != nil {
+			audioCodec = w.audioSeq.Codec
+		}
+		w.muxer = fmp4.NewMuxer(videoCodec, audioCodec)
+		initData := w.muxer.Init(w.videoSeq, w.audioSeq, 0, 0, 0, 0)
+		if _, err := f.Write(initData); err != nil {
+			return fmt.Errorf("write fMP4 init segment: %w", err)
+		}
+		w.initDone = true
 	}
 
 	w.gopBuffer = append(w.gopBuffer, frame)
@@ -120,44 +120,62 @@ func (w *fmp4FrameWriter) flush(f *os.File) error {
 
 // mp4FrameWriter writes AVFrames as a classic MP4 with moov atom at end.
 type mp4FrameWriter struct {
-	muxer   *mp4.Muxer
-	started bool
-	prevDTS int64
+	muxer        *mp4.Muxer
+	started      bool
+	videoSeq     *avframe.AVFrame
+	audioSeq     *avframe.AVFrame
+	prevVideoDTS int64
+	prevAudioDTS int64
 }
 
-func (w *mp4FrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *mp4FrameWriter) writeHeader(_ *os.File, _, _, _ *avframe.AVFrame) error {
 	return nil // defer until we have codec info
 }
 
 func (w *mp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
-		if w.muxer == nil {
-			videoCodec := avframe.CodecType(0)
-			audioCodec := avframe.CodecType(0)
-			if frame.MediaType.IsVideo() {
-				videoCodec = frame.Codec
-			} else {
-				audioCodec = frame.Codec
-			}
-			w.muxer = mp4.NewMuxer(videoCodec, audioCodec)
-		}
-		w.muxer.WriteFrame(f, frame, -1)
-
-		if !w.started {
-			w.muxer.WriteFtyp(f)
-			w.muxer.WriteMdatHeader(f)
-			w.started = true
-			w.prevDTS = -1
+		if frame.MediaType.IsVideo() {
+			w.videoSeq = frame
+		} else if frame.MediaType.IsAudio() {
+			w.audioSeq = frame
 		}
 		return nil
 	}
 
-	if !w.started || w.muxer == nil {
-		return nil
+	if !w.started {
+		var videoCodec, audioCodec avframe.CodecType
+		if w.videoSeq != nil {
+			videoCodec = w.videoSeq.Codec
+		}
+		if w.audioSeq != nil {
+			audioCodec = w.audioSeq.Codec
+		}
+		w.muxer = mp4.NewMuxer(videoCodec, audioCodec)
+		if w.videoSeq != nil {
+			w.muxer.WriteFrame(f, w.videoSeq, -1) //nolint:errcheck
+		}
+		if w.audioSeq != nil {
+			w.muxer.WriteFrame(f, w.audioSeq, -1) //nolint:errcheck
+		}
+		if err := w.muxer.WriteFtyp(f); err != nil {
+			return err
+		}
+		if _, err := w.muxer.WriteMdatHeader(f); err != nil {
+			return err
+		}
+		w.started = true
+		w.prevVideoDTS = -1
+		w.prevAudioDTS = -1
 	}
 
-	_, err := w.muxer.WriteFrame(f, frame, w.prevDTS)
-	w.prevDTS = frame.DTS
+	previous := w.prevAudioDTS
+	if frame.MediaType.IsVideo() {
+		previous = w.prevVideoDTS
+		w.prevVideoDTS = frame.DTS
+	} else {
+		w.prevAudioDTS = frame.DTS
+	}
+	_, err := w.muxer.WriteFrame(f, frame, previous)
 	return err
 }
 
@@ -179,10 +197,15 @@ type FileWriter struct {
 	bytesWritten int64
 	headerDone   bool
 	segmentIndex int
+	videoSeq     *avframe.AVFrame
+	audioSeq     *avframe.AVFrame
 }
 
 // NewFileWriter creates a new file writer for the given stream key.
 func NewFileWriter(streamKey string, cfg config.RecordConfig) (*FileWriter, error) {
+	if err := core.ValidateStreamKey(streamKey); err != nil {
+		return nil, fmt.Errorf("record: invalid stream key: %w", err)
+	}
 	w := &FileWriter{
 		cfg:       cfg,
 		streamKey: streamKey,
@@ -231,11 +254,29 @@ func (w *FileWriter) Format() string {
 // WriteFrame writes an AVFrame to the current file.
 // Handles header writing on first frame and file segmentation.
 func (w *FileWriter) WriteFrame(frame *avframe.AVFrame) error {
+	if frame.FrameType == avframe.FrameTypeSequenceHeader {
+		if frame.MediaType.IsVideo() {
+			w.videoSeq = frame
+		} else if frame.MediaType.IsAudio() {
+			w.audioSeq = frame
+		}
+		if !w.headerDone {
+			return nil
+		}
+	}
 	if !w.headerDone {
-		if err := w.format.writeHeader(w.file, frame); err != nil {
+		if err := w.format.writeHeader(w.file, w.videoSeq, w.audioSeq, frame); err != nil {
 			return fmt.Errorf("write header: %w", err)
 		}
 		w.headerDone = true
+		for _, header := range []*avframe.AVFrame{w.videoSeq, w.audioSeq} {
+			if header != nil {
+				if err := w.format.writeFrame(w.file, header); err != nil {
+					return fmt.Errorf("write sequence header: %w", err)
+				}
+				w.bytesWritten += int64(len(header.Payload))
+			}
+		}
 	}
 
 	if err := w.format.writeFrame(w.file, frame); err != nil {
@@ -285,6 +326,12 @@ func (w *FileWriter) FilePath() string {
 
 func (w *FileWriter) openFile() error {
 	filePath := w.expandPath()
+	if strings.ContainsAny(filePath, "{}") {
+		return fmt.Errorf("record path contains an unknown placeholder: %s", filePath)
+	}
+	if err := core.ValidatePathWithinRoot(recordPathRoot(w.cfg.Path, filePath), filePath); err != nil {
+		return fmt.Errorf("record path escapes configured root: %w", err)
+	}
 
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -302,6 +349,20 @@ func (w *FileWriter) openFile() error {
 	w.bytesWritten = 0
 	w.startTime = time.Now()
 	return nil
+}
+
+func recordPathRoot(template, expanded string) string {
+	if template == "" {
+		template = "./recordings/{stream_key}/{date}_{time}.{ext}"
+	}
+	if index := strings.IndexByte(template, '{'); index >= 0 {
+		prefix := template[:index]
+		if prefix == "" {
+			return "."
+		}
+		return filepath.Clean(filepath.Dir(prefix))
+	}
+	return filepath.Dir(expanded)
 }
 
 func (w *FileWriter) rotate() error {
@@ -324,7 +385,7 @@ func (w *FileWriter) rotate() error {
 	w.segmentIndex++
 
 	// Reset format writer for new segment
-	w.format = newFrameWriter(w.cfg.Format)
+	w.format = newFrameWriterWithContext(w.cfg.Format, w.streamKey, w.cfg)
 
 	// Open new file
 	return w.openFile()
@@ -343,8 +404,15 @@ func (w *FileWriter) expandPath() string {
 
 	// Replace stream_key slashes with OS path separator for directory structure
 	streamDir := strings.ReplaceAll(w.streamKey, "/", string(filepath.Separator))
+	streamName := path.Base(w.streamKey)
+	ext := w.Format()
+	if ext == "fmp4" {
+		ext = "mp4"
+	}
 
 	p = strings.ReplaceAll(p, "{stream_key}", streamDir)
+	p = strings.ReplaceAll(p, "{stream}", streamName)
+	p = strings.ReplaceAll(p, "{ext}", ext)
 	p = strings.ReplaceAll(p, "{date}", now.Format("2006-01-02"))
 	p = strings.ReplaceAll(p, "{time}", fmt.Sprintf("%s_%04d", now.Format("150405"), w.segmentIndex))
 	return p
@@ -395,10 +463,25 @@ func (w *FileWriter) notifyFileComplete() {
 	}
 	body, _ := json.Marshal(payload)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:gosec
+	timeout := w.cfg.OnFileComplete.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body)) //nolint:gosec
+	if err != nil {
+		slog.Error("file complete callback request error", "module", "record", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: timeout}).Do(req) //nolint:gosec
 	if err != nil {
 		slog.Error("file complete callback error", "module", "record", "error", err)
 		return
 	}
 	resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		slog.Error("file complete callback rejected", "module", "record", "status", resp.Status)
+	}
 }

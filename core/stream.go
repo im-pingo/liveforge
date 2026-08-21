@@ -84,9 +84,12 @@ type Stream struct {
 	config config.StreamConfig
 	limits config.LimitsConfig
 
-	mu        sync.RWMutex
-	state     StreamState
-	publisher Publisher
+	mu                  sync.RWMutex
+	state               StreamState
+	publisher           Publisher
+	publisherGeneration uint64
+	closed              bool
+	onDestroy           func(*Stream)
 
 	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
 	muxerManager *MuxerManager
@@ -142,12 +145,24 @@ func (s *Stream) State() StreamState {
 
 // SetPublisher assigns a publisher to this stream.
 func (s *Stream) SetPublisher(pub Publisher) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	_, err := s.SetPublisherWithGeneration(pub)
+	return err
+}
 
-	if s.state == StreamStatePublishing {
-		return errors.New("stream already has a publisher")
+// SetPublisherWithGeneration assigns a publisher and returns a generation
+// token that cleanup code must present before detaching it.
+func (s *Stream) SetPublisherWithGeneration(pub Publisher) (uint64, error) {
+	if pub == nil {
+		return 0, errors.New("publisher is nil")
 	}
+	s.mu.Lock()
+	if s.state == StreamStatePublishing || s.closed || s.state == StreamStateDestroying {
+		s.mu.Unlock()
+		return 0, errors.New("stream already has a publisher or is closed")
+	}
+	oldRing := s.ringBuffer
+	oldMuxer := s.muxerManager
+	oldTranscode := s.transcodeManager
 
 	// Cancel no-publisher timer if republishing
 	if s.noPublisherTimer != nil {
@@ -161,21 +176,53 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 		s.idleTimer = nil
 	}
 
-	if s.transcodeManager != nil {
-		s.transcodeManager.Reset()
+	if oldMuxer != nil {
+		s.muxerManager = oldMuxer.NewGeneration()
 	}
+	s.publisherGeneration++
+	generation := s.publisherGeneration
 
 	s.publisher = pub
 	s.state = StreamStatePublishing
+	s.ringBuffer = util.NewRingBuffer[*avframe.AVFrame](s.config.RingBufferSize)
+	s.gopCache = nil
+	s.audioCache = nil
+	s.videoSeqHeader = nil
+	s.audioSeqHeader = nil
+	s.seqHeaderReady = make(chan struct{})
+	s.stats.reset()
 	s.stats.initStats()
+	s.mu.Unlock()
 
-	return nil
+	if oldRing != nil {
+		oldRing.Close()
+	}
+	if oldMuxer != nil {
+		oldMuxer.Reset()
+	}
+	if oldTranscode != nil {
+		oldTranscode.Reset()
+	}
+	return generation, nil
 }
 
 // RemovePublisher detaches the publisher and starts the no-publisher timeout.
 func (s *Stream) RemovePublisher() {
+	s.removePublisher(0)
+}
+
+// RemovePublisherIfGeneration detaches only the publisher belonging to the
+// supplied generation. It returns false for stale cleanup callbacks.
+func (s *Stream) RemovePublisherIfGeneration(generation uint64) bool {
+	return s.removePublisher(generation)
+}
+
+func (s *Stream) removePublisher(generation uint64) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.publisher == nil || (generation != 0 && generation != s.publisherGeneration) {
+		s.mu.Unlock()
+		return false
+	}
 
 	s.publisher = nil
 	s.state = StreamStateNoPublisher
@@ -183,25 +230,41 @@ func (s *Stream) RemovePublisher() {
 	if s.config.NoPublisherTimeout > 0 {
 		s.noPublisherTimer = time.AfterFunc(s.config.NoPublisherTimeout, func() {
 			s.mu.Lock()
-			defer s.mu.Unlock()
+			var hook func(*Stream)
 			if s.state == StreamStateNoPublisher {
 				s.state = StreamStateDestroying
+				hook = s.onDestroy
+				s.onDestroy = nil
+			}
+			s.mu.Unlock()
+			if hook != nil {
+				hook(s)
 			}
 		})
 	}
 
 	s.checkIdleTimeout()
+	s.mu.Unlock()
+	return true
 }
 
 // Close force-closes the stream: closes the ring buffer, removes the publisher,
 // and transitions to destroying state.
 func (s *Stream) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.state == StreamStateDestroying {
+	if s.closed {
+		s.mu.Unlock()
 		return
 	}
+	s.closed = true
+	s.state = StreamStateDestroying
+	pub := s.publisher
+	s.publisher = nil
+	ring := s.ringBuffer
+	muxers := s.muxerManager
+	transcode := s.transcodeManager
+	hook := s.onDestroy
+	s.onDestroy = nil
 
 	if s.noPublisherTimer != nil {
 		s.noPublisherTimer.Stop()
@@ -213,13 +276,22 @@ func (s *Stream) Close() {
 		s.idleTimer = nil
 	}
 
-	if s.publisher != nil {
-		s.publisher.Close() //nolint:errcheck
-		s.publisher = nil
+	s.mu.Unlock()
+	if pub != nil {
+		pub.Close() //nolint:errcheck
 	}
-
-	s.state = StreamStateDestroying
-	s.ringBuffer.Close()
+	if muxers != nil {
+		muxers.Reset()
+	}
+	if transcode != nil {
+		transcode.Reset()
+	}
+	if ring != nil {
+		ring.Close()
+	}
+	if hook != nil {
+		hook(s)
+	}
 }
 
 // Publisher returns the current publisher, if any.
@@ -229,11 +301,23 @@ func (s *Stream) Publisher() Publisher {
 	return s.publisher
 }
 
+// PublisherGeneration returns the generation of the current publisher. The
+// value is intended for conditional cleanup; zero means no publisher has been
+// installed yet.
+func (s *Stream) PublisherGeneration() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.publisherGeneration
+}
+
 // WriteFrame writes a media frame to the ring buffer and updates caches.
 // Returns false if the frame was rejected due to bitrate limit.
 func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed || s.state == StreamStateDestroying || s.ringBuffer == nil {
+		return false
+	}
 
 	// Enforce max_bitrate_per_stream: reject non-header frames when over limit
 	if maxKbps := s.limits.MaxBitratePerStream; maxKbps > 0 {
@@ -424,7 +508,10 @@ func (s *Stream) Stats() StreamStatsSnapshot {
 
 // RingBuffer returns the stream's ring buffer for reader creation.
 func (s *Stream) RingBuffer() *util.RingBuffer[*avframe.AVFrame] {
-	return s.ringBuffer
+	s.mu.RLock()
+	ring := s.ringBuffer
+	s.mu.RUnlock()
+	return ring
 }
 
 // MuxerManager returns the stream's muxer manager.
@@ -440,6 +527,12 @@ func (s *Stream) FeedbackRouter() *FeedbackRouter {
 // TranscodeManager returns the stream's audio transcoding manager, or nil if disabled.
 func (s *Stream) TranscodeManager() *TranscodeManager {
 	return s.transcodeManager
+}
+
+func (s *Stream) setDestroyHook(hook func(*Stream)) {
+	s.mu.Lock()
+	s.onDestroy = hook
+	s.mu.Unlock()
 }
 
 // AddSubscriber increments the subscriber count for a protocol (e.g. "rtmp").
@@ -514,9 +607,15 @@ func (s *Stream) checkIdleTimeout() {
 		if s.idleTimer == nil {
 			s.idleTimer = time.AfterFunc(s.config.IdleTimeout, func() {
 				s.mu.Lock()
-				defer s.mu.Unlock()
+				var hook func(*Stream)
 				if s.publisher == nil && s.totalSubscribers() == 0 {
 					s.state = StreamStateDestroying
+					hook = s.onDestroy
+					s.onDestroy = nil
+				}
+				s.mu.Unlock()
+				if hook != nil {
+					hook(s)
 				}
 			})
 		}

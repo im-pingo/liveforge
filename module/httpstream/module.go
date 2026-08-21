@@ -66,10 +66,15 @@ func (m *Module) Init(s *core.Server) error {
 	mux.HandleFunc("/{path...}", m.handleStream)
 	var handler http.Handler = mux
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
-		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst, rl.TrustedProxies...)
 		handler = m.limiter.Wrap(handler)
 	}
-	m.httpSrv = &http.Server{Handler: handler}
+	m.httpSrv = &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {

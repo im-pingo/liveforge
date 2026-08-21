@@ -9,8 +9,8 @@ import (
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/avframe"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // playbackClient handles video recording playback sessions.
@@ -56,7 +56,18 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	req.SetBody([]byte(sdpOffer))
 
 	// Create stream and publisher
-	stream, _ := pc.handler.hub.GetOrCreate(streamKey)
+	stream, streamExisted := pc.handler.hub.Find(streamKey)
+	if streamExisted && stream.State() == core.StreamStateDestroying {
+		streamExisted = false
+		stream = nil
+	}
+	if !streamExisted {
+		stream, err = pc.handler.hub.GetOrCreate(streamKey)
+	}
+	if err != nil {
+		pc.handler.ports.Free(rtpPort, rtpPort+1)
+		return nil, fmt.Errorf("get playback stream: %w", err)
+	}
 	pub := NewPublisher(
 		fmt.Sprintf("gb28181-playback-%s", channelID),
 		func(frame *avframe.AVFrame) {
@@ -75,10 +86,27 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		Publisher: pub,
 		Stream:    stream,
 	}
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
+		pc.handler.ports.Free(rtpPort, rtpPort+1)
+		if !streamExisted {
+			pc.handler.hub.Destroy(streamKey, stream)
+		}
+		return nil, fmt.Errorf("set playback publisher: %w", err)
+	}
+	session.PublisherGeneration = generation
+	cleanupPublisher := func() {
+		pub.Close()
+		stream.RemovePublisherIfGeneration(generation)
+		if !streamExisted {
+			pc.handler.hub.Destroy(streamKey, stream)
+		}
+	}
 
 	// Send INVITE
 	invTx, err := pc.sipService.SendInvite(ctx, req)
 	if err != nil {
+		cleanupPublisher()
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("send playback INVITE: %w", err)
 	}
@@ -86,6 +114,7 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	select {
 	case <-invTx.Done():
 	case <-time.After(10 * time.Second):
+		cleanupPublisher()
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
 		return nil, fmt.Errorf("playback INVITE timeout")
@@ -93,12 +122,14 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 
 	resp := invTx.Response()
 	if resp == nil {
+		cleanupPublisher()
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
 		return nil, fmt.Errorf("playback INVITE: no response")
 	}
 
 	if resp.StatusCode != 200 {
+		cleanupPublisher()
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
 		return nil, fmt.Errorf("playback INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
@@ -119,15 +150,16 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		session.ID = callID.Value()
 	}
 
-	session.SetState(SessionStateStreaming)
-	pc.handler.sessions.Add(session)
-
 	// Start RTP receiver
 	receiver, err := NewRTPReceiver(rtpPort, pub)
 	if err != nil {
+		cleanupPublisher()
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("create playback RTP receiver: %w", err)
 	}
+	session.Receiver = receiver
+	session.SetState(SessionStateStreaming)
+	pc.handler.sessions.Add(session)
 	go receiver.Run()
 
 	// Emit publish event

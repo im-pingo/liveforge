@@ -21,6 +21,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install FFmpeg development libraries for full Linux artifacts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libavcodec-dev libswresample-dev libavutil-dev
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -54,9 +60,9 @@ jobs:
             os="${os_arch%/*}"
             arch="${os_arch#*/}"
             output="dist/liveforge-${os}-${arch}"
-            [ "$os" = "linux" ] && cgo=1 || cgo=0
+            if [ "$os" = "linux" ]; then cgo=1; tags=audiocodec; else cgo=0; tags=; fi
             CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch \
-              go build -trimpath \
+              go build -trimpath -tags "$tags" \
               -ldflags "-s -w -X main.version=${{ steps.tag.outputs.version }}" \
               -o "$output" ./cmd/liveforge
           done

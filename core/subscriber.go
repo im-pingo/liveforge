@@ -5,7 +5,7 @@ type StartMode uint8
 
 const (
 	StartModeGOP      StartMode = iota + 1 // Start from nearest keyframe
-	StartModeRealtime                       // Start from current frame
+	StartModeRealtime                      // Start from current frame
 )
 
 // FeedbackMode determines how subscriber feedback is handled.
@@ -13,10 +13,10 @@ type FeedbackMode uint8
 
 const (
 	FeedbackAuto        FeedbackMode = iota // Default: auto-select based on subscriber count
-	FeedbackPassthrough                      // Forward FB directly to publisher
-	FeedbackAggregate                        // Aggregate FBs before forwarding
-	FeedbackDrop                             // Discard FB
-	FeedbackServerSide                       // Server-side adaptation, don't forward
+	FeedbackPassthrough                     // Forward FB directly to publisher
+	FeedbackAggregate                       // Aggregate FBs before forwarding
+	FeedbackDrop                            // Discard FB
+	FeedbackServerSide                      // Server-side adaptation, don't forward
 )
 
 // LayerPrefer determines which simulcast layer to subscribe.

@@ -52,30 +52,66 @@ func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 	if err := ValidateStreamKey(key); err != nil {
 		return nil, err
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if s, ok := h.streams[key]; ok {
-		if s.State() != StreamStateDestroying {
-			return s, nil
+	for {
+		h.mu.RLock()
+		existing := h.streams[key]
+		h.mu.RUnlock()
+		if existing != nil {
+			if existing.State() != StreamStateDestroying {
+				return existing, nil
+			}
+			// Remove the observed generation before retrying. If another
+			// goroutine won the race, re-read the map and try again.
+			h.Destroy(key, existing)
+			continue
 		}
-		// Stream is being destroyed; replace it with a fresh one.
-		delete(h.streams, key)
+
+		h.mu.RLock()
+		max := h.limits.MaxStreams
+		full := max > 0 && len(h.streams) >= max
+		candidates := make([]struct {
+			key    string
+			stream *Stream
+		}, 0)
+		if full {
+			for candidateKey, candidate := range h.streams {
+				candidates = append(candidates, struct {
+					key    string
+					stream *Stream
+				}{candidateKey, candidate})
+			}
+		}
+		h.mu.RUnlock()
+		for _, candidate := range candidates {
+			if candidate.stream.State() == StreamStateDestroying {
+				h.Destroy(candidate.key, candidate.stream)
+			}
+		}
+
+		h.mu.Lock()
+		if existing := h.streams[key]; existing != nil {
+			h.mu.Unlock()
+			continue
+		}
+		if max := h.limits.MaxStreams; max > 0 && len(h.streams) >= max {
+			h.mu.Unlock()
+			return nil, fmt.Errorf("max streams limit reached (%d)", max)
+		}
+		s := NewStream(key, h.config, h.limits, h.eventBus)
+		if h.audioCodecEnabled {
+			s.transcodeManager = NewTranscodeManager(s, audiocodec.Global(), h.config.RingBufferSize)
+		}
+		s.setDestroyHook(func(stream *Stream) {
+			h.Destroy(key, stream)
+		})
+		h.streams[key] = s
+		h.mu.Unlock()
+
+		if h.eventBus != nil {
+			h.eventBus.Emit(EventStreamCreate, &EventContext{StreamKey: key}) //nolint:errcheck
+		}
+		return s, nil
 	}
-
-	if max := h.limits.MaxStreams; max > 0 && len(h.streams) >= max {
-		return nil, fmt.Errorf("max streams limit reached (%d)", max)
-	}
-
-	s := NewStream(key, h.config, h.limits, h.eventBus)
-	if h.audioCodecEnabled {
-		s.transcodeManager = NewTranscodeManager(s, audiocodec.Global(), h.config.RingBufferSize)
-	}
-	h.streams[key] = s
-
-	h.eventBus.Emit(EventStreamCreate, &EventContext{StreamKey: key}) //nolint:errcheck
-
-	return s, nil
 }
 
 // Find returns a stream by key, or nil if not found.
@@ -91,12 +127,34 @@ func (h *StreamHub) Find(key string) (*Stream, bool) {
 
 // Remove deletes a stream from the hub and emits EventStreamDestroy.
 func (h *StreamHub) Remove(key string) {
+	h.mu.RLock()
+	s := h.streams[key]
+	h.mu.RUnlock()
+	if s != nil {
+		h.Destroy(key, s)
+	}
+}
+
+// Destroy removes key only when it still refers to expected. It closes the
+// stream and emits exactly one destroy event after releasing the hub lock.
+func (h *StreamHub) Destroy(key string, expected *Stream) bool {
+	if ValidateStreamKey(key) != nil {
+		return false
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, ok := h.streams[key]; ok {
-		delete(h.streams, key)
+	current, ok := h.streams[key]
+	if !ok || (expected != nil && current != expected) {
+		h.mu.Unlock()
+		return false
+	}
+	delete(h.streams, key)
+	h.mu.Unlock()
+
+	current.Close()
+	if h.eventBus != nil {
 		h.eventBus.Emit(EventStreamDestroy, &EventContext{StreamKey: key}) //nolint:errcheck
 	}
+	return true
 }
 
 // Count returns the number of active streams.

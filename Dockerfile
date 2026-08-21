@@ -23,6 +23,7 @@ COPY . .
 
 RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
+    -tags audiocodec \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /liveforge ./cmd/liveforge
 
@@ -42,7 +43,7 @@ COPY --from=builder /liveforge /usr/local/bin/liveforge
 COPY configs/liveforge.yaml /etc/liveforge/liveforge.yaml
 
 # RTMP, RTSP, HTTP(HLS/DASH/FLV), WebRTC, SRT, SIP(UDP), API+Console, Metrics
-EXPOSE 1935 8554 8080 8443 6000 5060/udp 8090 9090
+EXPOSE 1935 8554 8080 8443 6000/udp 5060/udp 8090 9090
 
 VOLUME ["/data"]
 

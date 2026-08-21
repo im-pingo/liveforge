@@ -1,19 +1,22 @@
 package ratelimit
 
 import (
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Limiter implements a per-IP token bucket rate limiter.
 type Limiter struct {
-	rate     float64 // tokens per second
-	burst    int     // max tokens
-	mu       sync.Mutex
-	visitors map[string]*bucket
-	stopCh   chan struct{}
+	rate           float64 // tokens per second
+	burst          int     // max tokens
+	trustedProxies []*net.IPNet
+	mu             sync.Mutex
+	visitors       map[string]*bucket
+	stopCh         chan struct{}
 }
 
 type bucket struct {
@@ -23,12 +26,31 @@ type bucket struct {
 
 // New creates a Limiter that allows rate requests/sec with the given burst size.
 // Starts a background goroutine to clean up stale entries.
-func New(rate float64, burst int) *Limiter {
+func New(rate float64, burst int, trustedProxyValues ...string) *Limiter {
+	trustedProxies := make([]*net.IPNet, 0, len(trustedProxyValues))
+	for _, value := range trustedProxyValues {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if ip4 := ip.To4(); ip4 != nil {
+				ip = ip4
+				bits = 32
+			}
+			value = fmt.Sprintf("%s/%d", ip, bits)
+		}
+		if _, network, err := net.ParseCIDR(value); err == nil {
+			trustedProxies = append(trustedProxies, network)
+		}
+	}
 	l := &Limiter{
-		rate:     rate,
-		burst:    burst,
-		visitors: make(map[string]*bucket),
-		stopCh:   make(chan struct{}),
+		rate:           rate,
+		burst:          burst,
+		trustedProxies: trustedProxies,
+		visitors:       make(map[string]*bucket),
+		stopCh:         make(chan struct{}),
 	}
 	go l.cleanup()
 	return l
@@ -65,13 +87,51 @@ func (l *Limiter) Allow(ip string) bool {
 // Wrap returns an http.Handler middleware that rate limits by client IP.
 func (l *Limiter) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := extractIP(r)
+		ip := extractIPWithTrustedProxies(r, l.trustedProxies)
 		if !l.Allow(ip) {
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// extractIPWithTrustedProxies honors forwarding headers only when the direct
+// peer belongs to an explicitly configured trusted proxy network. This keeps
+// client-controlled forwarding headers from bypassing the per-client limiter.
+func extractIPWithTrustedProxies(r *http.Request, trusted []*net.IPNet) string {
+	remote := remoteIP(r.RemoteAddr)
+	peer := net.ParseIP(remote)
+	for _, network := range trusted {
+		if peer != nil && network.Contains(peer) {
+			if xff := firstForwardedIP(r.Header.Get("X-Forwarded-For")); xff != "" {
+				return xff
+			}
+			if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(xri) != nil {
+				return xri
+			}
+			break
+		}
+	}
+	return remote
+}
+
+func firstForwardedIP(value string) string {
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if net.ParseIP(item) != nil {
+			return item
+		}
+	}
+	return ""
+}
+
+func remoteIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 // Close stops the background cleanup goroutine.

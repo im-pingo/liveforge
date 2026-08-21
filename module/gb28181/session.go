@@ -9,19 +9,21 @@ import (
 
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
-	mu        sync.Mutex
-	ID        string           // SIP Call-ID
-	DeviceID  string
-	ChannelID string
-	StreamKey string
-	Direction SessionDirection
-	LocalPort int
-	RemoteAddr *net.UDPAddr
-	Transport  string // "udp" or "tcp"
-	State      SessionState
-	Publisher  *Publisher
-	Stream     *core.Stream
-	SSRC       uint32
+	mu                  sync.Mutex
+	ID                  string // SIP Call-ID
+	DeviceID            string
+	ChannelID           string
+	StreamKey           string
+	Direction           SessionDirection
+	LocalPort           int
+	RemoteAddr          *net.UDPAddr
+	Transport           string // "udp" or "tcp"
+	State               SessionState
+	Publisher           *Publisher
+	PublisherGeneration uint64
+	Receiver            *RTPReceiver
+	Stream              *core.Stream
+	SSRC                uint32
 }
 
 // SetState transitions the session to a new state.
@@ -45,6 +47,9 @@ func (s *MediaSession) Close() {
 	s.State = SessionStateClosed
 	if s.Publisher != nil {
 		s.Publisher.Close()
+	}
+	if s.Receiver != nil {
+		s.Receiver.Close()
 	}
 }
 
@@ -119,13 +124,46 @@ func (m *SessionManager) All() []*MediaSession {
 }
 
 // CloseByDevice closes all sessions for a device.
-func (m *SessionManager) CloseByDevice(deviceID string) {
+func (m *SessionManager) CloseByDevice(deviceID string) []*MediaSession {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var closed []*MediaSession
 	for id, s := range m.sessions {
 		if s.DeviceID == deviceID {
-			s.Close()
+			closed = append(closed, s)
 			delete(m.sessions, id)
 		}
 	}
+	m.mu.Unlock()
+	for _, s := range closed {
+		s.Close()
+	}
+	return closed
+}
+
+// CloseAll removes and closes every active session, returning the sessions so
+// protocol-specific resources can be released by the owning handler.
+func (m *SessionManager) CloseAll() []*MediaSession {
+	m.mu.Lock()
+	closed := make([]*MediaSession, 0, len(m.sessions))
+	for id, s := range m.sessions {
+		closed = append(closed, s)
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+	for _, s := range closed {
+		s.Close()
+	}
+	return closed
+}
+
+// Take removes and returns a session atomically. This prevents BYE, device
+// offline, API stop, and module shutdown from cleaning the same session twice.
+func (m *SessionManager) Take(callID string) *MediaSession {
+	m.mu.Lock()
+	s := m.sessions[callID]
+	if s != nil {
+		delete(m.sessions, callID)
+	}
+	m.mu.Unlock()
+	return s
 }

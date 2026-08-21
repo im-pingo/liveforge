@@ -40,6 +40,23 @@ func (s *StreamStats) initStats() {
 	s.windowMu.Unlock()
 }
 
+// reset clears all publisher-generation counters and timing windows.
+func (s *StreamStats) reset() {
+	s.bytesIn.Store(0)
+	s.videoFrames.Store(0)
+	s.audioFrames.Store(0)
+	s.lastFrame.Store(time.Time{})
+	s.windowMu.Lock()
+	s.startTime = time.Time{}
+	s.windowBytes = 0
+	s.windowVideo = 0
+	s.windowStart = time.Time{}
+	s.snapBytes = 0
+	s.snapVideo = 0
+	s.snapTime = time.Time{}
+	s.windowMu.Unlock()
+}
+
 // recordFrame updates counters for an incoming frame.
 func (s *StreamStats) recordFrame(payloadSize int, isVideo bool) {
 	s.bytesIn.Add(int64(payloadSize))

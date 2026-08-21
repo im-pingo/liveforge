@@ -122,7 +122,9 @@ func (m *Module) apiDeleteDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.sessions.CloseByDevice(deviceID)
+	for _, session := range m.sessions.CloseByDevice(deviceID) {
+		m.handler.cleanupSession(session, r.RemoteAddr)
+	}
 	m.registry.Unregister(deviceID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
 }
@@ -235,12 +237,9 @@ func (m *Module) apiStopPlay(w http.ResponseWriter, r *http.Request, channelID s
 	}
 
 	for _, session := range sessions {
-		session.Close()
-		m.sessions.Remove(session.ID)
-		if session.Stream != nil {
-			session.Stream.RemovePublisher()
+		if session = m.sessions.Take(session.ID); session != nil {
+			m.handler.cleanupSession(session, r.RemoteAddr)
 		}
-		m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
@@ -251,7 +250,7 @@ func (m *Module) apiPlayback(w http.ResponseWriter, r *http.Request, channelID s
 		StartTime string `json:"start_time"`
 		EndTime   string `json:"end_time"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -300,7 +299,7 @@ func (m *Module) apiPTZ(w http.ResponseWriter, r *http.Request, channelID string
 		HSpeed  uint8  `json:"h_speed"`
 		VSpeed  uint8  `json:"v_speed"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -415,18 +414,13 @@ func (m *Module) apiDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := m.sessions.Get(sessionID)
+	session := m.sessions.Take(sessionID)
 	if session == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
 	}
 
-	session.Close()
-	m.sessions.Remove(sessionID)
-	if session.Stream != nil {
-		session.Stream.RemovePublisher()
-	}
-	m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
+	m.handler.cleanupSession(session, r.RemoteAddr)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }

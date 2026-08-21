@@ -102,7 +102,7 @@ func (h *Handlers) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request configPatchRequest
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid configuration patch")
@@ -152,7 +152,7 @@ func (h *Handlers) handlePasswordChange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var request passwordChangeRequest
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || request.NewPassword == "" {
 		writeError(w, http.StatusBadRequest, "invalid password change")

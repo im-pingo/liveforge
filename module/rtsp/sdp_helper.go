@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"encoding/base64"
+	"net/url"
 	"strings"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -11,20 +12,20 @@ import (
 
 // encodingNameToCodec maps SDP encoding names to internal codec types.
 var encodingNameToCodec = map[string]avframe.CodecType{
-	"H264":           avframe.CodecH264,
-	"H265":           avframe.CodecH265,
-	"VP8":            avframe.CodecVP8,
-	"VP9":            avframe.CodecVP9,
-	"AV1":            avframe.CodecAV1,
-	"MPEG4-GENERIC":  avframe.CodecAAC,
-	"MP4A-LATM":      avframe.CodecAAC,
-	"OPUS":           avframe.CodecOpus,
-	"MPA":            avframe.CodecMP3,
-	"PCMU":           avframe.CodecG711U,
-	"PCMA":           avframe.CodecG711A,
-	"G722":           avframe.CodecG722,
-	"G729":           avframe.CodecG729,
-	"SPEEX":          avframe.CodecSpeex,
+	"H264":          avframe.CodecH264,
+	"H265":          avframe.CodecH265,
+	"VP8":           avframe.CodecVP8,
+	"VP9":           avframe.CodecVP9,
+	"AV1":           avframe.CodecAV1,
+	"MPEG4-GENERIC": avframe.CodecAAC,
+	"MP4A-LATM":     avframe.CodecAAC,
+	"OPUS":          avframe.CodecOpus,
+	"MPA":           avframe.CodecMP3,
+	"PCMU":          avframe.CodecG711U,
+	"PCMA":          avframe.CodecG711A,
+	"G722":          avframe.CodecG722,
+	"G729":          avframe.CodecG729,
+	"SPEEX":         avframe.CodecSpeex,
 }
 
 // sdpToMediaInfo extracts MediaInfo from a parsed SDP SessionDescription.
@@ -33,13 +34,74 @@ func sdpToMediaInfo(sd *sdp.SessionDescription) *avframe.MediaInfo {
 	return info
 }
 
-// PTMap maps RTP payload types to codec types, as declared in the SDP.
+// RTPTrackInfo is the SDP-declared codec and RTP timestamp clock for a payload type.
+type RTPTrackInfo struct {
+	Codec     avframe.CodecType
+	ClockRate uint32
+}
+
+// PTMap maps RTP payload types to codecs. It is retained for constructor compatibility.
 type PTMap map[uint8]avframe.CodecType
 
+// RTPTrackMap maps RTP payload types to their SDP-declared track metadata.
+type RTPTrackMap map[uint8]RTPTrackInfo
+
+// RTPTrackDescription preserves one SDP media line's identity. Payload types
+// are scoped to a media line and may be reused by another track.
+type RTPTrackDescription struct {
+	TrackID     int
+	Control     string
+	PayloadType uint8
+	Info        RTPTrackInfo
+}
+
+// sdpToTrackDescriptions extracts codec and control metadata for each media
+// line. A trackID in the control attribute is preferred; the media index is
+// the fallback identity used by generated SDP.
+func sdpToTrackDescriptions(sd *sdp.SessionDescription) []RTPTrackDescription {
+	if sd == nil {
+		return nil
+	}
+	descriptions := make([]RTPTrackDescription, 0, len(sd.Media))
+	for index, md := range sd.Media {
+		if md == nil || len(md.Formats) == 0 {
+			continue
+		}
+		pt := md.Formats[0]
+		if pt < 0 || pt > 127 {
+			continue
+		}
+		rtpMap := md.RTPMap(pt)
+		if rtpMap == nil {
+			continue
+		}
+		codec, ok := encodingNameToCodec[strings.ToUpper(rtpMap.EncodingName)]
+		if !ok {
+			continue
+		}
+		clockRate := uint32(0)
+		if rtpMap.ClockRate > 0 {
+			clockRate = uint32(rtpMap.ClockRate)
+		}
+		control := md.Control()
+		trackID := index
+		if id, ok := extractTrackID(control); ok {
+			trackID = id
+		}
+		descriptions = append(descriptions, RTPTrackDescription{
+			TrackID:     trackID,
+			Control:     control,
+			PayloadType: uint8(pt),
+			Info:        RTPTrackInfo{Codec: codec, ClockRate: clockRate},
+		})
+	}
+	return descriptions
+}
+
 // sdpToMediaInfoWithPT extracts MediaInfo and a PT-to-codec mapping from SDP.
-func sdpToMediaInfoWithPT(sd *sdp.SessionDescription) (*avframe.MediaInfo, PTMap) {
+func sdpToMediaInfoWithPT(sd *sdp.SessionDescription) (*avframe.MediaInfo, RTPTrackMap) {
 	info := &avframe.MediaInfo{}
-	ptMap := make(PTMap)
+	ptMap := make(RTPTrackMap)
 
 	for _, md := range sd.Media {
 		if len(md.Formats) == 0 {
@@ -58,7 +120,11 @@ func sdpToMediaInfoWithPT(sd *sdp.SessionDescription) (*avframe.MediaInfo, PTMap
 
 		// Record the SDP-declared PT for this codec.
 		if pt >= 0 && pt <= 127 {
-			ptMap[uint8(pt)] = codec
+			trackInfo := RTPTrackInfo{Codec: codec}
+			if rtpMap.ClockRate > 0 {
+				trackInfo.ClockRate = uint32(rtpMap.ClockRate)
+			}
+			ptMap[uint8(pt)] = trackInfo
 		}
 
 		switch md.Type {
@@ -130,11 +196,17 @@ func parseSPropParameterSets(fmtp string) []byte {
 // e.g., "rtsp://host/live/test/trackID=0" -> 0, true
 // Returns -1, false if no trackID is found.
 func extractTrackID(rawURL string) (int, bool) {
-	idx := strings.Index(rawURL, "trackID=")
-	if idx < 0 {
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Path != "" {
+		rawURL = parsed.Path
+	}
+	rawURL = strings.Trim(rawURL, "/")
+	if idx := strings.LastIndexByte(rawURL, '/'); idx >= 0 {
+		rawURL = rawURL[idx+1:]
+	}
+	if !strings.HasPrefix(rawURL, "trackID=") {
 		return -1, false
 	}
-	s := rawURL[idx+len("trackID="):]
+	s := rawURL[len("trackID="):]
 	// Parse simple integer
 	n := 0
 	found := false

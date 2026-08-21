@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -12,10 +13,10 @@ import (
 
 func TestParseStreamID(t *testing.T) {
 	tests := []struct {
-		name      string
-		streamID  string
-		wantMode  string
-		wantKey   string
+		name     string
+		streamID string
+		wantMode string
+		wantKey  string
 	}{
 		{
 			name:     "publish prefix",
@@ -83,6 +84,56 @@ func TestParseStreamID(t *testing.T) {
 				t.Errorf("key = %q, want %q", key, tt.wantKey)
 			}
 		})
+	}
+}
+
+func TestParseStreamRequestPreservesAuthorizationParams(t *testing.T) {
+	tests := []struct {
+		name     string
+		streamID string
+		wantMode string
+		wantKey  string
+		want     map[string]string
+	}{
+		{
+			name:     "URL query",
+			streamID: "publish:/live/camera?token=abc123&tenant=north",
+			wantMode: "publish",
+			wantKey:  "live/camera",
+			want:     map[string]string{"token": "abc123", "tenant": "north"},
+		},
+		{
+			name:     "SRT access control",
+			streamID: "#!::r=/live/camera,m=request,token=abc123,tenant=north",
+			wantMode: "request",
+			wantKey:  "live/camera",
+			want:     map[string]string{"token": "abc123", "tenant": "north"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseStreamRequest(tt.streamID)
+			if got.Mode != tt.wantMode || got.StreamKey != tt.wantKey {
+				t.Fatalf("request = (%q, %q), want (%q, %q)", got.Mode, got.StreamKey, tt.wantMode, tt.wantKey)
+			}
+			for key, want := range tt.want {
+				if value := got.Params[key]; value != want {
+					t.Errorf("param %q = %q, want %q", key, value, want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateSRTEncryption(t *testing.T) {
+	if err := validateSRTEncryption("", false); err != nil {
+		t.Fatalf("unencrypted connection should be allowed without passphrase: %v", err)
+	}
+	if err := validateSRTEncryption("configured-secret", true); err != nil {
+		t.Fatalf("encrypted connection rejected: %v", err)
+	}
+	if err := validateSRTEncryption("configured-secret", false); !errors.Is(err, errEncryptionRequired) {
+		t.Fatalf("plaintext error = %v, want %v", err, errEncryptionRequired)
 	}
 }
 
@@ -440,7 +491,6 @@ func TestModuleDuplicatePublish(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 }
-
 
 func TestParseStreamIDAccessControl(t *testing.T) {
 	// Additional edge cases for SRT access control format

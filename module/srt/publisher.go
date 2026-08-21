@@ -55,17 +55,19 @@ func (p *Publisher) Run() {
 		return
 	}
 
-	if err := stream.SetPublisher(p); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(p)
+	if err != nil {
 		slog.Error("set publisher error", "module", "srt", "stream", p.streamKey, "error", err)
 		return
 	}
 
 	defer func() {
-		stream.RemovePublisher()
-		p.eventBus.Emit(core.EventPublishStop, &core.EventContext{ //nolint:errcheck
-			StreamKey: p.streamKey,
-			Protocol:  "srt",
-		})
+		if stream.RemovePublisherIfGeneration(generation) {
+			p.eventBus.Emit(core.EventPublishStop, &core.EventContext{ //nolint:errcheck
+				StreamKey: p.streamKey,
+				Protocol:  "srt",
+			})
+		}
 	}()
 
 	// Demux MPEG-TS data from SRT connection into AVFrames.

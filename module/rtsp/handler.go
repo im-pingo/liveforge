@@ -1,10 +1,12 @@
 package rtsp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/im-pingo/liveforge/config"
@@ -64,6 +66,9 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	if !ok || stream.Publisher() == nil {
 		return newResponse(404, "Stream Not Found", req)
 	}
+	if err := h.authorize(req, core.AuthorizationSubscribe, streamKey, ""); err != nil {
+		return newResponse(401, "Unauthorized", req)
+	}
 	mediaInfo := stream.Publisher().MediaInfo()
 	sd := sdp.BuildFromMediaInfo(mediaInfo, req.URL, "0.0.0.0")
 	body := sd.Marshal()
@@ -74,8 +79,7 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Body = body
 	if session != nil {
-		session.MediaInfo = mediaInfo
-		session.Stream = stream
+		session.setDescription(stream, mediaInfo, sdpToTrackDescriptions(sd))
 		session.Transition(StateDescribed)
 	}
 	return resp
@@ -92,6 +96,11 @@ type TransportConfig struct {
 
 // HandleSetup negotiates transport for a track.
 func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr string) *Response {
+	if session != nil && h.server != nil {
+		if err := h.authorize(req, core.AuthorizationSubscribe, session.StreamKey, remoteAddr); err != nil {
+			return newResponse(401, "Unauthorized", req)
+		}
+	}
 	transport := req.Headers.Get("Transport")
 	tc := parseTransportHeader(transport)
 
@@ -132,15 +141,20 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 			UDP:       udpTransport,
 			Multicast: mcastTransport,
 		}
-		if session.MediaInfo != nil {
-			idx := len(session.Tracks)
+		if desc, ok := trackDescriptionForURL(session.TrackDescriptions, req.URL); ok {
+			ts.TrackID = desc.TrackID
+			ts.Control = desc.Control
+			ts.PayloadType = desc.PayloadType
+			ts.Codec = desc.Info.Codec
+		} else if session.MediaInfo != nil {
+			idx := len(session.trackSnapshot())
 			if idx == 0 && session.MediaInfo.HasVideo() {
 				ts.Codec = session.MediaInfo.VideoCodec
 			} else if (idx == 0 && !session.MediaInfo.HasVideo()) || idx == 1 {
 				ts.Codec = session.MediaInfo.AudioCodec
 			}
 		}
-		session.Tracks = append(session.Tracks, ts)
+		session.addTrack(ts)
 	}
 
 	resp := newResponse(200, "OK", req)
@@ -171,33 +185,34 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 	}
 
 	if session != nil && h.server != nil {
-		// Emit publish event — auth hooks can reject.
-		if err := h.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
-			StreamKey:  session.StreamKey,
-			Protocol:   "rtsp",
-			RemoteAddr: remoteAddr,
-		}); err != nil {
+		if err := h.authorize(req, core.AuthorizationPublish, session.StreamKey, remoteAddr); err != nil {
 			return newResponse(401, "Unauthorized", req)
 		}
 
 		mediaInfo, ptMap := sdpToMediaInfoWithPT(sd)
-		session.MediaInfo = mediaInfo
+		descriptions := sdpToTrackDescriptions(sd)
+		session.setDescription(nil, mediaInfo, descriptions)
 
 		stream, err := h.server.StreamHub().GetOrCreate(session.StreamKey)
 		if err != nil {
 			return newResponse(503, "Service Unavailable", req)
 		}
-		session.Stream = stream
-
-		pub, err := NewRTSPPublisher(session.ID, mediaInfo, stream, ptMap)
+		pub, err := NewRTSPPublisherWithDescriptions(session.ID, mediaInfo, stream, descriptions)
+		if len(descriptions) == 0 {
+			pub, err = NewRTSPPublisherWithTracks(session.ID, mediaInfo, stream, ptMap)
+		}
 		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}
-		session.Publisher = pub
-
-		if err := stream.SetPublisher(pub); err != nil {
+		generation, err := stream.SetPublisherWithGeneration(pub)
+		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}
+		session.setPublishState(stream, pub, generation)
+		h.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{ //nolint:errcheck
+			StreamKey: session.StreamKey, Protocol: "rtsp", RemoteAddr: remoteAddr,
+			Params: rtspQueryParams(req.URL),
+		})
 
 		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
 		// SequenceHeader frame so the stream caches it for late-joining subscribers.
@@ -233,12 +248,7 @@ func (h *Handler) HandleRecord(req *Request, session *RTSPSession) *Response {
 // HandlePlay starts playback (subscribing) on the stream.
 func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr string) *Response {
 	if session != nil && h.server != nil {
-		// Emit subscribe event — auth hooks can reject.
-		if err := h.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-			StreamKey:  session.StreamKey,
-			Protocol:   "rtsp",
-			RemoteAddr: remoteAddr,
-		}); err != nil {
+		if err := h.authorize(req, core.AuthorizationSubscribe, session.StreamKey, remoteAddr); err != nil {
 			return newResponse(401, "Unauthorized", req)
 		}
 	}
@@ -250,6 +260,84 @@ func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr stri
 	resp := newResponse(200, "OK", req)
 	resp.Headers.Set("RTP-Info", "url="+req.URL)
 	return resp
+}
+
+func (h *Handler) authorize(req *Request, action core.AuthorizationAction, streamKey, remoteAddr string) error {
+	request := core.AuthorizationRequest{
+		Action: action, StreamKey: streamKey, Protocol: "rtsp",
+		RemoteAddr: remoteAddr, Params: rtspQueryParams(req.URL),
+	}
+	request.Stage = core.AuthorizationPreSession
+	if err := h.server.Authorize(context.Background(), request); err != nil {
+		return err
+	}
+	request.Stage = core.AuthorizationPostConnect
+	return h.server.Authorize(context.Background(), request)
+}
+
+func rtspQueryParams(rawURL string) map[string]string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	params := make(map[string]string)
+	for name, values := range parsed.Query() {
+		if len(values) > 0 {
+			params[name] = values[0]
+		}
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
+
+func trackDescriptionForURL(descriptions []RTPTrackDescription, rawURL string) (RTPTrackDescription, bool) {
+	if id, ok := extractTrackID(rawURL); ok {
+		for _, description := range descriptions {
+			if description.TrackID == id {
+				return description, true
+			}
+		}
+	}
+	control := extractTrackControl(rawURL)
+	if control == "" {
+		return RTPTrackDescription{}, false
+	}
+	for _, description := range descriptions {
+		if normalizeTrackControl(description.Control) == control {
+			return description, true
+		}
+	}
+	return RTPTrackDescription{}, false
+}
+
+func extractTrackControl(rawURL string) string {
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Path != "" {
+		rawURL = parsed.Path
+	}
+	rawURL = strings.Trim(rawURL, "/")
+	if rawURL == "" {
+		return ""
+	}
+	if idx := strings.LastIndexByte(rawURL, '/'); idx >= 0 {
+		rawURL = rawURL[idx+1:]
+	}
+	return normalizeTrackControl(rawURL)
+}
+
+func normalizeTrackControl(raw string) string {
+	if parsed, err := url.Parse(raw); err == nil && parsed.Path != "" {
+		raw = parsed.Path
+	}
+	raw = strings.Trim(raw, "/")
+	if idx := strings.LastIndexByte(raw, '/'); idx >= 0 {
+		raw = raw[idx+1:]
+	}
+	if idx := strings.IndexByte(raw, '?'); idx >= 0 {
+		raw = raw[:idx]
+	}
+	return raw
 }
 
 // HandlePause pauses playback. For live streams, returns 200 OK.
@@ -272,6 +360,9 @@ func (h *Handler) HandleTeardown(req *Request, session *RTSPSession) *Response {
 // e.g., "rtsp://host:554/live/test" -> "live/test"
 // e.g., "rtsp://host/live/test/trackID=0" -> "live/test"
 func extractStreamKey(rawURL string) string {
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Path != "" {
+		rawURL = parsed.Path
+	}
 	// Remove rtsp:// prefix and host
 	idx := strings.Index(rawURL, "://")
 	if idx >= 0 {
@@ -285,6 +376,12 @@ func extractStreamKey(rawURL string) string {
 	// Remove trackID suffix
 	if trackIdx := strings.Index(rawURL, "/trackID="); trackIdx >= 0 {
 		rawURL = rawURL[:trackIdx]
+	}
+	if queryIdx := strings.IndexByte(rawURL, '?'); queryIdx >= 0 {
+		rawURL = rawURL[:queryIdx]
+	}
+	if fragmentIdx := strings.IndexByte(rawURL, '#'); fragmentIdx >= 0 {
+		rawURL = rawURL[:fragmentIdx]
 	}
 	return rawURL
 }

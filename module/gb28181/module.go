@@ -3,6 +3,7 @@ package gb28181
 import (
 	"log/slog"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
@@ -54,27 +55,25 @@ func (m *Module) Init(s *core.Server) error {
 	// Device registry
 	m.registry = NewDeviceRegistry(cfg.Keepalive.Timeout, cfg.DumpFile)
 	m.registry.RestoreFromFile()
+	// Session manager must be ready before the monitor can invoke its callback.
+	m.sessions = NewSessionManager()
 	m.registry.StartMonitor(func(deviceID string) {
 		slog.Info("device offline", "module", "gb28181", "device", deviceID)
-		m.sessions.CloseByDevice(deviceID)
+		for _, session := range m.sessions.CloseByDevice(deviceID) {
+			m.handler.cleanupSession(session, "")
+		}
 	})
-
-	// Session manager
-	m.sessions = NewSessionManager()
 
 	// Auth config
 	sipCfg := s.Config().SIP
-	var authCfg *digestAuthConfig
+	var authCfg *sipmod.DigestAuth
 	if sipCfg.Auth.Enabled {
-		authCfg = &digestAuthConfig{
-			enabled:  true,
-			realm:    sipCfg.Domain,
-			password: sipCfg.Auth.Password,
-		}
+		authCfg = sipmod.NewDigestAuth(sipCfg.Domain, sipCfg.Auth.Password)
 	}
 
 	// Handler
 	m.handler = &handler{
+		server:   s,
 		registry: m.registry,
 		sessions: m.sessions,
 		hub:      s.StreamHub(),
@@ -105,13 +104,14 @@ func (m *Module) Init(s *core.Server) error {
 	m.alarm = &alarmHandler{
 		registry: m.registry,
 	}
+	m.handler.alarm = m.alarm
 
 	// Register SIP handlers
 	m.sipService.OnRegister(m.handler.handleRegister)
 	m.sipService.OnInvite(m.handler.handleInvite)
 	m.sipService.OnBye(m.handler.handleBye)
 	m.sipService.OnMessage(m.handler.handleMessage)
-	m.sipService.OnSubscribe(m.alarm.handleSubscribe)
+	m.sipService.OnSubscribe(m.handler.handleSubscribe)
 
 	// Register API handlers
 	registerAPI(s, m)
@@ -125,10 +125,23 @@ func (m *Module) Init(s *core.Server) error {
 // Hooks returns empty hooks — GB28181 uses SIP events, not stream lifecycle hooks.
 func (m *Module) Hooks() []core.HookRegistration { return nil }
 
+func (m *Module) ValidateConfigChange(_, _ *config.Config) error { return nil }
+
+func (m *Module) ApplyConfigChange(_, next *config.Config) {
+	if m.handler != nil {
+		m.handler.setDigestAuth(next.SIP)
+	}
+}
+
 // Close stops the GB28181 module.
 func (m *Module) Close() error {
 	if m.registry != nil {
 		m.registry.Stop()
+	}
+	if m.sessions != nil && m.handler != nil {
+		for _, session := range m.sessions.CloseAll() {
+			m.handler.cleanupSession(session, "")
+		}
 	}
 	slog.Info("stopped", "module", "gb28181")
 	return nil

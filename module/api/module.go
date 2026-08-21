@@ -47,7 +47,7 @@ func (m *Module) Init(s *core.Server) error {
 
 	var handler http.Handler = securedRoutes(s, sessions)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
-		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst, rl.TrustedProxies...)
 		handler = m.limiter.Wrap(handler)
 	}
 	m.httpSrv = &http.Server{

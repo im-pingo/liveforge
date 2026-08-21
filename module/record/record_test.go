@@ -110,6 +110,19 @@ func TestFileWriterRejectsUnsafeStreamKey(t *testing.T) {
 	}
 }
 
+func TestFileWriterRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "live")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := config.RecordConfig{Path: filepath.Join(root, "{stream_key}", "record.flv")}
+	if writer, err := NewFileWriter("live/camera", cfg); err == nil {
+		writer.Close()
+		t.Fatal("writer accepted a symlink escape")
+	}
+}
+
 func TestFLVFileWriterDeclaresBothTracks(t *testing.T) {
 	cfg := config.RecordConfig{Format: "flv", Path: filepath.Join(t.TempDir(), "both.flv")}
 	writer, err := NewFileWriter("live/both", cfg)

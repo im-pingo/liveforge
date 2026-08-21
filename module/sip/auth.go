@@ -3,8 +3,10 @@ package sip
 import (
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/emiago/sipgo/sip"
@@ -14,16 +16,36 @@ import (
 type DigestAuth struct {
 	realm    string
 	password string
+	ttl      time.Duration
+	now      func() time.Time
+	mu       sync.Mutex
+	nonces   map[string]time.Time
 }
 
 // NewDigestAuth creates a new digest auth helper.
 func NewDigestAuth(realm, password string) *DigestAuth {
-	return &DigestAuth{realm: realm, password: password}
+	return newDigestAuthWithClock(realm, password, 2*time.Minute, time.Now)
+}
+
+func newDigestAuthWithClock(realm, password string, ttl time.Duration, now func() time.Time) *DigestAuth {
+	return &DigestAuth{
+		realm: realm, password: password, ttl: ttl, now: now,
+		nonces: make(map[string]time.Time),
+	}
 }
 
 // Challenge creates a 401 Unauthorized response with a WWW-Authenticate header.
 func (d *DigestAuth) Challenge(req *sip.Request) *sip.Response {
 	nonce := generateNonce()
+	now := d.now()
+	d.mu.Lock()
+	for value, expiresAt := range d.nonces {
+		if !expiresAt.After(now) {
+			delete(d.nonces, value)
+		}
+	}
+	d.nonces[nonce] = now.Add(d.ttl)
+	d.mu.Unlock()
 	resp := sip.NewResponseFromRequest(req, 401, "Unauthorized", nil)
 	wwwAuth := fmt.Sprintf(`Digest realm="%s", nonce="%s", algorithm=MD5`, d.realm, nonce)
 	resp.AppendHeader(sip.NewHeader("WWW-Authenticate", wwwAuth))
@@ -43,7 +65,7 @@ func (d *DigestAuth) Verify(req *sip.Request) bool {
 	uri := params["uri"]
 	responseHash := params["response"]
 
-	if username == "" || nonce == "" || uri == "" || responseHash == "" {
+	if username == "" || nonce == "" || uri == "" || responseHash == "" || params["realm"] != d.realm {
 		return false
 	}
 
@@ -54,7 +76,18 @@ func (d *DigestAuth) Verify(req *sip.Request) bool {
 	ha2 := md5Hex(string(req.Method) + ":" + uri)
 	expected := md5Hex(ha1 + ":" + nonce + ":" + ha2)
 
-	return responseHash == expected
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	expiresAt, issued := d.nonces[nonce]
+	if !issued || !expiresAt.After(d.now()) {
+		delete(d.nonces, nonce)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(responseHash), []byte(expected)) != 1 {
+		return false
+	}
+	delete(d.nonces, nonce)
+	return true
 }
 
 func md5Hex(s string) string {

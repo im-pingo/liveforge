@@ -2,6 +2,10 @@ package gb28181
 
 import (
 	"testing"
+
+	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
 func TestMediaSessionStateTransitions(t *testing.T) {
@@ -149,7 +153,10 @@ func TestSessionManagerCloseByDevice(t *testing.T) {
 	m.Add(&MediaSession{ID: "c2", DeviceID: "d1", State: SessionStateStreaming})
 	m.Add(&MediaSession{ID: "c3", DeviceID: "d2", State: SessionStateStreaming})
 
-	m.CloseByDevice("d1")
+	closed := m.CloseByDevice("d1")
+	if len(closed) != 2 {
+		t.Fatalf("CloseByDevice returned %d sessions, want 2", len(closed))
+	}
 
 	if m.Get("c1") != nil {
 		t.Error("c1 should be removed")
@@ -159,6 +166,56 @@ func TestSessionManagerCloseByDevice(t *testing.T) {
 	}
 	if m.Get("c3") == nil {
 		t.Error("c3 (different device) should remain")
+	}
+}
+
+func TestHandlerCleanupSessionReleasesPublisherAndPort(t *testing.T) {
+	ports, err := portalloc.New(42000, 42010)
+	if err != nil {
+		t.Fatalf("New port allocator: %v", err)
+	}
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/camera-1")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	pub := NewPublisher("test-publisher", nil)
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
+		t.Fatalf("SetPublisherWithGeneration: %v", err)
+	}
+	receiver, err := NewRTPReceiver(42000, pub)
+	if err != nil {
+		t.Fatalf("NewRTPReceiver: %v", err)
+	}
+	session := &MediaSession{
+		ID:                  "call-cleanup",
+		DeviceID:            "device-1",
+		StreamKey:           stream.Key(),
+		LocalPort:           42000,
+		Publisher:           pub,
+		PublisherGeneration: generation,
+		Receiver:            receiver,
+		Stream:              stream,
+		State:               SessionStateStreaming,
+	}
+	h := &handler{
+		ports: ports,
+		bus:   core.NewEventBus(),
+	}
+
+	h.cleanupSession(session, "127.0.0.1:5060")
+
+	if stream.Publisher() != nil {
+		t.Fatal("publisher remained attached after session cleanup")
+	}
+	rtpPort, rtcpPort, err := ports.AllocatePair()
+	if err != nil {
+		t.Fatalf("cleanup leaked RTP ports: %v", err)
+	}
+	defer ports.Free(rtpPort, rtcpPort)
+	if rtpPort != 42000 || rtcpPort != 42001 {
+		t.Fatalf("reallocated RTP pair = %d/%d, want 42000/42001", rtpPort, rtcpPort)
 	}
 }
 

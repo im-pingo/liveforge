@@ -61,9 +61,10 @@ type LimitsConfig struct {
 
 // RateLimitConfig holds per-IP HTTP rate limiting settings.
 type RateLimitConfig struct {
-	Enabled bool    `yaml:"enabled"`
-	Rate    float64 `yaml:"rate"`  // requests per second per IP
-	Burst   int     `yaml:"burst"` // max burst size per IP
+	Enabled        bool     `yaml:"enabled"`
+	Rate           float64  `yaml:"rate"`            // requests per second per IP
+	Burst          int      `yaml:"burst"`           // max burst size per IP
+	TrustedProxies []string `yaml:"trusted_proxies"` // CIDRs allowed to supply forwarded client IP headers
 }
 
 // RTMPConfig holds RTMP module settings.
@@ -433,7 +434,8 @@ type SegmentConfig struct {
 
 // FileCompleteConfig holds file completion callback settings.
 type FileCompleteConfig struct {
-	URL string `yaml:"url"`
+	URL     string        `yaml:"url"`
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // DVRConfig holds DVR/time-shift playback settings.

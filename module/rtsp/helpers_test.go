@@ -3,6 +3,8 @@ package rtsp
 import (
 	"bufio"
 	"bytes"
+	"fmt"
+	"net/http"
 	"net"
 	"testing"
 	"time"
@@ -10,7 +12,6 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
-	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
 )
 
 func TestToNTP(t *testing.T) {
@@ -31,8 +32,8 @@ func TestToNTP(t *testing.T) {
 
 func TestPionPayloaderForCodec(t *testing.T) {
 	tests := []struct {
-		codec    avframe.CodecType
-		wantNil  bool
+		codec   avframe.CodecType
+		wantNil bool
 	}{
 		{avframe.CodecH264, false},
 		{avframe.CodecVP8, false},
@@ -99,6 +100,12 @@ func TestNewRTSPPublisherWithPTMap(t *testing.T) {
 	if pub.MediaInfo() != info {
 		t.Error("MediaInfo mismatch")
 	}
+	if got := pub.ptMap[96]; got.Codec != avframe.CodecH264 || got.ClockRate != 90000 {
+		t.Errorf("legacy PT 96 = %+v, want H264/90000", got)
+	}
+	if got := pub.ptMap[101]; got.Codec != avframe.CodecAAC || got.ClockRate != 44100 {
+		t.Errorf("legacy PT 101 = %+v, want AAC/44100", got)
+	}
 }
 
 func TestNewRTSPPublisherNoPTMap(t *testing.T) {
@@ -115,9 +122,22 @@ func TestNewRTSPPublisherNoPTMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRTSPPublisher: %v", err)
 	}
-	// Should have depacketizers for default PTs
-	if len(pub.depacketizers) != 2 {
-		t.Errorf("expected 2 depacketizers, got %d", len(pub.depacketizers))
+	// Should have track metadata for both default PTs.
+	if len(pub.ptMap) != 2 {
+		t.Errorf("expected 2 payload types, got %d", len(pub.ptMap))
+	}
+	if got := pub.ptMap[96]; got.Codec != avframe.CodecH264 || got.ClockRate != 90000 {
+		t.Errorf("default video PT = %+v, want H264/90000", got)
+	}
+	if got := pub.ptMap[111]; got.Codec != avframe.CodecOpus || got.ClockRate != 48000 {
+		t.Errorf("default audio PT = %+v, want Opus/48000", got)
+	}
+}
+
+func TestNewRTSPPublisherRejectsUnsupportedFallbackCodec(t *testing.T) {
+	info := &avframe.MediaInfo{VideoCodec: avframe.CodecType(255)}
+	if _, err := NewRTSPPublisher("test-pub", info, nil, nil); err == nil {
+		t.Fatal("expected unsupported fallback codec error")
 	}
 }
 
@@ -274,6 +294,34 @@ func TestHandleSetupWithMediaInfo(t *testing.T) {
 	}
 }
 
+func TestHandleSetupUsesSDPTrackIdentityWhenSetupOrderIsReversed(t *testing.T) {
+	h := NewHandler(nil, nil, nil)
+	session := NewRTSPSession("test-id", "live/room1")
+	session.Transition(StateDescribed)
+	session.MediaInfo = &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecOpus}
+	session.TrackDescriptions = []RTPTrackDescription{
+		{TrackID: 0, Control: "trackID=0", PayloadType: 96, Info: RTPTrackInfo{Codec: avframe.CodecH264, ClockRate: 90000}},
+		{TrackID: 1, Control: "trackID=1", PayloadType: 96, Info: RTPTrackInfo{Codec: avframe.CodecOpus, ClockRate: 48000}},
+	}
+
+	for _, trackID := range []int{1, 0} {
+		req := &Request{Method: "SETUP", URL: fmt.Sprintf("rtsp://host/live/test/trackID=%d", trackID), Headers: make(http.Header)}
+		req.Headers.Set("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")
+		if resp := h.HandleSetup(req, session, "127.0.0.1:12345"); resp.StatusCode != 200 {
+			t.Fatalf("SETUP track %d status = %d", trackID, resp.StatusCode)
+		}
+	}
+	if len(session.Tracks) != 2 {
+		t.Fatalf("tracks = %d, want 2", len(session.Tracks))
+	}
+	if session.Tracks[0].TrackID != 1 || session.Tracks[0].Codec != avframe.CodecOpus {
+		t.Fatalf("first setup = %#v, want track 1 Opus", session.Tracks[0])
+	}
+	if session.Tracks[1].TrackID != 0 || session.Tracks[1].Codec != avframe.CodecH264 {
+		t.Fatalf("second setup = %#v, want track 0 H264", session.Tracks[1])
+	}
+}
+
 func TestHandleConnOptionsRequest(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RTSP.Enabled = true
@@ -402,10 +450,7 @@ func TestCodecDefaultPTAdditional(t *testing.T) {
 }
 
 func TestRTSPPublisherCloseIdempotent(t *testing.T) {
-	pub := &RTSPPublisher{
-		depacketizers: make(map[uint8]pkgrtp.Depacketizer),
-		done:          make(chan struct{}),
-	}
+	pub := &RTSPPublisher{done: make(chan struct{})}
 	if err := pub.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

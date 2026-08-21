@@ -92,3 +92,23 @@ func TestSessionClosedNoTransition(t *testing.T) {
 		t.Fatal("expected error for transition from Closed")
 	}
 }
+
+func TestSessionTrackSnapshotIsSafeDuringTeardown(t *testing.T) {
+	s := NewRTSPSession("tracks", "live/room1")
+	s.addTrack(TrackSetup{TrackID: 7, PayloadType: 96})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_ = s.trackSnapshot()
+		}
+	}()
+	s.Close()
+	<-done
+
+	tracks := s.trackSnapshot()
+	if len(tracks) != 1 || tracks[0].TrackID != 7 {
+		t.Fatalf("track snapshot changed during teardown: %+v", tracks)
+	}
+}

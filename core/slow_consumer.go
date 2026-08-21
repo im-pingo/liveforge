@@ -13,7 +13,7 @@ import (
 type ConsumerState uint8
 
 const (
-	ConsumerStateNormal     ConsumerState = iota
+	ConsumerStateNormal ConsumerState = iota
 	ConsumerStateDropNonKey
 	ConsumerStateSkipToKey
 )

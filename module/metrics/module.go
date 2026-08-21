@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/prometheus/client_golang/prometheus"
@@ -53,7 +54,12 @@ func (m *Module) Init(s *core.Server) error {
 	}
 	m.listener = ln
 
-	m.httpSrv = &http.Server{Handler: mux}
+	m.httpSrv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	slog.Info("listening", "module", "metrics", "addr", ln.Addr(), "path", path)
 

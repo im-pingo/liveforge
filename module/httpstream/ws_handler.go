@@ -34,14 +34,12 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	streamKey := app + "/" + key
-
-	// Emit subscribe event (auth hooks can reject)
-	if err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "ws-" + format,
-		RemoteAddr: r.RemoteAddr,
-		Params:     queryToMap(r.URL.Query()),
-	}); err != nil {
+	request := core.AuthorizationRequest{
+		Action: core.AuthorizationSubscribe, Stage: core.AuthorizationPreSession,
+		StreamKey: streamKey, Protocol: "ws-" + format,
+		RemoteAddr: r.RemoteAddr, Params: queryToMap(r.URL.Query()),
+	}
+	if err := m.server.Authorize(r.Context(), request); err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -60,6 +58,20 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.CloseNow()
+	request.Stage = core.AuthorizationPostConnect
+	if err := m.server.Authorize(r.Context(), request); err != nil {
+		conn.Close(websocket.StatusPolicyViolation, "forbidden") //nolint:errcheck
+		return
+	}
+	if err := stream.AddSubscriber("ws-" + format); err != nil {
+		conn.Close(websocket.StatusTryAgainLater, err.Error()) //nolint:errcheck
+		return
+	}
+	defer stream.RemoveSubscriber("ws-" + format)
+	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{ //nolint:errcheck
+		StreamKey: streamKey, Protocol: "ws-" + format,
+		RemoteAddr: r.RemoteAddr, Params: queryToMap(r.URL.Query()),
+	})
 
 	slog.Info("ws subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveWebSocket(r.Context(), conn, format, stream)

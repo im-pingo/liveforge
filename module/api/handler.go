@@ -208,14 +208,15 @@ func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "stream has no publisher")
 		return
 	}
+	generation := stream.PublisherGeneration()
 
 	pub.Close()
-	stream.RemovePublisher()
-
-	h.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-		StreamKey: key,
-		Protocol:  "api-kick",
-	}) //nolint:errcheck
+	if stream.RemovePublisherIfGeneration(generation) {
+		h.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
+			StreamKey: key,
+			Protocol:  "api-kick",
+		}) //nolint:errcheck
+	}
 
 	writeJSON(w, http.StatusOK, nil)
 }

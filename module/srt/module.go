@@ -1,6 +1,8 @@
 package srt
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -101,18 +103,34 @@ func (m *Module) serveLoop() {
 //   - "#!::r=/live/stream1,m=publish" → publish, "live/stream1"
 //   - "/live/stream1" → subscribe (default), "live/stream1"
 func parseStreamID(streamID string) (mode string, streamKey string) {
+	parsed := parseStreamRequest(streamID)
+	return parsed.Mode, parsed.StreamKey
+}
+
+type streamRequest struct {
+	Mode      string
+	StreamKey string
+	Params    map[string]string
+}
+
+// parseStreamRequest keeps authorization parameters separate from the
+// canonical stream key for both URL and SRT access-control stream IDs.
+func parseStreamRequest(streamID string) streamRequest {
 	// Format: "mode:path" (e.g., "publish:/live/stream1")
 	if strings.HasPrefix(streamID, "publish:") {
-		return "publish", normalizeStreamKey(strings.TrimPrefix(streamID, "publish:"))
+		key, params := parseStreamResource(strings.TrimPrefix(streamID, "publish:"))
+		return streamRequest{Mode: "publish", StreamKey: key, Params: params}
 	}
 	if strings.HasPrefix(streamID, "subscribe:") {
-		return "subscribe", normalizeStreamKey(strings.TrimPrefix(streamID, "subscribe:"))
+		key, params := parseStreamResource(strings.TrimPrefix(streamID, "subscribe:"))
+		return streamRequest{Mode: "subscribe", StreamKey: key, Params: params}
 	}
 
 	// Format: "#!::key=value,key=value" (SRT Access Control)
 	if strings.HasPrefix(streamID, "#!::") {
 		params := strings.TrimPrefix(streamID, "#!::")
 		var resource, modeVal string
+		authParams := make(map[string]string)
 		for _, kv := range strings.Split(params, ",") {
 			parts := strings.SplitN(kv, "=", 2)
 			if len(parts) != 2 {
@@ -123,16 +141,43 @@ func parseStreamID(streamID string) (mode string, streamKey string) {
 				resource = parts[1]
 			case "m":
 				modeVal = parts[1]
+			default:
+				authParams[parts[0]] = parts[1]
 			}
 		}
 		if modeVal == "" {
 			modeVal = "subscribe"
 		}
-		return modeVal, normalizeStreamKey(resource)
+		key, resourceParams := parseStreamResource(resource)
+		for name, value := range resourceParams {
+			authParams[name] = value
+		}
+		if len(authParams) == 0 {
+			authParams = nil
+		}
+		return streamRequest{Mode: modeVal, StreamKey: key, Params: authParams}
 	}
 
 	// Default: treat as subscribe with the streamID as path
-	return "subscribe", normalizeStreamKey(streamID)
+	key, params := parseStreamResource(streamID)
+	return streamRequest{Mode: "subscribe", StreamKey: key, Params: params}
+}
+
+func parseStreamResource(raw string) (string, map[string]string) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return strings.TrimPrefix(raw, "/"), nil
+	}
+	params := make(map[string]string)
+	for name, values := range u.Query() {
+		if len(values) > 0 {
+			params[name] = values[0]
+		}
+	}
+	if len(params) == 0 {
+		params = nil
+	}
+	return strings.TrimPrefix(u.Path, "/"), params
 }
 
 // normalizeStreamKey strips leading slash and URL query parameters.
@@ -144,6 +189,15 @@ func normalizeStreamKey(raw string) string {
 	return strings.TrimPrefix(raw, "/")
 }
 
+var errEncryptionRequired = errors.New("SRT encryption is required")
+
+func validateSRTEncryption(passphrase string, encrypted bool) error {
+	if passphrase != "" && !encrypted {
+		return errEncryptionRequired
+	}
+	return nil
+}
+
 // handleConnect is the SRT server callback for incoming connections.
 func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	if !m.server.AcquireConn() {
@@ -152,7 +206,8 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	}
 
 	streamID := req.StreamId()
-	mode, streamKey := parseStreamID(streamID)
+	parsed := parseStreamRequest(streamID)
+	mode, streamKey := parsed.Mode, parsed.StreamKey
 
 	if streamKey == "" {
 		slog.Warn("empty stream key", "module", "srt", "remote", req.RemoteAddr())
@@ -161,7 +216,12 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	}
 
 	cfg := m.server.RuntimeConfig().SRT()
-	if req.IsEncrypted() && cfg.Passphrase != "" {
+	if err := validateSRTEncryption(cfg.Passphrase, req.IsEncrypted()); err != nil {
+		slog.Warn("unencrypted connection rejected", "module", "srt", "remote", req.RemoteAddr())
+		m.server.ReleaseConn()
+		return gosrt.REJECT
+	}
+	if cfg.Passphrase != "" {
 		if err := req.SetPassphrase(cfg.Passphrase); err != nil {
 			slog.Warn("passphrase mismatch", "module", "srt", "remote", req.RemoteAddr(), "error", err)
 			m.server.ReleaseConn()
@@ -171,13 +231,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 
 	switch mode {
 	case "publish":
-		// Fire EventPublish via event bus for auth check
-		ctx := &core.EventContext{
-			StreamKey:  streamKey,
-			Protocol:   "srt",
-			RemoteAddr: req.RemoteAddr().String(),
-		}
-		if err := m.eventBus.Emit(core.EventPublish, ctx); err != nil {
+		if err := m.authorizeSRT(core.AuthorizationPublish, core.AuthorizationPreSession, parsed, req.RemoteAddr().String()); err != nil {
 			slog.Warn("publish auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
@@ -185,12 +239,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 		return gosrt.PUBLISH
 
 	case "subscribe", "request":
-		ctx := &core.EventContext{
-			StreamKey:  streamKey,
-			Protocol:   "srt",
-			RemoteAddr: req.RemoteAddr().String(),
-		}
-		if err := m.eventBus.Emit(core.EventSubscribe, ctx); err != nil {
+		if err := m.authorizeSRT(core.AuthorizationSubscribe, core.AuthorizationPreSession, parsed, req.RemoteAddr().String()); err != nil {
 			slog.Warn("subscribe auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
@@ -209,8 +258,13 @@ func (m *Module) handlePublish(conn gosrt.Conn) {
 	defer m.server.ReleaseConn()
 	defer conn.Close()
 
-	_, streamKey := parseStreamID(conn.StreamId())
+	parsed := parseStreamRequest(conn.StreamId())
+	streamKey := parsed.StreamKey
 	if streamKey == "" {
+		return
+	}
+	if err := m.authorizeSRT(core.AuthorizationPublish, core.AuthorizationPostConnect, parsed, conn.RemoteAddr().String()); err != nil {
+		slog.Warn("post-connect publish auth rejected", "module", "srt", "stream", streamKey, "error", err)
 		return
 	}
 
@@ -241,8 +295,13 @@ func (m *Module) handleSubscribe(conn gosrt.Conn) {
 	defer m.server.ReleaseConn()
 	defer conn.Close()
 
-	_, streamKey := parseStreamID(conn.StreamId())
+	parsed := parseStreamRequest(conn.StreamId())
+	streamKey := parsed.StreamKey
 	if streamKey == "" {
+		return
+	}
+	if err := m.authorizeSRT(core.AuthorizationSubscribe, core.AuthorizationPostConnect, parsed, conn.RemoteAddr().String()); err != nil {
+		slog.Warn("post-connect subscribe auth rejected", "module", "srt", "stream", streamKey, "error", err)
 		return
 	}
 
@@ -251,4 +310,11 @@ func (m *Module) handleSubscribe(conn gosrt.Conn) {
 	slog.Info("subscribe start", "module", "srt", "stream", streamKey, "remote", conn.RemoteAddr())
 	sub.Run()
 	slog.Info("subscribe stop", "module", "srt", "stream", streamKey)
+}
+
+func (m *Module) authorizeSRT(action core.AuthorizationAction, stage core.AuthorizationStage, parsed streamRequest, remoteAddr string) error {
+	return m.server.Authorize(context.Background(), core.AuthorizationRequest{
+		Action: action, Stage: stage, StreamKey: parsed.StreamKey,
+		Protocol: "srt", RemoteAddr: remoteAddr, Params: parsed.Params,
+	})
 }

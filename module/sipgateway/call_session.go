@@ -25,8 +25,9 @@ type CallSession struct {
 	conn       *net.UDPConn
 	remoteAddr *net.UDPAddr
 
-	stream    *core.Stream
-	publisher *sipPublisher
+	stream              *core.Stream
+	publisher           *sipPublisher
+	publisherGeneration uint64
 
 	mu     sync.Mutex
 	closed chan struct{}
@@ -64,11 +65,16 @@ func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remote
 			Channels:   1,
 		},
 	}
-	stream.SetPublisher(cs.publisher)
+	generation, err := stream.SetPublisherWithGeneration(cs.publisher)
+	if err != nil {
+		return err
+	}
+	cs.publisherGeneration = generation
 
 	addr := &net.UDPAddr{Port: cs.rtpPort}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
+		stream.RemovePublisherIfGeneration(generation)
 		return err
 	}
 	cs.conn = conn

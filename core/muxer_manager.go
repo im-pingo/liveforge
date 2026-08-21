@@ -128,3 +128,32 @@ func (mm *MuxerManager) SubscriberCount(format string) int {
 	}
 	return inst.subCount
 }
+
+// Reset closes all active muxer instances and starts a fresh generation while
+// preserving registered start callbacks. Existing readers are woken by the
+// buffer close and later ReleaseMuxer calls become no-ops for the old map.
+func (mm *MuxerManager) Reset() {
+	mm.mu.Lock()
+	old := mm.muxers
+	mm.muxers = make(map[string]*MuxerInstance)
+	mm.mu.Unlock()
+	for _, inst := range old {
+		inst.Buffer.Close()
+		close(inst.Done)
+	}
+}
+
+// NewGeneration returns an empty manager carrying the current start
+// callbacks. The caller can install it before closing the old generation.
+func (mm *MuxerManager) NewGeneration() *MuxerManager {
+	mm.mu.Lock()
+	callbacks := make(map[string]MuxerStartFunc, len(mm.onStart))
+	for format, fn := range mm.onStart {
+		callbacks[format] = fn
+	}
+	stream, bufSize := mm.stream, mm.bufSize
+	mm.mu.Unlock()
+	next := NewMuxerManager(stream, bufSize)
+	next.onStart = callbacks
+	return next
+}

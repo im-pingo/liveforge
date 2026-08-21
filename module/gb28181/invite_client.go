@@ -9,8 +9,8 @@ import (
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/avframe"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // inviteClient sends INVITE requests to GB28181 devices for live play or playback.
@@ -60,7 +60,18 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	req.SetBody([]byte(sdpOffer))
 
 	// Create stream and publisher
-	stream, _ := ic.handler.hub.GetOrCreate(streamKey)
+	stream, streamExisted := ic.handler.hub.Find(streamKey)
+	if streamExisted && stream.State() == core.StreamStateDestroying {
+		streamExisted = false
+		stream = nil
+	}
+	if !streamExisted {
+		stream, err = ic.handler.hub.GetOrCreate(streamKey)
+	}
+	if err != nil {
+		ic.handler.ports.Free(rtpPort, rtpPort+1)
+		return nil, fmt.Errorf("get stream: %w", err)
+	}
 	pub := NewPublisher(
 		fmt.Sprintf("gb28181-%s", channelID),
 		func(frame *avframe.AVFrame) {
@@ -69,28 +80,41 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	)
 
 	// Set publisher on stream so subscribers can connect
-	if err := stream.SetPublisher(pub); err != nil {
+	generation, err := stream.SetPublisherWithGeneration(pub)
+	if err != nil {
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
+		if !streamExisted {
+			ic.handler.hub.Destroy(streamKey, stream)
+		}
 		return nil, fmt.Errorf("set publisher: %w", err)
+	}
+	cleanupPublisher := func() {
+		pub.Close()
+		stream.RemovePublisherIfGeneration(generation)
+		if !streamExisted {
+			ic.handler.hub.Destroy(streamKey, stream)
+		}
 	}
 
 	// Create media session
 	session := &MediaSession{
-		ID:        "", // set after INVITE response
-		DeviceID:  device.DeviceID,
-		ChannelID: channelID,
-		StreamKey: streamKey,
-		Direction: SessionDirectionOutbound,
-		LocalPort: rtpPort,
-		Transport: device.Transport,
-		State:     SessionStateInviting,
-		Publisher: pub,
-		Stream:    stream,
+		ID:                  "", // set after INVITE response
+		DeviceID:            device.DeviceID,
+		ChannelID:           channelID,
+		StreamKey:           streamKey,
+		Direction:           SessionDirectionOutbound,
+		LocalPort:           rtpPort,
+		Transport:           device.Transport,
+		State:               SessionStateInviting,
+		Publisher:           pub,
+		PublisherGeneration: generation,
+		Stream:              stream,
 	}
 
 	// Send INVITE
 	invTx, err := ic.sipService.SendInvite(ctx, req)
 	if err != nil {
+		cleanupPublisher()
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("send INVITE: %w", err)
 	}
@@ -99,6 +123,7 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	select {
 	case <-invTx.Done():
 	case <-time.After(10 * time.Second):
+		cleanupPublisher()
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
 		return nil, fmt.Errorf("INVITE timeout")
@@ -106,12 +131,14 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 
 	resp := invTx.Response()
 	if resp == nil {
+		cleanupPublisher()
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
 		return nil, fmt.Errorf("INVITE: no response")
 	}
 
 	if resp.StatusCode != 200 {
+		cleanupPublisher()
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
 		return nil, fmt.Errorf("INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
@@ -134,16 +161,17 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 		session.ID = callID.Value()
 	}
 
-	session.SetState(SessionStateStreaming)
-	ic.handler.sessions.Add(session)
-
 	// Start RTP receiver
 	receiver, err := NewRTPReceiver(rtpPort, pub)
 	if err != nil {
+		cleanupPublisher()
 		slog.Error("rtp receiver creation failed", "module", "gb28181", "error", err)
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("create RTP receiver: %w", err)
 	}
+	session.Receiver = receiver
+	session.SetState(SessionStateStreaming)
+	ic.handler.sessions.Add(session)
 	go receiver.Run()
 
 	// Emit publish event

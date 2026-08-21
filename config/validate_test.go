@@ -15,6 +15,11 @@ func TestValidateRejectsUnsafeAndInvalidRuntimeValues(t *testing.T) {
 		want string
 	}{
 		{"zero ring", func(c *Config) { c.Stream.RingBufferSize = 0 }, "ring_buffer_size"},
+		{"invalid enabled rate limit", func(c *Config) {
+			c.Limits.RateLimit.Enabled = true
+			c.Limits.RateLimit.Rate = 0
+			c.Limits.RateLimit.Burst = 0
+		}, "rate_limit.rate"},
 		{"bad auth mode", func(c *Config) { c.Auth.Publish.Mode = "magic" }, "publish.mode"},
 		{"bad auth stage", func(c *Config) { c.Auth.Subscribe.Stage = "after_media" }, "subscribe.stage"},
 		{"active token without secret", func(c *Config) {
@@ -39,6 +44,11 @@ func TestValidateRejectsUnsafeAndInvalidRuntimeValues(t *testing.T) {
 		{"bad rtsp range", func(c *Config) { c.RTSP.RTPPortRange = []int{20000, 10000} }, "rtsp.rtp_port_range"},
 		{"short srt secret", func(c *Config) { c.SRT.Passphrase = "short" }, "srt.passphrase"},
 		{"bad srt key", func(c *Config) { c.SRT.PBKeyLen = 15 }, "srt.pbkeylen"},
+		{"enabled sip digest without password", func(c *Config) {
+			c.SIP.Auth.Enabled = true
+			c.SIP.Auth.Password = ""
+		}, "sip.auth.password"},
+		{"bad trusted proxy", func(c *Config) { c.Limits.RateLimit.TrustedProxies = []string{"not-a-cidr"} }, "trusted_proxies"},
 		{"unknown record placeholder", func(c *Config) { c.Record.Path = "/record/{camera}.flv" }, "record.path"},
 		{"unknown dvr placeholder", func(c *Config) { c.DVR.Path = "/dvr/{camera}" }, "dvr.path"},
 		{"remote default console", func(c *Config) {

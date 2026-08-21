@@ -37,11 +37,13 @@ const DefaultTimeout = 60 * time.Second
 
 // TrackSetup holds the transport configuration for a single track.
 type TrackSetup struct {
-	TrackID   int
-	Codec     avframe.CodecType
-	Transport TransportConfig
-	UDP       *UDPTransport      // non-nil for UDP unicast
-	Multicast *MulticastTransport // non-nil for UDP multicast
+	TrackID     int
+	Control     string
+	PayloadType uint8
+	Codec       avframe.CodecType
+	Transport   TransportConfig
+	UDP         *UDPTransport       // non-nil for UDP unicast
+	Multicast   *MulticastTransport // non-nil for UDP multicast
 }
 
 // RTSPSession represents an RTSP session with state management.
@@ -51,14 +53,18 @@ type RTSPSession struct {
 	State     SessionState
 	Timeout   time.Duration
 
-	Publisher  *RTSPPublisher
-	Subscriber *RTSPSubscriber
-	MediaInfo  *avframe.MediaInfo
-	Tracks     []TrackSetup
-	Stream     *core.Stream
+	Publisher           *RTSPPublisher
+	PublisherGeneration uint64
+	Subscriber          *RTSPSubscriber
+	MediaInfo           *avframe.MediaInfo
+	Tracks              []TrackSetup
+	TrackDescriptions   []RTPTrackDescription
+	Stream              *core.Stream
 
 	lastTouch time.Time
 	mu        sync.Mutex
+	tracksMu  sync.RWMutex
+	closeOnce sync.Once
 }
 
 func NewRTSPSession(id, streamKey string) *RTSPSession {
@@ -103,31 +109,129 @@ func (s *RTSPSession) IsExpired() bool {
 	return time.Since(s.lastTouch) > s.Timeout
 }
 
+func (s *RTSPSession) stateSnapshot() SessionState {
+	s.mu.Lock()
+	state := s.State
+	s.mu.Unlock()
+	return state
+}
+
+func (s *RTSPSession) publisherSnapshot() (*RTSPPublisher, *core.Stream, uint64) {
+	s.mu.Lock()
+	pub, stream, generation := s.Publisher, s.Stream, s.PublisherGeneration
+	s.mu.Unlock()
+	return pub, stream, generation
+}
+
+func (s *RTSPSession) subscriberSnapshot() *RTSPSubscriber {
+	s.mu.Lock()
+	subscriber := s.Subscriber
+	s.mu.Unlock()
+	return subscriber
+}
+
+func (s *RTSPSession) streamMediaSnapshot() (*core.Stream, *avframe.MediaInfo) {
+	s.mu.Lock()
+	stream, mediaInfo := s.Stream, s.MediaInfo
+	s.mu.Unlock()
+	return stream, mediaInfo
+}
+
+func (s *RTSPSession) setDescription(stream *core.Stream, mediaInfo *avframe.MediaInfo, descriptions []RTPTrackDescription) {
+	s.mu.Lock()
+	s.Stream = stream
+	s.MediaInfo = mediaInfo
+	s.TrackDescriptions = descriptions
+	s.mu.Unlock()
+}
+
+func (s *RTSPSession) setPublishState(stream *core.Stream, publisher *RTSPPublisher, generation uint64) {
+	s.mu.Lock()
+	s.Stream = stream
+	s.Publisher = publisher
+	s.PublisherGeneration = generation
+	s.mu.Unlock()
+}
+
+func (s *RTSPSession) setSubscriber(subscriber *RTSPSubscriber) {
+	s.mu.Lock()
+	s.Subscriber = subscriber
+	s.mu.Unlock()
+}
+
+func (s *RTSPSession) detachPublisher() (*RTSPPublisher, *core.Stream, uint64) {
+	s.mu.Lock()
+	pub, stream, generation := s.Publisher, s.Stream, s.PublisherGeneration
+	s.Publisher = nil
+	s.PublisherGeneration = 0
+	s.mu.Unlock()
+	return pub, stream, generation
+}
+
+func (s *RTSPSession) detachSubscriber() (*RTSPSubscriber, *core.Stream) {
+	s.mu.Lock()
+	subscriber, stream := s.Subscriber, s.Stream
+	s.Subscriber = nil
+	s.mu.Unlock()
+	return subscriber, stream
+}
+
 // Close cleans up publisher, subscriber, and UDP transport resources.
 func (s *RTSPSession) Close() {
-	if s.Publisher != nil {
-		if err := s.Publisher.Close(); err != nil {
-			slog.Error("error closing publisher", "module", "rtsp", "session", s.ID, "error", err)
+	s.closeOnce.Do(func() {
+		if publisher, stream, generation := s.detachPublisher(); publisher != nil {
+			if err := publisher.Close(); err != nil {
+				slog.Error("error closing publisher", "module", "rtsp", "session", s.ID, "error", err)
+			}
+			if stream != nil {
+				stream.RemovePublisherIfGeneration(generation)
+			}
 		}
-		if s.Stream != nil {
-			s.Stream.RemovePublisher()
+		if subscriber, stream := s.detachSubscriber(); subscriber != nil {
+			if err := subscriber.Close(); err != nil {
+				slog.Error("error closing subscriber", "module", "rtsp", "session", s.ID, "error", err)
+			}
+			if stream != nil {
+				stream.RemoveSubscriber("rtsp")
+			}
 		}
-		s.Publisher = nil
-	}
-	if s.Subscriber != nil {
-		if err := s.Subscriber.Close(); err != nil {
-			slog.Error("error closing subscriber", "module", "rtsp", "session", s.ID, "error", err)
-		}
-		if s.Stream != nil {
-			s.Stream.RemoveSubscriber("rtsp")
-		}
-		s.Subscriber = nil
-	}
-	// Close any UDP transports.
+		s.closeTracks()
+	})
+}
+
+func (s *RTSPSession) addTrack(track TrackSetup) {
+	s.tracksMu.Lock()
+	s.Tracks = append(s.Tracks, track)
+	s.tracksMu.Unlock()
+}
+
+func (s *RTSPSession) trackSnapshot() []TrackSetup {
+	s.tracksMu.RLock()
+	tracks := append([]TrackSetup(nil), s.Tracks...)
+	s.tracksMu.RUnlock()
+	return tracks
+}
+
+func (s *RTSPSession) closeTracks() {
+	s.tracksMu.Lock()
+	udp := make([]*UDPTransport, 0, len(s.Tracks))
+	multicast := make([]*MulticastTransport, 0, len(s.Tracks))
 	for i := range s.Tracks {
 		if s.Tracks[i].UDP != nil {
-			s.Tracks[i].UDP.Close()
+			udp = append(udp, s.Tracks[i].UDP)
 			s.Tracks[i].UDP = nil
 		}
+		if s.Tracks[i].Multicast != nil {
+			multicast = append(multicast, s.Tracks[i].Multicast)
+			s.Tracks[i].Multicast = nil
+		}
+	}
+	s.tracksMu.Unlock()
+
+	for _, transport := range udp {
+		transport.Close()
+	}
+	for _, transport := range multicast {
+		transport.Close()
 	}
 }

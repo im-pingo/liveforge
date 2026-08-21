@@ -41,14 +41,14 @@ type segmentInfo struct {
 
 func newTSFrameWriter(streamKey string, cfg config.RecordConfig) *tsFrameWriter {
 	return &tsFrameWriter{
-		cfg:       cfg,
-		streamKey: streamKey,
-		lastDTS:   -1,
+		cfg:        cfg,
+		streamKey:  streamKey,
+		lastDTS:    -1,
 		segStartTS: -1,
 	}
 }
 
-func (w *tsFrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *tsFrameWriter) writeHeader(_ *os.File, _, _, _ *avframe.AVFrame) error {
 	return nil
 }
 

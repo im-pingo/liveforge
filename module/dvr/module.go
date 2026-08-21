@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -48,7 +49,12 @@ func (m *Module) Init(s *core.Server) error {
 	mux.HandleFunc("GET /dvr/{app}/{key}.m3u8", m.handlePlaylist)
 	mux.HandleFunc("GET /dvr/{app}/{key}/{filename}", m.handleSegment)
 
-	m.httpSrv = &http.Server{Handler: mux}
+	m.httpSrv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel

@@ -30,9 +30,9 @@ func TestParseFeedbackMode(t *testing.T) {
 
 func TestFeedbackRouterFixedModes(t *testing.T) {
 	tests := []struct {
-		mode      string
-		wantPLI   bool
-		wantNACK  bool
+		mode     string
+		wantPLI  bool
+		wantNACK bool
 	}{
 		{"passthrough", true, true},
 		{"drop", false, false},

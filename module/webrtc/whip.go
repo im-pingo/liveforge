@@ -78,11 +78,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
 
 	var (
-		videoDetected bool
-		audioDetected bool
-		publisherSet  bool
-		sessionClosed bool
-		pubMu         sync.Mutex
+		videoDetected       bool
+		audioDetected       bool
+		publisherSet        bool
+		publisherGeneration uint64
+		sessionClosed       bool
+		pubMu               sync.Mutex
 	)
 	mediaReady := make(chan struct{})
 	var mediaReadyOnce sync.Once
@@ -93,11 +94,13 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		if sessionClosed || stream == nil || publisherSet || (!videoDetected && !audioDetected) {
 			return
 		}
-		if err := stream.SetPublisher(pub); err != nil {
+		generation, err := stream.SetPublisherWithGeneration(pub)
+		if err != nil {
 			slog.Error("WHIP set publisher failed", "module", "webrtc", "error", err)
 			return
 		}
 		publisherSet = true
+		publisherGeneration = generation
 		m.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
 			StreamKey:  streamKey,
 			Protocol:   "webrtc",
@@ -166,15 +169,17 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			}
 			sessionClosed = true
 			wasPublisher := publisherSet
+			generation := publisherGeneration
 			readyStream := stream
 			pubMu.Unlock()
 			if wasPublisher && readyStream != nil {
-				readyStream.RemovePublisher()
-				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:  streamKey,
-					Protocol:   "webrtc",
-					RemoteAddr: r.RemoteAddr,
-				})
+				if readyStream.RemovePublisherIfGeneration(generation) {
+					m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
+						StreamKey:  streamKey,
+						Protocol:   "webrtc",
+						RemoteAddr: r.RemoteAddr,
+					})
+				}
 			}
 			releaseConn()
 			sess.Close()

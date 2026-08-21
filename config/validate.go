@@ -16,6 +16,9 @@ func Validate(cfg *Config) error {
 	if cfg.Stream.RingBufferSize <= 0 {
 		return fmt.Errorf("stream.ring_buffer_size must be greater than zero")
 	}
+	if cfg.Limits.RateLimit.Enabled && (cfg.Limits.RateLimit.Rate <= 0 || cfg.Limits.RateLimit.Burst <= 0) {
+		return fmt.Errorf("limits.rate_limit.rate and burst must be greater than zero when enabled")
+	}
 	if err := validateAuthRule("publish", cfg.Auth.Publish, cfg.Auth.Enabled); err != nil {
 		return err
 	}
@@ -31,8 +34,22 @@ func Validate(cfg *Config) error {
 			return err
 		}
 	}
+	for _, value := range cfg.Limits.RateLimit.TrustedProxies {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return fmt.Errorf("limits.rate_limit.trusted_proxies must not contain empty entries")
+		}
+		if net.ParseIP(value) == nil {
+			if _, _, err := net.ParseCIDR(value); err != nil {
+				return fmt.Errorf("limits.rate_limit.trusted_proxies entry %q is not an IP or CIDR: %w", value, err)
+			}
+		}
+	}
 	if cfg.SRT.Passphrase != "" && (len(cfg.SRT.Passphrase) < 10 || len(cfg.SRT.Passphrase) > 79) {
 		return fmt.Errorf("srt.passphrase must contain 10 to 79 characters")
+	}
+	if cfg.SIP.Auth.Enabled && strings.TrimSpace(cfg.SIP.Auth.Password) == "" {
+		return fmt.Errorf("sip.auth.password must not be empty when digest authentication is enabled")
 	}
 	switch cfg.SRT.PBKeyLen {
 	case 0, 16, 24, 32:

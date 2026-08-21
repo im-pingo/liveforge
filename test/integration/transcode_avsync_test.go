@@ -11,6 +11,9 @@ import (
 )
 
 func TestTranscodeAVSync(t *testing.T) {
+	if !audiocodec.Global().CanTranscode(avframe.CodecG711U, avframe.CodecG711A) {
+		t.Skip("requires the audiocodec build tag and FFmpeg runtime")
+	}
 	cfg := config.StreamConfig{RingBufferSize: 256}
 	bus := core.NewEventBus()
 	s := core.NewStream("avsync-test", cfg, config.LimitsConfig{}, bus)

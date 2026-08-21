@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/ratelimit"
@@ -18,16 +19,16 @@ import (
 
 // Module implements the WebRTC WHIP/WHEP module.
 type Module struct {
-	server   *core.Server
-	api      *webrtc.API
-	sessions sync.Map // sessionID -> *Session
-	listener net.Listener
-	httpSrv  *http.Server
-	limiter   *ratelimit.Limiter
-	wg        sync.WaitGroup
-	latestBWE              chan cc.BandwidthEstimator
-	nextInitialBitrate     int64 // per-session override, set before NewPeerConnection
-	nextInitialBitrateMu   sync.Mutex
+	server               *core.Server
+	api                  *webrtc.API
+	sessions             sync.Map // sessionID -> *Session
+	listener             net.Listener
+	httpSrv              *http.Server
+	limiter              *ratelimit.Limiter
+	wg                   sync.WaitGroup
+	latestBWE            chan cc.BandwidthEstimator
+	nextInitialBitrate   int64 // per-session override, set before NewPeerConnection
+	nextInitialBitrateMu sync.Mutex
 }
 
 // NewModule creates a new WebRTC module.
@@ -69,7 +70,6 @@ func (m *Module) Init(s *core.Server) error {
 	// Include loopback (127.0.0.1) as an ICE host candidate so same-host clients
 	// connect via loopback UDP instead of the LAN interface, avoiding packet loss.
 	se.SetIncludeLoopbackCandidate(true)
-
 
 	me := &webrtc.MediaEngine{}
 	if err := registerCodecs(me); err != nil {
@@ -164,10 +164,15 @@ func (m *Module) Init(s *core.Server) error {
 
 	var handler http.Handler = corsMiddleware(mux)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
-		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		m.limiter = ratelimit.New(rl.Rate, rl.Burst, rl.TrustedProxies...)
 		handler = m.limiter.Wrap(handler)
 	}
-	m.httpSrv = &http.Server{Handler: handler}
+	m.httpSrv = &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
@@ -317,10 +322,10 @@ func registerCodecs(me *webrtc.MediaEngine) error {
 
 	// Video codecs: one entry per codec + RTX.
 	videoCodecs := []struct {
-		mime    string
-		pt      webrtc.PayloadType
-		rtxPT   webrtc.PayloadType
-		fmtp    string
+		mime  string
+		pt    webrtc.PayloadType
+		rtxPT webrtc.PayloadType
+		fmtp  string
 	}{
 		{webrtc.MimeTypeVP8, 96, 97, ""},
 		{webrtc.MimeTypeVP9, 98, 99, "profile-id=0"},

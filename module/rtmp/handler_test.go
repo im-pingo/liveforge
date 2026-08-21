@@ -177,8 +177,8 @@ func TestHandlerMediaMessage(t *testing.T) {
 
 	// Send video keyframe
 	videoData := []byte{
-		0x17,       // keyframe + H.264
-		0x01,       // AVC NALU
+		0x17,             // keyframe + H.264
+		0x01,             // AVC NALU
 		0x00, 0x00, 0x00, // CTS = 0
 		0x65, 0x88, 0x00, 0x01, // NALU data
 	}
@@ -204,6 +204,72 @@ func TestHandlerMediaMessage(t *testing.T) {
 	}
 
 	clientConn.Close()
+}
+
+func TestHandlerDeleteStreamCleansPublisherImmediately(t *testing.T) {
+	hub, bus := newTestHub()
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	const streamKey = "live/delete-me"
+	stream, err := hub.GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	generation, err := stream.SetPublisherWithGeneration(NewPublisher(streamKey, serverConn))
+	if err != nil {
+		t.Fatalf("SetPublisherWithGeneration: %v", err)
+	}
+
+	stopEvents := make(chan *core.EventContext, 1)
+	bus.Register(core.HookRegistration{
+		Event: core.EventPublishStop,
+		Mode:  core.HookSync,
+		Handler: func(ctx *core.EventContext) error {
+			stopEvents <- ctx
+			return nil
+		},
+	})
+
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
+	handler.streamKey = streamKey
+	handler.isPublisher = true
+	handler.publisherGeneration = generation
+
+	if err := handler.onDeleteStream(); err != nil {
+		t.Fatalf("onDeleteStream: %v", err)
+	}
+	if handler.isPublisher {
+		t.Fatal("publisher flag remains set after deleteStream")
+	}
+	if handler.streamKey != "" {
+		t.Fatalf("stream key = %q, want empty after deleteStream", handler.streamKey)
+	}
+	if stream.Publisher() != nil {
+		t.Fatal("publisher remains attached after deleteStream")
+	}
+	if stream.State() != core.StreamStateNoPublisher {
+		t.Fatalf("stream state = %v, want no publisher", stream.State())
+	}
+
+	select {
+	case ctx := <-stopEvents:
+		if ctx.StreamKey != streamKey || ctx.Protocol != "rtmp" {
+			t.Fatalf("stop event = %+v, want stream %q protocol rtmp", ctx, streamKey)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for publish stop event")
+	}
+
+	if err := handler.onDeleteStream(); err != nil {
+		t.Fatalf("second onDeleteStream: %v", err)
+	}
+	select {
+	case <-stopEvents:
+		t.Fatal("second deleteStream emitted duplicate stop event")
+	default:
+	}
 }
 
 // drainReader is a helper to read and discard from a connection

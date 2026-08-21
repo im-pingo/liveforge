@@ -1,6 +1,8 @@
 package httpstream
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +13,12 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+type httpAuthorizerFunc func(context.Context, core.AuthorizationRequest) error
+
+func (f httpAuthorizerFunc) Authorize(ctx context.Context, request core.AuthorizationRequest) error {
+	return f(ctx, request)
+}
 
 func TestParseStreamPath(t *testing.T) {
 	tests := []struct {
@@ -141,6 +149,47 @@ func TestHandlerUnsupportedFormat(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandlerAuthorizesEveryHTTPMediaResource(t *testing.T) {
+	_, server, addr := newHTTPTestServer(t)
+	denied := errors.New("denied")
+	var requests []core.AuthorizationRequest
+	server.SetAuthorizer(httpAuthorizerFunc(func(_ context.Context, request core.AuthorizationRequest) error {
+		requests = append(requests, request)
+		return denied
+	}))
+
+	paths := []string{
+		"/live/camera.m3u8?token=manifest",
+		"/live/camera.mpd?token=manifest",
+		"/live/camera/0.ts?token=segment",
+		"/live/camera/1.0.m4s?token=part",
+		"/live/camera/v1.m4s?token=segment",
+		"/live/camera/vinit.mp4?token=init",
+		"/live/camera/audio_init.mp4?token=init",
+	}
+	for _, requestPath := range paths {
+		resp, err := http.Get(addr + requestPath)
+		if err != nil {
+			t.Fatalf("GET %s: %v", requestPath, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("GET %s status = %d, want 403", requestPath, resp.StatusCode)
+		}
+	}
+	if len(requests) != len(paths) {
+		t.Fatalf("authorization calls = %d, want %d", len(requests), len(paths))
+	}
+	for _, request := range requests {
+		if request.Action != core.AuthorizationSubscribe || request.Stage != core.AuthorizationPreSession {
+			t.Errorf("authorization request = %#v", request)
+		}
+		if request.StreamKey != "live/camera" || request.Params["token"] == "" {
+			t.Errorf("authorization context lost path/query: %#v", request)
+		}
 	}
 }
 
@@ -808,6 +857,6 @@ type mediaPublisher struct {
 	info *avframe.MediaInfo
 }
 
-func (p *mediaPublisher) ID() string                   { return "test-media-pub" }
+func (p *mediaPublisher) ID() string                    { return "test-media-pub" }
 func (p *mediaPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *mediaPublisher) Close() error                  { return nil }

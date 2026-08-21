@@ -1,28 +1,38 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TAGS    ?=
 
-.PHONY: build build-static test clean deps deps-static check-deps
+.PHONY: build build-static build-core test test-core clean deps deps-static check-deps
 
 # ---------------------------------------------------------------------------
 # Build targets
 # ---------------------------------------------------------------------------
 
-# Default: auto-install deps, then build.
-#   macOS  — vendored static libs (checked/built automatically)
-#   Linux  — system pkg-config shared libs (auto-installed)
-build: deps
-	CGO_ENABLED=1 go build -trimpath -tags '$(TAGS)' \
+# Full build with audio transcoding. Dependencies are checked by the compiler
+# (system FFmpeg on Linux, vendored libraries on macOS); no missing helper
+# script is required for a normal build.
+build:
+	CGO_ENABLED=1 go build -trimpath -tags 'audiocodec $(TAGS)' \
 		-ldflags "-s -w -X main.version=$(VERSION)" \
 		-o bin/liveforge ./cmd/liveforge
 
-# Linux with vendored static FFmpeg libs (built from source automatically).
-build-static: deps-static
-	CGO_ENABLED=1 go build -trimpath -tags 'ffmpeg_static' \
+# Linux with vendored static FFmpeg libraries.
+build-static:
+	CGO_ENABLED=1 go build -trimpath -tags 'audiocodec ffmpeg_static $(TAGS)' \
 		-ldflags "-s -w -X main.version=$(VERSION)" \
 		-o bin/liveforge ./cmd/liveforge
 
-test: deps
-	CGO_ENABLED=1 go test -race -tags '$(TAGS)' -cover ./...
+# Dependency-free core build for development and protocol/lifecycle smoke
+# tests. Audio transcoding remains explicitly disabled in this artifact.
+build-core:
+	CGO_ENABLED=0 go build -trimpath -tags '$(TAGS)' \
+		-ldflags "-s -w -X main.version=$(VERSION)" \
+		-o bin/liveforge-core ./cmd/liveforge
+
+test:
+	CGO_ENABLED=1 go test -race -tags 'audiocodec $(TAGS)' -cover ./...
+
+test-core:
+	CGO_ENABLED=0 go test -race -tags '$(TAGS)' ./...
 
 clean:
 	rm -rf bin/
@@ -33,11 +43,11 @@ clean:
 
 # Install/verify system FFmpeg dev packages (shared libs on Linux, vendored on macOS).
 deps:
-	@./scripts/install-deps.sh
+	@echo "Dependencies are resolved by the selected build target; run make check-deps for status."
 
 # Build vendored static libs from FFmpeg source.
 deps-static:
-	@./scripts/install-deps.sh --static
+	@echo "Static FFmpeg libraries must be present under third_party/ffmpeg/lib/<os>_<arch>/."
 
 # Print dependency status without installing.
 check-deps:

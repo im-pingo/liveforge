@@ -14,12 +14,15 @@ func TestSdpToMediaInfoH264(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info := sdpToMediaInfo(sd)
+	info, ptMap := sdpToMediaInfoWithPT(sd)
 	if info.VideoCodec != avframe.CodecH264 {
 		t.Errorf("VideoCodec = %v, want H264", info.VideoCodec)
 	}
 	if info.AudioCodec != 0 {
 		t.Errorf("AudioCodec = %v, want 0", info.AudioCodec)
+	}
+	if got := ptMap[96]; got.Codec != avframe.CodecH264 || got.ClockRate != 90000 {
+		t.Errorf("PT 96 = %+v, want H264/90000", got)
 	}
 }
 
@@ -31,7 +34,7 @@ func TestSdpToMediaInfoH264AAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info := sdpToMediaInfo(sd)
+	info, ptMap := sdpToMediaInfoWithPT(sd)
 	if info.VideoCodec != avframe.CodecH264 {
 		t.Errorf("VideoCodec = %v, want H264", info.VideoCodec)
 	}
@@ -43,6 +46,9 @@ func TestSdpToMediaInfoH264AAC(t *testing.T) {
 	}
 	if info.Channels != 2 {
 		t.Errorf("Channels = %d, want 2", info.Channels)
+	}
+	if got := ptMap[97]; got.Codec != avframe.CodecAAC || got.ClockRate != 44100 {
+		t.Errorf("PT 97 = %+v, want AAC/44100", got)
 	}
 }
 
@@ -83,6 +89,8 @@ func TestExtractTrackID(t *testing.T) {
 		{"rtsp://host/live/test/trackID=0", 0, true},
 		{"rtsp://host/live/test/trackID=1", 1, true},
 		{"rtsp://host/live/test/trackID=12", 12, true},
+		{"rtsp://host/live/test?trackID=12", -1, false},
+		{"rtsp://host/live/test/opaque-trackID=12", -1, false},
 		{"rtsp://host/live/test", -1, false},
 		{"rtsp://host/live/test/trackID=", -1, false},
 	}
