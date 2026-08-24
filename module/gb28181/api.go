@@ -228,9 +228,10 @@ func (m *Module) apiPlay(w http.ResponseWriter, r *http.Request, channelID strin
 		return
 	}
 
+	snapshot := session.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"stream_key": session.StreamKey,
-		"session_id": session.ID,
+		"stream_key": snapshot.StreamKey,
+		"session_id": snapshot.ID,
 	})
 }
 
@@ -288,9 +289,10 @@ func (m *Module) apiPlayback(w http.ResponseWriter, r *http.Request, channelID s
 		return
 	}
 
+	snapshot := session.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"stream_key": session.StreamKey,
-		"session_id": session.ID,
+		"stream_key": snapshot.StreamKey,
+		"session_id": snapshot.ID,
 	})
 }
 
@@ -395,19 +397,20 @@ func (m *Module) apiListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]sessionDTO, 0, len(sessions))
 	for _, s := range sessions {
+		snapshot := s.Snapshot()
 		dir := "inbound"
-		if s.Direction == SessionDirectionOutbound {
+		if snapshot.Direction == SessionDirectionOutbound {
 			dir = "outbound"
 		}
 		out = append(out, sessionDTO{
-			ID:        s.ID,
-			DeviceID:  s.DeviceID,
-			ChannelID: s.ChannelID,
-			StreamKey: s.StreamKey,
+			ID:        snapshot.ID,
+			DeviceID:  snapshot.DeviceID,
+			ChannelID: snapshot.ChannelID,
+			StreamKey: snapshot.StreamKey,
 			Direction: dir,
-			State:     s.GetState().String(),
-			LocalPort: s.LocalPort,
-			Transport: s.Transport,
+			State:     snapshot.State.String(),
+			LocalPort: snapshot.LocalPort,
+			Transport: snapshot.Transport,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -24,6 +24,63 @@ import (
 	pionrtp "github.com/pion/rtp/v2"
 )
 
+type blockingTerminalDialog struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingTerminalDialog) Done() <-chan struct{} {
+	done := make(chan struct{})
+	return done
+}
+func (d *blockingTerminalDialog) Response() *sip.Response       { return nil }
+func (d *blockingTerminalDialog) SendACK(context.Context) error { return nil }
+func (d *blockingTerminalDialog) SendBYE(context.Context) error {
+	close(d.entered)
+	<-d.release
+	return nil
+}
+func (d *blockingTerminalDialog) Close() {}
+
+func TestTerminalMetricsPublishAtomicallyWithSessionRemoval(t *testing.T) {
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.reserveCall("atomic-terminal"); err != nil {
+		t.Fatal(err)
+	}
+	session := newCallSession("atomic-terminal", "sip/atomic", negotiatedCodec{
+		Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA",
+	}, "outbound", rtpPort, rtcpPort)
+	dialog := &blockingTerminalDialog{entered: make(chan struct{}), release: make(chan struct{})}
+	session.dialog = newDialogTeardown(dialog)
+	gw.configureSession(session)
+	if err := gw.activateReservedCall(session); err != nil {
+		t.Fatal(err)
+	}
+	session.established.Store(true)
+	finishDone := make(chan bool, 1)
+	go func() {
+		finishDone <- gw.finishSession(session, CallStateNetworkLost, errors.New("network lost"))
+	}()
+	select {
+	case <-dialog.entered:
+	case <-time.After(time.Second):
+		t.Fatal("terminal cleanup did not reach dialog teardown")
+	}
+
+	window := gw.Metrics()
+	close(dialog.release)
+	if !<-finishDone {
+		t.Fatal("finishSession did not own terminal transition")
+	}
+	if window.ActiveCalls == 0 && window.NetworkFailures == 1 && window.CallsEnded == 0 {
+		t.Fatalf("observed partial terminal metrics: %+v", window)
+	}
+}
+
 type gatewayTestPublisher struct {
 	id   string
 	info *avframe.MediaInfo

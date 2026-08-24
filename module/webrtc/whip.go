@@ -35,12 +35,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
 		return
 	}
-	connAcquired := true
+	var releaseConnOnce sync.Once
 	releaseConn := func() {
-		if connAcquired {
-			connAcquired = false
-			m.server.ReleaseConn()
-		}
+		releaseConnOnce.Do(m.server.ReleaseConn)
 	}
 
 	contentType := r.Header.Get("Content-Type")
@@ -97,11 +94,23 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		publisherSet  bool
 		pubMu         sync.Mutex
 	)
+	sess.setCleanup(func() {
+		pubMu.Lock()
+		wasPublisher := publisherSet
+		pubMu.Unlock()
+		if wasPublisher {
+			stream.RemovePublisherIf(pub)
+		}
+		lifecycleCtx := *publishCtx
+		lifecycleCtx.PublisherID = pub.ID()
+		sess.stopLifecycle(m.server.GetEventBus(), core.EventPublishStop, &lifecycleCtx)
+		releaseConn()
+	})
 
 	setPublisherOnce := func() {
 		pubMu.Lock()
 		defer pubMu.Unlock()
-		if publisherSet || (!videoDetected && !audioDetected) {
+		if publisherSet || (!videoDetected && !audioDetected) || sess.isClosed() {
 			return
 		}
 		if err := stream.SetPublisher(pub); err != nil {
@@ -111,7 +120,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		publisherSet = true
 		lifecycleCtx := *publishCtx
 		lifecycleCtx.PublisherID = pub.ID()
-		m.server.GetEventBus().EmitAsync(core.EventPublish, &lifecycleCtx)
+		sess.startLifecycle(m.server.GetEventBus(), core.EventPublish, &lifecycleCtx)
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -152,26 +161,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	// Cleanup on ICE disconnect.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
-			pubMu.Lock()
-			wasPublisher := publisherSet
-			pubMu.Unlock()
-
-			if wasPublisher {
-				stream.RemovePublisherIf(pub)
-				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:   streamKey,
-					PublisherID: pub.ID(),
-					Protocol:    "webrtc",
-					RemoteAddr:  r.RemoteAddr,
-				})
-			}
-			releaseConn()
+			sess.Close()
 		}
 	})
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		sess.Close()
-		releaseConn()
 		http.Error(w, fmt.Sprintf("set remote description: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -179,14 +174,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		sess.Close()
-		releaseConn()
 		http.Error(w, fmt.Sprintf("create answer: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		sess.Close()
-		releaseConn()
 		http.Error(w, fmt.Sprintf("set local description: %v", err), http.StatusInternalServerError)
 		return
 	}

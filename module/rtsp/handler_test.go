@@ -93,6 +93,27 @@ func TestHandleAnnounce(t *testing.T) {
 	}
 }
 
+func TestHandleAnnounceRejectsClosedSessionWithoutMutation(t *testing.T) {
+	server := core.NewServer(&config.Config{Stream: config.StreamConfig{RingBufferSize: 16}})
+	h := NewHandler(server, nil, nil)
+	session := NewRTSPSession("closed", "live/closed")
+	if !session.Close() {
+		t.Fatal("failed to close session fixture")
+	}
+	sdpBody := "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=test\r\nt=0 0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/closed", Headers: make(http.Header), Body: []byte(sdpBody)}
+	req.Headers.Set("CSeq", "1")
+
+	resp := h.HandleAnnounce(req, session, "127.0.0.1:12345")
+
+	if resp.StatusCode != 454 {
+		t.Fatalf("closed session response = %d, want 454", resp.StatusCode)
+	}
+	if stream, ok := server.StreamHub().Find("live/closed"); ok && stream.Publisher() != nil {
+		t.Fatal("closed session ANNOUNCE installed a publisher")
+	}
+}
+
 func TestHandleAnnouncePublishesGenerationAfterStreamDiscovery(t *testing.T) {
 	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
 	server := core.NewServer(cfg)

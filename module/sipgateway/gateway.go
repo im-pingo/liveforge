@@ -591,8 +591,8 @@ func (gw *Gateway) Call(callID string) (CallSnapshot, bool) {
 
 // Metrics returns a stable snapshot without exposing per-call labels.
 func (gw *Gateway) Metrics() MetricsSnapshot {
-	snapshot := gw.metrics.snapshot()
 	gw.mu.RLock()
+	snapshot := gw.metrics.snapshot()
 	snapshot.ActiveCalls = len(gw.sessions)
 	for _, session := range gw.sessions {
 		switch session.direction {
@@ -683,6 +683,9 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 		return false
 	}
 	session.terminate(state, err, false)
+	if session.established.Load() {
+		gw.metrics.callsEnded.Add(1)
+	}
 	delete(gw.sessions, session.callID)
 	gw.addTerminalLocked(session.snapshot())
 	gw.mu.Unlock()
@@ -694,9 +697,6 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 		if publisher != nil && publisher.ID() == session.publisher.id {
 			session.stream.RemovePublisherIf(publisher)
 		}
-	}
-	if session.established.Load() {
-		gw.metrics.callsEnded.Add(1)
 	}
 	return true
 }

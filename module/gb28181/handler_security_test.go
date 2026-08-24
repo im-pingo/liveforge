@@ -67,6 +67,31 @@ func digestResponse(username, realm, password, method, uri, nonce string) string
 	return hash(ha1 + ":" + nonce + ":" + ha2)
 }
 
+func digestChallengeNonce(t *testing.T, response *sip.Response) string {
+	t.Helper()
+	header := response.GetHeader("WWW-Authenticate")
+	if header == nil {
+		t.Fatal("401 response missing WWW-Authenticate challenge")
+	}
+	for _, field := range strings.Split(header.Value(), ",") {
+		field = strings.TrimSpace(field)
+		if index := strings.Index(field, "nonce="); index >= 0 {
+			return strings.Trim(strings.TrimSpace(field[index+len("nonce="):]), `"`)
+		}
+	}
+	t.Fatal("WWW-Authenticate challenge missing nonce")
+	return ""
+}
+
+func addGBDigestAuthorization(req *sip.Request, username, realm, password, nonce string) {
+	uri := req.Recipient.String()
+	responseHash := digestResponse(username, realm, password, string(req.Method), uri, nonce)
+	req.AppendHeader(sip.NewHeader("Authorization", fmt.Sprintf(
+		`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s"`,
+		username, realm, nonce, uri, responseHash,
+	)))
+}
+
 func TestRegisterRequiresDigestBeforeRegistryMutation(t *testing.T) {
 	const (
 		deviceID = "34020000001110000001"
@@ -86,21 +111,13 @@ func TestRegisterRequiresDigestBeforeRegistryMutation(t *testing.T) {
 	if response == nil || response.StatusCode != 401 {
 		t.Fatalf("REGISTER without digest response = %#v, want 401", response)
 	}
-	if response.GetHeader("WWW-Authenticate") == nil {
-		t.Fatal("401 response missing WWW-Authenticate challenge")
-	}
+	nonce := digestChallengeNonce(t, response)
 	if registry.Get(deviceID) != nil {
 		t.Fatal("unauthorized REGISTER mutated device registry")
 	}
 
 	authorized := newGBRequest(sip.REGISTER, deviceID, deviceID)
-	nonce := "known-nonce"
-	uri := authorized.Recipient.String()
-	responseHash := digestResponse(deviceID, realm, password, string(sip.REGISTER), uri, nonce)
-	authorized.AppendHeader(sip.NewHeader("Authorization", fmt.Sprintf(
-		`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s"`,
-		deviceID, realm, nonce, uri, responseHash,
-	)))
+	addGBDigestAuthorization(authorized, deviceID, realm, password, nonce)
 	tx = &captureServerTransaction{}
 	h.handleRegister(authorized, tx)
 	if response := tx.lastResponse(); response == nil || response.StatusCode != 200 {
@@ -108,6 +125,23 @@ func TestRegisterRequiresDigestBeforeRegistryMutation(t *testing.T) {
 	}
 	if registry.Get(deviceID) == nil {
 		t.Fatal("valid digest did not register device")
+	}
+
+	replayedUnregister := newGBRequest(sip.REGISTER, deviceID, deviceID)
+	replayedUnregister.AppendHeader(sip.NewHeader("Expires", "0"))
+	addGBDigestAuthorization(replayedUnregister, deviceID, realm, password, nonce)
+	tx = &captureServerTransaction{}
+	h.handleRegister(replayedUnregister, tx)
+	replayResponse := tx.lastResponse()
+	if replayResponse == nil || replayResponse.StatusCode != 401 {
+		t.Fatalf("replayed unregister response = %#v, want 401", replayResponse)
+	}
+	challenge := replayResponse.GetHeader("WWW-Authenticate")
+	if challenge == nil || !strings.Contains(challenge.Value(), "stale=true") {
+		t.Fatalf("replayed unregister challenge = %#v, want stale=true", challenge)
+	}
+	if registry.Get(deviceID) == nil {
+		t.Fatal("replayed unregister removed device")
 	}
 
 	unregister := newGBRequest(sip.REGISTER, deviceID, deviceID)

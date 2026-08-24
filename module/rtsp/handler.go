@@ -74,9 +74,12 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Body = body
 	if session != nil {
-		session.MediaInfo = mediaInfo
-		session.Stream = stream
-		session.Transition(StateDescribed)
+		if !session.SetDescription(mediaInfo, stream) {
+			return newResponse(454, "Session Not Found", req)
+		}
+		if err := session.Transition(StateDescribed); err != nil {
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 	}
 	return resp
 }
@@ -132,15 +135,15 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 			UDP:       udpTransport,
 			Multicast: mcastTransport,
 		}
-		if session.MediaInfo != nil {
-			idx := len(session.Tracks)
-			if idx == 0 && session.MediaInfo.HasVideo() {
-				ts.Codec = session.MediaInfo.VideoCodec
-			} else if (idx == 0 && !session.MediaInfo.HasVideo()) || idx == 1 {
-				ts.Codec = session.MediaInfo.AudioCodec
+		if !session.AddTrack(ts) {
+			if udpTransport != nil {
+				udpTransport.Close()
 			}
+			if mcastTransport != nil {
+				mcastTransport.Close()
+			}
+			return newResponse(454, "Session Not Found", req)
 		}
-		session.Tracks = append(session.Tracks, ts)
 	}
 
 	resp := newResponse(200, "OK", req)
@@ -154,14 +157,19 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 			tc.ClientPorts[0], tc.ClientPorts[1], tc.ServerPorts[0], tc.ServerPorts[1]))
 	}
 	if session != nil {
-		resp.Headers.Set("Session", session.ID+";timeout=60")
-		session.Transition(StateReady)
+		resp.Headers.Set("Session", session.Snapshot().ID+";timeout=60")
+		if err := session.Transition(StateReady); err != nil {
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 	}
 	return resp
 }
 
 // HandleAnnounce processes ANNOUNCE request with SDP body.
 func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr string) *Response {
+	if session != nil && !session.CanHandleRequest() {
+		return newResponse(454, "Session Not Found", req)
+	}
 	if len(req.Body) == 0 {
 		return newResponse(400, "Bad Request", req)
 	}
@@ -171,9 +179,10 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 	}
 
 	if session != nil && h.server != nil {
+		snapshot := session.Snapshot()
 		publishCtx := &core.EventContext{
-			StreamKey:   session.StreamKey,
-			PublisherID: session.ID,
+			StreamKey:   snapshot.StreamKey,
+			PublisherID: snapshot.ID,
 			Protocol:    "rtsp",
 			RemoteAddr:  remoteAddr,
 		}
@@ -182,25 +191,37 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 		}
 
 		mediaInfo, ptMap := sdpToMediaInfoWithPT(sd)
-		session.MediaInfo = mediaInfo
-		stream, err := h.server.StreamHub().GetOrCreate(session.StreamKey)
+		stream, err := h.server.StreamHub().GetOrCreate(snapshot.StreamKey)
 		if err != nil {
 			return newResponse(503, "Service Unavailable", req)
 		}
-		session.Stream = stream
 
-		pub, err := NewRTSPPublisher(session.ID, mediaInfo, stream, ptMap)
+		pub, err := NewRTSPPublisher(snapshot.ID, mediaInfo, stream, ptMap)
 		if err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}
-		session.Publisher = pub
 
 		if err := stream.SetPublisher(pub); err != nil {
+			_ = pub.Close()
 			return newResponse(500, "Internal Server Error", req)
 		}
-		if session.MarkPublished() {
-			h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
+		if !session.SetPublisher(mediaInfo, stream, pub) {
+			stream.RemovePublisherIf(pub)
+			_ = pub.Close()
+			return newResponse(454, "Session Not Found", req)
 		}
+		if err := session.Transition(StateAnnounced); err != nil {
+			session.ClearPublisher(pub)
+			stream.RemovePublisherIf(pub)
+			_ = pub.Close()
+			if !session.CanHandleRequest() {
+				return newResponse(454, "Session Not Found", req)
+			}
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
+		session.startPublishLifecycle(func() {
+			h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
+		})
 
 		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
 		// SequenceHeader frame so the stream caches it for late-joining subscribers.
@@ -212,13 +233,20 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 				0, 0,
 				mediaInfo.VideoSequenceHeader,
 			)
-			stream.WriteFrame(seqFrame)
+			if stream.Publisher() == pub {
+				stream.WriteFrame(seqFrame)
+			}
 			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
 		}
 	}
 
-	if session != nil {
-		session.Transition(StateAnnounced)
+	if session != nil && h.server == nil {
+		if err := session.Transition(StateAnnounced); err != nil {
+			if !session.CanHandleRequest() {
+				return newResponse(454, "Session Not Found", req)
+			}
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 	}
 	return newResponse(200, "OK", req)
 }
@@ -226,6 +254,9 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 // HandleRecord starts recording (publishing) on the stream.
 func (h *Handler) HandleRecord(req *Request, session *RTSPSession) *Response {
 	if session != nil {
+		if !session.CanHandleRequest() {
+			return newResponse(454, "Session Not Found", req)
+		}
 		if err := session.Transition(StateRecording); err != nil {
 			return newResponse(455, "Method Not Valid in This State", req)
 		}
@@ -236,11 +267,17 @@ func (h *Handler) HandleRecord(req *Request, session *RTSPSession) *Response {
 // HandlePlay starts playback (subscribing) on the stream.
 func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr string) *Response {
 	if session != nil && h.server != nil {
-		// Emit subscribe event — auth hooks can reject.
-		if err := h.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-			StreamKey:  session.StreamKey,
-			Protocol:   "rtsp",
-			RemoteAddr: remoteAddr,
+		if !session.CanHandleRequest() {
+			return newResponse(454, "Session Not Found", req)
+		}
+		snapshot := session.Snapshot()
+		// Authorization runs before subscriber mutation. The asynchronous start
+		// event is emitted only after runSubscriberLoop installs the subscriber.
+		if err := h.server.GetEventBus().EmitSync(core.EventSubscribe, &core.EventContext{
+			StreamKey:    snapshot.StreamKey,
+			SubscriberID: snapshot.ID,
+			Protocol:     "rtsp",
+			RemoteAddr:   remoteAddr,
 		}); err != nil {
 			return newResponse(401, "Unauthorized", req)
 		}
@@ -258,7 +295,12 @@ func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr stri
 // HandlePause pauses playback. For live streams, returns 200 OK.
 func (h *Handler) HandlePause(req *Request, session *RTSPSession) *Response {
 	if session != nil {
-		session.Transition(StateReady)
+		if !session.CanHandleRequest() {
+			return newResponse(454, "Session Not Found", req)
+		}
+		if err := session.Transition(StateReady); err != nil {
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 	}
 	return newResponse(200, "OK", req)
 }
@@ -266,7 +308,12 @@ func (h *Handler) HandlePause(req *Request, session *RTSPSession) *Response {
 // HandleTeardown closes the session.
 func (h *Handler) HandleTeardown(req *Request, session *RTSPSession) *Response {
 	if session != nil {
-		session.Transition(StateClosed)
+		if !session.CanHandleRequest() {
+			return newResponse(454, "Session Not Found", req)
+		}
+		if err := session.Transition(StateClosed); err != nil {
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 	}
 	return newResponse(200, "OK", req)
 }

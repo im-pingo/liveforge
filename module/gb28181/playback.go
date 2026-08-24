@@ -17,6 +17,7 @@ import (
 type playbackClient struct {
 	sipService sipmod.SIPService
 	handler    *handler
+	sendInvite inviteSender
 }
 
 // playback starts a recording playback session from a device.
@@ -96,35 +97,35 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	}
 
 	// Send INVITE
-	invTx, err := pc.sipService.SendInvite(ctx, req)
+	invTx, err := sendInvite(ctx, pc.sipService, pc.sendInvite, req)
 	if err != nil {
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send playback INVITE: %w", err)
 	}
+	defer invTx.Close()
 
 	select {
 	case <-invTx.Done():
 	case <-time.After(10 * time.Second):
-		invTx.Close()
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("playback INVITE timeout")
 	}
 
 	resp := invTx.Response()
 	if resp == nil {
-		invTx.Close()
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("playback INVITE: no response")
 	}
 
 	if resp.StatusCode != 200 {
-		invTx.Close()
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("playback INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
 	}
 
 	if err := invTx.SendACK(ctx); err != nil {
-		slog.Warn("failed to send ACK for playback", "module", "gb28181", "error", err)
+		pc.handler.rollbackSession(session, !streamExisted)
+		terminateAcceptedDialog(invTx)
+		return nil, fmt.Errorf("send playback ACK: %w", err)
 	}
 
 	// Parse remote info from SDP answer
@@ -146,15 +147,15 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	pc.handler.sessions.Add(session)
 	go receiver.Run()
 
-	if session.MarkPublished() {
-		publishCtx.PublisherID = pub.ID()
-		publishCtx.Extra = map[string]any{
-			"gb28181_device_id":  device.DeviceID,
-			"gb28181_channel_id": channelID,
-			"gb28181_playback":   true,
-		}
-		pc.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+	publishCtx.PublisherID = pub.ID()
+	publishCtx.Extra = map[string]any{
+		"gb28181_device_id":  device.DeviceID,
+		"gb28181_channel_id": channelID,
+		"gb28181_playback":   true,
 	}
+	session.startPublishLifecycle(func() {
+		pc.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+	})
 
 	slog.Info("playback started", "module", "gb28181",
 		"device", device.DeviceID, "channel", channelID,

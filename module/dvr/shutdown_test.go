@@ -54,6 +54,63 @@ func TestModuleRejectsPublishAfterCloseStarts(t *testing.T) {
 	}
 }
 
+func TestEventBusStopCannotOvertakeBlockedDVRStart(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{DrainTimeout: time.Second},
+		DVR: config.DVRConfig{
+			StreamPattern: "*",
+			Path:          filepath.Join(t.TempDir(), "{stream_key}"),
+		},
+		Stream: config.StreamConfig{RingBufferSize: 16},
+	}
+	server := core.NewServer(cfg)
+	stream, err := server.StreamHub().GetOrCreate("live/blocked-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &lifecyclePublisher{id: "generation-1"}
+	if err := stream.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	m := NewModule()
+	m.server = server
+	m.storePolicy(cfg.DVR)
+	startEntered := make(chan struct{})
+	releaseStart := make(chan struct{})
+	bus := server.GetEventBus()
+	bus.Register(core.HookRegistration{
+		Event: core.EventPublish,
+		Mode:  core.HookAsync,
+		Handler: func(ctx *core.EventContext) error {
+			close(startEntered)
+			<-releaseStart
+			return m.onPublish(ctx)
+		},
+	})
+	bus.Register(core.HookRegistration{Event: core.EventPublishStop, Mode: core.HookAsync, Handler: m.onPublishStop})
+	ctx := &core.EventContext{StreamKey: "live/blocked-start", PublisherID: pub.ID()}
+	bus.EmitAsync(core.EventPublish, ctx)
+	<-startEntered
+	stream.RemovePublisherIf(pub)
+	bus.EmitAsync(core.EventPublishStop, ctx)
+	close(releaseStart)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		session := m.sessions[ctx.StreamKey]
+		m.mu.Unlock()
+		if session != nil && !session.IsLive() {
+			if err := m.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("DVR session remained live after publish-stop for the same generation")
+}
+
 func TestModuleCloseSignalsEverySessionBeforeWaitingAndTimesOut(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{DrainTimeout: 20 * time.Millisecond}}
 	m := NewModule()

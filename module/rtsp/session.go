@@ -65,6 +65,22 @@ type RTSPSession struct {
 	subscribed bool
 }
 
+type RTSPSessionSnapshot struct {
+	ID         string
+	StreamKey  string
+	RemoteAddr string
+	State      SessionState
+	Timeout    time.Duration
+	Publisher  *RTSPPublisher
+	Subscriber *RTSPSubscriber
+	MediaInfo  *avframe.MediaInfo
+	Tracks     []TrackSetup
+	Stream     *core.Stream
+	Closed     bool
+	Published  bool
+	Subscribed bool
+}
+
 // MarkPublished records that the async publish lifecycle started.
 func (s *RTSPSession) MarkPublished() bool {
 	s.mu.Lock()
@@ -73,6 +89,17 @@ func (s *RTSPSession) MarkPublished() bool {
 		return false
 	}
 	s.published = true
+	return true
+}
+
+func (s *RTSPSession) startPublishLifecycle(emit func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed || s.Publisher == nil {
+		return false
+	}
+	s.published = true
+	emit()
 	return true
 }
 
@@ -86,10 +113,104 @@ func (s *RTSPSession) MarkSubscribed() bool {
 	return true
 }
 
+func (s *RTSPSession) startSubscribeLifecycle(emit func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed || s.Subscriber == nil {
+		return false
+	}
+	s.subscribed = true
+	emit()
+	return true
+}
+
 func (s *RTSPSession) lifecycleStarted() (published, subscribed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.published, s.subscribed
+}
+
+func (s *RTSPSession) CanHandleRequest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && s.State != StateClosed
+}
+
+func (s *RTSPSession) SetRemoteAddr(remoteAddr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed {
+		return false
+	}
+	s.RemoteAddr = remoteAddr
+	return true
+}
+
+func (s *RTSPSession) SetDescription(mediaInfo *avframe.MediaInfo, stream *core.Stream) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed {
+		return false
+	}
+	s.MediaInfo = mediaInfo
+	s.Stream = stream
+	return true
+}
+
+func (s *RTSPSession) AddTrack(track TrackSetup) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed {
+		return false
+	}
+	if s.MediaInfo != nil {
+		index := len(s.Tracks)
+		if index == 0 && s.MediaInfo.HasVideo() {
+			track.Codec = s.MediaInfo.VideoCodec
+		} else if (index == 0 && !s.MediaInfo.HasVideo()) || index == 1 {
+			track.Codec = s.MediaInfo.AudioCodec
+		}
+	}
+	s.Tracks = append(s.Tracks, track)
+	return true
+}
+
+func (s *RTSPSession) SetPublisher(mediaInfo *avframe.MediaInfo, stream *core.Stream, publisher *RTSPPublisher) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed {
+		return false
+	}
+	s.MediaInfo = mediaInfo
+	s.Stream = stream
+	s.Publisher = publisher
+	return true
+}
+
+func (s *RTSPSession) ClearPublisher(expected *RTSPPublisher) {
+	s.mu.Lock()
+	if s.Publisher == expected {
+		s.Publisher = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *RTSPSession) SetSubscriber(subscriber *RTSPSubscriber) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed || s.Stream == nil {
+		return false
+	}
+	s.Subscriber = subscriber
+	return true
+}
+
+func (s *RTSPSession) ClearSubscriber(expected *RTSPSubscriber) {
+	s.mu.Lock()
+	if s.Subscriber == expected {
+		s.Subscriber = nil
+	}
+	s.mu.Unlock()
 }
 
 func NewRTSPSession(id, streamKey string) *RTSPSession {
@@ -106,6 +227,9 @@ func NewRTSPSession(id, streamKey string) *RTSPSession {
 func (s *RTSPSession) Transition(newState SessionState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("session closed")
+	}
 	allowed, ok := allowedTransitions[s.State]
 	if !ok {
 		return fmt.Errorf("no transitions from state %d", s.State)
@@ -133,6 +257,30 @@ func (s *RTSPSession) GetState() SessionState {
 	return s.State
 }
 
+func (s *RTSPSession) Snapshot() RTSPSessionSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+func (s *RTSPSession) snapshotLocked() RTSPSessionSnapshot {
+	return RTSPSessionSnapshot{
+		ID:         s.ID,
+		StreamKey:  s.StreamKey,
+		RemoteAddr: s.RemoteAddr,
+		State:      s.State,
+		Timeout:    s.Timeout,
+		Publisher:  s.Publisher,
+		Subscriber: s.Subscriber,
+		MediaInfo:  s.MediaInfo,
+		Tracks:     append([]TrackSetup(nil), s.Tracks...),
+		Stream:     s.Stream,
+		Closed:     s.closed,
+		Published:  s.published,
+		Subscribed: s.subscribed,
+	}
+}
+
 // IsExpired returns true if the session has exceeded its timeout.
 func (s *RTSPSession) IsExpired() bool {
 	s.mu.Lock()
@@ -143,36 +291,41 @@ func (s *RTSPSession) IsExpired() bool {
 // Close cleans up publisher, subscriber, and UDP transport resources. The
 // first caller owns module-level cleanup and receives true.
 func (s *RTSPSession) Close() bool {
+	_, closed := s.closeSnapshot()
+	return closed
+}
+
+func (s *RTSPSession) closeSnapshot() (RTSPSessionSnapshot, bool) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return false
+		return RTSPSessionSnapshot{}, false
 	}
 	s.closed = true
 	s.State = StateClosed
-	publisher := s.Publisher
-	subscriber := s.Subscriber
-	stream := s.Stream
-	tracks := append([]TrackSetup(nil), s.Tracks...)
+	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
 
-	if publisher != nil {
-		if err := publisher.Close(); err != nil {
-			slog.Error("error closing publisher", "module", "rtsp", "session", s.ID, "error", err)
+	if snapshot.Publisher != nil {
+		if err := snapshot.Publisher.Close(); err != nil {
+			slog.Error("error closing publisher", "module", "rtsp", "session", snapshot.ID, "error", err)
 		}
-		if stream != nil {
-			stream.RemovePublisherIf(publisher)
-		}
-	}
-	if subscriber != nil {
-		if err := subscriber.Close(); err != nil {
-			slog.Error("error closing subscriber", "module", "rtsp", "session", s.ID, "error", err)
+		if snapshot.Stream != nil {
+			snapshot.Stream.RemovePublisherIf(snapshot.Publisher)
 		}
 	}
-	for i := range tracks {
-		if tracks[i].UDP != nil {
-			tracks[i].UDP.Close()
+	if snapshot.Subscriber != nil {
+		if err := snapshot.Subscriber.Close(); err != nil {
+			slog.Error("error closing subscriber", "module", "rtsp", "session", snapshot.ID, "error", err)
 		}
 	}
-	return true
+	for i := range snapshot.Tracks {
+		if snapshot.Tracks[i].UDP != nil {
+			snapshot.Tracks[i].UDP.Close()
+		}
+		if snapshot.Tracks[i].Multicast != nil {
+			snapshot.Tracks[i].Multicast.Close()
+		}
+	}
+	return snapshot, true
 }

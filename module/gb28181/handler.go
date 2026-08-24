@@ -32,9 +32,20 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 		tx.Respond(resp)
 		return
 	}
-	if h.auth != nil && !h.auth.Verify(req) {
-		tx.Respond(h.auth.Challenge(req))
-		return
+	if h.auth != nil {
+		switch h.auth.Verify(req, from.Address.User) {
+		case sipmod.DigestValid:
+		case sipmod.DigestStale:
+			_ = tx.Respond(h.auth.Challenge(req, true))
+			return
+		default:
+			if req.GetHeader("Authorization") == nil {
+				_ = tx.Respond(h.auth.Challenge(req))
+			} else {
+				_ = tx.Respond(sip.NewResponseFromRequest(req, 403, "Forbidden", nil))
+			}
+			return
+		}
 	}
 
 	deviceID := from.Address.User
@@ -173,17 +184,22 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", []byte(sdpAnswer))
 	resp.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
-	tx.Respond(resp)
-
-	// Emit publish event
-	if session.MarkPublished() {
-		publishCtx.PublisherID = pub.ID()
-		publishCtx.Extra = map[string]any{
-			"gb28181_device_id":  deviceID,
-			"gb28181_channel_id": channelID,
-		}
-		h.bus.EmitAsync(core.EventPublish, publishCtx)
+	if err := tx.Respond(resp); err != nil {
+		slog.Warn("failed to send INVITE final response", "module", "gb28181", "error", err)
+		h.rollbackSession(session, !streamExisted)
+		return
 	}
+
+	// Marking and enqueueing are one session-owned transition so teardown
+	// cannot overtake a publish start that has not reached the EventBus yet.
+	publishCtx.PublisherID = pub.ID()
+	publishCtx.Extra = map[string]any{
+		"gb28181_device_id":  deviceID,
+		"gb28181_channel_id": channelID,
+	}
+	session.startPublishLifecycle(func() {
+		h.bus.EmitAsync(core.EventPublish, publishCtx)
+	})
 
 	slog.Info("invite accepted", "module", "gb28181",
 		"device", deviceID, "channel", channelID,
@@ -194,10 +210,11 @@ func (h *handler) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 	callID := getCallID(req)
 	session := h.sessions.Get(callID)
 	if session != nil {
+		snapshot := session.Snapshot()
 		h.closeSession(session, req.Source())
 
 		slog.Info("session closed by BYE", "module", "gb28181",
-			"session", callID, "stream", session.StreamKey)
+			"session", callID, "stream", snapshot.StreamKey)
 	}
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", nil)
@@ -205,35 +222,35 @@ func (h *handler) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 }
 
 func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
-	if session == nil || !session.Close() {
+	if session == nil {
 		return false
 	}
-	publisherID := ""
-	if session.Publisher != nil {
-		publisherID = session.Publisher.ID()
+	snapshot, closed := session.closeSnapshot()
+	if !closed {
+		return false
 	}
-	if session.Stream != nil && session.Publisher != nil {
-		session.Stream.RemovePublisherIf(session.Publisher)
+	if snapshot.LocalPort > 0 && h.ports != nil {
+		h.ports.Free(snapshot.LocalPort, snapshot.LocalPort+1)
 	}
-	if session.LocalPort > 0 {
-		h.ports.Free(session.LocalPort, session.LocalPort+1)
+	if snapshot.Stream != nil && snapshot.Publisher != nil {
+		snapshot.Stream.RemovePublisherIf(snapshot.Publisher)
 	}
-	if session.ID != "" {
-		h.sessions.Remove(session.ID)
+	if snapshot.ID != "" && h.sessions != nil {
+		h.sessions.RemoveIf(snapshot.ID, session)
 	}
-	if session.publishLifecycleStarted() {
-		if remoteAddr == "" && session.RemoteAddr != nil {
-			remoteAddr = session.RemoteAddr.String()
+	if snapshot.Published {
+		if remoteAddr == "" && snapshot.RemoteAddr != nil {
+			remoteAddr = snapshot.RemoteAddr.String()
 		}
 		h.bus.EmitAsync(core.EventPublishStop, &core.EventContext{
-			StreamKey:   session.StreamKey,
-			PublisherID: publisherID,
+			StreamKey:   snapshot.StreamKey,
+			PublisherID: snapshot.PublisherID,
 			Protocol:    "gb28181",
 			RemoteAddr:  remoteAddr,
 			Extra: map[string]any{
-				"gb28181_device_id":  session.DeviceID,
-				"gb28181_channel_id": session.ChannelID,
-				"gb28181_playback":   session.Playback,
+				"gb28181_device_id":  snapshot.DeviceID,
+				"gb28181_channel_id": snapshot.ChannelID,
+				"gb28181_playback":   snapshot.Playback,
 			},
 		})
 	}
@@ -241,17 +258,18 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 }
 
 func (h *handler) rollbackSession(session *MediaSession, removeStream bool) {
+	snapshot := session.Snapshot()
 	if !h.closeSession(session, "") {
 		return
 	}
-	if removeStream && session.Stream != nil && session.Stream.Publisher() == nil {
-		h.hub.Remove(session.StreamKey)
+	if removeStream && snapshot.Stream != nil && snapshot.Stream.Publisher() == nil {
+		h.hub.Remove(snapshot.StreamKey)
 	}
 }
 
 func (h *handler) closeSessionsByDevice(deviceID string) {
 	for _, session := range h.sessions.All() {
-		if session.DeviceID == deviceID {
+		if session.Snapshot().DeviceID == deviceID {
 			h.closeSession(session, "")
 		}
 	}

@@ -17,6 +17,7 @@ import (
 type inviteClient struct {
 	sipService sipmod.SIPService
 	handler    *handler
+	sendInvite inviteSender
 }
 
 // invite sends an INVITE to a device channel and sets up the media session.
@@ -101,37 +102,37 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	}
 
 	// Send INVITE
-	invTx, err := ic.sipService.SendInvite(ctx, req)
+	invTx, err := sendInvite(ctx, ic.sipService, ic.sendInvite, req)
 	if err != nil {
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send INVITE: %w", err)
 	}
+	defer invTx.Close()
 
 	// Wait for final response
 	select {
 	case <-invTx.Done():
 	case <-time.After(10 * time.Second):
-		invTx.Close()
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("INVITE timeout")
 	}
 
 	resp := invTx.Response()
 	if resp == nil {
-		invTx.Close()
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("INVITE: no response")
 	}
 
 	if resp.StatusCode != 200 {
-		invTx.Close()
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
 	}
 
 	// Send ACK
 	if err := invTx.SendACK(ctx); err != nil {
-		slog.Warn("failed to send ACK", "module", "gb28181", "error", err)
+		ic.handler.rollbackSession(session, !streamExisted)
+		terminateAcceptedDialog(invTx)
+		return nil, fmt.Errorf("send ACK: %w", err)
 	}
 
 	// Parse remote RTP port from SDP answer
@@ -154,14 +155,14 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	ic.handler.sessions.Add(session)
 	go receiver.Run()
 
-	if session.MarkPublished() {
-		publishCtx.PublisherID = pub.ID()
-		publishCtx.Extra = map[string]any{
-			"gb28181_device_id":  device.DeviceID,
-			"gb28181_channel_id": channelID,
-		}
-		ic.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+	publishCtx.PublisherID = pub.ID()
+	publishCtx.Extra = map[string]any{
+		"gb28181_device_id":  device.DeviceID,
+		"gb28181_channel_id": channelID,
 	}
+	session.startPublishLifecycle(func() {
+		ic.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+	})
 
 	slog.Info("outbound invite accepted", "module", "gb28181",
 		"device", device.DeviceID, "channel", channelID,
