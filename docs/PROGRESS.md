@@ -3,7 +3,7 @@
 > This document tracks the overall development progress of the project.
 > It must be updated after every development session to prevent context loss.
 >
-> **Last updated: 2026-03-31**
+> **Last updated: 2026-08-24**
 
 ---
 
@@ -26,7 +26,7 @@
 |--------|------|-------------|
 | AVFrame type system | `pkg/avframe/` | Codec types, frame types, MediaInfo |
 | H.264 SPS / AAC ASC parser | `pkg/codec/h264/`, `pkg/codec/aac/` | SPS width/height/profile, AudioSpecificConfig |
-| Config system | `config/` | YAML loading, env expansion, defaults |
+| Config system | `config/`, `config/runtime/` | YAML loading, env expansion, defaults, background file/HTTP/Consul/Redis refresh, immutable snapshots, failure fallback |
 | EventBus | `core/event_bus.go` | Sync/async hooks, priority ordering, auth rejection support |
 | Server lifecycle | `core/server.go` | Module registration, graceful shutdown, drain timeout |
 | StreamHub | `core/stream_hub.go` | Stream lookup/create/delete |
@@ -200,18 +200,20 @@
 
 ## Not Yet Implemented ❌
 
-### Entirely missing (config exists, no code)
-
-| Feature | Config key | Estimated effort |
-|---------|-----------|-----------------|
-| **SIP** | `sip:` | Large |
-
 ### Config stubs (field exists, not enforced)
 
 | Feature | Config key | Status |
 |---------|-----------|--------|
 | ~~**max_skip_count / max_skip_window**~~ | `rtmp/rtsp/srt.skip_tracker` | **Done** — per-protocol SkipTracker config, wired to SlowConsumerFilter in all subscribers |
-| **Simulcast** | `webrtc.simulcast` | Config has layer definitions, no layer selection logic in WebRTC module |
+| **Simulcast** | `stream.simulcast` | Deferred — config has layer definitions, no layer selection logic in WebRTC module |
+
+### Deferred or productization work
+
+| Feature | Status |
+|---------|--------|
+| SIP Gateway | Implemented in `module/sipgateway/`; productization and deployment hardening can continue separately |
+| Runtime config API/metrics status endpoint | Manager status exists; public control-plane exposure remains follow-up work |
+| AI media analysis and semantic search | Roadmap work; no runtime integration claimed |
 
 ---
 

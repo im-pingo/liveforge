@@ -110,6 +110,11 @@ func defaults() *Config {
 			Listen: ":9090",
 			Path:   "/metrics",
 		},
+		Runtime: RuntimeConfig{
+			Source:       "file",
+			PollInterval: 30 * time.Second,
+			LoadTimeout:  10 * time.Second,
+		},
 		DVR: DVRConfig{
 			Listen:          ":8070",
 			Path:            "./dvr/{stream_key}",
@@ -135,10 +140,23 @@ func defaults() *Config {
 	}
 }
 
+// Defaults returns a new configuration populated with LiveForge defaults.
+// Callers may modify the returned value without affecting any other config.
+func Defaults() *Config {
+	return defaults()
+}
+
 // normalize canonicalizes config values (e.g. container name aliases).
 func normalize(cfg *Config) {
 	switch strings.ToLower(cfg.HTTP.LLHLS.Container) {
 	case "mpegts", "mpeg-ts":
 		cfg.HTTP.LLHLS.Container = "ts"
+	}
+}
+
+// Normalize canonicalizes config values after unmarshalling.
+func Normalize(cfg *Config) {
+	if cfg != nil {
+		normalize(cfg)
 	}
 }

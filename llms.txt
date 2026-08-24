@@ -11,6 +11,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Contribution contract: [AGENTS.md](AGENTS.md)
 - REST and WebRTC HTTP contract: [docs/api/openapi.yaml](docs/api/openapi.yaml)
 - Configuration schema: [docs/config/config.schema.json](docs/config/config.schema.json)
+- Runtime configuration recipe: [docs/recipes/runtime-config-sources.md](docs/recipes/runtime-config-sources.md)
 - Runnable recipes: [docs/recipes/](docs/recipes/)
 
 ## Identity
@@ -36,3 +37,6 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Treat release binaries as the portable default profile; use a source or Docker `audiocodec` build for audio transcoding.
 - Do not expose the sample configuration publicly: it disables auth and TLS and uses `admin/admin`.
 - Do not use `latest` when a versioned image or commit SHA is available.
+- Runtime configuration uses a background poller with lock-free snapshot reads. Sources are selectable with `runtime.source`: `file`, `http`, `consul`, or `redis`.
+- Source failures keep the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes remain restart-required.
+- Simulcast layer selection is deferred and is not implemented.

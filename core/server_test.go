@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 )
 
 type mockModule struct {
@@ -26,7 +27,7 @@ type mockModule struct {
 	hooks  []HookRegistration
 }
 
-func (m *mockModule) Name() string             { return m.name }
+func (m *mockModule) Name() string              { return m.name }
 func (m *mockModule) Init(s *Server) error      { m.inited = true; return nil }
 func (m *mockModule) Hooks() []HookRegistration { return m.hooks }
 func (m *mockModule) Close() error              { m.closed = true; return nil }
@@ -73,7 +74,7 @@ type orderTrackModule struct {
 	order *[]string
 }
 
-func (m *orderTrackModule) Name() string             { return m.name }
+func (m *orderTrackModule) Name() string              { return m.name }
 func (m *orderTrackModule) Init(s *Server) error      { return nil }
 func (m *orderTrackModule) Hooks() []HookRegistration { return nil }
 func (m *orderTrackModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
@@ -402,5 +403,21 @@ func TestServerUpdateConfig(t *testing.T) {
 	}
 	if rm.reloadCfgName != "reloaded" {
 		t.Errorf("expected reloadable module to see 'reloaded', got %q", rm.reloadCfgName)
+	}
+}
+
+func TestServerUpdateConfigSnapshotRecordsPendingRestart(t *testing.T) {
+	s := NewServer(&config.Config{Server: config.ServerConfig{Name: "initial"}})
+	next := &config.Config{Server: config.ServerConfig{Name: "next"}}
+	s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{
+		Config:         next,
+		PendingRestart: []string{"rtmp.listen"},
+	})
+	if s.Config() != next {
+		t.Fatal("server did not publish config snapshot")
+	}
+	paths := s.PendingRestartChanges()
+	if len(paths) != 1 || paths[0] != "rtmp.listen" {
+		t.Fatalf("pending restart paths = %v", paths)
 	}
 }

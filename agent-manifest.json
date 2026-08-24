@@ -17,6 +17,18 @@
     "config_schema": "docs/config/config.schema.json",
     "recipes": "docs/recipes/"
   },
+  "configuration": {
+    "runtime_loader": {
+      "status": "available",
+      "sources": ["file", "http", "consul", "redis"],
+      "polling": "background periodic refresh",
+      "read_path": "atomic immutable snapshot; no file/network I/O or blocking waits",
+      "failure_behavior": "retain last valid snapshot and expose source status",
+      "reload": "SIGHUP schedules asynchronous refresh",
+      "restart_required": ["module enablement", "listener addresses", "TLS files/mode", "port ranges", "audio codec enablement"],
+      "docs": "docs/recipes/runtime-config-sources.md"
+    }
+  },
   "runtime": {
     "go": ">=1.26",
     "default_build": {
@@ -74,12 +86,14 @@
     "The Docker image is only available after the release workflow publishes it.",
     "A GHCR package may require public visibility or registry authentication before docker pull works.",
     "Audio transcoding is unavailable unless the audiocodec build tag and FFmpeg libraries are present.",
-    "WebRTC browser publishing and playback require correct ICE/TURN and secure-context configuration in real deployments."
+    "WebRTC browser publishing and playback require correct ICE/TURN and secure-context configuration in real deployments.",
+    "Simulcast layer selection remains deferred; stream.simulcast is configuration-only."
   ],
   "recipes": [
     "docs/recipes/source-build.md",
     "docs/recipes/docker-local.md",
     "docs/recipes/rtmp-to-hls.md",
-    "docs/recipes/auth-and-tls.md"
+    "docs/recipes/auth-and-tls.md",
+    "docs/recipes/runtime-config-sources.md"
   ]
 }

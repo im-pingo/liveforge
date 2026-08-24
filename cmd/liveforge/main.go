@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -10,26 +11,57 @@ import (
 	"syscall"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/logger"
 	"github.com/im-pingo/liveforge/module/api"
 	"github.com/im-pingo/liveforge/module/auth"
+	"github.com/im-pingo/liveforge/module/cluster"
+	dvrmod "github.com/im-pingo/liveforge/module/dvr"
+	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
 	"github.com/im-pingo/liveforge/module/httpstream"
+	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	"github.com/im-pingo/liveforge/module/notify"
 	"github.com/im-pingo/liveforge/module/record"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
-	"github.com/im-pingo/liveforge/module/cluster"
-	gb28181mod "github.com/im-pingo/liveforge/module/gb28181"
-	metricsmod "github.com/im-pingo/liveforge/module/metrics"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	sipgwmod "github.com/im-pingo/liveforge/module/sipgateway"
-	dvrmod "github.com/im-pingo/liveforge/module/dvr"
 	srtmod "github.com/im-pingo/liveforge/module/srt"
 	webrtcmod "github.com/im-pingo/liveforge/module/webrtc"
+	"github.com/im-pingo/liveforge/pkg/logger"
 )
 
 var version = "dev"
+
+func newRuntimeManager(cfg *config.Config, configPath string, server *core.Server) (*configruntime.Manager, error) {
+	source, err := configruntime.BuildSource(cfg.Runtime, configPath)
+	if err != nil {
+		return nil, err
+	}
+	var manager *configruntime.Manager
+	manager, err = configruntime.NewManager(configruntime.Options{
+		Source:       source,
+		PollInterval: cfg.Runtime.PollInterval,
+		LoadTimeout:  cfg.Runtime.LoadTimeout,
+		Initial:      cfg,
+		OnChange: func(changeSet configruntime.ChangeSet) error {
+			snapshot := manager.Snapshot()
+			if snapshot == nil || snapshot.Config == nil {
+				return nil
+			}
+			server.UpdateConfigSnapshot(snapshot)
+			logger.Init(snapshot.Config.Server.LogLevel)
+			slog.Info("config snapshot published", "version", snapshot.Version.Value, "changes", len(changeSet.Changes), "restart_required", len(changeSet.Restart))
+			return nil
+		},
+	})
+	if err != nil {
+		_ = source.Close()
+		return nil, err
+	}
+	server.SetConfigManager(manager)
+	return manager, nil
+}
 
 func main() {
 	configPath := flag.String("c", "configs/liveforge.yaml", "config file path")
@@ -49,6 +81,14 @@ func main() {
 	logger.Init(cfg.Server.LogLevel)
 
 	s := core.NewServer(cfg)
+	manager, err := newRuntimeManager(cfg, *configPath, s)
+	if err != nil {
+		log.Fatalf("failed to configure runtime config manager: %v", err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		_ = manager.Close()
+		log.Fatalf("failed to start runtime config manager: %v", err)
+	}
 
 	if cfg.AudioCodec.Enabled {
 		s.StreamHub().SetAudioCodecEnabled(true)
@@ -141,15 +181,10 @@ func main() {
 	for {
 		sig := <-sigCh
 		if sig == syscall.SIGHUP {
-			slog.Info("received SIGHUP, reloading config", "path", *configPath)
-			newCfg, err := config.Load(*configPath)
-			if err != nil {
-				slog.Error("config reload failed", "error", err)
-				continue
+			slog.Info("received SIGHUP, scheduling config refresh", "source", manager.Status().Source)
+			if err := manager.Refresh(context.Background()); err != nil {
+				slog.Error("config refresh scheduling failed", "error", err)
 			}
-			logger.Init(newCfg.Server.LogLevel)
-			s.UpdateConfig(newCfg)
-			slog.Info("config reloaded successfully")
 			continue
 		}
 		slog.Info("shutting down", "signal", sig.String())
@@ -157,5 +192,6 @@ func main() {
 	}
 
 	s.Shutdown()
+	_ = manager.Close()
 	slog.Info("server stopped")
 }

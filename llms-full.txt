@@ -59,6 +59,14 @@ The local Docker Compose workflow builds the image from source by default. A rel
 The complete HTTP contract is [docs/api/openapi.yaml](docs/api/openapi.yaml). API responses use a JSON envelope with `code`, `message`, and optional `data` for the management API.
 When `api.auth.bearer_token` is configured, management and GB28181 endpoints require a bearer token or authenticated console session; `GET /api/v1/server/health` remains public.
 
+## Runtime configuration
+
+The bootstrap YAML file is read once during startup. The `config/runtime` manager then polls the selected source (`file`, `http`, `consul`, or `redis`) in a background goroutine. It parses, normalizes, validates, hashes, and atomically publishes immutable snapshots. Runtime reads are one atomic pointer load and do not perform file/network I/O, wait on channels, or contend with refresh locks.
+
+`SIGHUP` only schedules an asynchronous refresh. A source timeout, backend failure, malformed document, or validation error keeps the last valid snapshot active and updates manager status. Hot policy changes can be delivered to reloadable modules; listener addresses, module enablement, TLS files/mode, port ranges, and audio codec enablement are classified as `restart_required`. Simulcast configuration remains deferred because no layer selection runtime exists.
+
+Runnable source examples are in [docs/recipes/runtime-config-sources.md](docs/recipes/runtime-config-sources.md). Credentials must come from environment expansion or an external secret store and are never logged.
+
 ## Verification
 
 The documentation contract is checked with:

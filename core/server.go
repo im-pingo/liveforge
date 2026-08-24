@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 )
 
 // Version is set at build time via -ldflags.
@@ -33,8 +34,11 @@ type Server struct {
 	connCount atomic.Int64
 	done      chan struct{}
 
-	apiMu       sync.RWMutex
-	apiHandlers map[string]http.Handler
+	apiMu          sync.RWMutex
+	apiHandlers    map[string]http.Handler
+	pendingMu      sync.RWMutex
+	pendingRestart []string
+	configManager  *configruntime.Manager
 
 	autoCertOnce sync.Once
 	autoCert     *tls.Certificate // auto-generated self-signed cert (nil if file-based TLS configured)
@@ -63,7 +67,24 @@ func (s *Server) Config() *config.Config {
 // Reloadable modules. Errors from individual modules are logged but do not
 // stop the reload process.
 func (s *Server) UpdateConfig(cfg *config.Config) {
+	s.updateConfig(cfg, nil)
+}
+
+// UpdateConfigSnapshot publishes a validated runtime snapshot and records
+// changes that require a process restart. Existing module reload callbacks are
+// still invoked for the hot portion of the snapshot.
+func (s *Server) UpdateConfigSnapshot(snapshot *configruntime.ConfigSnapshot) {
+	if snapshot == nil || snapshot.Config == nil {
+		return
+	}
+	s.updateConfig(snapshot.Config, snapshot.PendingRestart)
+}
+
+func (s *Server) updateConfig(cfg *config.Config, pending []string) {
 	s.configPtr.Store(cfg)
+	s.pendingMu.Lock()
+	s.pendingRestart = append([]string(nil), pending...)
+	s.pendingMu.Unlock()
 	for _, m := range s.modules {
 		if r, ok := m.(Reloadable); ok {
 			if err := r.OnReload(s); err != nil {
@@ -72,6 +93,20 @@ func (s *Server) UpdateConfig(cfg *config.Config) {
 		}
 	}
 }
+
+// PendingRestartChanges returns configuration paths that are active in the
+// published snapshot but cannot be applied to listeners/modules in place.
+func (s *Server) PendingRestartChanges() []string {
+	s.pendingMu.RLock()
+	defer s.pendingMu.RUnlock()
+	return append([]string(nil), s.pendingRestart...)
+}
+
+// SetConfigManager attaches the runtime manager for status/API integrations.
+func (s *Server) SetConfigManager(manager *configruntime.Manager) { s.configManager = manager }
+
+// ConfigManager returns the attached runtime manager, if any.
+func (s *Server) ConfigManager() *configruntime.Manager { return s.configManager }
 
 // GetEventBus returns the server's event bus.
 func (s *Server) GetEventBus() *EventBus {
@@ -369,12 +404,12 @@ func (s *Server) emitAliveEvents() {
 
 		stats := stream.Stats()
 		extra := map[string]any{
-			"bytes_in":      stats.BytesIn,
-			"video_frames":  stats.VideoFrames,
-			"audio_frames":  stats.AudioFrames,
-			"bitrate_kbps":  stats.BitrateKbps,
-			"fps":           stats.FPS,
-			"uptime_sec":    int64(stats.Uptime.Seconds()),
+			"bytes_in":     stats.BytesIn,
+			"video_frames": stats.VideoFrames,
+			"audio_frames": stats.AudioFrames,
+			"bitrate_kbps": stats.BitrateKbps,
+			"fps":          stats.FPS,
+			"uptime_sec":   int64(stats.Uptime.Seconds()),
 		}
 
 		ctx := &EventContext{StreamKey: key, Extra: extra}

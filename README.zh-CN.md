@@ -301,8 +301,13 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 | `limits` | 全局连接数、流数、订阅者数限制 |
 | `tls` | TLS 证书和密钥配置 |
 | `stream` | GOP 缓存、环形缓冲区、空闲超时、慢消费者、Simulcast 设置 |
+| `runtime` | 后台配置刷新源：文件、HTTP、Consul 或 Redis |
 
 支持环境变量展开：`${API_TOKEN}`、`${AUTH_JWT_SECRET}`。
+
+### 运行时配置刷新
+
+进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照；`SIGHUP` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。文件、HTTP、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 ## 测试工具
 
@@ -443,7 +448,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 - [x] IP 级限流
 - [x] GB28181（SIP + 实时拉流 + 录像回放 + 云台 + 报警）
 - [x] 音频转码（AAC、Opus、G.711、MP3）
-- [ ] SIP 网关
+- [x] SIP 网关
 - [ ] Simulcast 分层选择
 - [ ] 管理后台增强
 

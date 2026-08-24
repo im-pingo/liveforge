@@ -301,8 +301,13 @@ Key sections:
 | `limits` | Global connection, stream, and subscriber limits |
 | `tls` | TLS certificate and key for HTTPS/secure protocols |
 | `stream` | GOP cache, ring buffer, idle timeout, slow consumer, simulcast settings |
+| `runtime` | Background configuration refresh source: file, HTTP, Consul, or Redis |
 
 Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}`.
+
+### Runtime configuration refresh
+
+The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, Consul, and Redis examples.
 
 ## Testing Tools
 
@@ -443,7 +448,7 @@ For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](
 - [x] Rate limiting
 - [x] GB28181 (SIP + live + playback + PTZ + alarm)
 - [x] Audio transcoding (AAC, Opus, G.711, MP3)
-- [ ] SIP gateway
+- [x] SIP gateway
 - [ ] Simulcast layer selection
 - [ ] Admin UI enhancements
 
