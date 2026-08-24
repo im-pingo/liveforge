@@ -40,35 +40,80 @@ func BuildPayload(eventName string, ctx *core.EventContext) *NotifyPayload {
 
 // HTTPSender delivers webhook notifications to configured endpoints.
 type HTTPSender struct {
-	mu        sync.RWMutex
-	endpoints []config.NotifyEndpointConfig
-	client    *http.Client
-	queue     chan *NotifyPayload
-	done      chan struct{}
+	mu         sync.RWMutex
+	endpoints  []config.NotifyEndpointConfig
+	client     *http.Client
+	queue      chan *NotifyPayload
+	done       chan struct{}
+	workerDone chan struct{}
+	stateMu    sync.Mutex
+	started    bool
+	stopping   bool
 }
 
 // NewHTTPSender creates a new HTTP webhook sender.
 func NewHTTPSender(endpoints []config.NotifyEndpointConfig) *HTTPSender {
 	return &HTTPSender{
-		endpoints: endpoints,
-		client:    &http.Client{Timeout: 5 * time.Second},
-		queue:     make(chan *NotifyPayload, 1024),
-		done:      make(chan struct{}),
+		endpoints:  endpoints,
+		client:     &http.Client{Timeout: 5 * time.Second},
+		queue:      make(chan *NotifyPayload, 1024),
+		done:       make(chan struct{}),
+		workerDone: make(chan struct{}),
 	}
 }
 
 // Start begins the worker goroutine that drains the queue.
 func (s *HTTPSender) Start() {
+	s.stateMu.Lock()
+	if s.started || s.stopping {
+		s.stateMu.Unlock()
+		return
+	}
+	s.started = true
+	s.stateMu.Unlock()
 	go s.worker()
 }
 
 // Stop signals the worker to exit and waits for drain.
 func (s *HTTPSender) Stop() {
-	close(s.done)
+	s.StopWithTimeout(0)
+}
+
+// StopWithTimeout signals the worker, drains events admitted before the stop,
+// and waits up to timeout. A non-positive timeout waits without a deadline.
+func (s *HTTPSender) StopWithTimeout(timeout time.Duration) bool {
+	s.stateMu.Lock()
+	if !s.stopping {
+		s.stopping = true
+		close(s.done)
+		if !s.started {
+			close(s.workerDone)
+		}
+	}
+	workerDone := s.workerDone
+	s.stateMu.Unlock()
+
+	if timeout <= 0 {
+		<-workerDone
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-workerDone:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // Send enqueues a payload for delivery. Non-blocking; drops if queue is full.
 func (s *HTTPSender) Send(p *NotifyPayload) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.stopping {
+		return
+	}
 	select {
 	case s.queue <- p:
 	default:
@@ -77,6 +122,7 @@ func (s *HTTPSender) Send(p *NotifyPayload) {
 }
 
 func (s *HTTPSender) worker() {
+	defer close(s.workerDone)
 	for {
 		select {
 		case p := <-s.queue:

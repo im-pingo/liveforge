@@ -198,7 +198,9 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 		if err := stream.SetPublisher(pub); err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}
-		h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
+		if session.MarkPublished() {
+			h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
+		}
 
 		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
 		// SequenceHeader frame so the stream caches it for late-joining subscribers.

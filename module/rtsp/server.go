@@ -78,6 +78,15 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 
 func (m *Module) Close() error {
 	close(m.done)
+	m.mu.Lock()
+	sessions := make([]*RTSPSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		m.cleanupSession(session)
+	}
 	if m.listener != nil {
 		return m.listener.Close()
 	}
@@ -93,16 +102,15 @@ func (m *Module) sessionReaper() {
 		case <-ticker.C:
 			m.mu.Lock()
 			var expired []*RTSPSession
-			for id, s := range m.sessions {
+			for _, s := range m.sessions {
 				if s.IsExpired() {
 					expired = append(expired, s)
-					delete(m.sessions, id)
 				}
 			}
 			m.mu.Unlock()
 			for _, s := range expired {
 				slog.Debug("reaping expired session", "module", "rtsp", "session", s.ID, "stream", s.StreamKey)
-				s.Close()
+				m.cleanupSession(s)
 			}
 		case <-m.done:
 			return
@@ -139,32 +147,13 @@ func (m *Module) handleConn(conn net.Conn) {
 
 	defer func() {
 		if session != nil {
-			// Emit stop events before cleanup.
-			if session.Publisher != nil {
-				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:   session.StreamKey,
-					PublisherID: session.Publisher.ID(),
-					Protocol:    "rtsp",
-					RemoteAddr:  conn.RemoteAddr().String(),
-				})
-			}
-			if session.Subscriber != nil {
-				m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
-					StreamKey:  session.StreamKey,
-					Protocol:   "rtsp",
-					RemoteAddr: conn.RemoteAddr().String(),
-				})
-			}
-			session.Close()
-			m.mu.Lock()
-			delete(m.sessions, session.ID)
-			m.mu.Unlock()
+			m.cleanupSession(session)
 		}
 	}()
 
 	for {
 		// Check if interleaved data ($ prefix) when in Recording state
-		if session != nil && session.State == StateRecording {
+		if session != nil && session.GetState() == StateRecording {
 			b, err := reader.Peek(1)
 			if err != nil {
 				return
@@ -174,16 +163,7 @@ func (m *Module) handleConn(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				// Odd channels carry RTCP — skip for now.
-				if ch%2 != 0 {
-					continue
-				}
-				if session.Publisher != nil {
-					pkt := &pionrtp.Packet{}
-					if err := pkt.Unmarshal(data); err == nil {
-						session.Publisher.FeedRTP(pkt)
-					}
-				}
+				m.processInterleaved(session, ch, data)
 				continue
 			}
 		}
@@ -199,6 +179,7 @@ func (m *Module) handleConn(conn net.Conn) {
 			sessionID := generateSessionID()
 			streamKey := extractStreamKey(req.URL)
 			session = NewRTSPSession(sessionID, streamKey)
+			session.RemoteAddr = conn.RemoteAddr().String()
 			m.mu.Lock()
 			m.sessions[sessionID] = session
 			m.mu.Unlock()
@@ -253,11 +234,7 @@ func (m *Module) handleConn(conn net.Conn) {
 			if err := WriteResponse(conn, resp); err != nil {
 				return
 			}
-			session.Close()
-			m.mu.Lock()
-			delete(m.sessions, session.ID)
-			m.mu.Unlock()
-			session = nil
+			m.cleanupSession(session)
 			return
 		case "GET_PARAMETER":
 			resp = m.handler.HandleGetParameter(req)
@@ -317,6 +294,7 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		sub.Close()
 		return
 	}
+	session.MarkSubscribed()
 
 	defer func() {
 		sub.Close()
@@ -378,6 +356,7 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 		if err != nil {
 			return
 		}
+		session.Touch()
 		if session.Publisher != nil {
 			pkt := &pionrtp.Packet{}
 			if err := pkt.Unmarshal(buf[:n]); err == nil {
@@ -385,6 +364,46 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 			}
 		}
 	}
+}
+
+func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []byte) {
+	if session == nil {
+		return
+	}
+	session.Touch()
+	if channel%2 != 0 || session.Publisher == nil {
+		return
+	}
+	pkt := &pionrtp.Packet{}
+	if err := pkt.Unmarshal(data); err == nil {
+		session.Publisher.FeedRTP(pkt)
+	}
+}
+
+func (m *Module) cleanupSession(session *RTSPSession) bool {
+	if session == nil || !session.Close() {
+		return false
+	}
+	m.mu.Lock()
+	delete(m.sessions, session.ID)
+	m.mu.Unlock()
+	published, subscribed := session.lifecycleStarted()
+	if published && session.Publisher != nil {
+		m.server.GetEventBus().EmitAsync(core.EventPublishStop, &core.EventContext{
+			StreamKey:   session.StreamKey,
+			PublisherID: session.Publisher.ID(),
+			Protocol:    "rtsp",
+			RemoteAddr:  session.RemoteAddr,
+		})
+	}
+	if subscribed {
+		m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &core.EventContext{
+			StreamKey:  session.StreamKey,
+			Protocol:   "rtsp",
+			RemoteAddr: session.RemoteAddr,
+		})
+	}
+	return true
 }
 
 // interleavedChannelToMediaType maps an interleaved channel to a media type

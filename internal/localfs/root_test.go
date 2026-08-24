@@ -100,3 +100,73 @@ func TestRecoveryMoveRetainsCrashPartialWhenHardLinksDisappear(t *testing.T) {
 		t.Fatalf("crash partial data = %q, err=%v", data, err)
 	}
 }
+
+func TestWriteSiblingAtomicClassifiesOnlyUnsupportedLinkErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		stage       string
+		errno       error
+		unsupported bool
+	}{
+		{name: "write no space", stage: "write", errno: unix.ENOSPC},
+		{name: "sync io", stage: "sync", errno: unix.EIO},
+		{name: "close io", stage: "close", errno: unix.EIO},
+		{name: "link permission", stage: "link", errno: unix.EPERM},
+		{name: "link access", stage: "link", errno: unix.EACCES},
+		{name: "link count", stage: "link", errno: unix.EMLINK},
+		{name: "link no space", stage: "link", errno: unix.ENOSPC},
+		{name: "link io", stage: "link", errno: unix.EIO},
+		{name: "link operation unsupported", stage: "link", errno: unix.EOPNOTSUPP, unsupported: true},
+		{name: "link syscall unavailable", stage: "link", errno: unix.ENOSYS, unsupported: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := t.TempDir()
+			root, err := OpenRoot(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+
+			originalWrite := writeFile
+			originalSync := syncFile
+			originalClose := closeFile
+			originalLink := linkAt
+			t.Cleanup(func() {
+				writeFile = originalWrite
+				syncFile = originalSync
+				closeFile = originalClose
+				linkAt = originalLink
+			})
+			switch test.stage {
+			case "write":
+				writeFile = func(*os.File, []byte) (int, error) { return 0, test.errno }
+			case "sync":
+				syncFile = func(*os.File) error { return test.errno }
+			case "close":
+				closeFile = func(file *os.File) error {
+					_ = file.Close()
+					return test.errno
+				}
+			case "link":
+				linkAt = func(int, string, int, string, int) error { return test.errno }
+			}
+
+			err = root.WriteFileAtomic("target.json", []byte("payload"), 0o644)
+			if !errors.Is(err, test.errno) {
+				t.Fatalf("error = %v, want preserved cause %v", err, test.errno)
+			}
+			if got := errors.Is(err, ErrHardLinksUnsupported); got != test.unsupported {
+				t.Fatalf("ErrHardLinksUnsupported = %v, want %v: %v", got, test.unsupported, err)
+			}
+			entries, readErr := os.ReadDir(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("failed atomic write left artifacts: %v", entries)
+			}
+		})
+	}
+}

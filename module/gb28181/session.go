@@ -9,19 +9,23 @@ import (
 
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
-	mu        sync.Mutex
-	ID        string           // SIP Call-ID
-	DeviceID  string
-	ChannelID string
-	StreamKey string
-	Direction SessionDirection
-	LocalPort int
+	mu         sync.Mutex
+	ID         string // SIP Call-ID
+	DeviceID   string
+	ChannelID  string
+	StreamKey  string
+	Direction  SessionDirection
+	LocalPort  int
 	RemoteAddr *net.UDPAddr
 	Transport  string // "udp" or "tcp"
 	State      SessionState
 	Publisher  *Publisher
+	Receiver   *RTPReceiver
 	Stream     *core.Stream
 	SSRC       uint32
+	Playback   bool
+	closed     bool
+	published  bool
 }
 
 // SetState transitions the session to a new state.
@@ -38,14 +42,41 @@ func (s *MediaSession) GetState() SessionState {
 	return s.State
 }
 
-// Close terminates the media session.
-func (s *MediaSession) Close() {
+// MarkPublished records that the publish lifecycle start event was emitted.
+// It returns false when termination already owns the session.
+func (s *MediaSession) MarkPublished() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.State = SessionStateClosed
+	if s.closed {
+		return false
+	}
+	s.published = true
+	return true
+}
+
+func (s *MediaSession) publishLifecycleStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.published
+}
+
+// Close terminates the media session. The first caller owns the remaining
+// module cleanup and receives true; later callers are no-ops.
+func (s *MediaSession) Close() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.closed = true
+	if s.Receiver != nil {
+		s.Receiver.Close()
+	}
 	if s.Publisher != nil {
 		s.Publisher.Close()
 	}
+	s.State = SessionStateClosed
+	return true
 }
 
 // SessionManager manages active media sessions.

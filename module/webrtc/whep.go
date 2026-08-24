@@ -24,6 +24,11 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
 		return
 	}
+	subscribeCtx := eventContextFromRequest(r, streamKey)
+	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
+		rejectUnauthorized(w)
+		return
+	}
 
 	if !m.server.AcquireConn() {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
@@ -306,11 +311,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
 	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, targetAudioCodec, bwe)
 
-	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "webrtc",
-		RemoteAddr: r.RemoteAddr,
-	})
+	m.server.GetEventBus().EmitAsync(core.EventSubscribe, subscribeCtx)
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/webrtc/session/"+sessionID)

@@ -25,6 +25,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
 		return
 	}
+	publishCtx := eventContextFromRequest(r, streamKey)
+	if err := m.server.GetEventBus().EmitSync(core.EventPublish, publishCtx); err != nil {
+		rejectUnauthorized(w)
+		return
+	}
 
 	if !m.server.AcquireConn() {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
@@ -104,12 +109,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		publisherSet = true
-		m.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
-			StreamKey:   streamKey,
-			PublisherID: pub.ID(),
-			Protocol:    "webrtc",
-			RemoteAddr:  r.RemoteAddr,
-		})
+		lifecycleCtx := *publishCtx
+		lifecycleCtx.PublisherID = pub.ID()
+		m.server.GetEventBus().EmitAsync(core.EventPublish, &lifecycleCtx)
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {

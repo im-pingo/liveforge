@@ -24,7 +24,18 @@ var (
 	ErrHardLinksUnsupported = errors.New("local storage requires hard-link support")
 )
 
-var linkAt = unix.Linkat
+var (
+	linkAt    = unix.Linkat
+	writeFile = func(file *os.File, data []byte) (int, error) {
+		return file.Write(data)
+	}
+	syncFile = func(file *os.File) error {
+		return file.Sync()
+	}
+	closeFile = func(file *os.File) error {
+		return file.Close()
+	}
+)
 
 type Root struct {
 	path string
@@ -637,19 +648,31 @@ func writeSiblingAtomic(dirFD int, final string, data []byte, perm os.FileMode) 
 		return mapPathError(err)
 	}
 	file := os.NewFile(uintptr(fd), temp)
-	if _, err = file.Write(data); err == nil {
-		err = file.Sync()
+	_, writeErr := writeFile(file, data)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = syncFile(file)
 	}
-	closeErr := file.Close()
-	if err == nil {
-		err = closeErr
+	closeErr := closeFile(file)
+	var operationErr error
+	switch {
+	case writeErr != nil:
+		operationErr = writeErr
+	case syncErr != nil:
+		operationErr = syncErr
+	case closeErr != nil:
+		operationErr = closeErr
 	}
-	if err == nil {
-		err = linkAt(dirFD, temp, dirFD, final, 0)
+	var linkErr error
+	if operationErr == nil {
+		linkErr = linkAt(dirFD, temp, dirFD, final, 0)
 	}
 	removeErr := unix.Unlinkat(dirFD, temp, 0)
-	if err != nil {
-		return mapLinkError(err)
+	if operationErr != nil {
+		return errors.Join(operationErr, removeErr)
+	}
+	if linkErr != nil {
+		return errors.Join(mapLinkError(linkErr), removeErr)
 	}
 	return removeErr
 }
@@ -691,8 +714,10 @@ func mapLinkError(err error) error {
 	switch {
 	case errors.Is(err, unix.ENOENT), errors.Is(err, unix.EEXIST), errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
 		return mapPathError(err)
+	case errors.Is(err, unix.EOPNOTSUPP), errors.Is(err, unix.ENOSYS):
+		return fmt.Errorf("%w: %w", ErrHardLinksUnsupported, err)
 	default:
-		return fmt.Errorf("%w: %v", ErrHardLinksUnsupported, err)
+		return err
 	}
 }
 

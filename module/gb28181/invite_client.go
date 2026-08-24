@@ -20,7 +20,13 @@ type inviteClient struct {
 }
 
 // invite sends an INVITE to a device channel and sets up the media session.
-func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID string) (*MediaSession, error) {
+func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID string, params map[string]string) (*MediaSession, error) {
+	streamKey := fmt.Sprintf("%s/%s", ic.handler.prefix, channelID)
+	publishCtx := outboundPublishContext(device, streamKey, params)
+	if err := authorizePublish(ic.handler.bus, publishCtx); err != nil {
+		return nil, err
+	}
+
 	// Allocate local RTP port pair
 	rtpPort, _, err := ic.handler.ports.AllocatePair()
 	if err != nil {
@@ -28,8 +34,6 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	}
 
 	localIP := getLocalIP()
-	streamKey := fmt.Sprintf("%s/%s", ic.handler.prefix, channelID)
-
 	// Build SDP offer
 	sdpOffer := fmt.Sprintf(
 		"v=0\r\no=- 0 0 IN IP4 %s\r\ns=LiveForge\r\nc=IN IP4 %s\r\nt=0 0\r\nm=video %d RTP/AVP 96\r\na=recvonly\r\na=rtpmap:96 PS/90000\r\n",
@@ -59,19 +63,26 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	req.AppendHeader(sip.NewHeader("Subject", fmt.Sprintf("%s:0,%s:0", channelID, serverID)))
 	req.SetBody([]byte(sdpOffer))
 
-	// Create stream and publisher
-	stream, _ := ic.handler.hub.GetOrCreate(streamKey)
+	_, streamExisted := ic.handler.hub.Find(streamKey)
+	stream, err := ic.handler.hub.GetOrCreate(streamKey)
+	if err != nil {
+		ic.handler.ports.Free(rtpPort, rtpPort+1)
+		return nil, fmt.Errorf("create stream: %w", err)
+	}
 	pub := NewPublisher(
-		fmt.Sprintf("gb28181-%s-%s", channelID, generateTag()),
+		newPublisherID("live", channelID),
 		func(frame *avframe.AVFrame) {
 			stream.WriteFrame(frame)
 		},
 	)
-
-	// Set publisher on stream so subscribers can connect
-	if err := stream.SetPublisher(pub); err != nil {
+	receiver, err := newRTPReceiver(rtpPort, pub)
+	if err != nil {
+		_ = pub.Close()
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
-		return nil, fmt.Errorf("set publisher: %w", err)
+		if !streamExisted {
+			ic.handler.hub.Remove(streamKey)
+		}
+		return nil, fmt.Errorf("create RTP receiver: %w", err)
 	}
 
 	// Create media session
@@ -85,13 +96,14 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 		Transport: device.Transport,
 		State:     SessionStateInviting,
 		Publisher: pub,
+		Receiver:  receiver,
 		Stream:    stream,
 	}
 
 	// Send INVITE
 	invTx, err := ic.sipService.SendInvite(ctx, req)
 	if err != nil {
-		ic.handler.ports.Free(rtpPort, rtpPort+1)
+		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send INVITE: %w", err)
 	}
 
@@ -99,21 +111,21 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	select {
 	case <-invTx.Done():
 	case <-time.After(10 * time.Second):
-		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
+		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("INVITE timeout")
 	}
 
 	resp := invTx.Response()
 	if resp == nil {
-		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
+		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("INVITE: no response")
 	}
 
 	if resp.StatusCode != 200 {
-		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		invTx.Close()
+		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
 	}
 
@@ -134,29 +146,22 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 		session.ID = callID.Value()
 	}
 
+	if err := stream.SetPublisher(pub); err != nil {
+		ic.handler.rollbackSession(session, !streamExisted)
+		return nil, fmt.Errorf("set publisher: %w", err)
+	}
 	session.SetState(SessionStateStreaming)
 	ic.handler.sessions.Add(session)
-
-	// Start RTP receiver
-	receiver, err := NewRTPReceiver(rtpPort, pub)
-	if err != nil {
-		slog.Error("rtp receiver creation failed", "module", "gb28181", "error", err)
-		ic.handler.ports.Free(rtpPort, rtpPort+1)
-		return nil, fmt.Errorf("create RTP receiver: %w", err)
-	}
 	go receiver.Run()
 
-	// Emit publish event
-	ic.handler.bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:   streamKey,
-		PublisherID: pub.ID(),
-		Protocol:    "gb28181",
-		RemoteAddr:  device.RemoteAddr,
-		Extra: map[string]any{
+	if session.MarkPublished() {
+		publishCtx.PublisherID = pub.ID()
+		publishCtx.Extra = map[string]any{
 			"gb28181_device_id":  device.DeviceID,
 			"gb28181_channel_id": channelID,
-		},
-	})
+		}
+		ic.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+	}
 
 	slog.Info("outbound invite accepted", "module", "gb28181",
 		"device", device.DeviceID, "channel", channelID,

@@ -21,6 +21,8 @@ type RTPReceiver struct {
 	mu        sync.Mutex
 }
 
+var newRTPReceiver = NewRTPReceiver
+
 // NewRTPReceiver creates a new RTP receiver bound to a UDP port.
 func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
 	addr := &net.UDPAddr{Port: port}

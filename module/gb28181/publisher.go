@@ -1,13 +1,21 @@
 package gb28181
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
 	pionrtp "github.com/pion/rtp/v2"
 )
+
+var publisherSequence atomic.Uint64
+
+func newPublisherID(kind, channelID string) string {
+	return fmt.Sprintf("gb28181-%s-%s-%d", kind, channelID, publisherSequence.Add(1))
+}
 
 // Publisher receives RTP/PS packets and writes AVFrames to a stream.
 type Publisher struct {

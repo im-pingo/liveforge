@@ -3,6 +3,7 @@ package gb28181
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -123,7 +124,7 @@ func (m *Module) apiDeleteDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.sessions.CloseByDevice(deviceID)
+	m.handler.closeSessionsByDevice(deviceID)
 	m.registry.Unregister(deviceID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
 }
@@ -216,8 +217,13 @@ func (m *Module) apiPlay(w http.ResponseWriter, r *http.Request, channelID strin
 		return
 	}
 
-	session, err := m.invite.invite(r.Context(), device, channelID)
+	session, err := m.invite.invite(r.Context(), device, channelID, httpEventParams(r))
 	if err != nil {
+		if errors.Is(err, errPublishUnauthorized) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -235,14 +241,7 @@ func (m *Module) apiStopPlay(w http.ResponseWriter, r *http.Request, channelID s
 		return
 	}
 
-	for _, session := range sessions {
-		session.Close()
-		m.sessions.Remove(session.ID)
-		if session.Stream != nil {
-			session.Stream.RemovePublisherIf(session.Publisher)
-		}
-		m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
-	}
+	m.handler.closeSessionsByChannel(channelID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
@@ -278,8 +277,13 @@ func (m *Module) apiPlayback(w http.ResponseWriter, r *http.Request, channelID s
 		return
 	}
 
-	session, err := m.playback.playback(r.Context(), device, channelID, startTime, endTime)
+	session, err := m.playback.playback(r.Context(), device, channelID, startTime, endTime, httpEventParams(r))
 	if err != nil {
+		if errors.Is(err, errPublishUnauthorized) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -422,12 +426,7 @@ func (m *Module) apiDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.Close()
-	m.sessions.Remove(sessionID)
-	if session.Stream != nil {
-		session.Stream.RemovePublisherIf(session.Publisher)
-	}
-	m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
+	m.handler.closeSession(session, r.RemoteAddr)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
