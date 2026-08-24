@@ -1,9 +1,11 @@
 package record
 
 import (
+	"context"
 	"log/slog"
 	"path"
 	"sync"
+	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -12,9 +14,17 @@ import (
 // Module implements stream recording to FLV files.
 type Module struct {
 	server   *core.Server
-	cfg      config.RecordConfig
+	runtime  atomic.Pointer[recordRuntime]
 	mu       sync.Mutex
 	sessions map[string]*RecordSession // streamKey -> session
+	history  []RecordingSessionStatus
+	metrics  RecordingMetrics
+}
+
+type recordRuntime struct {
+	cfg      config.RecordConfig
+	storage  Storage
+	template string
 }
 
 // NewModule creates a new record module.
@@ -30,9 +40,37 @@ func (m *Module) Name() string { return "record" }
 // Init reads recording config.
 func (m *Module) Init(s *core.Server) error {
 	m.server = s
-	m.cfg = s.Config().Record
-	slog.Info("enabled", "module", "record", "pattern", m.cfg.StreamPattern, "format", m.cfg.Format, "path", m.cfg.Path)
+	cfg := s.Config().Record
+	storage, template, err := newStorageForConfig(cfg)
+	if err != nil {
+		return err
+	}
+	m.runtime.Store(&recordRuntime{cfg: cfg, storage: storage, template: template})
+	slog.Info("enabled", "module", "record", "pattern", cfg.StreamPattern, "format", cfg.Format, "path", cfg.Path)
 	return nil
+}
+
+// OnReload atomically applies recording policy for new sessions. Active
+// sessions retain their creation policy so their current file finishes safely.
+func (m *Module) OnReload(s *core.Server) error {
+	cfg := s.Config().Record
+	if current := m.runtime.Load(); current != nil {
+		cfg.Enabled = current.cfg.Enabled
+	}
+	storage, template, err := newStorageForConfig(cfg)
+	if err != nil {
+		return err
+	}
+	m.runtime.Store(&recordRuntime{cfg: cfg, storage: storage, template: template})
+	return nil
+}
+
+// Policy returns a copy of the active recording policy.
+func (m *Module) Policy() config.RecordConfig {
+	if runtime := m.runtime.Load(); runtime != nil {
+		return runtime.cfg
+	}
+	return config.RecordConfig{}
 }
 
 // Hooks returns async hooks for publish start/stop events.
@@ -65,13 +103,19 @@ func (m *Module) Close() error {
 
 	for _, s := range sessions {
 		s.Stop()
+		s.Wait()
 	}
 	slog.Info("stopped", "module", "record")
 	return nil
 }
 
 func (m *Module) onPublish(ctx *core.EventContext) error {
-	if !matchPattern(m.cfg.StreamPattern, ctx.StreamKey) {
+	runtime := m.runtime.Load()
+	if runtime == nil {
+		return nil
+	}
+	cfg := runtime.cfg
+	if !matchPattern(cfg.StreamPattern, ctx.StreamKey) {
 		return nil
 	}
 
@@ -87,16 +131,83 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 		return nil // already recording
 	}
 
-	session, err := NewRecordSession(ctx.StreamKey, stream, m.cfg)
+	session, err := newRecordSession(ctx.StreamKey, stream, cfg, runtime.storage, runtime.template, &m.metrics)
 	if err != nil {
 		slog.Error("failed to start session", "module", "record", "stream", ctx.StreamKey, "error", err)
 		return nil
 	}
 
 	m.sessions[ctx.StreamKey] = session
+	session.onComplete = func(status RecordingSessionStatus) {
+		m.mu.Lock()
+		if m.sessions[ctx.StreamKey] == session {
+			delete(m.sessions, ctx.StreamKey)
+		}
+		m.history = append(m.history, status)
+		if len(m.history) > 100 {
+			m.history = append([]RecordingSessionStatus(nil), m.history[len(m.history)-100:]...)
+		}
+		m.mu.Unlock()
+	}
 	go session.Run()
 	slog.Info("started recording", "module", "record", "stream", ctx.StreamKey)
 	return nil
+}
+
+// ListRecordings returns completed and preserved failed local recordings.
+func (m *Module) ListRecordings(ctx context.Context) ([]RecordingInfo, error) {
+	runtime := m.runtime.Load()
+	if runtime == nil || runtime.storage == nil {
+		return nil, nil
+	}
+	return runtime.storage.List(ctx)
+}
+
+// Recording returns metadata for one safe storage-relative recording ID.
+func (m *Module) Recording(ctx context.Context, id string) (RecordingInfo, error) {
+	runtime := m.runtime.Load()
+	if runtime == nil || runtime.storage == nil {
+		return RecordingInfo{}, ErrRecordingNotFound
+	}
+	return runtime.storage.Stat(ctx, id)
+}
+
+// OpenRecording opens one finalized recording for download.
+func (m *Module) OpenRecording(ctx context.Context, id string) (ReadSeekCloser, RecordingInfo, error) {
+	runtime := m.runtime.Load()
+	if runtime == nil || runtime.storage == nil {
+		return nil, RecordingInfo{}, ErrRecordingNotFound
+	}
+	return runtime.storage.Open(ctx, id)
+}
+
+// DeleteRecording deletes one finalized recording and its metadata.
+func (m *Module) DeleteRecording(ctx context.Context, id string) error {
+	runtime := m.runtime.Load()
+	if runtime == nil || runtime.storage == nil {
+		return ErrRecordingNotFound
+	}
+	err := runtime.storage.Delete(ctx, id)
+	if err == nil {
+		m.metrics.deleted.Add(1)
+	}
+	return err
+}
+
+// RecordingStatus exposes bounded session history, storage health and metrics.
+func (m *Module) RecordingStatus(ctx context.Context) RecordingStatusSnapshot {
+	m.mu.Lock()
+	sessions := make([]RecordingSessionStatus, 0, len(m.sessions)+len(m.history))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session.Status())
+	}
+	sessions = append(sessions, m.history...)
+	m.mu.Unlock()
+	status := RecordingStatusSnapshot{Sessions: sessions, Metrics: m.metrics.Snapshot()}
+	if runtime := m.runtime.Load(); runtime != nil && runtime.storage != nil {
+		status.Storage = runtime.storage.Health(ctx)
+	}
+	return status
 }
 
 func (m *Module) onPublishStop(ctx *core.EventContext) error {
@@ -109,6 +220,7 @@ func (m *Module) onPublishStop(ctx *core.EventContext) error {
 
 	if ok {
 		session.Stop()
+		session.Wait()
 		slog.Info("stopped recording", "module", "record", "stream", ctx.StreamKey)
 	}
 	return nil
@@ -123,3 +235,5 @@ func matchPattern(pattern, key string) bool {
 	matched, _ := path.Match(pattern, key)
 	return matched
 }
+
+var _ core.Reloadable = (*Module)(nil)

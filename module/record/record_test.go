@@ -200,7 +200,7 @@ func TestFileWriterMaxSizeSegmentation(t *testing.T) {
 	}
 	defer w.Close()
 
-	firstFile := w.FilePath()
+	firstFile := strings.TrimSuffix(w.FilePath(), ".partial")
 
 	// Write frames until we exceed 1KB
 	for i := 0; i < 20; i++ {
@@ -214,7 +214,8 @@ func TestFileWriterMaxSizeSegmentation(t *testing.T) {
 	}
 
 	// File should have rotated — current path should differ from first
-	if w.FilePath() == firstFile {
+	currentPartial := w.FilePath()
+	if strings.TrimSuffix(currentPartial, ".partial") == firstFile {
 		t.Error("expected file rotation due to max_size, but file path didn't change")
 	}
 
@@ -222,8 +223,8 @@ func TestFileWriterMaxSizeSegmentation(t *testing.T) {
 	if _, err := os.Stat(firstFile); err != nil {
 		t.Errorf("first file should exist: %v", err)
 	}
-	if _, err := os.Stat(w.FilePath()); err != nil {
-		t.Errorf("rotated file should exist: %v", err)
+	if _, err := os.Stat(currentPartial); err != nil {
+		t.Errorf("current rotated partial file should exist: %v", err)
 	}
 }
 

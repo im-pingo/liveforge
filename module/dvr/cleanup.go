@@ -7,26 +7,42 @@ import (
 )
 
 func (m *Module) runCleanup(ctx context.Context) {
-	interval := m.cfg.CleanupInterval
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(m.cleanupInterval())
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-m.reloadCh:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(m.cleanupInterval())
+		case <-timer.C:
 			m.cleanExpiredSegments()
+			timer.Reset(m.cleanupInterval())
 		}
 	}
 }
 
+func (m *Module) cleanupInterval() time.Duration {
+	interval := m.Policy().CleanupInterval
+	if interval <= 0 {
+		return 30 * time.Second
+	}
+	return interval
+}
+
 func (m *Module) cleanExpiredSegments() {
-	cutoff := time.Now().Add(-m.cfg.Window)
+	window := m.Policy().Window
+	if window <= 0 {
+		window = 2 * time.Hour
+	}
+	cutoff := time.Now().Add(-window)
 
 	m.mu.Lock()
 	keys := make([]string, 0, len(m.sessions))
@@ -44,9 +60,12 @@ func (m *Module) cleanExpiredSegments() {
 			continue
 		}
 
-		removed := session.Index().CleanBefore(cutoff)
-		if len(removed) > 0 {
-			slog.Debug("dvr cleanup", "stream", key, "removed", len(removed))
+		result := session.Index().CleanBeforeWithResult(cutoff)
+		m.metrics.cleanupDeleted.Add(result.Deleted)
+		m.metrics.cleanupBytes.Add(result.Bytes)
+		m.metrics.cleanupFailures.Add(result.Failures)
+		if result.Deleted > 0 || result.Failures > 0 {
+			slog.Debug("dvr cleanup", "stream", key, "removed", result.Deleted, "failures", result.Failures)
 		}
 
 		if !session.IsLive() && session.Index().Len() == 0 {

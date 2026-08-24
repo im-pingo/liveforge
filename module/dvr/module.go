@@ -5,7 +5,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -14,19 +17,22 @@ import (
 // Module implements core.Module for DVR/time-shift playback.
 type Module struct {
 	server   *core.Server
-	cfg      config.DVRConfig
+	policy   atomic.Pointer[config.DVRConfig]
 	listener net.Listener
 	httpSrv  *http.Server
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	mu       sync.Mutex
 	sessions map[string]*Session
+	reloadCh chan struct{}
+	metrics  DVRMetrics
 }
 
 // NewModule creates a new DVR module.
 func NewModule() *Module {
 	return &Module{
 		sessions: make(map[string]*Session),
+		reloadCh: make(chan struct{}, 1),
 	}
 }
 
@@ -36,9 +42,10 @@ func (m *Module) Name() string { return "dvr" }
 // Init starts the DVR HTTP server and cleanup goroutine.
 func (m *Module) Init(s *core.Server) error {
 	m.server = s
-	m.cfg = s.Config().DVR
+	cfg := s.Config().DVR
+	m.storePolicy(cfg)
 
-	ln, err := s.MakeListenerAutoTLS(m.cfg.Listen, nil)
+	ln, err := s.MakeListenerAutoTLS(cfg.Listen, nil)
 	if err != nil {
 		return err
 	}
@@ -66,9 +73,36 @@ func (m *Module) Init(s *core.Server) error {
 	}()
 
 	slog.Info("listening", "module", "dvr", "addr", ln.Addr(),
-		"window", m.cfg.Window, "segment", m.cfg.SegmentDuration)
+		"window", cfg.Window, "segment", cfg.SegmentDuration)
 
 	return nil
+}
+
+// OnReload applies DVR retention and segmentation policy to new work. Active
+// segments finish with their creation policy; cleanup observes the new window.
+func (m *Module) OnReload(s *core.Server) error {
+	cfg := s.Config().DVR
+	current := m.Policy()
+	cfg.Enabled = current.Enabled
+	cfg.Listen = current.Listen
+	m.storePolicy(cfg)
+	select {
+	case m.reloadCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (m *Module) storePolicy(cfg config.DVRConfig) {
+	owned := cfg
+	m.policy.Store(&owned)
+}
+
+func (m *Module) Policy() config.DVRConfig {
+	if cfg := m.policy.Load(); cfg != nil {
+		return *cfg
+	}
+	return config.DVRConfig{}
 }
 
 // Hooks returns async hooks for publish start/stop events.
@@ -107,6 +141,7 @@ func (m *Module) Close() error {
 
 	for _, s := range sessions {
 		s.Stop()
+		s.Wait()
 	}
 
 	m.wg.Wait()
@@ -115,7 +150,8 @@ func (m *Module) Close() error {
 }
 
 func (m *Module) onPublish(ctx *core.EventContext) error {
-	if !matchPattern(m.cfg.StreamPattern, ctx.StreamKey) {
+	cfg := m.Policy()
+	if !matchPattern(cfg.StreamPattern, ctx.StreamKey) {
 		return nil
 	}
 
@@ -141,7 +177,7 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 		}
 	}
 
-	session, err := NewSession(ctx.StreamKey, stream, m.cfg, existingIndex, startSeq)
+	session, err := newSession(ctx.StreamKey, stream, cfg, existingIndex, startSeq, &m.metrics)
 	if err != nil {
 		slog.Error("failed to start dvr session", "module", "dvr", "stream", ctx.StreamKey, "error", err)
 		return nil
@@ -160,6 +196,7 @@ func (m *Module) onPublishStop(ctx *core.EventContext) error {
 
 	if session != nil {
 		session.Stop()
+		session.Wait()
 		slog.Info("stream stopped, segments retained", "module", "dvr", "stream", ctx.StreamKey)
 	}
 	return nil
@@ -171,6 +208,7 @@ func (m *Module) SessionStatus() any {
 	result := make([]DVRSessionStatus, 0, len(m.sessions))
 	for key, session := range m.sessions {
 		segs := session.Index().Segments()
+		sessionState := session.Status()
 		var totalDur float64
 		for _, seg := range segs {
 			totalDur += seg.Duration
@@ -180,16 +218,75 @@ func (m *Module) SessionStatus() any {
 			Live:      session.IsLive(),
 			Segments:  len(segs),
 			Duration:  totalDur,
+			Bytes:     segmentBytes(segs),
+			StartedAt: sessionState.StartedAt,
+			LastError: sessionState.LastError,
 		})
+		populateSegmentRange(&result[len(result)-1], segs)
 	}
 	m.mu.Unlock()
+	sort.Slice(result, func(i, j int) bool { return result[i].StreamKey < result[j].StreamKey })
 	return result
+}
+
+func (m *Module) DVRStatus() DVRStatusSnapshot {
+	sessions, _ := m.SessionStatus().([]DVRSessionStatus)
+	return DVRStatusSnapshot{Sessions: sessions, Storage: dvrStorageHealth(m.Policy().Path), Metrics: m.metrics.Snapshot()}
+}
+
+func (m *Module) DVRSession(streamKey string) (DVRSessionStatus, bool) {
+	m.mu.Lock()
+	session := m.sessions[streamKey]
+	m.mu.Unlock()
+	if session == nil {
+		return DVRSessionStatus{}, false
+	}
+	segments := session.Index().Segments()
+	var duration float64
+	for _, segment := range segments {
+		duration += segment.Duration
+	}
+	status := DVRSessionStatus{
+		StreamKey: streamKey,
+		Live:      session.IsLive(),
+		Segments:  len(segments),
+		Duration:  duration,
+		Bytes:     segmentBytes(segments),
+		StartedAt: session.Status().StartedAt,
+		LastError: session.Status().LastError,
+	}
+	populateSegmentRange(&status, segments)
+	return status, true
+}
+
+func populateSegmentRange(status *DVRSessionStatus, segments []Segment) {
+	if len(segments) == 0 {
+		return
+	}
+	status.OldestSegment = segments[0].StartTime
+	last := segments[len(segments)-1]
+	status.NewestSegment = last.StartTime.Add(time.Duration(last.Duration * float64(time.Second)))
+}
+
+func segmentBytes(segments []Segment) int64 {
+	var total int64
+	for _, segment := range segments {
+		total += segment.Size
+	}
+	return total
 }
 
 // DVRSessionStatus represents a single DVR session's status.
 type DVRSessionStatus struct {
-	StreamKey string  `json:"stream_key"`
-	Live      bool    `json:"live"`
-	Segments  int     `json:"segments"`
-	Duration  float64 `json:"duration_sec"`
+	StreamKey     string    `json:"stream_key"`
+	Live          bool      `json:"live"`
+	Segments      int       `json:"segments"`
+	Duration      float64   `json:"duration_sec"`
+	Bytes         int64     `json:"bytes"`
+	StartedAt     time.Time `json:"started_at"`
+	OldestSegment time.Time `json:"oldest_segment,omitempty"`
+	NewestSegment time.Time `json:"newest_segment,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
 }
+
+var _ core.Reloadable = (*Module)(nil)

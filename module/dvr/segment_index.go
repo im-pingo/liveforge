@@ -24,6 +24,13 @@ type SegmentIndex struct {
 	segments []Segment
 }
 
+type CleanupResult struct {
+	Segments []Segment
+	Deleted  uint64
+	Bytes    uint64
+	Failures uint64
+}
+
 // NewSegmentIndex creates a new segment index.
 func NewSegmentIndex() *SegmentIndex {
 	return &SegmentIndex{}
@@ -61,26 +68,36 @@ func (idx *SegmentIndex) SegmentBySeqNum(seqNum int) (Segment, bool) {
 
 // CleanBefore removes segments with StartTime before cutoff and deletes their disk files.
 func (idx *SegmentIndex) CleanBefore(cutoff time.Time) []Segment {
+	return idx.CleanBeforeWithResult(cutoff).Segments
+}
+
+// CleanBeforeWithResult deletes expired files and only removes successfully
+// deleted entries from the index. Failed deletions remain visible for retry.
+func (idx *SegmentIndex) CleanBeforeWithResult(cutoff time.Time) CleanupResult {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	splitAt := 0
-	for splitAt < len(idx.segments) && idx.segments[splitAt].StartTime.Before(cutoff) {
-		splitAt++
+	result := CleanupResult{}
+	remaining := make([]Segment, 0, len(idx.segments))
+	for _, seg := range idx.segments {
+		if !seg.StartTime.Before(cutoff) {
+			remaining = append(remaining, seg)
+			continue
+		}
+		err := os.Remove(seg.DiskPath)
+		if err != nil && !os.IsNotExist(err) {
+			result.Failures++
+			remaining = append(remaining, seg)
+			continue
+		}
+		result.Segments = append(result.Segments, seg)
+		result.Deleted++
+		if seg.Size > 0 {
+			result.Bytes += uint64(seg.Size)
+		}
 	}
-	if splitAt == 0 {
-		return nil
-	}
-
-	removed := make([]Segment, splitAt)
-	copy(removed, idx.segments[:splitAt])
-	idx.segments = idx.segments[splitAt:]
-
-	for _, seg := range removed {
-		os.Remove(seg.DiskPath)
-	}
-
-	return removed
+	idx.segments = remaining
+	return result
 }
 
 // Len returns the number of segments.

@@ -41,18 +41,18 @@ type segmentInfo struct {
 
 func newTSFrameWriter(streamKey string, cfg config.RecordConfig) *tsFrameWriter {
 	return &tsFrameWriter{
-		cfg:       cfg,
-		streamKey: streamKey,
-		lastDTS:   -1,
+		cfg:        cfg,
+		streamKey:  streamKey,
+		lastDTS:    -1,
 		segStartTS: -1,
 	}
 }
 
-func (w *tsFrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *tsFrameWriter) writeHeader(f mediaFile, frame *avframe.AVFrame) error {
 	return nil
 }
 
-func (w *tsFrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
+func (w *tsFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
 		if frame.MediaType.IsVideo() {
 			w.videoSeq = append([]byte(nil), frame.Payload...)
@@ -110,7 +110,7 @@ func (w *tsFrameWriter) openSegment() error {
 	filename := fmt.Sprintf("segment_%05d.ts", w.segmentIdx)
 	path := filepath.Join(w.segmentDir, filename)
 
-	sf, err := os.Create(path)
+	sf, err := os.Create(path + ".partial")
 	if err != nil {
 		return fmt.Errorf("create segment %s: %w", path, err)
 	}
@@ -126,7 +126,23 @@ func (w *tsFrameWriter) closeSegment() error {
 		return nil
 	}
 
-	w.segmentFile.Close()
+	partialPath := w.segmentFile.Name()
+	if err := w.segmentFile.Sync(); err != nil {
+		_ = w.segmentFile.Close()
+		_ = os.Rename(partialPath, w.segmentPath+".failed")
+		w.segmentFile = nil
+		return fmt.Errorf("sync TS segment: %w", err)
+	}
+	if err := w.segmentFile.Close(); err != nil {
+		_ = os.Rename(partialPath, w.segmentPath+".failed")
+		w.segmentFile = nil
+		return fmt.Errorf("close TS segment: %w", err)
+	}
+	if err := os.Rename(partialPath, w.segmentPath); err != nil {
+		_ = os.Rename(partialPath, w.segmentPath+".failed")
+		w.segmentFile = nil
+		return fmt.Errorf("finalize TS segment: %w", err)
+	}
 
 	dur := float64(0)
 	if w.segStartTS >= 0 && w.lastDTS > w.segStartTS {
@@ -144,11 +160,21 @@ func (w *tsFrameWriter) closeSegment() error {
 }
 
 // flush writes the final segment and playlist.
-func (w *tsFrameWriter) flush(f *os.File) error {
+func (w *tsFrameWriter) flush(f mediaFile) error {
 	if err := w.closeSegment(); err != nil {
 		return err
 	}
 	return w.writePlaylist()
+}
+
+func (w *tsFrameWriter) abort() {
+	if w.segmentFile == nil {
+		return
+	}
+	partialPath := w.segmentFile.Name()
+	_ = w.segmentFile.Close()
+	_ = os.Rename(partialPath, w.segmentPath+".failed")
+	w.segmentFile = nil
 }
 
 func (w *tsFrameWriter) writePlaylist() error {
@@ -180,5 +206,13 @@ func (w *tsFrameWriter) writePlaylist() error {
 
 	b.WriteString("#EXT-X-ENDLIST\n")
 
-	return os.WriteFile(playlistPath, []byte(b.String()), 0644)
+	tempPath := playlistPath + ".partial"
+	if err := os.WriteFile(tempPath, []byte(b.String()), 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, playlistPath); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
 }
