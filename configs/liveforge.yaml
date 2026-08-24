@@ -170,9 +170,6 @@ auth:
     mode: "none"
     token:
       secret: "${AUTH_JWT_SECRET}"
-  api:
-    bearer_token: "${API_TOKEN}"
-
 notify:
   http:
     enabled: false
@@ -225,7 +222,7 @@ record:
   enabled: false
   stream_pattern: "live/*"
   format: flv
-  path: "/data/record/{date}/{stream}_{time}.{ext}"
+  path: "/data/record/{date}/{stream_key}_{time}.{ext}"
   segment:
     mode: duration
     duration: 30m

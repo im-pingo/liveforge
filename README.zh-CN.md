@@ -31,14 +31,14 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 | 📡 | **GB28181 视频监控** | 完整 SIP 信令栈，设备注册、实时拉流、录像回放、云台控制、报警处理 —— 附带内置设备模拟器 |
 | 🌐 | **多协议集群** | 支持 RTMP / SRT / RTSP / RTP / GB28181 的 Origin-Edge 级联，支持 HTTP 调度回调动态拓扑 |
 | ⚡ | **LL-HLS 低延迟** | fMP4 部分分片、阻塞式播放列表刷新（`_HLS_msn`/`_HLS_part`）、增量播放列表 |
-| 🖥️ | **Web 控制台** | 内置实时仪表盘，流统计、多协议预览、浏览器 WHIP 推流 |
+| 🖥️ | **Web 控制台** | 权限感知的流、配置、集群、SIP、存储、安全和审计运维视图，以及浏览器预览/推流 |
 | 🛡️ | **生产级可靠性** | 慢消费者保护（EWMA 丢帧）、GCC 拥塞控制、IP 级限流、Prometheus 监控 |
 
 ## 特性
 
 ### 协议支持
 
-- **多协议推流** — RTMP、RTSP（TCP + UDP）、SRT、WebRTC WHIP、GB28181，兼容 OBS、FFmpeg、GStreamer 及浏览器
+- **多协议推流** — RTMP、RTSP（TCP + UDP，兼容音视频轨分别 SETUP）、SRT、WebRTC WHIP、GB28181，兼容 OBS、FFmpeg、GStreamer 及浏览器
 - **多协议拉流** — RTMP、RTSP、SRT、WebRTC WHEP、HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket
 - **SRT** — 安全可靠传输，AES 加密，低延迟 MPEG-TS 传输（纯 Go 实现 `datarhei/gosrt`）
 - **WebRTC** — WHIP/WHEP、ICE Lite、GCC 发送端带宽估计、浏览器推流
@@ -119,10 +119,10 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 
 ### 管理与运维
 
-- **Web 控制台** — 实时仪表盘：流列表、编解码、码率、帧率、GOP 缓存、多协议预览、浏览器 WHIP 推流
-- **REST API** — 流列表/详情/删除、踢出推流者、服务器状态、健康检查（启用 API bearer auth 时健康检查仍公开）
-- **鉴权** — JWT Token 验证和 HTTP 回调鉴权，推流/拉流分别控制
-- **录制** — FLV 文件录制，按时长分段，路径模板
+- **Web 控制台** — 流、运行时配置、集群、SIP 呼叫、录制/DVR 存储、安全、审计七个权限感知视图，以及多协议预览和 WHIP 推流
+- **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
+- **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制，分段、存储健康、下载/Range/删除管理和时移状态
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
 - **限流** — IP 级令牌桶，防止连接洪泛
@@ -173,7 +173,7 @@ graph LR
         API[REST API + Web 控制台]
         AUTH[鉴权模块]
         NOTIFY[Webhook + WS 通知]
-        RECORD[FLV 录制]
+        RECORD[FLV / FMP4 / MP4 / TS / HLS 录制]
         METRICS[Prometheus 监控]
     end
 ```
@@ -274,11 +274,15 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 - GOP 缓存可视化
 - 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、WebRTC）
 - WebRTC 推流（摄像头/麦克风 + 发送端统计）
-- 流管理（踢出推流者、删除流）
+- 权限感知的踢流、删流和运行时配置刷新
+- 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
+- 录制详情/下载/删除、DVR 会话/存储状态、安全状态和有界审计事件
 
 ## 配置
 
 LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.yaml`](configs/liveforge.yaml)。
+
+仓库内示例配置仅用于本地开发：它关闭 TLS 和鉴权，并使用 `admin/admin`。禁止不做修改就暴露到公网。
 
 主要配置段：
 
@@ -294,20 +298,21 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 | `audio_codec` | 启用/禁用按需音频转码 |
 | `api` | REST API 和 Web 控制台（默认 `:8090`） |
 | `auth` | JWT 和 HTTP 回调鉴权 |
-| `record` | FLV 录制及分段 |
+| `record` | FLV/FMP4/MP4/TS/HLS 录制、分段和完成回调 |
+| `dvr` | 时移分片、保留窗口、存储和会话状态 |
 | `notify` | HTTP Webhook 和 WebSocket 通知 |
 | `cluster` | 多协议转推和回源拉流，支持调度器 |
 | `metrics` | Prometheus 监控端点（默认 `:9090`） |
 | `limits` | 全局连接数、流数、订阅者数限制 |
 | `tls` | TLS 证书和密钥配置 |
-| `stream` | GOP 缓存、环形缓冲区、空闲超时、慢消费者、Simulcast 设置 |
+| `stream` | GOP 缓存、环形缓冲区、空闲超时、慢消费者、反馈；Simulcast 字段仍延期 |
 | `runtime` | 后台配置刷新源：文件、HTTP、Consul 或 Redis |
 
 支持环境变量展开：`${API_TOKEN}`、`${AUTH_JWT_SECRET}`。
 
 ### 运行时配置刷新
 
-进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照；`SIGHUP` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。文件、HTTP、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
+进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照；`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
 
@@ -356,10 +361,12 @@ liveforge/
 │   ├── httpstream/      # HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket
 │   ├── metrics/         # Prometheus 监控端点
 │   ├── notify/          # HTTP Webhook + WebSocket 通知
-│   ├── record/          # FLV 流录制
+│   ├── dvr/             # 时移分片存储和播放
+│   ├── record/          # FLV/FMP4/MP4/TS/HLS 录制和存储管理
 │   ├── rtmp/            # RTMP 协议（握手、分块、AMF0）
 │   ├── rtsp/            # RTSP 协议（TCP + UDP 传输）
 │   ├── sip/             # SIP 传输层（GB28181 依赖）
+│   ├── sipgateway/      # SIP 媒体网关和呼叫控制
 │   ├── srt/             # SRT 协议（基于 datarhei/gosrt）
 │   └── webrtc/          # WebRTC WHIP/WHEP + GCC（基于 pion/webrtc）
 ├── pkg/
@@ -410,7 +417,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 | Web 控制台 | 内置 | 无 | 有 | 有 |
 | 浏览器推流 | 支持（WHIP） | 不支持 | 不支持 | 不支持 |
 | 鉴权（JWT + 回调） | 支持 | 支持 | 支持 | 插件 |
-| 录制 | 支持（FLV） | 支持 | 支持 | 插件 |
+| 录制 | 支持（FLV/FMP4/MP4/TS/HLS） | 支持 | 支持 | 插件 |
 | Webhook 通知 | 支持（HMAC 签名） | 不支持 | 支持 | 不支持 |
 | ICE Lite | 支持 | 不支持 | 不支持 | 不支持 |
 | Prometheus 监控 | 支持 | 不支持 | 支持 | 插件 |
@@ -424,6 +431,8 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 > **📖 完整文档请访问 [GitHub Wiki](../../wiki/Home-zh)。**
 
 面向 AI Agent 的入口是 [`AGENTS.md`](AGENTS.md)、[`agent-manifest.json`](agent-manifest.json) 和 [`llms.txt`](llms.txt)。API 契约、配置 schema 和可执行场景文档位于 `docs/`，并由 CI 校验同步状态。
+
+运维 recipes：[运行时配置](docs/recipes/runtime-config-sources.md)、[鉴权/TLS](docs/recipes/auth-and-tls.md)、[录制/DVR](docs/recipes/recording-dvr-management.md)、[SIP Gateway](docs/recipes/sipgateway-management.md)、[集群 relay](docs/recipes/cluster-relay-operations.md)、[RBAC/审计](docs/recipes/rbac-audit.md) 和[发布验证](docs/recipes/release-verification.md)。
 
 | 主题 | 中文 | EN |
 |------|------|-----|
@@ -451,8 +460,9 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 - [x] GB28181（SIP + 实时拉流 + 录像回放 + 云台 + 报警）
 - [x] 音频转码（AAC、Opus、G.711、MP3）
 - [x] SIP 网关
+- [x] 权限感知的七视图管理控制台
+- [x] 录制/DVR、集群、安全和审计管理 API
 - [ ] Simulcast 分层选择
-- [ ] 管理后台增强
 
 ## 许可证
 

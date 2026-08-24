@@ -1,273 +1,134 @@
-# Liveforge Project Progress
+# LiveForge Project Progress
 
-> This document tracks the overall development progress of the project.
-> It must be updated after every development session to prevent context loss.
+> Source-aligned project status. Update this file only after implementation and a passing verification path exist.
 >
-> **Last updated: 2026-08-24**
+> Last updated: 2026-08-25
 
----
+## Current Status
 
-## Project Overview
+LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-**Liveforge** is a high-performance media streaming server written in Go, supporting multi-protocol ingest and playback.
+All previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime.
 
-- **Code volume**: ~19,700 lines (excluding tests), ~36,000 total
-- **Commits**: 149
-- **Test packages**: 30 with tests, all passing, 0 failures
-- **Author**: im-pingo <cczjp89@gmail.com>
+Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
 
----
+## Implemented Capabilities
 
-## Completed Features ✅
+### Core And Protocols
 
-### Phase 1 — Core Architecture + RTMP
+- Shared stream hub, lifecycle events, GOP/ring buffers, statistics, resource limits, graceful drain, rollback-capable module reload, and slow-consumer handling.
+- RTMP ingest/playback and FLV bridging.
+- RTSP ingest/playback over TCP interleaving and UDP, including separate audio/video track SETUP compatibility.
+- Pure-Go SRT ingest/playback with MPEG-TS and optional encryption.
+- WebRTC WHIP/WHEP publish/play, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
+- HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback.
+- GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and simulator coverage.
+- Optional audio transcoding for AAC, Opus, G.711, and MP3 when built with `CGO_ENABLED=1 -tags audiocodec` and FFmpeg libraries.
 
-| Module | Path | Description |
-|--------|------|-------------|
-| AVFrame type system | `pkg/avframe/` | Codec types, frame types, MediaInfo |
-| H.264 SPS / AAC ASC parser | `pkg/codec/h264/`, `pkg/codec/aac/` | SPS width/height/profile, AudioSpecificConfig |
-| Config system | `config/`, `config/runtime/` | YAML loading, env expansion, defaults, background file/HTTP/Consul/Redis refresh, immutable snapshots, failure fallback |
-| EventBus | `core/event_bus.go` | Sync/async hooks, priority ordering, auth rejection support |
-| Server lifecycle | `core/server.go` | Module registration, graceful shutdown, drain timeout |
-| StreamHub | `core/stream_hub.go` | Stream lookup/create/delete |
-| Stream state machine | `core/stream.go` | State transitions, GOP cache, ring buffer writes, no-publisher timeout |
-| Ring buffer | `pkg/util/ringbuffer.go` | Lock-free SPMC, blocking read, signal notification |
-| Publisher/Subscriber interfaces | `core/publisher.go`, `core/subscriber.go` | Standard interface definitions |
-| MuxerManager | `core/muxer_manager.go` | Per-protocol muxer lifecycle management |
-| SharedBuffer | `core/shared_buffer.go` | Multi-subscriber distribution of muxed data |
-| FLV muxer/demuxer | `pkg/muxer/flv/` | FLV read/write, RTMP data path |
-| RTMP module | `module/rtmp/` | Handshake, chunk stream, AMF0, publisher, subscriber, server |
-| Auth module | `module/auth/` | JWT token verification, HTTP callback mode |
-| API module | `module/api/` | Full REST API, console login, bearer token + session auth |
-| Integration tests | `test/integration/` | RTMP push → RTMP pull E2E test |
+### Runtime Configuration
 
----
+- Bootstrap YAML defaults, normalization, validation, and environment expansion.
+- Selectable `file`, HTTP/HTTPS, Consul, and Redis sources.
+- Immediate load plus periodic background polling with bounded load timeout.
+- Atomic immutable snapshot and typed-key reads without file/network I/O, refresh waits, or status-lock contention.
+- Coalesced asynchronous manual refresh from `SIGHUP` and `POST /api/v1/server/config/refresh`.
+- Last-valid snapshot retention on source, parse, validation, immutable-change, or module-application failure.
+- Exact hot/restart/immutable path classification; restart-required desired state is retained in `pending_restart` while effective values stay unchanged.
+- Prepare/apply/publication ordering with reloader rollback on later application rejection.
+- Status and Prometheus counters for accepted, rejected, application-failed, callback-failed, superseded callback, consecutive failure, and pending restart state.
+- Callback coalescing retains the latest transition and increments `DroppedCallbacks` for superseded pending notifications.
 
-### Phase 2 — HTTP Streaming
+### Management, Security, And Console
 
-| Module | Path | Description |
-|--------|------|-------------|
-| TS muxer | `pkg/muxer/ts/` | PAT/PMT, PES, PCR, adaptation field |
-| FMP4 muxer | `pkg/muxer/fmp4/` | Init segment, media segment, box utilities |
-| H.265 codec helper | `pkg/codec/h265/` | NAL type parsing |
-| MP3 codec helper | `pkg/codec/mp3/` | Frame header parsing |
-| Opus codec helper | `pkg/codec/opus/` | Ogg header parsing |
-| AV1 codec helper | `pkg/codec/av1/` | OBU parsing |
-| HTTP streaming module | `module/httpstream/` | HLS (.m3u8/.ts), LL-HLS (partial segments, blocking reload, GOP cache warm-start), DASH (.mpd/.m4s), HTTP-FLV, WebSocket stream |
-| Muxer worker | `module/httpstream/muxer_worker.go` | Per-format goroutine, SharedBuffer distribution |
+- Public `GET /api/v1/server/health`; protected stream, server, config, cluster, SIP Gateway, recording/DVR, security, audit, GB28181, and debug operations.
+- Named bearer tokens with viewer/operator/admin RBAC, legacy admin bearer compatibility, and role-bearing console sessions.
+- The deprecated `auth.api.bearer_token` migrates only when `api.auth.bearer_token` is empty; the current path wins when both exist.
+- Bounded in-memory audit plus structured logs for authentication failures, authorization denials, console login failures, rate-limited mutations, mutation outcomes, and accepted config application.
+- Audit metadata removes keys containing token, secret, password, or authorization.
+- Permission-aware seven-view console: streams, config, cluster, SIP, storage, security, and audit. Actions are enabled only for the active role.
+- Redacted runtime config, security, cluster relay/peer, call, recording, storage, DVR, and audit status.
 
----
+### Recording And DVR
 
-### Phase 3 — RTP/SDP/RTSP
+- FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording.
+- Stream pattern selection, duration/size segmentation, path templates, completion callbacks, retry/failure preservation, and storage health.
+- Authenticated recording list/status/detail, HTTP range download, and admin delete operations.
+- DVR playlist/segment serving, retention cleanup, storage/session status, and Prometheus metrics.
 
-| Module | Path | Description |
-|--------|------|-------------|
-| SDP parser/builder | `pkg/sdp/` | Full SDP parsing, MediaInfo → SDP generation |
-| RTP session | `pkg/rtp/session.go` | SSRC/sequence/timestamp management |
-| RTCP SR/RR | `pkg/rtp/rtcp.go` | Build and parse Sender Report / Receiver Report |
-| H.264 RTP packetizer | `pkg/rtp/h264.go` | FU-A fragmentation, STAP-A, Annex-B conversion |
-| H.265 RTP packetizer | `pkg/rtp/h265.go` | FU, AP |
-| AAC RTP packetizer | `pkg/rtp/aac.go` | RFC 3640 AAC-hbr |
-| Opus RTP packetizer | `pkg/rtp/opus.go` | RFC 7587 |
-| G.711 RTP packetizer | `pkg/rtp/g711.go` | PCMU/PCMA |
-| VP8 RTP packetizer | `pkg/rtp/vp8.go` | RFC 7741 |
-| VP9 RTP packetizer | `pkg/rtp/vp9.go` | Draft |
-| AV1 RTP packetizer | `pkg/rtp/av1.go` | Draft |
-| MP3 RTP packetizer | `pkg/rtp/mp3.go` | RFC 2250 |
-| G.722/G.729/Speex packetizers | `pkg/rtp/g722.go` etc. | Basic framing |
-| RTSP request/response parser | `module/rtsp/parser.go` | Full RTSP message parsing |
-| RTSP session state machine | `module/rtsp/session.go` | State transitions, timeout, IsExpired() |
-| TCP interleaved framing | `module/rtsp/transport.go` | `$` + channel + length + data |
-| UDP transport | `module/rtsp/transport.go` | UDPTransport, PortManager port allocation |
-| RTSP handler | `module/rtsp/handler.go` | OPTIONS/DESCRIBE/SETUP/PLAY/PAUSE/ANNOUNCE/RECORD/TEARDOWN, EventBus integration |
-| RTSP publisher | `module/rtsp/publisher.go` | RTP depacketization → AVFrame, RTCP RR every 5s |
-| RTSP subscriber | `module/rtsp/subscriber.go` | AVFrame → RTP packetization, TCP+UDP dual mode, RTCP SR every 5s |
-| RTSP server | `module/rtsp/server.go` | Connection management, session reaper (10s interval), EventBus stop events |
+### SIP Gateway
 
-**Verified scenarios:**
-- TCP push (ANNOUNCE/RECORD) → TCP pull (DESCRIBE/PLAY) ✅
-- UDP push → TCP pull ✅
-- UDP push → UDP pull ✅ (fixed UDP subscriber hang)
-- RTSP push → RTMP pull ✅
+- Inbound and outbound calls, codec negotiation, RTP/RTCP port management, bounded concurrency, call status, dial/detail/hangup API, console operations, and Prometheus metrics.
+- Stable HTTP mappings for invalid input, missing streams/calls, codec mismatch, capacity/port exhaustion, setup failure, and unavailable module states.
 
----
+### Cluster Relay
 
-### Phase 4 — Core Enhancements + REST API
+- Forward push and on-demand origin pull over RTMP, SRT, RTSP, RTP, and GB28181.
+- Static or HTTP-scheduled targets, retry policy, idle cleanup, bounded relay pool, health checks, peer eviction/recovery, status API, and finite-cardinality metrics.
+- RTP/GB signaling paths are configurable and protected by management RBAC.
+- Node signaling resolves credentials from the current atomic config on every request: `api.auth.bearer_token` first, otherwise the first named admin token.
+- Credential rotation is hot. Configured auth without a usable admin token fails locally before contacting a peer.
+- Peer response bodies and returned/logged errors are bounded and redacted.
 
-| Module | Path | Description |
-|--------|------|-------------|
-| Stream stats | `core/stream_stats.go` | Atomic byte/frame/bitrate/FPS counters |
-| Connection limits | `core/server.go`, `core/stream.go` | max_streams, max_subscribers_per_stream, max_connections enforcement |
-| Alive loop | `core/server.go` | Periodic EventStreamAlive/PublishAlive/SubscribeAlive emission |
-| EventBus lifecycle | `core/stream_hub.go` | EventStreamCreate/EventStreamDestroy on hub operations |
-| Full REST API | `module/api/handler.go` | Streams list/detail/delete/kick, server info/stats, health check |
-| Console login | `module/api/module.go`, `module/api/login.go` | HMAC-SHA256 session cookies, login page, 24h expiry |
-| Port separation | `module/api/module.go` | 8080 = media only, 8090 = API + console (protected) |
-| API auth | `module/api/module.go` | Bearer token OR session cookie for API endpoints |
+### Tooling And Release
 
----
+- `lf-test`, GB28181 simulator, and shared testkit packages have meaningful package tests and CI-compatible output/exit behavior.
+- No-native-dependency quick check: `go test ./...`.
+- Tagged baseline requires Go 1.26 and FFmpeg development libraries:
 
-### Phase 5 — Business Modules (Notify + Record)
-
-| Module | Path | Description |
-|--------|------|-------------|
-| Notify module | `module/notify/module.go` | Async hooks (priority 90) for all 9 lifecycle events |
-| HTTP webhook sender | `module/notify/http_sender.go` | Buffered queue, HMAC-SHA256 signature, retry with backoff |
-| WebSocket notification sender | `module/notify/ws_sender.go` | Real-time event stream via WebSocket, event filtering, multi-client broadcast |
-| Record module | `module/record/module.go` | Async hooks for publish/publish_stop (priority 50) |
-| Record session | `module/record/session.go` | RingBuffer reader with select-based cancellation |
-| File writer | `module/record/file_writer.go` | FLV muxer, duration segmentation, path templates |
-
----
-
-### Phase 6 — WebRTC + TLS
-
-| Module | Path | Description |
-|--------|------|-------------|
-| WebRTC module | `module/webrtc/` | WHIP publish, WHEP subscribe, session management, ICE trickle |
-| WHIP handler | `module/webrtc/whip.go` | SDP offer/answer, pion/webrtc PeerConnection, RTP depacketization → AVFrame |
-| WHEP handler | `module/webrtc/whep.go` | AVFrame → RTP packetization, GOP cache replay, realtime/live modes |
-| Track sender | `module/webrtc/track_sender.go` | Codec-aware RTP track writing |
-| Web console WHIP | `module/api/console.html` | Browser-based camera/mic publish via WHIP, outbound stats |
-| TLS support | `core/server.go` | Global TLS config, per-module `*bool` three-state override |
-
----
-
-### Phase 7 — SRT Protocol
-
-| Module | Path | Description |
-|--------|------|-------------|
-| SRT config | `config/config.go` | SRTConfig struct: listen, latency, passphrase, pbkeylen |
-| SRT module | `module/srt/module.go` | Listener, accept loop, connection routing via streamid |
-| SRT publisher | `module/srt/publisher.go` | MPEG-TS demux from SRT → AVFrame into StreamHub |
-| SRT subscriber | `module/srt/subscriber.go` | AVFrame → MPEG-TS mux, write to SRT connection |
-
-**Library**: `github.com/datarhei/gosrt` — pure Go SRT implementation (no CGo)
-
----
-
-### Phase 8 — Cluster Forwarding + Origin Pull
-
-| Module | Path | Description |
-|--------|------|-------------|
-| Cluster module | `module/cluster/module.go` | Module registration, forward + origin manager lifecycle |
-| Forward manager | `module/cluster/forward.go` | Multi-target RTMP push on publish, auto-cleanup on unpublish |
-| Origin pull manager | `module/cluster/origin.go` | On-demand pull from origin servers on subscribe, exponential backoff retry |
-| Scheduler | `module/cluster/scheduler.go` | Dynamic target resolution via HTTP callback, priority-based fallback to static config |
-| RTMP client | `module/cluster/rtmp_client.go` | Client-side RTMP handshake, connect, publish, play, media frame send/receive |
-
----
-
-### Phase 9 — Prometheus Metrics
-
-| Module | Path | Description |
-|--------|------|-------------|
-| Metrics module | `module/metrics/module.go` | HTTP endpoint, Prometheus registry, Go/process collectors |
-| Collector | `module/metrics/collector.go` | Server-level gauges (streams, connections, uptime), per-stream counters (bytes, frames, bitrate, FPS, GOP cache, subscribers by protocol) |
-
----
-
-### Phase 10 — Quality of Service + GCC
-
-| Module | Path | Description |
-|--------|------|-------------|
-| Slow consumer filter | `core/slow_consumer.go` | EWMA-based lag detection, progressive frame dropping (warn/drop/critical), configurable ratios |
-| Multi-GOP cache | `core/stream.go` | Configurable `gop_cache_num`, audio cache window |
-| Stream feedback routing | `core/feedback.go` | Auto/passthrough/aggregate/drop modes for subscriber feedback |
-| Rate limiting | `pkg/ratelimit/` | Per-IP token bucket limiter for HTTP endpoints |
-| Structured logging | `pkg/logger/` | slog-based structured logging |
-| GCC congestion control | `module/webrtc/module.go` | Send-side bandwidth estimation via pion/interceptor GCC |
-| GCC-aware WHEP feed | `module/webrtc/whep_feed.go` | BandwidthEstimator integration, adaptive bitrate pacing |
-| TWCC header extension | `module/webrtc/module.go` | HeaderExtensionInterceptor for GCC compatibility |
-| SkipTracker per-protocol | `config/config.go` | Per-protocol slow consumer limits (max_count/window) wired to all subscribers |
-| fMP4 recording | `module/record/` | FMP4 format support, max_size segmentation |
-
-### Phase 11 — Multi-Protocol Cluster Relay
-
-| Module | Path | Description |
-|--------|------|-------------|
-| RelayTransport interface | `module/cluster/transport.go` | Plugin interface for cluster relay protocols (Push/Pull/Close/Scheme) |
-| TransportRegistry | `module/cluster/registry.go` | URL scheme-based transport resolution with Register/Resolve/Close |
-| RTMPTransport | `module/cluster/transport_rtmp.go` | RTMP relay via FLV-over-RTMP chunk stream |
-| SRTTransport | `module/cluster/transport_srt.go` | SRT relay via TS mux/demux over gosrt |
-| RTSPTransport | `module/cluster/transport_rtsp.go` | RTSP relay with TCP interleaved RTP framing |
-| RTPTransport | `module/cluster/transport_rtp.go` | Direct RTP relay with SDP-over-HTTP signaling, port allocator, RTCP SR/RR/BYE |
-| Relay metrics | `module/cluster/relay_metrics.go` | Prometheus gauges/counters for active relays, bytes, errors, latency, packet loss |
-| Cluster config | `config/config.go` | ClusterSRTConfig, ClusterRTSPConfig, ClusterRTPConfig structs with YAML tags |
-| RTCP BYE | `pkg/rtp/rtcp.go` | BuildBYE function and exported RTCP type constants |
-
----
-
-## Not Yet Implemented ❌
-
-### Config stubs (field exists, not enforced)
-
-| Feature | Config key | Status |
-|---------|-----------|--------|
-| ~~**max_skip_count / max_skip_window**~~ | `rtmp/rtsp/srt.skip_tracker` | **Done** — per-protocol SkipTracker config, wired to SlowConsumerFilter in all subscribers |
-| **Simulcast** | `stream.simulcast` | Deferred — config has layer definitions, no layer selection logic in WebRTC module |
-
-### Deferred or productization work
-
-| Feature | Status |
-|---------|--------|
-| SIP Gateway | Implemented in `module/sipgateway/`; productization and deployment hardening can continue separately |
-| Runtime config API/metrics status endpoint | **Done** — redacted `GET /api/v1/server/config` exposes source/version/failure/restart status; Prometheus export remains follow-up work |
-| AI media analysis and semantic search | Roadmap work; no runtime integration claimed |
-
----
-
-## Directory Structure
-
-```
-liveforge/
-├── cmd/liveforge/          # Entry point
-├── config/                 # Config loading
-├── core/                   # Server, Stream, EventBus, MuxerManager
-├── module/
-│   ├── api/                # REST API + web console + login auth
-│   ├── auth/               # JWT/callback auth
-│   ├── cluster/            # Multi-protocol cluster relay (RTMP/SRT/RTSP/RTP)
-│   ├── httpstream/         # HLS/DASH/HTTP-FLV/HTTP-TS/FMP4/WebSocket
-│   ├── metrics/            # Prometheus metrics endpoint
-│   ├── notify/             # HTTP webhook notifications
-│   ├── record/             # FLV stream recording
-│   ├── rtmp/               # RTMP ingest and playback
-│   ├── rtsp/               # RTSP ingest and playback (TCP+UDP)
-│   ├── srt/                # SRT ingest and playback (via datarhei/gosrt)
-│   └── webrtc/             # WebRTC WHIP/WHEP (via pion/webrtc)
-├── pkg/
-│   ├── avframe/            # Frame type definitions
-│   ├── codec/              # H264/H265/AAC/AV1/MP3/Opus parsing
-│   ├── muxer/              # TS/FMP4/FLV muxers
-│   ├── rtp/                # Full RTP/RTCP stack
-│   ├── sdp/                # SDP parse/build
-│   └── util/               # Ring buffer
-├── test/integration/       # E2E integration tests
-└── docs/
-    ├── PROGRESS.md         # This file
-    └── superpowers/
-        ├── plans/          # Phase 1/2/3 implementation plans
-        └── specs/          # Phase 1/2/3 design specs
+```bash
+CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
+CGO_ENABLED=1 go test -tags audiocodec -race \
+  -coverprofile=coverage.out -covermode=atomic ./...
 ```
 
----
+- GitHub Actions uses Node 24-compatible action majors: checkout/setup-go/upload-artifact v7, Docker setup-buildx/login v4, build-push v7, golangci-lint v9, and action-gh-release v3.
+- Release binaries cover linux/darwin on amd64/arm64 with the portable no-CGO profile. The tagged Docker build contains the FFmpeg audio profile.
 
-## Known Issues / Tech Debt
+## Completion Evidence
 
-| Issue | Description | Priority |
-|-------|-------------|----------|
-| RTMP pull initial stutter | GOP cache burst causes ffplay frame drops on join | Low (expected live stream behavior) |
-| ~~LL-HLS first play stutter~~ | ~~Empty playlist on cold start caused ~2s periodic stutter~~ | **Fixed** (GOP cache warm-start + 3-segment hold for legacy players) |
-| ~~DASH audio in browser~~ | ~~Chrome MSE rejected audio: LL-HLS/DASH init segment URL conflict + ESDS encoding~~ | **Fixed** (separate `vinit.mp4` for DASH + 4-byte ESDS lengths + dynamic codec string) |
-| ~~No Prometheus metrics~~ | ~~No metrics endpoint exposed~~ | **Fixed** (`module/metrics/` with server + per-stream gauges) |
+| Closure | Evidence |
+| --- | --- |
+| Permission-aware seven-view console and accessible operations | `5929f99` |
+| RTSP separate audio/video multi-track SETUP | `08911ea` |
+| Meaningful CLI/tool package tests | `7df71a0` |
+| Cluster peer error bounding/redaction and final security hardening | `ef20a1a` |
+| GB28181 live/playback stop route and `gb28181:control` permission | Registered and covered in `module/gb28181` and `module/api` tests |
+| Runtime callback coalescing counter | `DroppedCallbacks` status/metrics path and manager tests |
+| Cluster credential hot rotation/no-admin failure | RTP/GB transport credential tests and cluster operations recipe |
 
----
+## Operations Documentation
 
-## Development Conventions
+- API: `docs/api/openapi.yaml`
+- Configuration and reload annotations: `docs/config/config.schema.json`
+- Runtime sources: `docs/recipes/runtime-config-sources.md`
+- Authentication/TLS and bearer migration: `docs/recipes/auth-and-tls.md`
+- RBAC/audit: `docs/recipes/rbac-audit.md`
+- Recording/DVR: `docs/recipes/recording-dvr-management.md`
+- SIP Gateway: `docs/recipes/sipgateway-management.md`
+- Cluster relay: `docs/recipes/cluster-relay-operations.md`
+- Release artifact verification: `docs/recipes/release-verification.md`
 
-- **Commit format**: `<type>: <description>` — types: feat/fix/refactor/docs/test/chore/perf/ci
-- **Language**: All code and documentation must be in English
-- **Author**: im-pingo <cczjp89@gmail.com>
-- **Testing**: Unit tests required for new features, integration tests for critical paths
-- **Branch**: main
+Every operations recipe uses loopback-safe examples, authenticated requests, expected success/failure codes, diagnostics/metrics, rollback, and recovery. Each warns that `configs/liveforge.yaml` disables TLS/auth and uses `admin/admin`, so it must never be publicly exposed unchanged.
+
+## Deferred Work
+
+| Feature | Configuration | Status |
+| --- | --- | --- |
+| Simulcast layer selection and automatic layer pausing | `stream.simulcast.*` | Deferred and unsupported; all fields are restart-required until a runtime implementation exists |
+
+AI media analysis, semantic search, and other AI adaptations are roadmap opportunities, not incomplete claims against the current streaming runtime.
+
+## Verification Contract
+
+Run focused tests for changed modules, then:
+
+```bash
+tools/check-agent-docs_test.sh
+CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh
+go test ./...
+CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
+CGO_ENABLED=1 go test -tags audiocodec -race \
+  -coverprofile=coverage.out -covermode=atomic ./...
+```
+
+Do not claim Docker images, release assets, optional audio transcoding, or deferred Simulcast behavior without the corresponding artifact/build/runtime verification.

@@ -12,6 +12,8 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - REST and WebRTC HTTP contract: [docs/api/openapi.yaml](docs/api/openapi.yaml)
 - Configuration schema: [docs/config/config.schema.json](docs/config/config.schema.json)
 - Runtime configuration recipe: [docs/recipes/runtime-config-sources.md](docs/recipes/runtime-config-sources.md)
+- Authentication and RBAC recipes: [docs/recipes/auth-and-tls.md](docs/recipes/auth-and-tls.md), [docs/recipes/rbac-audit.md](docs/recipes/rbac-audit.md)
+- Operations recipes: [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [release verification](docs/recipes/release-verification.md)
 - Runnable recipes: [docs/recipes/](docs/recipes/)
 
 ## Identity
@@ -28,6 +30,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - A user needs protocol bridging, such as RTMP publish to HLS or WebRTC playback.
 - A user needs GB28181 device registration, live view, playback, PTZ, or alarm handling.
 - A user needs a built-in console, REST API, metrics, recording, notifications, or multi-node relay.
+- A user needs permission-aware config, cluster, SIP call, recording/DVR, security, or audit operations.
 
 ## Do not assume
 
@@ -39,4 +42,8 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Do not use `latest` when a versioned image or commit SHA is available.
 - Runtime configuration uses a background poller with lock-free snapshot reads. Sources are selectable with `runtime.source`: `file`, `http`, `consul`, or `redis`.
 - Source failures keep the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes remain restart-required.
+- The console has seven permission-aware operations views: streams, config, cluster, SIP, storage, security, and audit.
+- Recording supports FLV, FMP4, MP4, TS, and HLS with authenticated metadata/download/delete APIs and DVR status.
+- RTSP supports separate audio/video SETUP tracks for TCP-interleaved and UDP sessions.
+- RTP/GB cluster signaling reads current credentials per request, preferring `api.auth.bearer_token`, then the first named admin token; configured auth without an admin credential fails locally.
 - Simulcast layer selection is deferred and is not implemented.

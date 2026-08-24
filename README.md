@@ -31,14 +31,14 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 | 📡 | **GB28181 video surveillance** | Full SIP signaling stack, device registration, live invite, playback, PTZ control, alarm handling — plus a built-in device simulator for testing |
 | 🌐 | **Multi-protocol cluster** | Origin-edge cascading via RTMP / SRT / RTSP / RTP / GB28181 with HTTP scheduler callback for dynamic topology |
 | ⚡ | **LL-HLS** | Low-Latency HLS with fMP4 partial segments, blocking playlist reload (`_HLS_msn`/`_HLS_part`), and delta playlist updates |
-| 🖥️ | **Web console** | Built-in real-time dashboard with stream stats, multi-protocol preview, and browser WHIP publish |
+| 🖥️ | **Web console** | Permission-aware streams, config, cluster, SIP, storage, security, and audit operations plus browser preview/publish |
 | 🛡️ | **Production-ready** | Slow consumer protection (EWMA frame dropping), GCC congestion control, per-IP rate limiting, Prometheus metrics |
 
 ## Features
 
 ### Protocols
 
-- **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP), SRT, WebRTC WHIP, or GB28181
+- **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP, separate audio/video SETUP tracks), SRT, WebRTC WHIP, or GB28181
 - **Multi-protocol playback** — Pull via RTMP, RTSP, SRT, WebRTC WHEP, HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, or WebSocket
 - **SRT** — Secure Reliable Transport with AES encryption, low-latency MPEG-TS delivery (pure Go via `datarhei/gosrt`)
 - **WebRTC** — WHIP/WHEP with ICE Lite, GCC send-side bandwidth estimation, and browser-based publish
@@ -119,10 +119,10 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 
 ### Management & Operations
 
-- **Web console** — Real-time dashboard: stream list, codecs, bitrate, FPS, GOP cache, multi-protocol preview, WebRTC browser publish
-- **REST API** — List/inspect/delete streams, kick publishers, server stats, health checks (the health endpoint remains public when API bearer auth is enabled)
-- **Auth** — JWT token verification and HTTP callback authentication for publish and subscribe
-- **Recording** — FLV file recording with duration-based segmentation and path templates
+- **Web console** — Seven permission-aware views for streams, runtime config, cluster, SIP calls, recording/DVR storage, security, and audit, plus multi-protocol preview and WHIP publish
+- **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
+- **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
+- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; segmentation, storage health, download/range/delete management, and time-shift status
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
 - **Rate limiting** — Per-IP token bucket for connection flood protection
@@ -173,7 +173,7 @@ graph LR
         API[REST API + Web Console]
         AUTH[Auth Module]
         NOTIFY[Webhook + WS Notifications]
-        RECORD[FLV Recording]
+        RECORD[FLV / FMP4 / MP4 / TS / HLS Recording]
         METRICS[Prometheus Metrics]
     end
 ```
@@ -274,11 +274,15 @@ Open `http://localhost:8090/console` for the real-time management dashboard:
 - GOP cache visualization
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, WebRTC)
 - WebRTC publish with camera/mic and outbound stats
-- Stream management (kick publisher, delete stream)
+- Permission-aware stream kick/delete and runtime config refresh
+- Cluster relay/peer status and SIP call dial/detail/hangup
+- Recording metadata/download/delete, DVR session/storage status, security posture, and bounded audit events
 
 ## Configuration
 
 LiveForge uses a single YAML configuration file. See [`configs/liveforge.yaml`](configs/liveforge.yaml) for the full reference.
+
+The checked-in sample is for local development only: it disables TLS and authentication and uses `admin/admin`. Never expose it publicly unchanged.
 
 Key sections:
 
@@ -294,20 +298,21 @@ Key sections:
 | `audio_codec` | Enable/disable on-demand audio transcoding |
 | `api` | REST API and web console (default `:8090`) |
 | `auth` | JWT and HTTP callback authentication |
-| `record` | FLV recording with segmentation |
+| `record` | FLV/FMP4/MP4/TS/HLS recording, segmentation, completion callback |
+| `dvr` | Time-shift segments, retention window, storage and session status |
 | `notify` | HTTP webhook and WebSocket notifications |
 | `cluster` | Multi-protocol forwarding and origin pull with scheduler |
 | `metrics` | Prometheus metrics endpoint (default `:9090`) |
 | `limits` | Global connection, stream, and subscriber limits |
 | `tls` | TLS certificate and key for HTTPS/secure protocols |
-| `stream` | GOP cache, ring buffer, idle timeout, slow consumer, simulcast settings |
+| `stream` | GOP cache, ring buffer, idle timeout, slow consumer, feedback; Simulcast fields are deferred |
 | `runtime` | Background configuration refresh source: file, HTTP, Consul, or Redis |
 
 Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}`.
 
 ### Runtime configuration refresh
 
-The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, Consul, and Redis examples.
+The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, Consul, and Redis examples.
 
 Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
 
@@ -356,10 +361,12 @@ liveforge/
 │   ├── httpstream/      # HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket
 │   ├── metrics/         # Prometheus metrics endpoint
 │   ├── notify/          # HTTP webhook + WebSocket notifications
-│   ├── record/          # FLV stream recording
+│   ├── dvr/             # Time-shift segment storage and playback
+│   ├── record/          # FLV/FMP4/MP4/TS/HLS recording and storage management
 │   ├── rtmp/            # RTMP protocol (handshake, chunks, AMF0)
 │   ├── rtsp/            # RTSP protocol (TCP + UDP transport)
 │   ├── sip/             # SIP transport layer (used by GB28181)
+│   ├── sipgateway/      # Inbound/outbound SIP media gateway and call control
 │   ├── srt/             # SRT protocol (via datarhei/gosrt)
 │   └── webrtc/          # WebRTC WHIP/WHEP + GCC (via pion/webrtc)
 ├── pkg/
@@ -410,7 +417,7 @@ The first command skips FFmpeg-tagged transcoding integration tests. The second 
 | Web console | Yes (built-in) | No | Yes | Yes |
 | Browser publish | Yes (WHIP) | No | No | No |
 | Auth (JWT + callback) | Yes | Yes | Yes | Plugin |
-| Recording | Yes (FLV) | Yes | Yes | Plugin |
+| Recording | Yes (FLV/FMP4/MP4/TS/HLS) | Yes | Yes | Plugin |
 | Webhooks | Yes (HMAC-signed) | No | Yes | No |
 | ICE Lite | Yes | No | No | No |
 | Prometheus metrics | Yes | No | Yes | Plugin |
@@ -424,6 +431,8 @@ The first command skips FFmpeg-tagged transcoding integration tests. The second 
 > **📖 Full documentation is on the [GitHub Wiki](../../wiki).**
 
 For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](agent-manifest.json), and [`llms.txt`](llms.txt). The API contract, configuration schema, and runnable recipes are kept in `docs/` and checked by CI.
+
+Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [authentication/TLS](docs/recipes/auth-and-tls.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [RBAC/audit](docs/recipes/rbac-audit.md), and [release verification](docs/recipes/release-verification.md).
 
 | Topic | EN | 中文 |
 |-------|-----|------|
@@ -451,8 +460,9 @@ For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](
 - [x] GB28181 (SIP + live + playback + PTZ + alarm)
 - [x] Audio transcoding (AAC, Opus, G.711, MP3)
 - [x] SIP gateway
+- [x] Permission-aware seven-view management console
+- [x] Recording/DVR, cluster, security, and audit management APIs
 - [ ] Simulcast layer selection
-- [ ] Admin UI enhancements
 
 ## License
 

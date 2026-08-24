@@ -1,490 +1,742 @@
 openapi: 3.1.0
 info:
-  title: LiveForge Management API
-  version: 1.0.0
+  title: LiveForge HTTP API
+  version: 1.1.0
   description: |
-    Management and WebRTC HTTP endpoints exposed by LiveForge. Management
-    endpoints are served on the configured API listener. When
-    `api.auth.bearer_token` is configured, management and GB28181 endpoints
-    accept `Authorization: Bearer <token>` (or an authenticated console
-    session); the health endpoint remains public.
+    Source-aligned contract for the management API, GB28181 API, WebRTC
+    WHIP/WHEP signaling, and the default internal cluster relay signaling
+    paths. Management responses use `{code,message,data?}`. GB28181 handlers
+    return direct JSON objects or arrays. WebRTC signaling returns SDP or
+    plain-text errors.
+
+    Management and GB28181 routes accept either an opaque bearer token from
+    `api.auth` or an authenticated `lf_session` console cookie when management
+    credentials are configured. If no management tokens are configured,
+    compatibility mode resolves an anonymous admin principal. Health is always
+    public. A missing/invalid credential returns 401; an authenticated role
+    without the operation's `x-liveforge-permission` returns 403. Enabled
+    per-IP rate limiting can return 429 before a handler runs.
+
+    Internal relay signaling paths are configurable through
+    `cluster.rtp.signaling_path` and `cluster.gb28181.signaling_path`; this
+    document shows their defaults. Node clients read credentials atomically
+    for each request, preferring `api.auth.bearer_token`, then the first named
+    admin token. See `docs/recipes/cluster-relay-operations.md` before exposing
+    these internal paths.
 servers:
-  - url: http://localhost:8090
-    description: Local development API listener
+  - url: http://127.0.0.1:8090
+    description: Default local management listener
+  - url: https://127.0.0.1:8443
+    description: Default local WebRTC signaling listener
+security:
+  - bearerAuth: []
+  - consoleSession: []
 tags:
-  - name: server
-  - name: streams
-  - name: dvr
-  - name: gb28181
-  - name: webrtc
+  - {name: server}
+  - {name: streams}
+  - {name: security}
+  - {name: sipgateway}
+  - {name: cluster}
+  - {name: recording}
+  - {name: dvr}
+  - {name: gb28181}
+  - {name: webrtc}
+  - {name: internal-cluster, description: Configurable node-to-node signaling; default paths only.}
 paths:
   /api/v1/server/health:
     get:
       tags: [server]
       operationId: getHealth
-      summary: Check server health
+      summary: Check process health
       security: []
       responses:
         '200':
-          description: Healthy server
+          description: Healthy process
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                code: 0
-                message: ok
-                data:
-                  status: healthy
+              schema: {$ref: '#/components/schemas/HealthResponse'}
   /api/v1/server/info:
     get:
       tags: [server]
       operationId: getServerInfo
-      summary: Read version, modules, and configured endpoints
+      summary: Read version, uptime, modules, and endpoints
+      x-liveforge-permission: server:read
       responses:
-        '200':
-          description: Server information
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ServerInfoResponse'
+        '200': {description: Server information, content: {application/json: {schema: {$ref: '#/components/schemas/ServerInfoResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/server/stats:
     get:
       tags: [server]
       operationId: getServerStats
       summary: Read aggregate stream and connection counts
+      x-liveforge-permission: server:read
       responses:
-        '200':
-          description: Server statistics
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ServerStatsResponse'
+        '200': {description: Server statistics, content: {application/json: {schema: {$ref: '#/components/schemas/ServerStatsResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/server/config:
     get:
       tags: [server]
       operationId: getRuntimeConfigStatus
-      summary: Read runtime configuration source and refresh status
+      summary: Read redacted runtime source, version, failures, counters, and pending restart paths
+      x-liveforge-permission: server:read
       responses:
-        '200':
-          description: Redacted runtime configuration status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfigRuntimeStatusResponse'
+        '200': {description: Runtime configuration status, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigRuntimeStatusResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/server/config/refresh:
+    post:
+      tags: [server]
+      operationId: refreshRuntimeConfig
+      summary: Schedule an asynchronous source refresh
+      description: Returns after enqueueing; source I/O remains on the background manager worker.
+      x-liveforge-permission: config:reload
+      responses:
+        '202': {description: Refresh scheduled, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduledResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/audit:
+    get:
+      tags: [security]
+      operationId: listAuditEntries
+      summary: Read the bounded in-memory management audit trail
+      x-liveforge-permission: audit:read
+      responses:
+        '200': {description: Audit entries, content: {application/json: {schema: {$ref: '#/components/schemas/AuditResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/security/status:
+    get:
+      tags: [security]
+      operationId: getSecurityStatus
+      summary: Read redacted token, console, and audit status
+      x-liveforge-permission: audit:read
+      responses:
+        '200': {description: Redacted security status, content: {application/json: {schema: {$ref: '#/components/schemas/SecurityStatusResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/streams:
     get:
       tags: [streams]
       operationId: listStreams
       summary: List active streams
+      x-liveforge-permission: streams:read
       parameters:
-        - name: q
-          in: query
-          required: false
-          description: Case-sensitive substring filter for stream keys.
-          schema:
-            type: string
+        - {name: q, in: query, required: false, description: Case-sensitive stream-key substring., schema: {type: string}}
       responses:
-        '200':
-          description: Active streams
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StreamsResponse'
+        '200': {description: Active streams, content: {application/json: {schema: {$ref: '#/components/schemas/StreamsResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/streams/{streamKey}:
     parameters:
-      - $ref: '#/components/parameters/StreamKey'
+      - {$ref: '#/components/parameters/StreamKey'}
     get:
       tags: [streams]
       operationId: getStream
-      summary: Read one stream and its statistics
+      summary: Read one stream and detailed statistics
+      x-liveforge-permission: streams:read
       responses:
-        '200':
-          description: Stream details
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StreamResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
+        '200': {description: Stream details, content: {application/json: {schema: {$ref: '#/components/schemas/StreamResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
     delete:
       tags: [streams]
       operationId: deleteStream
       summary: Delete a stream
-      description: Destructive operation. Require explicit operator authorization.
+      x-liveforge-permission: streams:delete
       responses:
-        '200':
-          description: Stream deleted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
+        '200': {$ref: '#/components/responses/Success'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/streams/{streamKey}/kick:
     parameters:
-      - $ref: '#/components/parameters/StreamKey'
+      - {$ref: '#/components/parameters/StreamKey'}
     post:
       tags: [streams]
       operationId: kickPublisher
       summary: Disconnect the current publisher
-      description: Destructive operation. Require explicit operator authorization.
+      x-liveforge-permission: streams:kick
       responses:
-        '200':
-          description: Publisher disconnected
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          description: Stream has no publisher
+        '200': {$ref: '#/components/responses/Success'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/sipgateway/calls:
+    get:
+      tags: [sipgateway]
+      operationId: listSIPGatewayCalls
+      summary: List calls and SIP Gateway counters
+      x-liveforge-permission: sip:read
+      responses:
+        '200': {description: Calls and counters, content: {application/json: {schema: {$ref: '#/components/schemas/SIPCallsResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      tags: [sipgateway]
+      operationId: dialSIPGatewayCall
+      summary: Start an outbound SIP call for an active stream
+      x-liveforge-permission: sip:calls
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SIPDialRequest'}
+      responses:
+        '201': {description: Call created, content: {application/json: {schema: {$ref: '#/components/schemas/SIPDialResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/sipgateway/calls/{callId}:
+    parameters:
+      - {$ref: '#/components/parameters/CallId'}
+    get:
+      tags: [sipgateway]
+      operationId: getSIPGatewayCall
+      summary: Read one SIP call
+      x-liveforge-permission: sip:read
+      responses:
+        '200': {description: Call status, content: {application/json: {schema: {$ref: '#/components/schemas/SIPCallResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    delete:
+      tags: [sipgateway]
+      operationId: hangupSIPGatewayCall
+      summary: End one SIP call
+      x-liveforge-permission: sip:calls
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/cluster/status:
+    get:
+      tags: [cluster]
+      operationId: getClusterStatus
+      summary: Read bounded relay and peer health status
+      description: Returns an enabled=false-compatible empty view when the cluster module is absent.
+      x-liveforge-permission: cluster:read
+      responses:
+        '200': {description: Cluster status, content: {application/json: {schema: {$ref: '#/components/schemas/ClusterStatusResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/recordings:
+    get:
+      tags: [recording]
+      operationId: listRecordings
+      summary: List recordings from configured storage
+      x-liveforge-permission: recordings:read
+      responses:
+        '200': {description: Recordings, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingsResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/recordings/status:
+    get:
+      tags: [recording]
+      operationId: getRecordingStatus
+      summary: Read active recording, storage, and counter status
+      x-liveforge-permission: recordings:read
+      responses:
+        '200': {description: Recording status, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingStatusResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/recordings/{recordingPath}:
+    parameters:
+      - {$ref: '#/components/parameters/RecordingPath'}
+    get:
+      tags: [recording]
+      operationId: getRecording
+      summary: Read recording metadata
+      x-liveforge-permission: recordings:read
+      responses:
+        '200': {description: Recording metadata, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    delete:
+      tags: [recording]
+      operationId: deleteRecording
+      summary: Delete a completed recording
+      x-liveforge-permission: recordings:delete
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/recordings/{recordingPath}/download:
+    parameters:
+      - {$ref: '#/components/parameters/RecordingPath'}
+    get:
+      tags: [recording]
+      operationId: downloadRecording
+      summary: Download a completed recording with HTTP range support
+      x-liveforge-permission: recordings:read
+      responses:
+        '200': {description: Complete recording, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+        '206': {description: Requested byte range, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+        '304': {description: Not modified}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '416': {description: Requested range is not satisfiable}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/dvr/status:
     get:
       tags: [dvr]
       operationId: getDVRStatus
-      summary: Read DVR session status
+      summary: Read DVR sessions, storage health, and counters
+      description: Returns an empty enabled=false view when the DVR module is absent.
+      x-liveforge-permission: recordings:read
       responses:
-        '200':
-          description: DVR status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
+        '200': {description: DVR status, content: {application/json: {schema: {$ref: '#/components/schemas/DVRStatusResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/dvr/sessions/{streamKey}:
+    parameters:
+      - {$ref: '#/components/parameters/StreamKey'}
+    get:
+      tags: [dvr]
+      operationId: getDVRSession
+      summary: Read one DVR session by stream key
+      x-liveforge-permission: recordings:read
+      responses:
+        '200': {description: DVR session, content: {application/json: {schema: {$ref: '#/components/schemas/DVRSessionResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/gb28181/devices:
     get:
       tags: [gb28181]
       operationId: listGB28181Devices
-      summary: List registered GB28181 devices
+      summary: List registered devices
+      x-liveforge-permission: gb28181:read
       responses:
-        '200':
-          description: Registered devices
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GBDeviceSummary'
+        '200': {description: Devices, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/GBDeviceSummary'}}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
   /api/v1/gb28181/devices/{deviceId}:
     parameters:
-      - $ref: '#/components/parameters/DeviceId'
+      - {$ref: '#/components/parameters/DeviceId'}
     get:
       tags: [gb28181]
       operationId: getGB28181Device
-      summary: Read a device and its channels
+      summary: Read one device and its channels
+      x-liveforge-permission: gb28181:read
       responses:
-        '200':
-          description: Device details
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBDevice'
-        '404':
-          description: Device not found
+        '200': {description: Device detail, content: {application/json: {schema: {$ref: '#/components/schemas/GBDevice'}}}}
+        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
     delete:
       tags: [gb28181]
       operationId: unregisterGB28181Device
       summary: Unregister a device and close its sessions
-      description: Destructive operation. Require explicit operator authorization.
+      x-liveforge-permission: gb28181:delete
       responses:
-        '200':
-          description: Device unregistered
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBStatusResponse'
-        '404':
-          description: Device not found
+        '200': {description: Device unregistered, content: {application/json: {schema: {$ref: '#/components/schemas/GBStatus'}}}}
+        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
   /api/v1/gb28181/channels:
     get:
       tags: [gb28181]
       operationId: listGB28181Channels
-      summary: List discovered GB28181 channels
+      summary: List discovered channels
+      x-liveforge-permission: gb28181:read
       parameters:
-        - name: device_id
-          in: query
-          required: false
-          schema: {type: string}
+        - {name: device_id, in: query, required: false, schema: {type: string}}
       responses:
-        '200':
-          description: Discovered channels
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GBChannel'
-        '404':
-          description: Device not found when device_id is supplied
+        '200': {description: Channels, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/GBChannel'}}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
   /api/v1/gb28181/channels/{channelId}/play:
     parameters:
-      - $ref: '#/components/parameters/ChannelId'
+      - {$ref: '#/components/parameters/ChannelId'}
     post:
       tags: [gb28181]
       operationId: startGB28181LiveView
-      summary: Start live view for a channel
+      summary: Start live view
+      x-liveforge-permission: gb28181:control
       responses:
-        '200':
-          description: Live session created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBSessionResponse'
-        '404':
-          description: Channel not found
+        '200': {description: Session created, content: {application/json: {schema: {$ref: '#/components/schemas/GBSessionStart'}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '500': {$ref: '#/components/responses/GBInternalError'}
     delete:
       tags: [gb28181]
       operationId: stopGB28181LiveView
-      summary: Stop live view sessions for a channel
+      summary: Stop active live-view sessions for the channel
+      x-liveforge-permission: gb28181:control
       responses:
-        '200':
-          description: Live sessions stopped
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBStatusResponse'
-        '404':
-          description: No active session or channel not found
+        '200': {description: Sessions stopped, content: {application/json: {schema: {$ref: '#/components/schemas/GBStatus'}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
   /api/v1/gb28181/channels/{channelId}/playback:
     parameters:
-      - $ref: '#/components/parameters/ChannelId'
+      - {$ref: '#/components/parameters/ChannelId'}
     post:
       tags: [gb28181]
       operationId: startGB28181Playback
-      summary: Start playback for an RFC3339 time range
+      summary: Start playback for an RFC3339 range
+      x-liveforge-permission: gb28181:control
       requestBody:
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GBPlaybackRequest'
+        content: {application/json: {schema: {$ref: '#/components/schemas/GBPlaybackRequest'}}}
       responses:
-        '200':
-          description: Playback session created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBSessionResponse'
-        '400':
-          description: Invalid or missing RFC3339 time range
-        '404':
-          description: Channel not found
+        '200': {description: Session created, content: {application/json: {schema: {$ref: '#/components/schemas/GBSessionStart'}}}}
+        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '500': {$ref: '#/components/responses/GBInternalError'}
     delete:
       tags: [gb28181]
       operationId: stopGB28181Playback
-      summary: Stop playback sessions for a channel
+      summary: Stop active playback sessions for the channel
+      x-liveforge-permission: gb28181:control
       responses:
-        '200':
-          description: Playback sessions stopped
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBStatusResponse'
-        '404':
-          description: No active session or channel not found
+        '200': {description: Sessions stopped, content: {application/json: {schema: {$ref: '#/components/schemas/GBStatus'}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
   /api/v1/gb28181/channels/{channelId}/ptz:
     parameters:
-      - $ref: '#/components/parameters/ChannelId'
+      - {$ref: '#/components/parameters/ChannelId'}
     post:
       tags: [gb28181]
       operationId: controlGB28181PTZ
-      summary: Send PTZ control to a channel
+      summary: Send a PTZ command
+      x-liveforge-permission: gb28181:control
       requestBody:
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GBPTZRequest'
+        content: {application/json: {schema: {$ref: '#/components/schemas/GBPTZRequest'}}}
       responses:
-        '200':
-          description: PTZ command accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBStatusResponse'
-        '400':
-          description: Unknown or missing command
-        '404':
-          description: Channel not found
+        '200': {description: Command sent, content: {application/json: {schema: {$ref: '#/components/schemas/GBStatus'}}}}
+        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '500': {$ref: '#/components/responses/GBInternalError'}
   /api/v1/gb28181/channels/{channelId}/catalog:
     parameters:
-      - $ref: '#/components/parameters/ChannelId'
+      - {$ref: '#/components/parameters/ChannelId'}
     post:
       tags: [gb28181]
       operationId: queryGB28181Catalog
       summary: Request a device catalog refresh
+      x-liveforge-permission: gb28181:control
       responses:
-        '200':
-          description: Catalog query sent
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBStatusResponse'
-        '404':
-          description: Device or channel not found
+        '200': {description: Query sent, content: {application/json: {schema: {$ref: '#/components/schemas/GBStatus'}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '500': {$ref: '#/components/responses/GBInternalError'}
   /api/v1/gb28181/sessions:
     get:
       tags: [gb28181]
       operationId: listGB28181Sessions
-      summary: List active GB28181 media sessions
+      summary: List active media sessions
+      x-liveforge-permission: gb28181:read
       responses:
-        '200':
-          description: Active sessions
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GBSession'
+        '200': {description: Sessions, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/GBSession'}}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
   /api/v1/gb28181/sessions/{sessionId}:
     parameters:
-      - $ref: '#/components/parameters/SessionId'
+      - {$ref: '#/components/parameters/SessionId'}
     delete:
       tags: [gb28181]
       operationId: stopGB28181Session
-      summary: Stop one GB28181 media session
+      summary: Stop one media session
+      x-liveforge-permission: gb28181:delete
       responses:
-        '200':
-          description: Session stopped
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GBStatusResponse'
-        '404':
-          description: Session not found
+        '200': {description: Session stopped, content: {application/json: {schema: {$ref: '#/components/schemas/GBStatus'}}}}
+        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+  /api/relay/push:
+    post:
+      tags: [internal-cluster]
+      operationId: signalRTPRelayPush
+      summary: Negotiate a default-path RTP push relay
+      x-liveforge-permission: server:mutate
+      parameters:
+        - {name: stream, in: query, required: true, schema: {type: string}}
+      requestBody: {required: true, content: {application/sdp: {schema: {type: string}}}}
+      responses:
+        '200': {description: SDP answer, content: {application/sdp: {schema: {type: string}}}}
+        '400': {$ref: '#/components/responses/RelayBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RelayNotFound'}
+        '406': {$ref: '#/components/responses/RelayNotAcceptable'}
+        '503': {$ref: '#/components/responses/RelayUnavailable'}
+  /api/relay/pull:
+    post:
+      tags: [internal-cluster]
+      operationId: signalRTPRelayPull
+      summary: Negotiate a default-path RTP pull relay
+      x-liveforge-permission: server:mutate
+      parameters:
+        - {name: stream, in: query, required: true, schema: {type: string}}
+      requestBody: {required: true, content: {application/sdp: {schema: {type: string}}}}
+      responses:
+        '200': {description: SDP answer, content: {application/sdp: {schema: {type: string}}}}
+        '400': {$ref: '#/components/responses/RelayBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RelayNotFound'}
+        '406': {$ref: '#/components/responses/RelayNotAcceptable'}
+        '503': {$ref: '#/components/responses/RelayUnavailable'}
+  /api/relay/gb/push:
+    post:
+      tags: [internal-cluster]
+      operationId: signalGBRelayPush
+      summary: Allocate the receiver port for a default-path GB28181 push relay
+      x-liveforge-permission: server:mutate
+      parameters:
+        - {name: stream, in: query, required: true, schema: {type: string}}
+        - {name: port, in: query, required: true, schema: {type: integer}}
+      responses:
+        '200': {description: Allocated UDP port, content: {text/plain: {schema: {type: integer}}}}
+        '400': {$ref: '#/components/responses/RelayBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/RelayUnavailable'}
+  /api/relay/gb/pull:
+    post:
+      tags: [internal-cluster]
+      operationId: signalGBRelayPull
+      summary: Start a default-path GB28181 pull relay
+      x-liveforge-permission: server:mutate
+      parameters:
+        - {name: stream, in: query, required: true, schema: {type: string}}
+        - {name: port, in: query, required: true, schema: {type: integer}}
+      responses:
+        '200': {description: Relay started}
+        '400': {$ref: '#/components/responses/RelayBadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RelayNotFound'}
   /webrtc/whip/{streamKey}:
     parameters:
-      - $ref: '#/components/parameters/StreamKey'
+      - {$ref: '#/components/parameters/StreamKey'}
     post:
       tags: [webrtc]
       operationId: publishWHIP
-      summary: Publish a stream with a WHIP SDP offer
-      requestBody:
-        required: true
-        content:
-          application/sdp:
-            schema:
-              type: string
+      summary: Publish with a WHIP SDP offer
+      security: [{streamBearerAuth: []}, {streamToken: []}, {}]
+      requestBody: {required: true, content: {application/sdp: {schema: {type: string}}}}
       responses:
-        '201':
-          description: SDP answer; the Location header identifies the session.
-          headers:
-            Location:
-              schema:
-                type: string
-          content:
-            application/sdp:
-              schema:
-                type: string
-        '400':
-          description: Invalid stream key or SDP
-        '415':
-          description: Content-Type is not application/sdp
+        '201': {$ref: '#/components/responses/SDPAnswer'}
+        '400': {$ref: '#/components/responses/MediaBadRequest'}
+        '401': {$ref: '#/components/responses/MediaUnauthorized'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
+        '500': {$ref: '#/components/responses/MediaInternalError'}
+        '503': {$ref: '#/components/responses/MediaUnavailable'}
+    options:
+      tags: [webrtc]
+      operationId: optionsWHIP
+      summary: Handle CORS preflight
+      security: []
+      responses: {'204': {description: CORS preflight accepted}}
   /webrtc/whep/{streamKey}:
     parameters:
-      - $ref: '#/components/parameters/StreamKey'
+      - {$ref: '#/components/parameters/StreamKey'}
     post:
       tags: [webrtc]
       operationId: playWHEP
-      summary: Play a stream with a WHEP SDP offer
-      requestBody:
-        required: true
-        content:
-          application/sdp:
-            schema:
-              type: string
+      summary: Play with a WHEP SDP offer
+      security: [{streamBearerAuth: []}, {streamToken: []}, {}]
+      requestBody: {required: true, content: {application/sdp: {schema: {type: string}}}}
       responses:
-        '201':
-          description: SDP answer; the Location header identifies the session.
-          headers:
-            Location:
-              schema:
-                type: string
-          content:
-            application/sdp:
-              schema:
-                type: string
-        '404':
-          description: Stream is not publishing
-        '415':
-          description: Content-Type is not application/sdp
+        '201': {$ref: '#/components/responses/SDPAnswer'}
+        '400': {$ref: '#/components/responses/MediaBadRequest'}
+        '401': {$ref: '#/components/responses/MediaUnauthorized'}
+        '404': {$ref: '#/components/responses/MediaNotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
+        '500': {$ref: '#/components/responses/MediaInternalError'}
+        '503': {$ref: '#/components/responses/MediaUnavailable'}
+    options:
+      tags: [webrtc]
+      operationId: optionsWHEP
+      summary: Handle CORS preflight
+      security: []
+      responses: {'204': {description: CORS preflight accepted}}
+  /webrtc/session/{sessionId}:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    delete:
+      tags: [webrtc]
+      operationId: deleteWebRTCSession
+      summary: Close a WHIP or WHEP session
+      security: []
+      responses:
+        '200': {description: Session closed}
+        '404': {$ref: '#/components/responses/MediaNotFound'}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
+    patch:
+      tags: [webrtc]
+      operationId: patchWebRTCSession
+      summary: Acknowledge a trickle ICE SDP fragment
+      security: []
+      requestBody: {required: true, content: {application/trickle-ice-sdpfrag: {schema: {type: string}}}}
+      responses:
+        '204': {description: Fragment accepted}
+        '404': {$ref: '#/components/responses/MediaNotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
+    options:
+      tags: [webrtc]
+      operationId: optionsWebRTCSession
+      summary: Handle CORS preflight
+      security: []
+      responses: {'204': {description: CORS preflight accepted}}
 components:
   securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: opaque token
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque management token}
+    consoleSession: {type: apiKey, in: cookie, name: lf_session}
+    streamBearerAuth: {type: http, scheme: bearer, bearerFormat: publish or subscribe token}
+    streamToken: {type: apiKey, in: query, name: token}
   parameters:
-    StreamKey:
-      name: streamKey
-      in: path
-      required: true
-      description: URL-decoded stream key such as live/demo.
-      schema:
-        type: string
-    DeviceId:
-      name: deviceId
-      in: path
-      required: true
-      schema: {type: string}
-    ChannelId:
-      name: channelId
-      in: path
-      required: true
-      schema: {type: string}
-    SessionId:
-      name: sessionId
-      in: path
-      required: true
-      schema: {type: string}
+    StreamKey: {name: streamKey, in: path, required: true, description: URL-decoded catch-all stream key such as live/demo., schema: {type: string}}
+    RecordingPath: {name: recordingPath, in: path, required: true, description: URL-decoded recording ID relative to configured storage; traversal is rejected., schema: {type: string}}
+    DeviceId: {name: deviceId, in: path, required: true, schema: {type: string}}
+    ChannelId: {name: channelId, in: path, required: true, schema: {type: string}}
+    SessionId: {name: sessionId, in: path, required: true, schema: {type: string}}
+    CallId: {name: callId, in: path, required: true, schema: {type: string}}
   responses:
-    NotFound:
-      description: Resource not found
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ApiResponse'
+    Success: {description: Successful management operation, content: {application/json: {schema: {$ref: '#/components/schemas/ApiResponse'}}}}
+    BadRequest: {description: Invalid or missing input, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    Unauthorized: {description: Missing or invalid management credential, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    Forbidden: {description: Principal lacks the required permission, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    NotFound: {description: Resource not found, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    Conflict: {description: Resource state conflicts with the operation, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    RateLimited: {description: Per-IP request limit exceeded, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    Unprocessable: {description: Valid JSON but missing target data or a compatible codec, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    BadGateway: {description: Upstream SIP call setup failed; internal details are redacted, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    InternalError: {description: Storage or server failure, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    Unavailable: {description: Required module or runtime manager is disabled, closed, or unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    GBBadRequest: {description: Invalid GB28181 request, content: {application/json: {schema: {$ref: '#/components/schemas/GBError'}}}}
+    GBUnauthorized: {description: Management middleware returns an envelope; live/playback publish authorization can return a direct GB error., content: {application/json: {schema: {oneOf: [{$ref: '#/components/schemas/ApiError'}, {$ref: '#/components/schemas/GBError'}]}}}}
+    GBForbidden: {description: Principal lacks the required permission; emitted by management middleware., content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    GBNotFound: {description: Device, channel, or session not found, content: {application/json: {schema: {$ref: '#/components/schemas/GBError'}}}}
+    GBRateLimited: {description: Per-IP request limit exceeded; emitted by management middleware., content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    GBInternalError: {description: SIP or media setup failed, content: {application/json: {schema: {$ref: '#/components/schemas/GBError'}}}}
+    RelayBadRequest: {description: Invalid relay query or SDP, content: {text/plain: {schema: {type: string}}}}
+    RelayNotFound: {description: Relay stream or publisher not found, content: {text/plain: {schema: {type: string}}}}
+    RelayNotAcceptable: {description: No supported codec in the RTP SDP offer, content: {text/plain: {schema: {type: string}}}}
+    RelayUnavailable: {description: Relay port allocation or setup unavailable, content: {text/plain: {schema: {type: string}}}}
+    SDPAnswer:
+      description: SDP answer; Location identifies the session resource.
+      headers: {Location: {required: true, schema: {type: string}}}
+      content: {application/sdp: {schema: {type: string}}}
+    MediaBadRequest: {description: Invalid stream key, body, or SDP, content: {text/plain: {schema: {type: string}}}}
+    MediaUnauthorized: {description: Publish or subscribe authorization rejected, content: {text/plain: {schema: {type: string}}}}
+    MediaNotFound: {description: Stream or session not found, content: {text/plain: {schema: {type: string}}}}
+    UnsupportedMedia: {description: Unsupported Content-Type or no compatible media tracks, content: {text/plain: {schema: {type: string}}}}
+    MediaRateLimited: {description: Per-IP signaling limit exceeded, content: {text/plain: {schema: {type: string}}}}
+    MediaInternalError: {description: Peer connection or SDP answer failure, content: {text/plain: {schema: {type: string}}}}
+    MediaUnavailable: {description: Server draining, connection limit reached, or session setup aborted, content: {text/plain: {schema: {type: string}}}}
   schemas:
     ApiResponse:
       type: object
       required: [code, message]
-      properties:
-        code:
-          type: integer
-        message:
-          type: string
-        data: {}
+      properties: {code: {type: integer, const: 0}, message: {type: string}, data: {}}
+    ApiError:
+      type: object
+      required: [code, message]
+      properties: {code: {type: integer, minimum: 400}, message: {type: string}}
+    HealthResponse:
+      allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: healthy}}}}}]
+    ScheduledResponse:
+      allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: scheduled}}}}}]
     ServerInfo:
       type: object
       required: [version, uptime_sec, modules]
-      properties:
-        version: {type: string}
-        uptime_sec: {type: integer, format: int64}
-        modules: {type: array, items: {type: string}}
-        endpoints: {type: object, additionalProperties: {type: string}}
-    ServerInfoResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ServerInfo'
-    ServerStats:
-      type: object
-      required: [streams, connections]
-      properties:
-        streams: {type: integer}
-        connections: {type: integer, format: int64}
-    ServerStatsResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ServerStats'
+      properties: {version: {type: string}, uptime_sec: {type: integer, format: int64}, modules: {type: array, items: {type: string}}, endpoints: {type: object, additionalProperties: {type: string}}}
+    ServerInfoResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ServerInfo'}}}]}
+    ServerStats: {type: object, required: [streams, connections], properties: {streams: {type: integer}, connections: {type: integer, format: int64}}}
+    ServerStatsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ServerStats'}}}]}
     ConfigRuntimeStatus:
       type: object
+      required: [enabled, consecutive_failures, callback_failures, dropped_callbacks, config_changes_accepted, config_changes_rejected, config_changes_application_failed]
       properties:
         enabled: {type: boolean}
         source: {type: string}
@@ -493,61 +745,80 @@ components:
         last_attempt: {type: string, format: date-time}
         last_success: {type: string, format: date-time}
         consecutive_failures: {type: integer, format: int64}
-        last_error: {type: string}
+        last_error: {type: string, description: Bounded redacted source/application error.}
         pending_restart: {type: array, items: {type: string}}
         callback_failures: {type: integer, format: int64}
-        dropped_callbacks: {type: integer, format: int64}
-    ConfigRuntimeStatusResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ConfigRuntimeStatus'
-    StreamStats:
-      type: object
-      properties:
-        bytes_in: {type: integer, format: int64}
-        video_frames: {type: integer, format: int64}
-        audio_frames: {type: integer, format: int64}
-        uptime_sec: {type: integer, format: int64}
-        bitrate_kbps: {type: integer, format: int64}
-        fps: {type: number, format: double}
+        dropped_callbacks: {type: integer, format: int64, description: Superseded pending callback notifications.}
+        config_changes_accepted: {type: integer, format: int64}
+        config_changes_rejected: {type: integer, format: int64}
+        config_changes_application_failed: {type: integer, format: int64}
+    ConfigRuntimeStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ConfigRuntimeStatus'}}}]}
+    StreamStats: {type: object, properties: {bytes_in: {type: integer, format: int64}, video_frames: {type: integer, format: int64}, audio_frames: {type: integer, format: int64}, uptime_sec: {type: integer, format: int64}, bitrate_kbps: {type: integer, format: int64}, fps: {type: number}}}
     StreamInfo:
       type: object
-      required: [key, state, subscribers]
-      properties:
-        key: {type: string}
-        state: {type: string}
-        publisher: {type: string}
-        video_codec: {type: string}
-        audio_codec: {type: string}
-        gop_cache_len: {type: integer}
-        gop_video_frames: {type: integer}
-        gop_audio_frames: {type: integer}
-        gop_duration_ms: {type: integer, format: int64}
-        subscribers: {type: object, additionalProperties: {type: integer}}
-        stats: {$ref: '#/components/schemas/StreamStats'}
-    StreamsResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              type: object
-              required: [streams]
-              properties:
-                streams: {type: array, items: {$ref: '#/components/schemas/StreamInfo'}}
-    StreamResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/StreamInfo'
-    GBDeviceSummary:
+      required: [key, state, publisher, video_codec, audio_codec, gop_cache_len, gop_video_frames, gop_audio_frames, gop_duration_ms, subscribers]
+      properties: {key: {type: string}, state: {type: string}, publisher: {type: string}, video_codec: {type: string}, audio_codec: {type: string}, gop_cache_len: {type: integer}, gop_video_frames: {type: integer}, gop_audio_frames: {type: integer}, gop_duration_ms: {type: integer, format: int64}, subscribers: {type: object, additionalProperties: {type: integer}}, stats: {$ref: '#/components/schemas/StreamStats'}}
+    StreamsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {streams: {type: array, items: {$ref: '#/components/schemas/StreamInfo'}}}}}}]}
+    StreamResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/StreamInfo'}}}]}
+    AuditEntry:
       type: object
-      required: [device_id, remote_addr, transport, status, channel_count]
+      required: [time, request_id, principal, role, action, resource, result]
+      properties: {time: {type: string, format: date-time}, request_id: {type: string}, principal: {type: string}, role: {type: string}, action: {type: string}, resource: {type: string}, result: {type: string}, remote_addr: {type: string}, metadata: {type: object, additionalProperties: {type: string}, description: Keys containing token, secret, password, or authorization are removed.}}
+    AuditResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/AuditEntry'}}}}]}
+    SecurityStatus:
+      type: object
+      properties: {legacy_bearer_configured: {type: boolean}, tokens: {type: array, items: {type: object, properties: {name: {type: string}, role: {type: string}}}}, console_configured: {type: boolean}, console_role: {type: string}, audit_enabled: {type: boolean}, audit_entries: {type: integer}, audit_events_total: {type: integer, format: int64}}
+    SecurityStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SecurityStatus'}}}]}
+    SIPDialRequest: {type: object, additionalProperties: false, required: [target_uri, stream_key], properties: {target_uri: {type: string}, stream_key: {type: string}}}
+    SIPCall:
+      type: object
+      properties: {call_id: {type: string}, direction: {type: string, enum: [inbound, outbound]}, stream_key: {type: string}, codec: {type: string}, rtp_port: {type: integer}, rtcp_port: {type: integer}, remote_address: {type: string}, started_at: {type: string, format: date-time}, state: {type: string}, last_error: {type: string}, last_rtp_at: {type: string, format: date-time}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}}
+    SIPMetrics:
+      type: object
+      additionalProperties: false
+      properties:
+        active_calls: {type: integer}
+        active_inbound: {type: integer}
+        active_outbound: {type: integer}
+        calls_started_total: {type: integer, format: int64}
+        calls_ended_total: {type: integer, format: int64}
+        setup_failures_total: {type: integer, format: int64}
+        codec_failures_total: {type: integer, format: int64}
+        duplicate_call_ids_total: {type: integer, format: int64}
+        port_exhaustions_total: {type: integer, format: int64}
+        capacity_rejections_total: {type: integer, format: int64}
+        network_failures_total: {type: integer, format: int64}
+        rtp_packets_sent_total: {type: integer, format: int64}
+        rtp_packets_received_total: {type: integer, format: int64}
+        rtp_bytes_sent_total: {type: integer, format: int64}
+        rtp_bytes_received_total: {type: integer, format: int64}
+    SIPCallsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {calls: {type: array, items: {$ref: '#/components/schemas/SIPCall'}}, metrics: {$ref: '#/components/schemas/SIPMetrics'}}}}}]}
+    SIPCallResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SIPCall'}}}]}
+    SIPDialResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {call_id: {type: string}}}}}]}
+    RelayStatus: {type: object, properties: {direction: {type: string, enum: [forward, origin]}, protocol: {type: string, enum: [rtmp, srt, rtsp, rtp, gb28181]}, stream_key: {type: string}, endpoint: {type: string}, started_at: {type: string, format: date-time}}}
+    PeerStatus: {type: object, properties: {host: {type: string}, consecutive_failures: {type: integer}, last_attempt: {type: string, format: date-time}, last_success: {type: string, format: date-time}, evicted: {type: boolean}}}
+    ClusterStatus: {type: object, properties: {enabled: {type: boolean}, active_forwards: {type: integer}, active_origins: {type: integer}, relays: {type: array, items: {$ref: '#/components/schemas/RelayStatus'}}, peers: {type: array, items: {$ref: '#/components/schemas/PeerStatus'}}, truncated: {type: boolean}}}
+    ClusterStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ClusterStatus'}}}]}
+    Recording:
+      type: object
+      properties: {id: {type: string}, stream_key: {type: string}, format: {type: string, enum: [flv, fmp4, mp4, ts, hls]}, state: {type: string}, size_bytes: {type: integer, format: int64}, started_at: {type: string, format: date-time}, completed_at: {type: string, format: date-time}, duration_sec: {type: number}, error: {type: string}}
+    StorageHealth: {type: object, properties: {backend: {type: string}, root: {type: string}, healthy: {type: boolean}, low_space: {type: boolean}, total_bytes: {type: integer, format: int64}, available_bytes: {type: integer, format: int64}, error: {type: string}}}
+    RecordingSession: {type: object, properties: {stream_key: {type: string}, recording_id: {type: string}, state: {type: string}, started_at: {type: string, format: date-time}, completed_at: {type: string, format: date-time}, duration_sec: {type: number}, bytes: {type: integer, format: int64}, write_retries: {type: integer, format: int64}, last_error: {type: string}}}
+    RecordingMetrics: {type: object, properties: {files_completed: {type: integer}, files_failed: {type: integer}, write_retries: {type: integer}, write_failures: {type: integer}, files_deleted: {type: integer}, bytes_written: {type: integer}, storage_errors: {type: integer}}}
+    RecordingsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Recording'}}}}]}
+    RecordingResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/Recording'}}}]}
+    RecordingStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {sessions: {type: array, items: {$ref: '#/components/schemas/RecordingSession'}}, storage: {$ref: '#/components/schemas/StorageHealth'}, metrics: {$ref: '#/components/schemas/RecordingMetrics'}}}}}]}
+    DVRSession: {type: object, properties: {stream_key: {type: string}, live: {type: boolean}, segments: {type: integer}, duration_sec: {type: number}, bytes: {type: integer, format: int64}, started_at: {type: string, format: date-time}, oldest_segment: {type: string, format: date-time}, newest_segment: {type: string, format: date-time}, last_error: {type: string}}}
+    DVRStorageHealth: {type: object, properties: {root: {type: string}, healthy: {type: boolean}, low_space: {type: boolean}, total_bytes: {type: integer}, available_bytes: {type: integer}, error: {type: string}}}
+    DVRMetrics: {type: object, properties: {segments_written: {type: integer}, segment_bytes: {type: integer}, write_retries: {type: integer}, write_failures: {type: integer}, cleanup_deleted: {type: integer}, cleanup_bytes: {type: integer}, cleanup_failures: {type: integer}}}
+    DVRStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {enabled: {type: boolean}, sessions: {type: array, items: {$ref: '#/components/schemas/DVRSession'}}, storage: {$ref: '#/components/schemas/DVRStorageHealth'}, metrics: {$ref: '#/components/schemas/DVRMetrics'}}}}}]}
+    DVRSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/DVRSession'}}}]}
+    GBError: {type: object, required: [error], properties: {error: {type: string}}}
+    GBStatus: {type: object, required: [status], properties: {status: {type: string}}}
+    GBChannel: {type: object, properties: {channel_id: {type: string}, name: {type: string}, manufacturer: {type: string}, status: {type: string}, ptz_type: {type: integer}, latitude: {type: number}, longitude: {type: number}}}
+    GBDeviceSummary: {type: object, properties: {device_id: {type: string}, remote_addr: {type: string}, transport: {type: string}, status: {type: string}, registered_at: {type: string, format: date-time}, last_keepalive: {type: string, format: date-time}, channel_count: {type: integer}}}
+    GBDevice:
+      type: object
       properties:
         device_id: {type: string}
         remote_addr: {type: string}
@@ -556,59 +827,8 @@ components:
         registered_at: {type: string, format: date-time}
         last_keepalive: {type: string, format: date-time}
         channel_count: {type: integer}
-    GBDevice:
-      allOf:
-        - $ref: '#/components/schemas/GBDeviceSummary'
-        - type: object
-          required: [channels]
-          properties:
-            channels: {type: array, items: {$ref: '#/components/schemas/GBChannel'}}
-    GBChannel:
-      type: object
-      required: [channel_id, name, manufacturer, status]
-      properties:
-        channel_id: {type: string}
-        name: {type: string}
-        manufacturer: {type: string}
-        status: {type: string}
-        ptz_type: {type: integer}
-        latitude: {type: number, format: double}
-        longitude: {type: number, format: double}
-    GBSession:
-      type: object
-      required: [id, device_id, channel_id, stream_key, direction, state, local_port, transport]
-      properties:
-        id: {type: string}
-        device_id: {type: string}
-        channel_id: {type: string}
-        stream_key: {type: string}
-        direction: {type: string, enum: [inbound, outbound]}
-        state: {type: string}
-        local_port: {type: integer}
-        transport: {type: string}
-    GBSessionResponse:
-      type: object
-      required: [stream_key, session_id]
-      properties:
-        stream_key: {type: string}
-        session_id: {type: string}
-    GBStatusResponse:
-      type: object
-      required: [status]
-      properties:
-        status: {type: string}
-    GBPlaybackRequest:
-      type: object
-      required: [start_time, end_time]
-      properties:
-        start_time: {type: string, format: date-time}
-        end_time: {type: string, format: date-time}
-    GBPTZRequest:
-      type: object
-      required: [command]
-      properties:
-        command:
-          type: string
-          enum: [up, down, left, right, upleft, upright, downleft, downright, zoomin, zoomout, stop]
-        h_speed: {type: integer, minimum: 0, maximum: 255}
-        v_speed: {type: integer, minimum: 0, maximum: 255}
+        channels: {type: array, items: {$ref: '#/components/schemas/GBChannel'}}
+    GBPlaybackRequest: {type: object, required: [start_time, end_time], properties: {start_time: {type: string, format: date-time}, end_time: {type: string, format: date-time}}}
+    GBPTZRequest: {type: object, required: [command], properties: {command: {type: string, enum: [up, down, left, right, upleft, upright, downleft, downright, zoomin, zoomout, stop]}, h_speed: {type: integer, minimum: 0, maximum: 255}, v_speed: {type: integer, minimum: 0, maximum: 255}}}
+    GBSessionStart: {type: object, required: [stream_key, session_id], properties: {stream_key: {type: string}, session_id: {type: string}}}
+    GBSession: {type: object, properties: {id: {type: string}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string}, direction: {type: string, enum: [inbound, outbound]}, state: {type: string}, local_port: {type: integer}, transport: {type: string}}}

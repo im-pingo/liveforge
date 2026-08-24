@@ -1,8 +1,24 @@
 # Runtime Configuration Sources
 
-LiveForge reads the bootstrap YAML file once during startup. After startup, a background manager polls the selected source and publishes immutable snapshots. Reading a configuration value uses an atomic in-memory load; it never performs file or network I/O and does not wait for a refresh.
+The checked-in sample configuration is for local development only: it disables TLS and authentication and uses the console credentials `admin/admin`. Never expose it publicly unchanged.
 
-## Local file (default)
+LiveForge reads the bootstrap YAML at startup. A single background worker then loads the selected source immediately, polls it periodically, and publishes immutable snapshots. A runtime configuration read is an atomic in-memory load: it never performs file/network I/O, waits for refresh, or takes the manager status lock.
+
+## Prerequisites
+
+- Keep the management listener on `127.0.0.1` while validating a source.
+- Put source credentials in deployment secret injection or environment variables.
+- Ensure every source returns a complete configuration, not a partial patch.
+- Export a token with `config:reload` (operator or admin) for manual refresh:
+
+```bash
+export LIVEFORGE_API=http://127.0.0.1:8090
+export OPERATOR_TOKEN='replace-me'
+```
+
+The source, poll interval, load timeout, and source connection settings are bootstrap-controlled and require restart to change.
+
+## Local File
 
 ```yaml
 runtime:
@@ -13,21 +29,22 @@ runtime:
     path: ""
 ```
 
-An empty `file.path` uses the path passed with `-c`. A changed file is parsed, normalized, validated, and published only when its normalized content changes.
+An empty `file.path` uses the path passed with `-c`. A changed file is parsed, normalized, validated, and considered only when normalized content changes.
 
-## HTTP distribution
+## HTTP Or HTTPS
 
 ```yaml
 runtime:
-  source: http
+  source: https
   poll_interval: 15s
+  load_timeout: 10s
   http:
     url: "https://config.example.internal/liveforge.yaml"
     token: "${LIVEFORGE_CONFIG_TOKEN}"
     max_bytes: 4194304
 ```
 
-The client sends `If-None-Match` and `If-Modified-Since` after the first successful response. `304 Not Modified` does not replace the active snapshot. Use a private HTTPS endpoint and inject the token through a secret manager or environment variable.
+The client uses `If-None-Match` and `If-Modified-Since` after a successful response. `304 Not Modified` retains the snapshot. Use authenticated HTTPS and a bounded `max_bytes` value.
 
 ## Consul KV
 
@@ -37,45 +54,85 @@ runtime:
   poll_interval: 15s
   consul:
     address: "https://consul.example.internal"
-    prefix: "liveforge"
+    prefix: liveforge
     token: "${CONSUL_HTTP_TOKEN}"
+    max_bytes: 4194304
 ```
 
-The loader reads one KV prefix in one request, decodes values, and maps dotted or slash-separated keys to a complete configuration document. The Consul index is used as the source version when available.
+One KV prefix is loaded per attempt. Dotted or slash-separated keys map to configuration paths; a complete `config`, `config.yaml`, `config.yml`, or `config.json` value is also accepted. The Consul index is used as source version when available.
 
 ## Redis
 
-Hash mode reads all fields in one `HGETALL`:
+Hash mode uses one `HGETALL`:
 
 ```yaml
 runtime:
   source: redis
   redis:
     addr: "redis.example.internal:6379"
+    username: liveforge
+    password: "${REDIS_PASSWORD}"
+    db: 0
     hash: "liveforge:config"
     version_key: "liveforge:config:version"
-    password: "${REDIS_PASSWORD}"
     tls: true
 ```
 
-Prefix mode uses `SCAN` and a pipelined batch of `GET` operations:
+Prefix mode uses `SCAN` and pipelined `GET` operations:
 
 ```yaml
 runtime:
   source: redis
   redis:
-    addr: "redis.example.internal:6379"
+    addr: "127.0.0.1:6379"
     prefix: "liveforge:config:"
 ```
 
-Redis fields use dotted or slash-separated paths such as `server.name` and `limits.max_connections`. A field named `config`, `config.yaml`, `config.yml`, or `config.json` is treated as a complete document.
+Redis fields use dotted or slash-separated paths such as `server.log_level` and `limits.max_connections`. Prefer hash mode when an atomic producer can update the hash and version key together.
 
-## Failure and restart behavior
+## Refresh And Observe
 
-- A source timeout, unavailable backend, parse error, or validation error retains the last valid snapshot and increments the source failure status.
-- `SIGHUP` only schedules an asynchronous refresh; it does not perform I/O in the signal loop.
-- Policy values such as limits, auth rules, log level, recording/DVR policy, and segment settings are hot-reloadable when a module supports the change.
-- Listener addresses, module enablement, TLS files/mode, port ranges, and audio codec enablement are reported as `restart_required`; they are not partially applied to live listeners.
-- Simulcast configuration is retained but layer selection is deferred and is not supported by the runtime.
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  "$LIVEFORGE_API/api/v1/server/config/refresh"
+curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  "$LIVEFORGE_API/api/v1/server/config"
+```
 
-Do not place credentials in committed configuration files or logs. Use environment expansion only as a bridge to a deployment secret store.
+Refresh success is 202 and means scheduled, not already loaded. Status success is 200. The refresh route returns 401 for invalid credentials, 403 for a viewer, 429 when rate limited, and 503 when the manager is unavailable, closed, or not started. `SIGHUP` has the same asynchronous enqueue semantics and performs no source I/O in the signal loop.
+
+Status reports source/version/hash, last attempt/success, consecutive failures, redacted last error, pending restart paths, callback failures, superseded callback count, and accepted/rejected/application-failed counters. Coalescing retains the newest accepted callback and increments `dropped_callbacks` for each superseded pending notification.
+
+Prometheus exports:
+
+```text
+liveforge_config_consecutive_failures
+liveforge_config_pending_restart
+liveforge_config_callback_failures
+liveforge_config_callbacks_dropped
+liveforge_config_changes_total{result="accepted|rejected|application_failed"}
+```
+
+## Application And Failure Semantics
+
+- Empty, timed-out, unavailable, malformed, or invalid input retains the last valid effective snapshot.
+- `server.name` is immutable; attempting to change it rejects the complete candidate.
+- Hot policy changes are prepared/applied before atomic publication. A module rejection prevents publication, and already prepared reloaders are rolled back when a later reloader fails.
+- Restart-required desired values remain visible in `pending_restart`; effective values retain the previously applied values until process restart.
+- Exact per-field classes are in `docs/config/config.schema.json` under `x-liveforge-reload`.
+- All `stream.simulcast` fields are restart-required and deferred; no runtime layer selection exists.
+
+The deprecated `auth.api.bearer_token` is copied to `api.auth.bearer_token` only when the current path is empty. If both are present, the current path wins. Migrate with a single move:
+
+```text
+auth.api.bearer_token -> api.auth.bearer_token
+```
+
+## Rollback And Recovery
+
+1. Retain the last known valid source document and its version.
+2. Restore that complete document, then request refresh and verify a new `last_success`/active hash.
+3. On an immutable rejection, restore `server.name`; a restart does not make an immutable runtime transition acceptable.
+4. On application failure, inspect the redacted status/log entry and the responsible module; the prior effective snapshot remains active.
+5. For pending restart paths, either revert them in the source or restart in a controlled window after validating the desired document.
+6. During backend outage, do not point reads at the backend. Runtime consumers continue using the last atomic snapshot.
