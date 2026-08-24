@@ -68,8 +68,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.listener = ln
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /dvr/{app}/{key}.m3u8", m.handlePlaylist)
-	mux.HandleFunc("GET /dvr/{app}/{key}/{filename}", m.handleSegment)
+	mux.HandleFunc("GET /dvr/{app}/{resource...}", m.handleMedia)
 
 	m.httpSrv = &http.Server{Handler: mux}
 

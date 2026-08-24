@@ -54,6 +54,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - Stream pattern selection, duration/size segmentation, path templates, completion callbacks, retry/failure preservation, and storage health.
 - Authenticated recording list/status/detail, HTTP range download, and admin delete operations.
 - DVR playlist/segment serving, retention cleanup, storage/session status, and Prometheus metrics.
+- DVR media registration is valid on Go 1.26 and strictly dispatches only `GET /dvr/{app}/{key}.m3u8` and `GET /dvr/{app}/{key}/{filename}`; malformed or nested resources return 404 before playback authorization or storage lookup.
 
 ### SIP Gateway
 
@@ -92,6 +93,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | RTSP separate audio/video multi-track SETUP | `08911ea` |
 | Meaningful CLI/tool package tests | `7df71a0` |
 | Cluster peer error bounding/redaction and final security hardening | `ef20a1a` |
+| Go 1.26 DVR media route registration, strict pre-auth dispatch, and bounded lifecycle | Real-listener tests in `module/dvr/route_test.go` |
 | GB28181 live/playback stop route and `gb28181:control` permission | Registered and covered in `module/gb28181` and `module/api` tests |
 | Runtime callback coalescing counter | `DroppedCallbacks` status/metrics path and manager tests |
 | Cluster credential hot rotation/no-admin failure | RTP/GB transport credential tests and cluster operations recipe |
@@ -109,6 +111,8 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 - Release artifact verification: `docs/recipes/release-verification.md`
 
 Every operations recipe uses loopback-safe examples, authenticated requests, expected success/failure codes, diagnostics/metrics, rollback, and recovery. Each warns that `configs/liveforge.yaml` disables TLS/auth and uses `admin/admin`, so it must never be publicly exposed unchanged.
+
+This DVR fix restores the already documented media URL contract and does not change capabilities, prerequisites, ports, configuration, authentication, REST contracts, or operator workflows. Therefore `agent-manifest.json`, `llms.txt`, `llms-full.txt`, `README.md`, `README.zh-CN.md`, `docs/api/openapi.yaml`, `docs/config/config.schema.json`, and the recording/DVR recipe require no corresponding content change.
 
 ## Deferred Work
 

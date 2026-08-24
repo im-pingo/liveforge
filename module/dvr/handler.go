@@ -10,6 +10,34 @@ import (
 	"github.com/im-pingo/liveforge/core"
 )
 
+func (m *Module) handleMedia(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("app")
+	resource := r.PathValue("resource")
+	if !validMediaPathPart(app) {
+		http.NotFound(w, r)
+		return
+	}
+
+	if key, ok := strings.CutSuffix(resource, ".m3u8"); ok && validMediaPathPart(key) {
+		r.SetPathValue("key", key)
+		m.handlePlaylist(w, r)
+		return
+	}
+
+	key, filename, ok := strings.Cut(resource, "/")
+	if !ok || !validMediaPathPart(key) || strings.Contains(filename, "/") || parseSeqNum(filename) < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	r.SetPathValue("key", key)
+	r.SetPathValue("filename", filename)
+	m.handleSegment(w, r)
+}
+
+func validMediaPathPart(value string) bool {
+	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, "/\\")
+}
+
 func (m *Module) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("app")
 	key := r.PathValue("key")
