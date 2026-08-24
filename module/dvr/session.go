@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,14 +23,15 @@ import (
 
 // Session manages DVR segment writing for a single stream.
 type Session struct {
-	streamKey string
-	stream    *core.Stream
-	cfg       config.DVRConfig
-	index     *SegmentIndex
-	segDir    string
-	storage   *dvrStorage
-	dir       *localfs.Dir
-	ownsStore bool
+	streamKey   string
+	stream      *core.Stream
+	publisherID string
+	cfg         config.DVRConfig
+	index       *SegmentIndex
+	segDir      string
+	storage     *dvrStorage
+	dir         *localfs.Dir
+	ownsStore   bool
 
 	muxer       *ts.Muxer
 	segFile     segmentFile
@@ -48,6 +51,12 @@ type Session struct {
 	done        chan struct{}
 	finished    chan struct{}
 	lifecycle   atomic.Uint32
+	runMu       sync.Mutex
+	runStarted  bool
+	closeCalled bool
+	finishOnce  sync.Once
+	storageOnce sync.Once
+	storageErr  error
 	startedAt   time.Time
 	lastError   atomic.Pointer[string]
 	metrics     *DVRMetrics
@@ -133,6 +142,9 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 		startedAt:   time.Now().UTC(),
 		metrics:     metrics,
 	}
+	if publisher := stream.Publisher(); publisher != nil {
+		session.publisherID = publisher.ID()
+	}
 	if recoveredPartials > 0 {
 		metrics.writeFailures.Add(uint64(recoveredPartials))
 		session.setLastError(fmt.Errorf("dvr: recovered %d crash partial segment(s)", recoveredPartials))
@@ -142,11 +154,19 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 
 // Run starts the DVR segment writing loop. Blocks until Stop or stream closes.
 func (s *Session) Run() {
-	defer func() {
-		s.closeSegment(false)
-		s.lifecycle.Store(sessionStopped)
-		close(s.finished)
-	}()
+	s.runMu.Lock()
+	if s.runStarted {
+		s.runMu.Unlock()
+		return
+	}
+	s.runStarted = true
+	closeCalled := s.closeCalled
+	s.runMu.Unlock()
+	if closeCalled {
+		s.finish()
+		return
+	}
+	defer s.finish()
 
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		s.videoSeq = append([]byte(nil), vsh.Payload...)
@@ -179,6 +199,17 @@ func (s *Session) Run() {
 		case <-s.stream.RingBuffer().Signal():
 		}
 	}
+}
+
+func (s *Session) finish() {
+	s.finishOnce.Do(func() {
+		s.closeSegment(false)
+		s.lifecycle.Store(sessionStopped)
+		if s.ownsStore {
+			_ = s.closeStorage()
+		}
+		close(s.finished)
+	})
 }
 
 // Wait blocks until Run has finalized the current segment.
@@ -430,6 +461,22 @@ func (s *Session) Stop() {
 	}
 }
 
+// Close stops the session, waits for finalization when Run has started, and
+// releases any storage boundary owned by this standalone session.
+func (s *Session) Close() error {
+	s.runMu.Lock()
+	s.closeCalled = true
+	started := s.runStarted
+	s.runMu.Unlock()
+	s.Stop()
+	if started {
+		s.Wait()
+	} else {
+		s.finish()
+	}
+	return s.closeStorage()
+}
+
 // IsLive returns true if the stream is still publishing.
 func (s *Session) IsLive() bool {
 	return s.lifecycle.Load() == sessionActive
@@ -456,13 +503,16 @@ func (s *Session) cleanBefore(cutoff time.Time) CleanupResult {
 	})
 }
 
-func (s *Session) closeStorage() {
-	if s.dir != nil {
-		_ = s.dir.Close()
-	}
-	if s.ownsStore && s.storage != nil {
-		_ = s.storage.Close()
-	}
+func (s *Session) closeStorage() error {
+	s.storageOnce.Do(func() {
+		if s.dir != nil {
+			s.storageErr = errors.Join(s.storageErr, s.dir.Close())
+		}
+		if s.ownsStore && s.storage != nil {
+			s.storageErr = errors.Join(s.storageErr, s.storage.Close())
+		}
+	})
+	return s.storageErr
 }
 
 func resolvePath(pathTemplate, streamKey string) string {
@@ -486,13 +536,7 @@ func rebuildSegmentIndex(dir *localfs.Dir, segDir string, segmentDuration time.D
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("dvr: scan retained segments: %w", err)
 	}
-	idx := NewSegmentIndex()
-	next := minimumNext
 	recovered := 0
-	duration := segmentDuration.Seconds()
-	if duration <= 0 {
-		duration = 6
-	}
 	for _, entry := range entries {
 		filename := filepath.Base(filepath.FromSlash(entry.RelPath))
 		if strings.HasSuffix(filename, ".ts.partial") {
@@ -506,11 +550,34 @@ func rebuildSegmentIndex(dir *localfs.Dir, segDir string, segmentDuration time.D
 			recovered++
 			continue
 		}
+	}
+	segments, next := buildRetainedSegments(entries, segDir, segmentDuration, minimumNext)
+	idx := NewSegmentIndex()
+	for _, segment := range segments {
+		idx.Add(segment)
+	}
+	return idx, next, recovered, nil
+}
+
+func buildRetainedSegments(entries []localfs.Entry, segDir string, segmentDuration time.Duration, minimumNext int) ([]Segment, int) {
+	duration := segmentDuration.Seconds()
+	if duration <= 0 {
+		duration = 6
+	}
+	next := minimumNext
+	seen := make(map[int]struct{}, len(entries))
+	segments := make([]Segment, 0, len(entries))
+	for _, entry := range entries {
+		filename := filepath.Base(filepath.FromSlash(entry.RelPath))
 		seq := parseSeqNum(filename)
 		if seq < 0 {
 			continue
 		}
-		idx.Add(Segment{
+		if _, duplicate := seen[seq]; duplicate {
+			continue
+		}
+		seen[seq] = struct{}{}
+		segments = append(segments, Segment{
 			SeqNum:    seq,
 			StartTime: entry.ModTime,
 			Duration:  duration,
@@ -522,5 +589,6 @@ func rebuildSegmentIndex(dir *localfs.Dir, segDir string, segmentDuration time.D
 			next = seq + 1
 		}
 	}
-	return idx, next, recovered, nil
+	sort.Slice(segments, func(i, j int) bool { return segments[i].SeqNum < segments[j].SeqNum })
+	return segments, next
 }

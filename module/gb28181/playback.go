@@ -9,8 +9,8 @@ import (
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/avframe"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // playbackClient handles video recording playback sessions.
@@ -58,7 +58,7 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	// Create stream and publisher
 	stream, _ := pc.handler.hub.GetOrCreate(streamKey)
 	pub := NewPublisher(
-		fmt.Sprintf("gb28181-playback-%s", channelID),
+		fmt.Sprintf("gb28181-playback-%s-%s", channelID, generateTag()),
 		func(frame *avframe.AVFrame) {
 			stream.WriteFrame(frame)
 		},
@@ -132,9 +132,10 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 
 	// Emit publish event
 	pc.handler.bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "gb28181",
-		RemoteAddr: device.RemoteAddr,
+		StreamKey:   streamKey,
+		PublisherID: pub.ID(),
+		Protocol:    "gb28181",
+		RemoteAddr:  device.RemoteAddr,
 		Extra: map[string]any{
 			"gb28181_device_id":  device.DeviceID,
 			"gb28181_channel_id": channelID,

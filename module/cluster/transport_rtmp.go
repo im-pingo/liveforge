@@ -154,7 +154,7 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	for {
 		select {

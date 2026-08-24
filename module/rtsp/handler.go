@@ -171,18 +171,18 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 	}
 
 	if session != nil && h.server != nil {
-		// Emit publish event — auth hooks can reject.
-		if err := h.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
-			StreamKey:  session.StreamKey,
-			Protocol:   "rtsp",
-			RemoteAddr: remoteAddr,
-		}); err != nil {
+		publishCtx := &core.EventContext{
+			StreamKey:   session.StreamKey,
+			PublisherID: session.ID,
+			Protocol:    "rtsp",
+			RemoteAddr:  remoteAddr,
+		}
+		if err := h.server.GetEventBus().EmitSync(core.EventPublish, publishCtx); err != nil {
 			return newResponse(401, "Unauthorized", req)
 		}
 
 		mediaInfo, ptMap := sdpToMediaInfoWithPT(sd)
 		session.MediaInfo = mediaInfo
-
 		stream, err := h.server.StreamHub().GetOrCreate(session.StreamKey)
 		if err != nil {
 			return newResponse(503, "Service Unavailable", req)
@@ -198,6 +198,7 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 		if err := stream.SetPublisher(pub); err != nil {
 			return newResponse(500, "Internal Server Error", req)
 		}
+		h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
 
 		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
 		// SequenceHeader frame so the stream caches it for late-joining subscribers.

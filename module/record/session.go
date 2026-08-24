@@ -13,16 +13,17 @@ import (
 
 // RecordSession reads frames from a stream's RingBuffer and writes them to an FLV file.
 type RecordSession struct {
-	streamKey  string
-	stream     *core.Stream
-	cfg        config.RecordConfig
-	writer     *FileWriter
-	reader     *util.RingReader[*avframe.AVFrame]
-	done       chan struct{}
-	finished   chan struct{}
-	startedAt  time.Time
-	state      atomic.Pointer[RecordingSessionStatus]
-	onComplete func(RecordingSessionStatus)
+	streamKey   string
+	stream      *core.Stream
+	publisherID string
+	cfg         config.RecordConfig
+	writer      *FileWriter
+	reader      *util.RingReader[*avframe.AVFrame]
+	done        chan struct{}
+	finished    chan struct{}
+	startedAt   time.Time
+	state       atomic.Pointer[RecordingSessionStatus]
+	onComplete  func(RecordingSessionStatus)
 }
 
 // NewRecordSession creates a recording session for the given stream.
@@ -55,6 +56,9 @@ func newRecordSessionWithWriter(streamKey string, stream *core.Stream, cfg confi
 		startedAt: time.Now().UTC(),
 	}
 	session.updateStatus(RecordingActive, nil)
+	if publisher := stream.Publisher(); publisher != nil {
+		session.publisherID = publisher.ID()
+	}
 	return session
 }
 

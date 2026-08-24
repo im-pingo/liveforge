@@ -95,3 +95,41 @@ func TestEventBusAsyncHook(t *testing.T) {
 		t.Fatal("async handler was not called within 1s")
 	}
 }
+
+func TestEventBusSeparatesSyncAuthorizationFromAsyncLifecycle(t *testing.T) {
+	bus := NewEventBus()
+	actionStarted := false
+	asyncObserved := make(chan bool, 1)
+	bus.Register(HookRegistration{
+		Event: EventPublish,
+		Mode:  HookSync,
+		Handler: func(*EventContext) error {
+			if actionStarted {
+				t.Fatal("sync authorization ran after publish action")
+			}
+			return nil
+		},
+	})
+	bus.Register(HookRegistration{
+		Event: EventPublish,
+		Mode:  HookAsync,
+		Handler: func(*EventContext) error {
+			asyncObserved <- actionStarted
+			return nil
+		},
+	})
+
+	if err := bus.EmitSync(EventPublish, &EventContext{StreamKey: "live/two-phase"}); err != nil {
+		t.Fatal(err)
+	}
+	actionStarted = true
+	bus.EmitAsync(EventPublish, &EventContext{StreamKey: "live/two-phase"})
+	select {
+	case observed := <-asyncObserved:
+		if !observed {
+			t.Fatal("async lifecycle ran before publish action")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async lifecycle hook did not run")
+	}
+}

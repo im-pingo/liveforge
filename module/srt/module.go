@@ -173,11 +173,12 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	case "publish":
 		// Fire EventPublish via event bus for auth check
 		ctx := &core.EventContext{
-			StreamKey:  streamKey,
-			Protocol:   "srt",
-			RemoteAddr: req.RemoteAddr().String(),
+			StreamKey:   streamKey,
+			PublisherID: publisherID(streamKey, req.SocketId(), req.PeerSocketId()),
+			Protocol:    "srt",
+			RemoteAddr:  req.RemoteAddr().String(),
 		}
-		if err := m.eventBus.Emit(core.EventPublish, ctx); err != nil {
+		if err := m.eventBus.EmitSync(core.EventPublish, ctx); err != nil {
 			slog.Warn("publish auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT

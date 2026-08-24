@@ -24,8 +24,8 @@ type Module struct {
 	handler  *Handler
 	ports    *portalloc.PortAllocator
 	sessions map[string]*RTSPSession
-	mu          sync.Mutex
-	done        chan struct{}
+	mu       sync.Mutex
+	done     chan struct{}
 }
 
 // NewModule creates a new RTSP module.
@@ -142,9 +142,10 @@ func (m *Module) handleConn(conn net.Conn) {
 			// Emit stop events before cleanup.
 			if session.Publisher != nil {
 				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:  session.StreamKey,
-					Protocol:   "rtsp",
-					RemoteAddr: conn.RemoteAddr().String(),
+					StreamKey:   session.StreamKey,
+					PublisherID: session.Publisher.ID(),
+					Protocol:    "rtsp",
+					RemoteAddr:  conn.RemoteAddr().String(),
 				})
 			}
 			if session.Subscriber != nil {

@@ -54,6 +54,25 @@ func TestStreamStateTransitions(t *testing.T) {
 	}
 }
 
+func TestRemovePublisherIfKeepsReplacement(t *testing.T) {
+	s := NewStream("live/reorder", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	oldPublisher := &testPublisher{id: "old"}
+	if err := s.SetPublisher(oldPublisher); err != nil {
+		t.Fatal(err)
+	}
+	s.RemovePublisher()
+	newPublisher := &testPublisher{id: "new"}
+	if err := s.SetPublisher(newPublisher); err != nil {
+		t.Fatal(err)
+	}
+	if s.RemovePublisherIf(oldPublisher) {
+		t.Fatal("stale publisher removed the replacement")
+	}
+	if s.Publisher() != newPublisher {
+		t.Fatal("replacement publisher was detached")
+	}
+}
+
 func TestStreamRejectDuplicatePublisher(t *testing.T) {
 	bus := NewEventBus()
 	s := NewStream("live/test", newTestStreamConfig(), config.LimitsConfig{}, bus)

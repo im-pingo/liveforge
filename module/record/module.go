@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -21,6 +22,7 @@ type Module struct {
 	sessions  map[string]*RecordSession // streamKey -> session
 	history   []RecordingSessionStatus
 	metrics   RecordingMetrics
+	wg        sync.WaitGroup
 	closing   bool
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -140,6 +142,26 @@ func (m *Module) close() error {
 			pending++
 		}
 	}
+	workersDone := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(workersDone)
+	}()
+	var workerErr error
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		workerErr = fmt.Errorf("record: drain timeout waiting for module workers")
+	} else {
+		timer := time.NewTimer(remaining)
+		select {
+		case <-workersDone:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			workerErr = fmt.Errorf("record: drain timeout waiting for module workers")
+		}
+	}
 	if runtime := m.runtime.Load(); runtime != nil {
 		if closer, ok := runtime.storage.(interface{ Close() error }); ok {
 			_ = closer.Close()
@@ -147,9 +169,9 @@ func (m *Module) close() error {
 	}
 	slog.Info("stopped", "module", "record")
 	if pending > 0 {
-		return fmt.Errorf("record: drain timeout with %d session(s) still finalizing", pending)
+		return errors.Join(fmt.Errorf("record: drain timeout with %d session(s) still finalizing", pending), workerErr)
 	}
-	return nil
+	return workerErr
 }
 
 func (m *Module) drainTimeout() time.Duration {
@@ -175,38 +197,65 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 	if !ok {
 		return nil
 	}
-
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closing {
+		m.mu.Unlock()
 		return nil
 	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	defer m.wg.Done()
+	publisherID := ctx.PublisherID
 
-	if _, exists := m.sessions[ctx.StreamKey]; exists {
-		return nil // already recording
-	}
-
-	session, err := newRecordSession(ctx.StreamKey, stream, cfg, runtime.storage, runtime.template, &m.metrics)
-	if err != nil {
-		slog.Error("failed to start session", "module", "record", "stream", ctx.StreamKey, "error", err)
-		return nil
-	}
-
-	m.sessions[ctx.StreamKey] = session
-	session.onComplete = func(status RecordingSessionStatus) {
-		m.mu.Lock()
-		if m.sessions[ctx.StreamKey] == session {
-			delete(m.sessions, ctx.StreamKey)
+	for {
+		if publisher := stream.Publisher(); publisher != nil {
+			if publisherID == "" {
+				publisherID = publisher.ID()
+			} else if publisher.ID() != publisherID {
+				return nil
+			}
 		}
-		m.history = append(m.history, status)
-		if len(m.history) > 100 {
-			m.history = append([]RecordingSessionStatus(nil), m.history[len(m.history)-100:]...)
+		m.mu.Lock()
+		if m.closing {
+			m.mu.Unlock()
+			return nil
+		}
+		if existing := m.sessions[ctx.StreamKey]; existing != nil {
+			if existing.publisherID == publisherID {
+				m.mu.Unlock()
+				return nil
+			}
+			existing.Stop()
+			m.mu.Unlock()
+			existing.Wait()
+			continue
+		}
+
+		session, err := newRecordSession(ctx.StreamKey, stream, cfg, runtime.storage, runtime.template, &m.metrics)
+		if err != nil {
+			m.mu.Unlock()
+			slog.Error("failed to start session", "module", "record", "stream", ctx.StreamKey, "error", err)
+			return nil
+		}
+		session.publisherID = publisherID
+
+		m.sessions[ctx.StreamKey] = session
+		session.onComplete = func(status RecordingSessionStatus) {
+			m.mu.Lock()
+			if m.sessions[ctx.StreamKey] == session {
+				delete(m.sessions, ctx.StreamKey)
+			}
+			m.history = append(m.history, status)
+			if len(m.history) > 100 {
+				m.history = append([]RecordingSessionStatus(nil), m.history[len(m.history)-100:]...)
+			}
+			m.mu.Unlock()
 		}
 		m.mu.Unlock()
+		go session.Run()
+		slog.Info("started recording", "module", "record", "stream", ctx.StreamKey)
+		return nil
 	}
-	go session.Run()
-	slog.Info("started recording", "module", "record", "stream", ctx.StreamKey)
-	return nil
 }
 
 // ListRecordings returns completed and preserved failed local recordings.
@@ -267,16 +316,19 @@ func (m *Module) RecordingStatus(ctx context.Context) RecordingStatusSnapshot {
 
 func (m *Module) onPublishStop(ctx *core.EventContext) error {
 	m.mu.Lock()
-	session, ok := m.sessions[ctx.StreamKey]
-	if ok {
-		delete(m.sessions, ctx.StreamKey)
+	session := m.sessions[ctx.StreamKey]
+	if session != nil && ctx.PublisherID != "" && session.publisherID != "" && session.publisherID != ctx.PublisherID {
+		session = nil
+	}
+	if session != nil {
+		session.Stop()
 	}
 	m.mu.Unlock()
 
-	if ok {
-		session.Stop()
-		session.Wait()
-		slog.Info("stopped recording", "module", "record", "stream", ctx.StreamKey)
+	if session != nil {
+		if session.WaitUntil(time.Now().Add(m.drainTimeout())) {
+			slog.Info("stopped recording", "module", "record", "stream", ctx.StreamKey)
+		}
 	}
 	return nil
 }

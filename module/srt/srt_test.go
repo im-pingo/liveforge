@@ -12,10 +12,10 @@ import (
 
 func TestParseStreamID(t *testing.T) {
 	tests := []struct {
-		name      string
-		streamID  string
-		wantMode  string
-		wantKey   string
+		name     string
+		streamID string
+		wantMode string
+		wantKey  string
 	}{
 		{
 			name:     "publish prefix",
@@ -183,9 +183,10 @@ func TestPublisherIDAndMediaInfo(t *testing.T) {
 	// Use a mock connection (nil is fine for metadata tests)
 	pub := &Publisher{
 		streamKey: "live/test",
+		id:        publisherID("live/test", 100, 200),
 	}
 	pub.info.Store(&avframe.MediaInfo{})
-	if pub.ID() != "srt-pub-live/test" {
+	if pub.ID() != "srt-pub-live/test-100-200" {
 		t.Errorf("ID = %q", pub.ID())
 	}
 	if pub.MediaInfo() == nil {
@@ -197,14 +198,22 @@ func TestNewPublisher(t *testing.T) {
 	bus := core.NewEventBus()
 	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 256}, config.LimitsConfig{}, bus)
 	pub := NewPublisher(nil, "live/test", hub, bus)
-	if pub.ID() != "srt-pub-live/test" {
-		t.Errorf("ID = %q", pub.ID())
+	if pub.ID() == "" {
+		t.Error("publisher ID is empty")
 	}
 	if pub.MediaInfo() == nil {
 		t.Error("expected non-nil MediaInfo")
 	}
 	if pub.streamKey != "live/test" {
 		t.Errorf("streamKey = %q", pub.streamKey)
+	}
+}
+
+func TestPublisherIDIncludesConnectionIdentity(t *testing.T) {
+	first := publisherID("live/test", 100, 200)
+	second := publisherID("live/test", 100, 201)
+	if first == second {
+		t.Fatalf("publisher IDs reused across connections: %q", first)
 	}
 }
 
@@ -440,7 +449,6 @@ func TestModuleDuplicatePublish(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 }
-
 
 func TestParseStreamIDAccessControl(t *testing.T) {
 	// Additional edge cases for SRT access control format

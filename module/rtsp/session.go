@@ -40,7 +40,7 @@ type TrackSetup struct {
 	TrackID   int
 	Codec     avframe.CodecType
 	Transport TransportConfig
-	UDP       *UDPTransport      // non-nil for UDP unicast
+	UDP       *UDPTransport       // non-nil for UDP unicast
 	Multicast *MulticastTransport // non-nil for UDP multicast
 }
 
@@ -106,11 +106,12 @@ func (s *RTSPSession) IsExpired() bool {
 // Close cleans up publisher, subscriber, and UDP transport resources.
 func (s *RTSPSession) Close() {
 	if s.Publisher != nil {
-		if err := s.Publisher.Close(); err != nil {
+		publisher := s.Publisher
+		if err := publisher.Close(); err != nil {
 			slog.Error("error closing publisher", "module", "rtsp", "session", s.ID, "error", err)
 		}
 		if s.Stream != nil {
-			s.Stream.RemovePublisher()
+			s.Stream.RemovePublisherIf(publisher)
 		}
 		s.Publisher = nil
 	}

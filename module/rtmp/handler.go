@@ -38,6 +38,7 @@ type Handler struct {
 	app         string
 	streamKey   string
 	isPublisher bool
+	publisher   *Publisher
 	appParams   map[string]string // params from connect (app field query string)
 	caps        PeerCapabilities
 
@@ -84,11 +85,16 @@ func (h *Handler) cleanup() {
 		return
 	}
 	if stream, ok := h.hub.Find(h.streamKey); ok {
-		stream.RemovePublisher()
+		stream.RemovePublisherIf(h.publisher)
+		publisherID := ""
+		if h.publisher != nil {
+			publisherID = h.publisher.ID()
+		}
 		h.eventBus.Emit(core.EventPublishStop, &core.EventContext{
-			StreamKey:  h.streamKey,
-			Protocol:   "rtmp",
-			RemoteAddr: h.conn.RemoteAddr().String(),
+			StreamKey:   h.streamKey,
+			PublisherID: publisherID,
+			Protocol:    "rtmp",
+			RemoteAddr:  h.conn.RemoteAddr().String(),
 		})
 	}
 }
@@ -215,40 +221,43 @@ func (h *Handler) onCreateStream(vals []any) error {
 }
 
 func (h *Handler) onPublish(vals []any) error {
+	var mergedParams map[string]string
 	if len(vals) >= 4 {
 		if name, ok := vals[3].(string); ok {
 			// Parse query string from stream name (e.g. "test?token=xxx")
 			cleanName, params := splitNameParams(name)
 			h.streamKey = h.app + "/" + cleanName
 			// Merge app-level params with stream-level params (stream-level wins)
-			mergedParams := mergeParams(h.appParams, params)
-
-			// Emit publish event BEFORE action — auth hooks can reject
-			if err := h.eventBus.Emit(core.EventPublish, &core.EventContext{
-				StreamKey:  h.streamKey,
-				Protocol:   "rtmp",
-				RemoteAddr: h.conn.RemoteAddr().String(),
-				Params:     mergedParams,
-			}); err != nil {
-				_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
-				return fmt.Errorf("publish %s: %w", h.streamKey, err)
-			}
+			mergedParams = mergeParams(h.appParams, params)
 		}
 	}
 	if h.streamKey == "" {
 		return fmt.Errorf("publish: missing stream name")
 	}
 
+	pub := NewPublisher(h.streamKey, h.conn)
+	publishCtx := &core.EventContext{
+		StreamKey:   h.streamKey,
+		PublisherID: pub.ID(),
+		Protocol:    "rtmp",
+		RemoteAddr:  h.conn.RemoteAddr().String(),
+		Params:      mergedParams,
+	}
+	if err := h.eventBus.EmitSync(core.EventPublish, publishCtx); err != nil {
+		_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
+		return fmt.Errorf("publish %s: %w", h.streamKey, err)
+	}
 	stream, err := h.hub.GetOrCreate(h.streamKey)
 	if err != nil {
 		_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
 	}
-	pub := NewPublisher(h.streamKey, h.conn)
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
 	}
+	h.publisher = pub
 	h.isPublisher = true
+	h.eventBus.EmitAsync(core.EventPublish, publishCtx)
 
 	// Send onStatus(NetStream.Publish.Start)
 	return h.sendOnStatus("status", "NetStream.Publish.Start", "Publishing started")

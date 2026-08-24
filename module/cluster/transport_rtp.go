@@ -406,7 +406,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -683,7 +683,7 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 			"stream", streamKey, "error", err)
 		return
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)

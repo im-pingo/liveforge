@@ -105,7 +105,7 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	// Create publisher
 	pub := NewPublisher(
-		fmt.Sprintf("gb28181-%s", channelID),
+		fmt.Sprintf("gb28181-%s-%s", channelID, generateTag()),
 		func(frame *avframe.AVFrame) {
 			stream.WriteFrame(frame)
 		},
@@ -156,9 +156,10 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	// Emit publish event
 	h.bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "gb28181",
-		RemoteAddr: req.Source(),
+		StreamKey:   streamKey,
+		PublisherID: pub.ID(),
+		Protocol:    "gb28181",
+		RemoteAddr:  req.Source(),
 		Extra: map[string]any{
 			"gb28181_device_id":  deviceID,
 			"gb28181_channel_id": channelID,
@@ -178,15 +179,16 @@ func (h *handler) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 		h.sessions.Remove(callID)
 
 		if session.Stream != nil {
-			session.Stream.RemovePublisher()
+			session.Stream.RemovePublisherIf(session.Publisher)
 		}
 
 		h.ports.Free(session.LocalPort, session.LocalPort+1)
 
 		h.bus.Emit(core.EventPublishStop, &core.EventContext{
-			StreamKey:  session.StreamKey,
-			Protocol:   "gb28181",
-			RemoteAddr: req.Source(),
+			StreamKey:   session.StreamKey,
+			PublisherID: session.Publisher.ID(),
+			Protocol:    "gb28181",
+			RemoteAddr:  req.Source(),
 			Extra: map[string]any{
 				"gb28181_device_id":  session.DeviceID,
 				"gb28181_channel_id": session.ChannelID,

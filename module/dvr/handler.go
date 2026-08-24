@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/im-pingo/liveforge/core"
@@ -113,17 +114,21 @@ func (m *Module) authorizePlayback(w http.ResponseWriter, r *http.Request, strea
 
 func parseSeqNum(filename string) int {
 	// Expected format: seg_000042.ts
-	name := strings.TrimSuffix(filename, ".ts")
-	if !strings.HasPrefix(name, "seg_") {
+	if !strings.HasPrefix(filename, "seg_") || !strings.HasSuffix(filename, ".ts") {
 		return -1
 	}
-	numStr := name[4:]
-	n := 0
+	numStr := filename[4 : len(filename)-3]
+	if len(numStr) < 6 || (len(numStr) > 6 && numStr[0] == '0') {
+		return -1
+	}
 	for _, c := range numStr {
 		if c < '0' || c > '9' {
 			return -1
 		}
-		n = n*10 + int(c-'0')
+	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return -1
 	}
 	return n
 }

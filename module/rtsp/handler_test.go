@@ -4,7 +4,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
@@ -87,6 +90,61 @@ func TestHandleAnnounce(t *testing.T) {
 	}
 	if session.State != StateAnnounced {
 		t.Errorf("state = %d, want Announced", session.State)
+	}
+}
+
+func TestHandleAnnouncePublishesGenerationAfterStreamDiscovery(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	server := core.NewServer(cfg)
+	var syncPublisherID string
+	var syncStreamVisible bool
+	type lifecycleObservation struct {
+		publisherID   string
+		streamVisible bool
+		publisherSet  bool
+	}
+	asyncObserved := make(chan lifecycleObservation, 1)
+	server.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventPublish,
+		Mode:  core.HookSync,
+		Handler: func(ctx *core.EventContext) error {
+			syncPublisherID = ctx.PublisherID
+			_, syncStreamVisible = server.StreamHub().Find(ctx.StreamKey)
+			return nil
+		},
+	})
+	server.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventPublish,
+		Mode:  core.HookAsync,
+		Handler: func(ctx *core.EventContext) error {
+			stream, visible := server.StreamHub().Find(ctx.StreamKey)
+			asyncObserved <- lifecycleObservation{
+				publisherID:   ctx.PublisherID,
+				streamVisible: visible,
+				publisherSet:  visible && stream.Publisher() != nil,
+			}
+			return nil
+		},
+	})
+	h := NewHandler(server, nil, nil)
+	session := NewRTSPSession("generation-id", "live/room1")
+	sdpBody := "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=test\r\nt=0 0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/test", Headers: make(http.Header), Body: []byte(sdpBody)}
+	req.Headers.Set("CSeq", "1")
+	resp := h.HandleAnnounce(req, session, "127.0.0.1:12345")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if syncPublisherID != session.ID || syncStreamVisible {
+		t.Fatalf("sync publisher ID=%q stream visible before auth=%v", syncPublisherID, syncStreamVisible)
+	}
+	select {
+	case observed := <-asyncObserved:
+		if observed.publisherID != session.ID || !observed.streamVisible || !observed.publisherSet {
+			t.Fatalf("async observation=%+v", observed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async publish lifecycle was not emitted")
 	}
 }
 

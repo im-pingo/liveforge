@@ -9,8 +9,8 @@ import (
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/avframe"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // inviteClient sends INVITE requests to GB28181 devices for live play or playback.
@@ -62,7 +62,7 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	// Create stream and publisher
 	stream, _ := ic.handler.hub.GetOrCreate(streamKey)
 	pub := NewPublisher(
-		fmt.Sprintf("gb28181-%s", channelID),
+		fmt.Sprintf("gb28181-%s-%s", channelID, generateTag()),
 		func(frame *avframe.AVFrame) {
 			stream.WriteFrame(frame)
 		},
@@ -148,9 +148,10 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 
 	// Emit publish event
 	ic.handler.bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "gb28181",
-		RemoteAddr: device.RemoteAddr,
+		StreamKey:   streamKey,
+		PublisherID: pub.ID(),
+		Protocol:    "gb28181",
+		RemoteAddr:  device.RemoteAddr,
 		Extra: map[string]any{
 			"gb28181_device_id":  device.DeviceID,
 			"gb28181_channel_id": channelID,

@@ -105,9 +105,10 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		}
 		publisherSet = true
 		m.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
-			StreamKey:  streamKey,
-			Protocol:   "webrtc",
-			RemoteAddr: r.RemoteAddr,
+			StreamKey:   streamKey,
+			PublisherID: pub.ID(),
+			Protocol:    "webrtc",
+			RemoteAddr:  r.RemoteAddr,
 		})
 	}
 
@@ -154,11 +155,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			pubMu.Unlock()
 
 			if wasPublisher {
-				stream.RemovePublisher()
+				stream.RemovePublisherIf(pub)
 				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:  streamKey,
-					Protocol:   "webrtc",
-					RemoteAddr: r.RemoteAddr,
+					StreamKey:   streamKey,
+					PublisherID: pub.ID(),
+					Protocol:    "webrtc",
+					RemoteAddr:  r.RemoteAddr,
 				})
 			}
 			releaseConn()

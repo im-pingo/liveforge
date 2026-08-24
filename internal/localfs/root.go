@@ -18,10 +18,13 @@ import (
 )
 
 var (
-	ErrInvalidPath = errors.New("invalid local storage path")
-	ErrNotFound    = errors.New("local storage object not found")
-	ErrExists      = errors.New("local storage object already exists")
+	ErrInvalidPath          = errors.New("invalid local storage path")
+	ErrNotFound             = errors.New("local storage object not found")
+	ErrExists               = errors.New("local storage object already exists")
+	ErrHardLinksUnsupported = errors.New("local storage requires hard-link support")
 )
+
+var linkAt = unix.Linkat
 
 type Root struct {
 	path string
@@ -65,6 +68,10 @@ func OpenRoot(path string) (*Root, error) {
 	}
 	fd, err := openAbsoluteDir(resolved, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := probeHardLinks(fd); err != nil {
+		_ = unix.Close(fd)
 		return nil, err
 	}
 	return &Root{path: filepath.Clean(resolved), fd: fd}, nil
@@ -357,8 +364,8 @@ func (p *Pending) PublishAs(finalBase string) error {
 	if !validBase(finalBase) {
 		return ErrInvalidPath
 	}
-	if err := unix.Linkat(p.dirFD, p.base, p.dirFD, finalBase, 0); err != nil {
-		return mapPathError(err)
+	if err := linkAt(p.dirFD, p.base, p.dirFD, finalBase, 0); err != nil {
+		return mapLinkError(err)
 	}
 	if err := unix.Unlinkat(p.dirFD, p.base, 0); err != nil {
 		return err
@@ -606,11 +613,11 @@ func moveSiblingToUnique(dirFD int, from string, candidate func(int) string) (st
 		if !validBase(to) {
 			return "", ErrInvalidPath
 		}
-		if err := unix.Linkat(dirFD, from, dirFD, to, 0); err != nil {
+		if err := linkAt(dirFD, from, dirFD, to, 0); err != nil {
 			if errors.Is(err, unix.EEXIST) {
 				continue
 			}
-			return "", mapPathError(err)
+			return "", mapLinkError(err)
 		}
 		if err := unix.Unlinkat(dirFD, from, 0); err != nil {
 			return "", err
@@ -638,13 +645,55 @@ func writeSiblingAtomic(dirFD int, final string, data []byte, perm os.FileMode) 
 		err = closeErr
 	}
 	if err == nil {
-		err = unix.Linkat(dirFD, temp, dirFD, final, 0)
+		err = linkAt(dirFD, temp, dirFD, final, 0)
 	}
 	removeErr := unix.Unlinkat(dirFD, temp, 0)
 	if err != nil {
-		return mapPathError(err)
+		return mapLinkError(err)
 	}
 	return removeErr
+}
+
+func probeHardLinks(dirFD int) error {
+	stamp := time.Now().UnixNano()
+	for attempt := 0; attempt < 100; attempt++ {
+		source := fmt.Sprintf(".liveforge-link-probe-%d-%d", stamp, attempt)
+		target := source + ".link"
+		fd, err := unix.Openat(dirFD, source, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return mapPathError(err)
+		}
+		if err := unix.Close(fd); err != nil {
+			_ = unix.Unlinkat(dirFD, source, 0)
+			return err
+		}
+		linkErr := linkAt(dirFD, source, dirFD, target, 0)
+		targetRemoveErr := error(nil)
+		if linkErr == nil {
+			targetRemoveErr = unix.Unlinkat(dirFD, target, 0)
+		}
+		sourceRemoveErr := unix.Unlinkat(dirFD, source, 0)
+		if linkErr != nil {
+			return fmt.Errorf("local storage hard-link probe: %w", mapLinkError(linkErr))
+		}
+		if err := errors.Join(targetRemoveErr, sourceRemoveErr); err != nil {
+			return fmt.Errorf("local storage hard-link probe cleanup: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("local storage hard-link probe: %w", ErrExists)
+}
+
+func mapLinkError(err error) error {
+	switch {
+	case errors.Is(err, unix.ENOENT), errors.Is(err, unix.EEXIST), errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
+		return mapPathError(err)
+	default:
+		return fmt.Errorf("%w: %v", ErrHardLinksUnsupported, err)
+	}
 }
 
 func mapPathError(err error) error {

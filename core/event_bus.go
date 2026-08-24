@@ -35,29 +35,41 @@ func (b *EventBus) Register(h HookRegistration) {
 // and that error is returned. Async hooks fire in goroutines after all sync
 // hooks succeed.
 func (b *EventBus) Emit(event EventType, ctx *EventContext) error {
-	b.mu.RLock()
-	hooks := b.hooks[event]
-	// Copy slice under lock to avoid races if Register is called concurrently
-	copied := make([]HookRegistration, len(hooks))
-	copy(copied, hooks)
-	b.mu.RUnlock()
+	if err := b.EmitSync(event, ctx); err != nil {
+		return err
+	}
+	b.EmitAsync(event, ctx)
+	return nil
+}
 
-	var asyncHooks []HookRegistration
-
-	for _, h := range copied {
-		if h.Mode == HookAsync {
-			asyncHooks = append(asyncHooks, h)
+// EmitSync runs only synchronous hooks and returns the first rejection.
+func (b *EventBus) EmitSync(event EventType, ctx *EventContext) error {
+	for _, h := range b.snapshot(event) {
+		if h.Mode != HookSync {
 			continue
 		}
 		if err := h.Handler(ctx); err != nil {
 			return err
 		}
 	}
-
-	// Fire async hooks in goroutines
-	for _, h := range asyncHooks {
-		go h.Handler(ctx) //nolint:errcheck
-	}
-
 	return nil
+}
+
+// EmitAsync starts only asynchronous lifecycle hooks.
+func (b *EventBus) EmitAsync(event EventType, ctx *EventContext) {
+	for _, h := range b.snapshot(event) {
+		if h.Mode == HookAsync {
+			go h.Handler(ctx) //nolint:errcheck
+		}
+	}
+}
+
+func (b *EventBus) snapshot(event EventType) []HookRegistration {
+	b.mu.RLock()
+	hooks := b.hooks[event]
+	// Copy slice under lock to avoid races if Register is called concurrently
+	copied := make([]HookRegistration, len(hooks))
+	copy(copied, hooks)
+	b.mu.RUnlock()
+	return copied
 }

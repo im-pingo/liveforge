@@ -268,7 +268,7 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte
@@ -392,7 +392,7 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 		slog.Error("gb push set publisher failed", "module", "cluster", "error", err)
 		return
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte

@@ -260,6 +260,15 @@ func TestHandleStreamDelete(t *testing.T) {
 
 func TestHandleKick(t *testing.T) {
 	h, s := newTestHandlers(t)
+	var stoppedPublisherID string
+	s.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventPublishStop,
+		Mode:  core.HookSync,
+		Handler: func(ctx *core.EventContext) error {
+			stoppedPublisherID = ctx.PublisherID
+			return nil
+		},
+	})
 
 	hub := s.StreamHub()
 	stream, err := hub.GetOrCreate("live/kick")
@@ -280,6 +289,9 @@ func TestHandleKick(t *testing.T) {
 	}
 	if stream.Publisher() != nil {
 		t.Error("expected publisher to be removed after kick")
+	}
+	if stoppedPublisherID != pub.ID() {
+		t.Fatalf("stop publisher ID = %q, want %q", stoppedPublisherID, pub.ID())
 	}
 }
 

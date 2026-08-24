@@ -692,7 +692,7 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 	if session.direction == "inbound" && session.stream != nil && session.publisher != nil {
 		publisher := session.stream.Publisher()
 		if publisher != nil && publisher.ID() == session.publisher.id {
-			session.stream.RemovePublisher()
+			session.stream.RemovePublisherIf(publisher)
 		}
 	}
 	if session.established.Load() {

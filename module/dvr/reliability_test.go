@@ -11,6 +11,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/localfs"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
@@ -192,6 +193,35 @@ func TestNewSessionRebuildsRetainedIndexAndNeverOverwritesFinal(t *testing.T) {
 	}
 }
 
+func TestBuildRetainedSegmentsSortsValidUniqueSequences(t *testing.T) {
+	baseTime := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	entries := []localfs.Entry{
+		{RelPath: "live/camera/seg_000010.ts", Size: 10, ModTime: baseTime.Add(10 * time.Second)},
+		{RelPath: "live/camera/seg_000002.ts", Size: 2, ModTime: baseTime.Add(2 * time.Second)},
+		{RelPath: "live/camera/seg_.ts", Size: 99, ModTime: baseTime},
+		{RelPath: "live/camera/seg_2.ts", Size: 99, ModTime: baseTime},
+		{RelPath: "live/camera/seg_000001.ts", Size: 1, ModTime: baseTime.Add(time.Second)},
+		{RelPath: "live/camera/seg_000002.ts", Size: 200, ModTime: baseTime.Add(20 * time.Second)},
+		{RelPath: "live/camera/seg_000003.ts.bak", Size: 99, ModTime: baseTime},
+	}
+
+	segments, next := buildRetainedSegments(entries, "/dvr/live/camera", 4*time.Second, 0)
+	if next != 11 {
+		t.Fatalf("next sequence = %d, want 11", next)
+	}
+	if len(segments) != 3 {
+		t.Fatalf("segments = %+v, want 3 valid unique entries", segments)
+	}
+	for i, want := range []int{1, 2, 10} {
+		if segments[i].SeqNum != want {
+			t.Fatalf("segments = %+v, want ordered sequences [1 2 10]", segments)
+		}
+	}
+	if segments[1].Size != 2 {
+		t.Fatalf("duplicate sequence replaced first entry: %+v", segments[1])
+	}
+}
+
 func TestNewSessionRecoversEveryCrashPartialDuringIndexRebuild(t *testing.T) {
 	dir := t.TempDir()
 	streamDir := filepath.Join(dir, "live/recover-all")
@@ -307,6 +337,35 @@ func TestSessionPublishNeverReplacesConcurrentFinal(t *testing.T) {
 	}
 	if session.Index().Len() != 0 || session.Status().Metrics.WriteFailures != 1 {
 		t.Fatalf("index=%+v status=%+v", session.Index().Segments(), session.Status())
+	}
+}
+
+func TestStandaloneSessionRunReleasesPrivateStorageBoundary(t *testing.T) {
+	root := t.TempDir()
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, _ := hub.GetOrCreate("live/release")
+	session, err := NewSession("live/release", stream, config.DVRConfig{Path: filepath.Join(root, "{stream_key}")}, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "live/release/probe.ts"), []byte("probe"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	go session.Run()
+	session.Stop()
+	session.Wait()
+
+	if _, err := session.dir.Stat("probe.ts"); err == nil {
+		t.Fatal("standalone stream directory remained usable after Run")
+	}
+	if _, err := session.storage.root.Stat("live/release/probe.ts"); err == nil {
+		t.Fatal("standalone storage root remained usable after Run")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
 

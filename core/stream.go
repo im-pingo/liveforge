@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -227,7 +228,22 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 func (s *Stream) RemovePublisher() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.removePublisherLocked()
+}
 
+// RemovePublisherIf detaches pub only when it is still the active publisher.
+// It prevents a delayed connection cleanup from removing a replacement.
+func (s *Stream) RemovePublisherIf(pub Publisher) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !samePublisher(s.publisher, pub) {
+		return false
+	}
+	s.removePublisherLocked()
+	return true
+}
+
+func (s *Stream) removePublisherLocked() {
 	s.publisher = nil
 	s.state = StreamStateNoPublisher
 
@@ -242,6 +258,17 @@ func (s *Stream) RemovePublisher() {
 	}
 
 	s.checkIdleTimeout()
+}
+
+func samePublisher(left, right Publisher) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	leftType := reflect.TypeOf(left)
+	if leftType != reflect.TypeOf(right) || !leftType.Comparable() {
+		return false
+	}
+	return left == right
 }
 
 // Close force-closes the stream: closes the ring buffer, removes the publisher,

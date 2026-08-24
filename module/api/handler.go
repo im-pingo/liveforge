@@ -217,11 +217,12 @@ func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pub.Close()
-	stream.RemovePublisher()
+	stream.RemovePublisherIf(pub)
 
 	h.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-		StreamKey: key,
-		Protocol:  "api-kick",
+		StreamKey:   key,
+		PublisherID: pub.ID(),
+		Protocol:    "api-kick",
 	}) //nolint:errcheck
 
 	writeJSON(w, http.StatusOK, nil)

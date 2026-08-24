@@ -239,7 +239,7 @@ func (m *Module) apiStopPlay(w http.ResponseWriter, r *http.Request, channelID s
 		session.Close()
 		m.sessions.Remove(session.ID)
 		if session.Stream != nil {
-			session.Stream.RemovePublisher()
+			session.Stream.RemovePublisherIf(session.Publisher)
 		}
 		m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
 	}
@@ -425,7 +425,7 @@ func (m *Module) apiDeleteSession(w http.ResponseWriter, r *http.Request) {
 	session.Close()
 	m.sessions.Remove(sessionID)
 	if session.Stream != nil {
-		session.Stream.RemovePublisher()
+		session.Stream.RemovePublisherIf(session.Publisher)
 	}
 	m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
 

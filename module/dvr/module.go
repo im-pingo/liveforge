@@ -226,8 +226,24 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 	if !ok {
 		return nil
 	}
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return nil
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	defer m.wg.Done()
+	publisherID := ctx.PublisherID
 
 	for {
+		if publisher := stream.Publisher(); publisher != nil {
+			if publisherID == "" {
+				publisherID = publisher.ID()
+			} else if publisher.ID() != publisherID {
+				return nil
+			}
+		}
 		m.mu.Lock()
 		if m.closing {
 			m.mu.Unlock()
@@ -235,15 +251,14 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 		}
 
 		existing := m.sessions[ctx.StreamKey]
-		if existing != nil && existing.IsLive() {
+		if existing != nil && existing.publisherID == publisherID && existing.IsLive() {
 			m.mu.Unlock()
 			return nil
 		}
-		if existing != nil && existing.IsStopping() {
+		if existing != nil && (existing.IsStopping() || existing.IsLive()) {
+			existing.Stop()
 			m.mu.Unlock()
-			if !existing.WaitUntil(time.Now().Add(m.drainTimeout())) {
-				return nil
-			}
+			existing.Wait()
 			continue
 		}
 
@@ -273,6 +288,7 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 			slog.Error("failed to start dvr session", "module", "dvr", "stream", ctx.StreamKey, "error", err)
 			return nil
 		}
+		session.publisherID = publisherID
 
 		m.sessions[ctx.StreamKey] = session
 		m.mu.Unlock()
@@ -285,12 +301,18 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 func (m *Module) onPublishStop(ctx *core.EventContext) error {
 	m.mu.Lock()
 	session := m.sessions[ctx.StreamKey]
+	if session != nil && ctx.PublisherID != "" && session.publisherID != "" && session.publisherID != ctx.PublisherID {
+		session = nil
+	}
+	if session != nil {
+		session.Stop()
+	}
 	m.mu.Unlock()
 
 	if session != nil {
-		session.Stop()
-		session.Wait()
-		slog.Info("stream stopped, segments retained", "module", "dvr", "stream", ctx.StreamKey)
+		if session.WaitUntil(time.Now().Add(m.drainTimeout())) {
+			slog.Info("stream stopped, segments retained", "module", "dvr", "stream", ctx.StreamKey)
+		}
 	}
 	return nil
 }
