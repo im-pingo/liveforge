@@ -2,9 +2,11 @@ package sip
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
@@ -17,14 +19,82 @@ type sipClient struct {
 }
 
 func (c *sipClient) writeRequest(ctx context.Context, req *sip.Request) error {
-	if req.IsAck() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return c.client.WriteRequest(req)
-	}
 	_, err := c.client.TransactionRequest(ctx, req)
 	return err
+}
+
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
+func (c *sipClient) writeACK(ctx context.Context, req *sip.Request) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := sipgo.ClientRequestBuild(c.client, req); err != nil {
+		return fmt.Errorf("build ACK request: %w", err)
+	}
+	if c.client.TxRequester != nil {
+		_, err := c.client.TxRequester.Request(ctx, req)
+		return err
+	}
+
+	conn, err := c.client.TransportLayer().ClientRequestConnection(ctx, req)
+	if err != nil {
+		return fmt.Errorf("prepare ACK connection: %w", err)
+	}
+	defer conn.TryClose()
+	return writeMessageWithContext(ctx, conn, req)
+}
+
+func writeMessageWithContext(ctx context.Context, conn sip.Connection, msg sip.Message) error {
+	setDeadline, ok := connectionWriteDeadline(conn)
+	if !ok {
+		return fmt.Errorf("SIP connection %T does not support bounded writes", conn)
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if hasDeadline {
+		if err := setDeadline(deadline); err != nil {
+			return fmt.Errorf("set SIP write deadline: %w", err)
+		}
+	}
+
+	writeDone := make(chan struct{})
+	watcherDone := make(chan struct{})
+	var interruptErr error
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			if err := setDeadline(time.Now()); err != nil {
+				interruptErr = errors.Join(err, conn.Close())
+			}
+		case <-writeDone:
+		}
+	}()
+
+	writeErr := conn.WriteMsg(msg)
+	close(writeDone)
+	<-watcherDone
+	clearErr := setDeadline(time.Time{})
+	ctxErr := ctx.Err()
+	if ctxErr == nil && hasDeadline && !time.Now().Before(deadline) {
+		ctxErr = context.DeadlineExceeded
+	}
+	if ctxErr != nil {
+		return errors.Join(ctxErr, interruptErr, writeErr, clearErr)
+	}
+	return errors.Join(interruptErr, writeErr, clearErr)
+}
+
+func connectionWriteDeadline(conn sip.Connection) (func(time.Time) error, bool) {
+	if setter, ok := conn.(writeDeadlineSetter); ok {
+		return setter.SetWriteDeadline, true
+	}
+	if udpConn, ok := conn.(*sip.UDPConnection); ok && udpConn.PacketConn != nil {
+		return udpConn.PacketConn.SetWriteDeadline, true
+	}
+	return nil, false
 }
 
 // service is the concrete implementation of SIPService.

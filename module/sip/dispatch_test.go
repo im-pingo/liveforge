@@ -2,6 +2,8 @@ package sip
 
 import (
 	"context"
+	"errors"
+	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -40,6 +42,90 @@ type clientTxRequesterFunc func(context.Context, *sip.Request) (sip.ClientTransa
 
 func (f clientTxRequesterFunc) Request(ctx context.Context, req *sip.Request) (sip.ClientTransaction, error) {
 	return f(ctx, req)
+}
+
+type blockingMessageConnection struct {
+	net.Conn
+	writeStarted chan struct{}
+	writeDone    chan struct{}
+	startOnce    sync.Once
+}
+
+func (c *blockingMessageConnection) WriteMsg(msg sip.Message) error {
+	defer close(c.writeDone)
+	if c.writeStarted != nil {
+		c.startOnce.Do(func() { close(c.writeStarted) })
+	}
+	_, err := c.Write([]byte(msg.String()))
+	return err
+}
+func (c *blockingMessageConnection) Ref(int) int            { return 1 }
+func (c *blockingMessageConnection) TryClose() (int, error) { return 1, nil }
+
+type failingDeadlineConnection struct {
+	*blockingMessageConnection
+}
+
+func (c *failingDeadlineConnection) SetWriteDeadline(time.Time) error {
+	return errors.New("test write deadline failure")
+}
+
+func TestWriteMessageWithContextBoundsBlockingWriteAndJoinsWriter(t *testing.T) {
+	writeSide, blockedSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = writeSide.Close()
+		_ = blockedSide.Close()
+	})
+	conn := &blockingMessageConnection{Conn: writeSide, writeDone: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	err := writeMessageWithContext(ctx, conn, makeTestRequest(sip.ACK))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("writeMessageWithContext error = %v, want context.DeadlineExceeded", err)
+	}
+	select {
+	case <-conn.writeDone:
+	default:
+		t.Fatal("writeMessageWithContext returned before the blocked writer terminated")
+	}
+}
+
+func TestWriteMessageWithContextClosesBlockedConnectionWhenDeadlineInterruptFails(t *testing.T) {
+	writeSide, blockedSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = writeSide.Close()
+		_ = blockedSide.Close()
+	})
+	base := &blockingMessageConnection{
+		Conn:         writeSide,
+		writeStarted: make(chan struct{}),
+		writeDone:    make(chan struct{}),
+	}
+	conn := &failingDeadlineConnection{blockingMessageConnection: base}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- writeMessageWithContext(ctx, conn, makeTestRequest(sip.ACK))
+	}()
+	<-base.writeStarted
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("writeMessageWithContext error = %v, want context.Canceled", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		_ = writeSide.Close()
+		<-result
+		t.Fatal("write remained blocked after cancellation deadline interrupt failed")
+	}
+	select {
+	case <-base.writeDone:
+	default:
+		t.Fatal("writeMessageWithContext returned before the fallback close stopped the writer")
+	}
 }
 
 // mockServerTx is a minimal mock implementing sip.ServerTransaction.

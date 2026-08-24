@@ -71,6 +71,7 @@ type gatewayRaceRequester struct {
 	cancel     context.CancelFunc
 	inviteTx   *offeredFinalClientTx
 	senderDone chan struct{}
+	ackRequest func(context.Context, *sip.Request) error
 
 	mu      sync.Mutex
 	invites int
@@ -78,17 +79,15 @@ type gatewayRaceRequester struct {
 	byes    int
 }
 
-func (r *gatewayRaceRequester) Request(_ context.Context, req *sip.Request) (sip.ClientTransaction, error) {
-	r.mu.Lock()
-	switch req.Method {
-	case sip.INVITE:
-		r.invites++
-	case sip.ACK:
-		r.acks++
-	case sip.BYE:
-		r.byes++
+func (r *gatewayRaceRequester) Request(ctx context.Context, req *sip.Request) (sip.ClientTransaction, error) {
+	if req.Method == sip.ACK && r.ackRequest != nil {
+		err := r.ackRequest(ctx, req)
+		tx := newOfferedFinalClientTx()
+		tx.Terminate()
+		return tx, err
 	}
-	r.mu.Unlock()
+
+	r.record(req.Method)
 
 	if req.Method != sip.INVITE {
 		tx := newOfferedFinalClientTx()
@@ -106,6 +105,19 @@ func (r *gatewayRaceRequester) Request(_ context.Context, req *sip.Request) (sip
 	runtime.Gosched()
 	r.cancel()
 	return r.inviteTx, nil
+}
+
+func (r *gatewayRaceRequester) record(method sip.RequestMethod) {
+	r.mu.Lock()
+	switch method {
+	case sip.INVITE:
+		r.invites++
+	case sip.ACK:
+		r.acks++
+	case sip.BYE:
+		r.byes++
+	}
+	r.mu.Unlock()
 }
 
 func (r *gatewayRaceRequester) counts() (invites, acks, byes int) {
@@ -146,6 +158,10 @@ func TestGatewayFinalizesOffered2xxFromRealSIPAdapterOnCancellation(t *testing.T
 		cancel:     cancel,
 		inviteTx:   clientTx,
 		senderDone: make(chan struct{}),
+	}
+	requester.ackRequest = func(_ context.Context, req *sip.Request) error {
+		requester.record(req.Method)
+		return nil
 	}
 	realService := realSIPServiceWithRequester(t, requester)
 
@@ -192,6 +208,88 @@ func TestGatewayFinalizesOffered2xxFromRealSIPAdapterOnCancellation(t *testing.T
 	}
 	if got := gw.ActiveCalls(); got != 0 {
 		t.Fatalf("ActiveCalls = %d, want 0 after canceled 2xx", got)
+	}
+}
+
+func TestGatewayBoundsBlockingRealSIPACKAndStillSendsBYE(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clientTx := newOfferedFinalClientTx()
+	requester := &gatewayRaceRequester{
+		cancel:     cancel,
+		inviteTx:   clientTx,
+		senderDone: make(chan struct{}),
+	}
+	ackStarted := make(chan struct{})
+	ackDone := make(chan struct{})
+	ackRelease := make(chan struct{})
+	var ackStartOnce sync.Once
+	var ackReleaseOnce sync.Once
+	t.Cleanup(func() { ackReleaseOnce.Do(func() { close(ackRelease) }) })
+	requester.ackRequest = func(ctx context.Context, req *sip.Request) error {
+		requester.record(req.Method)
+		ackStartOnce.Do(func() { close(ackStarted) })
+		defer close(ackDone)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ackRelease:
+			return errors.New("ACK test transport released")
+		}
+	}
+	realService := realSIPServiceWithRequester(t, requester)
+
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	stream, _ := hub.GetOrCreate("live/blocking-ack")
+	publishTestAudio(t, stream, avframe.CodecG711A)
+	gw.sendInvite = func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
+		return realService.SendInvite(ctx, req)
+	}
+
+	started := time.Now()
+	dialDone := make(chan error, 1)
+	go func() {
+		_, err := gw.Dial(ctx, "alice", stream.Key())
+		dialDone <- err
+	}()
+	select {
+	case <-ackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("real SIP ACK write did not start")
+	}
+
+	var dialErr error
+	exceededDeadline := false
+	select {
+	case dialErr = <-dialDone:
+	case <-time.After(6 * time.Second):
+		exceededDeadline = true
+		ackReleaseOnce.Do(func() { close(ackRelease) })
+		dialErr = <-dialDone
+	}
+	if exceededDeadline {
+		t.Fatal("Gateway.Dial remained blocked after the 5s ACK deadline")
+	}
+	if elapsed := time.Since(started); elapsed > 6*time.Second {
+		t.Fatalf("Gateway.Dial elapsed %v, want at most 6s", elapsed)
+	}
+	if !errors.Is(dialErr, context.DeadlineExceeded) {
+		t.Fatalf("Dial error = %v, want context.DeadlineExceeded", dialErr)
+	}
+	select {
+	case <-ackDone:
+	default:
+		t.Fatal("Gateway.Dial returned before the blocked ACK writer terminated")
+	}
+
+	invites, acks, byes := requester.counts()
+	if invites != 1 || acks != 1 || byes != 1 {
+		t.Fatalf("SIP signaling INVITE=%d ACK=%d BYE=%d, want exactly 1 each", invites, acks, byes)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("ActiveCalls = %d, want 0 after ACK deadline", got)
 	}
 }
 

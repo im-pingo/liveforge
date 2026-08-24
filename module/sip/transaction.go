@@ -40,7 +40,8 @@ func (t *InviteTransaction) SendACK(ctx context.Context) error {
 	}
 
 	ack := buildACK(t.request, resp)
-	return t.client.writeRequest(ctx, ack)
+	ack.SetTransport(t.request.Transport())
+	return t.client.writeACK(ctx, ack)
 }
 
 // SendBYE sends a BYE to terminate the dialog.
