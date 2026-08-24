@@ -16,10 +16,10 @@ import (
 // TestConsolePublishFlow launches headless Chrome on the console page
 // (served over localhost HTTP — a secure context) and exercises the full
 // WebRTC Publish workflow:
-//   1. Open the publish modal
-//   2. Verify fake camera/mic devices are enumerated
-//   3. Enter a stream key and click "Start Publishing"
-//   4. Verify the WHIP session succeeds and the stream appears in the hub
+//  1. Open the publish modal
+//  2. Verify fake camera/mic devices are enumerated
+//  3. Enter a stream key and click "Start Publishing"
+//  4. Verify the WHIP session succeeds and the stream appears in the hub
 func TestConsolePublishFlow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping browser test in short mode")
