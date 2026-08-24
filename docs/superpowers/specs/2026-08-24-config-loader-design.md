@@ -62,7 +62,7 @@ Optional typed access is provided for components that need a single setting with
 
 ```go
 type Key[T any] struct { /* immutable key metadata and atomic value */ }
-func (m *Manager) RegisterKey[T any](name string, class ChangeClass, read func(*config.Config) T) (*Key[T], error)
+func RegisterKey[T any](m *Manager, name string, class ChangeClass, read func(*config.Config) T) (*Key[T], error)
 func (k *Key[T]) Load() T
 ```
 
@@ -70,11 +70,11 @@ Registration is local-only and cannot perform backend I/O. Keys publish values d
 
 ### Refresh lifecycle
 
-`Start` performs one bounded initial load and then launches one polling goroutine. The poll interval has a minimum enforced value of one second. Each cycle calls `source.Load` with a context deadline, hashes the returned bytes, parses YAML or JSON into defaults plus overrides, normalizes values, validates the complete config, computes a field-level diff against the active snapshot, and atomically publishes only if the hash changed.
+`Start` launches the manager worker, requests one bounded initial load, and waits for that result before returning; this is the only startup wait and it is not on a runtime read path. The worker then continues with one polling loop. The poll interval has a minimum enforced value of one second. Each cycle calls `source.Load` with a context deadline, hashes the returned bytes, parses YAML or JSON into defaults plus overrides, normalizes values, validates the complete config, computes a field-level diff against the active snapshot, and atomically publishes only if the hash changed.
 
 Callbacks receive a value object containing old/new versions, changed paths, hot changes, restart-required paths, and the current source status. Callback dispatch is asynchronous and bounded; a slow callback cannot block snapshot publication or runtime reads. Callback errors are recorded in status.
 
-`Refresh` only schedules or performs an explicit asynchronous refresh from control code; `SIGHUP` calls it without doing I/O in the signal loop. `Close` cancels the polling context, waits for the loader goroutine, and closes the source exactly once.
+`Refresh` only schedules an explicit asynchronous refresh on a coalescing request channel and returns immediately; `SIGHUP` calls it without doing I/O in the signal loop. `Close` cancels the polling context, waits for the loader goroutine, and closes the source exactly once.
 
 ### Source implementations
 
