@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,7 +13,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var errPeerAdminCredentialUnavailable = errors.New("management authentication is configured but no admin credential is available")
+const maxPeerSignalingResponseBytes int64 = 64 << 10
+
+var (
+	errPeerAdminCredentialUnavailable = errors.New("management authentication is configured but no admin credential is available")
+	errPeerSignalingResponseTooLarge  = errors.New("peer signaling response too large")
+)
 
 func authorizePeerRequest(req *http.Request, server *core.Server) error {
 	if server == nil {
@@ -32,6 +39,28 @@ func authorizePeerRequest(req *http.Request, server *core.Server) error {
 		}
 	}
 	return errPeerAdminCredentialUnavailable
+}
+
+func readPeerSignalingResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxPeerSignalingResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read peer signaling response: %w", err)
+	}
+	if int64(len(data)) > maxPeerSignalingResponseBytes {
+		return nil, errPeerSignalingResponseTooLarge
+	}
+	return data, nil
+}
+
+func discardPeerSignalingResponse(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxPeerSignalingResponseBytes+1))
+}
+
+func peerSignalingStatusError(statusCode int) error {
+	if statusText := http.StatusText(statusCode); statusText != "" {
+		return fmt.Errorf("peer signaling rejected: HTTP %d %s", statusCode, statusText)
+	}
+	return fmt.Errorf("peer signaling rejected: HTTP %d", statusCode)
 }
 
 // Module implements core.Module for cluster forwarding and origin pull.

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -313,14 +312,11 @@ func (t *GBTransport) postSignal(ctx context.Context, sigURL string) ([]byte, er
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read signaling response: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("signaling rejected: %d %s", resp.StatusCode, string(body))
+		discardPeerSignalingResponse(resp.Body)
+		return nil, peerSignalingStatusError(resp.StatusCode)
 	}
-	return body, nil
+	return readPeerSignalingResponse(resp.Body)
 }
 
 func (t *GBTransport) Close() error { return nil }

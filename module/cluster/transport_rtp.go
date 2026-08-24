@@ -905,18 +905,15 @@ func (t *RTPTransport) postSDP(ctx context.Context, sigURL string, sdpData []byt
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
 	if resp.StatusCode == http.StatusNotAcceptable {
+		discardPeerSignalingResponse(resp.Body)
 		return nil, ErrCodecMismatch
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("signaling error: HTTP %d: %s", resp.StatusCode, string(body))
+		discardPeerSignalingResponse(resp.Body)
+		return nil, peerSignalingStatusError(resp.StatusCode)
 	}
-	return body, nil
+	return readPeerSignalingResponse(resp.Body)
 }
 
 // extractRemoteAddr extracts the UDP address from an SDP session description.
