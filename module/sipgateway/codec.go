@@ -14,13 +14,35 @@ type codecInfo struct {
 }
 
 var encodingToCodec = map[string]codecInfo{
-	"PCMU":          {avframe.CodecG711U, 8000, 0},
-	"PCMA":          {avframe.CodecG711A, 8000, 8},
-	"G722":          {avframe.CodecG722, 8000, 9},
-	"G729":          {avframe.CodecG729, 8000, 18},
-	"opus":          {avframe.CodecOpus, 48000, 111},
-	"speex":         {avframe.CodecSpeex, 16000, 102},
-	"MPEG4-GENERIC": {avframe.CodecAAC, 44100, 101},
+	"PCMU": {avframe.CodecG711U, 8000, 0},
+	"PCMA": {avframe.CodecG711A, 8000, 8},
+	"G722": {avframe.CodecG722, 8000, 9},
+	"OPUS": {avframe.CodecOpus, 48000, 111},
+}
+
+func codecForEncoding(name string) (codecInfo, bool) {
+	info, ok := encodingToCodec[strings.ToUpper(name)]
+	return info, ok
+}
+
+func configuredCodecForSource(configured []string, source avframe.CodecType) (negotiatedCodec, bool) {
+	for _, name := range configured {
+		info, ok := codecForEncoding(name)
+		if !ok || info.Codec != source {
+			continue
+		}
+		encodingName := strings.ToUpper(name)
+		if info.Codec == avframe.CodecOpus {
+			encodingName = "opus"
+		}
+		return negotiatedCodec{
+			Codec:        info.Codec,
+			PT:           info.PT,
+			ClockRate:    info.ClockRate,
+			EncodingName: encodingName,
+		}, true
+	}
+	return negotiatedCodec{}, false
 }
 
 type negotiatedCodec struct {
@@ -54,12 +76,9 @@ func negotiateCodec(offer *sdp.MediaDescription, preferred []string) (negotiated
 		}
 
 		nameUpper := strings.ToUpper(rm.EncodingName)
-		info, supported := encodingToCodec[rm.EncodingName]
-		if !supported {
-			info, supported = encodingToCodec[nameUpper]
-			if !supported {
-				continue
-			}
+		info, supported := codecForEncoding(rm.EncodingName)
+		if !supported || rm.ClockRate != info.ClockRate {
+			continue
 		}
 
 		prio, inPreferred := priorityMap[nameUpper]

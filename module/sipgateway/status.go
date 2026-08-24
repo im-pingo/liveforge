@@ -3,8 +3,20 @@ package sipgateway
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strings"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	terminalHistoryLimit = 100
+	terminalErrorLimit   = 256
+)
+
+var (
+	sipCredentialPattern = regexp.MustCompile(`(?i)(sips?:[^\s:@]+):[^\s@]+@`)
+	bearerTokenPattern   = regexp.MustCompile(`(?i)(bearer\s+)[^\s]+`)
 )
 
 var (
@@ -18,6 +30,8 @@ var (
 	ErrGatewayClosed = errors.New("SIP gateway is closed")
 	// ErrTargetRequired indicates that an outbound call omitted its SIP target.
 	ErrTargetRequired = errors.New("SIP gateway target is required")
+	// ErrInvalidTargetURI indicates that an outbound SIP target is malformed.
+	ErrInvalidTargetURI = errors.New("SIP gateway target URI is invalid")
 	// ErrPortExhausted indicates that no RTP/RTCP pair is available.
 	ErrPortExhausted = errors.New("SIP gateway RTP ports exhausted")
 	// ErrCodecMismatch indicates that the remote side selected no configured codec.
@@ -95,6 +109,20 @@ type gatewayMetrics struct {
 	rtpPacketsRecv     atomic.Uint64
 	rtpBytesSent       atomic.Uint64
 	rtpBytesRecv       atomic.Uint64
+}
+
+func redactedTerminalError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.Join(strings.Fields(err.Error()), " ")
+	message = sipCredentialPattern.ReplaceAllString(message, `${1}:[redacted]@`)
+	message = bearerTokenPattern.ReplaceAllString(message, `${1}[redacted]`)
+	runes := []rune(message)
+	if len(runes) > terminalErrorLimit {
+		message = string(runes[:terminalErrorLimit])
+	}
+	return message
 }
 
 func (m *gatewayMetrics) snapshot() MetricsSnapshot {

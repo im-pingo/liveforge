@@ -13,9 +13,10 @@ import (
 )
 
 type sipGatewayStub struct {
-	calls  map[string]sipgateway.CallSnapshot
-	dialed string
-	hungup string
+	calls   map[string]sipgateway.CallSnapshot
+	dialed  string
+	dialErr error
+	hungup  string
 }
 
 func (m *sipGatewayStub) Name() string                   { return "sipgateway" }
@@ -35,6 +36,9 @@ func (m *sipGatewayStub) Call(id string) (sipgateway.CallSnapshot, bool) {
 }
 func (m *sipGatewayStub) Dial(_ context.Context, target, stream string) (string, error) {
 	m.dialed = target + "|" + stream
+	if m.dialErr != nil {
+		return "", m.dialErr
+	}
 	return "outbound-1", nil
 }
 func (m *sipGatewayStub) Hangup(id string) error { m.hungup = id; delete(m.calls, id); return nil }
@@ -80,5 +84,22 @@ func TestSIPGatewayMissingModuleAndCall(t *testing.T) {
 	h.handleSIPGatewayCalls(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("missing module status=%d", w.Code)
+	}
+}
+
+func TestSIPGatewayMalformedTargetIsBadRequest(t *testing.T) {
+	cfg := newTestConfig()
+	server := core.NewServer(cfg)
+	stub := &sipGatewayStub{dialErr: sipgateway.ErrInvalidTargetURI}
+	server.RegisterModule(stub)
+	h := NewHandlers(server)
+	body := []byte(`{"target_uri":"sip:alice","stream_key":"live/audio"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sipgateway/calls", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.handleSIPGatewayDial(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed target status = %d body=%s, want 400", w.Code, w.Body.String())
 	}
 }

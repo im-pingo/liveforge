@@ -1,6 +1,7 @@
 package sipgateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
@@ -25,11 +27,12 @@ type CallSession struct {
 	rtpPort    int
 	rtcpPort   int
 	conn       *net.UDPConn
+	rtcpConn   *net.UDPConn
 	remoteAddr *net.UDPAddr
 
 	stream    *core.Stream
 	publisher *sipPublisher
-	dialog    inviteDialog
+	dialog    *dialogTeardown
 	metrics   *gatewayMetrics
 
 	lifecycleMu     sync.Mutex
@@ -48,6 +51,38 @@ type CallSession struct {
 	terminateOnce   sync.Once
 	stopOnce        sync.Once
 	closed          chan struct{}
+}
+
+type dialogTeardown struct {
+	dialog inviteDialog
+	once   sync.Once
+	err    error
+}
+
+func newDialogTeardown(dialog inviteDialog) *dialogTeardown {
+	return &dialogTeardown{dialog: dialog}
+}
+
+func (d *dialogTeardown) teardown() error {
+	if d == nil || d.dialog == nil {
+		return nil
+	}
+	d.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.err = d.dialog.SendBYE(ctx)
+		cancel()
+		d.dialog.Close()
+	})
+	return d.err
+}
+
+func (d *dialogTeardown) endedByRemote() {
+	if d == nil || d.dialog == nil {
+		return
+	}
+	d.once.Do(func() {
+		d.dialog.Close()
+	})
 }
 
 type sipPublisher struct {
@@ -137,23 +172,78 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 	if err != nil {
 		return err
 	}
+	rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: cs.rtcpPort})
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
 
 	cs.mu.Lock()
 	cs.stream = stream
 	cs.remoteAddr = &net.UDPAddr{IP: remoteIPAddr, Port: remotePort}
 	cs.conn = conn
+	cs.rtcpConn = rtcpConn
 	cs.state = CallStateActive
 	cs.mu.Unlock()
 	cs.established.Store(true)
 
 	go cs.sendLoop()
+	go cs.receiveRTCPLoop()
 	return nil
+}
+
+func (cs *CallSession) receiveRTCPLoop() {
+	defer slog.Info("rtcp receive loop stopped", "module", "sipgateway", "call", cs.callID)
+
+	buf := make([]byte, 1500)
+	cs.mu.RLock()
+	conn := cs.rtcpConn
+	remoteAddr := cs.remoteAddr
+	idleTimeout := cs.rtpIdleTimeout
+	cs.mu.RUnlock()
+	if idleTimeout <= 0 {
+		idleTimeout = 30 * time.Second
+	}
+	lastValid := time.Now()
+
+	for {
+		if err := conn.SetReadDeadline(lastValid.Add(idleTimeout)); err != nil {
+			cs.networkLost(err)
+			return
+		}
+		n, sender, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-cs.closed:
+				return
+			default:
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				cs.networkLost(fmt.Errorf("RTCP liveness timeout after %s", idleTimeout))
+				return
+			}
+			cs.networkLost(err)
+			return
+		}
+		if remoteAddr != nil && remoteAddr.IP != nil && !sender.IP.Equal(remoteAddr.IP) {
+			continue
+		}
+		packets, err := rtcp.Unmarshal(buf[:n])
+		if err != nil || len(packets) == 0 {
+			continue
+		}
+		lastValid = time.Now()
+	}
 }
 
 func (cs *CallSession) receiveLoop() {
 	defer slog.Info("rtp receive loop stopped", "module", "sipgateway", "call", cs.callID)
 
 	depacketizer := cs.newDepacketizer()
+	if depacketizer.inner == nil {
+		cs.networkLost(ErrCodecMismatch)
+		return
+	}
 	buf := make([]byte, 2048)
 	cs.mu.RLock()
 	conn := cs.conn
@@ -208,6 +298,10 @@ func (cs *CallSession) sendLoop() {
 
 	session := rtp.NewSession(uint8(cs.codec.PT), uint32(cs.codec.ClockRate))
 	packetizer := cs.newPacketizer()
+	if packetizer.inner == nil {
+		cs.networkLost(ErrCodecMismatch)
+		return
+	}
 	cs.mu.RLock()
 	stream := cs.stream
 	conn := cs.conn
@@ -292,7 +386,7 @@ func (cs *CallSession) terminate(state CallState, err error, notify bool) bool {
 		cs.mu.Lock()
 		cs.state = state
 		if err != nil {
-			cs.lastError = err.Error()
+			cs.lastError = redactedTerminalError(err)
 		}
 		callback = cs.onTerminate
 		cs.mu.Unlock()
@@ -313,9 +407,13 @@ func (cs *CallSession) stop() {
 		close(cs.closed)
 		cs.mu.RLock()
 		conn := cs.conn
+		rtcpConn := cs.rtcpConn
 		cs.mu.RUnlock()
 		if conn != nil {
 			_ = conn.Close()
+		}
+		if rtcpConn != nil {
+			_ = rtcpConn.Close()
 		}
 	})
 }
@@ -388,13 +486,14 @@ func (cs *CallSession) newDepacketizer() *audioDepacketizer {
 		d.inner = &rtp.OpusDepacketizer{}
 	case avframe.CodecG722:
 		d.inner = &rtp.G722Depacketizer{}
-	default:
-		d.inner = &rtp.G711Depacketizer{Codec: avframe.CodecG711U}
 	}
 	return d
 }
 
 func (d *audioDepacketizer) depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, error) {
+	if d.inner == nil {
+		return nil, ErrCodecMismatch
+	}
 	return d.inner.Depacketize(pkt)
 }
 
@@ -413,12 +512,13 @@ func (cs *CallSession) newPacketizer() *audioPacketizer {
 		p.inner = &rtp.OpusPacketizer{}
 	case avframe.CodecG722:
 		p.inner = &rtp.G722Packetizer{}
-	default:
-		p.inner = &rtp.G711Packetizer{}
 	}
 	return p
 }
 
 func (p *audioPacketizer) packetize(frame *avframe.AVFrame) ([]*pionrtp.Packet, error) {
+	if p.inner == nil {
+		return nil, ErrCodecMismatch
+	}
 	return p.inner.Packetize(frame, 1400)
 }

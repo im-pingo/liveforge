@@ -88,6 +88,8 @@ func writeSIPGatewayError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, sipgateway.ErrCallCapacity), errors.Is(err, sipgateway.ErrPortExhausted):
 		writeError(w, http.StatusTooManyRequests, err.Error())
+	case errors.Is(err, sipgateway.ErrInvalidTargetURI):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, sipgateway.ErrTargetRequired), errors.Is(err, sipgateway.ErrCodecMismatch):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, sipgateway.ErrGatewayDisabled), errors.Is(err, sipgateway.ErrGatewayClosed):

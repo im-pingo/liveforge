@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,7 @@ type Gateway struct {
 	mu             sync.RWMutex
 	sessions       map[string]*CallSession
 	pending        map[string]struct{}
+	terminal       []CallSnapshot
 	closed         bool
 	rtpIdleTimeout time.Duration
 	metrics        gatewayMetrics
@@ -227,6 +229,7 @@ func (gw *Gateway) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
+	cs.dialog.endedByRemote()
 	gw.finishSession(cs, CallStateEnded, nil)
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", nil)
@@ -243,6 +246,23 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	}
 	if targetURI == "" {
 		return "", ErrTargetRequired
+	}
+	reqURI, err := parseTargetURI(targetURI, gw.sipService.Domain())
+	if err != nil {
+		return "", err
+	}
+
+	publisher := stream.Publisher()
+	if publisher == nil || publisher.MediaInfo() == nil {
+		gw.metrics.setupFailures.Add(1)
+		gw.metrics.codecFailures.Add(1)
+		return "", ErrCodecMismatch
+	}
+	sourceCodec, ok := configuredCodecForSource(gw.codecs, publisher.MediaInfo().AudioCodec)
+	if !ok {
+		gw.metrics.setupFailures.Add(1)
+		gw.metrics.codecFailures.Add(1)
+		return "", ErrCodecMismatch
 	}
 
 	callID := uuid.NewString()
@@ -268,21 +288,8 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		}
 	}()
 
-	var offerCodecs []negotiatedCodec
-	for _, name := range gw.codecs {
-		if info, ok := encodingToCodec[name]; ok {
-			offerCodecs = append(offerCodecs, negotiatedCodec{
-				Codec:        info.Codec,
-				PT:           info.PT,
-				ClockRate:    info.ClockRate,
-				EncodingName: name,
-			})
-		}
-	}
+	offerBody := buildOfferSDP(gw.localIP, rtpPort, []negotiatedCodec{sourceCodec})
 
-	offerBody := buildOfferSDP(gw.localIP, rtpPort, offerCodecs)
-
-	reqURI := sip.Uri{User: targetURI, Host: gw.sipService.Domain()}
 	fromURI := sip.Uri{User: gw.sipService.ServerID(), Host: gw.sipService.Domain()}
 
 	inviteReq := sip.NewRequest(sip.INVITE, reqURI)
@@ -309,12 +316,27 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	}
 
 	resp := invTx.Response()
-	if resp == nil || resp.StatusCode != 200 {
+	if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		gw.metrics.setupFailures.Add(1)
 		if resp != nil {
 			return "", fmt.Errorf("INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
 		}
 		return "", fmt.Errorf("INVITE failed: no response")
+	}
+
+	dialog := newDialogTeardown(invTx)
+	teardownOnReturn := true
+	defer func() {
+		if teardownOnReturn {
+			_ = dialog.teardown()
+		}
+	}()
+	ackCtx, cancelACK := context.WithTimeout(context.Background(), 5*time.Second)
+	err = invTx.SendACK(ackCtx)
+	cancelACK()
+	if err != nil {
+		gw.metrics.setupFailures.Add(1)
+		return "", fmt.Errorf("send ACK: %w", err)
 	}
 
 	answerSDP, err := sdp.Parse(resp.Body())
@@ -335,20 +357,15 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", fmt.Errorf("no audio in answer SDP")
 	}
 
-	nc, ok := negotiateCodec(audioMedia, gw.codecs)
-	if !ok {
+	nc, ok := negotiateCodec(audioMedia, []string{sourceCodec.EncodingName})
+	if !ok || nc.Codec != sourceCodec.Codec {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.codecFailures.Add(1)
 		return "", ErrCodecMismatch
 	}
 
-	if err := invTx.SendACK(ctx); err != nil {
-		gw.metrics.setupFailures.Add(1)
-		return "", fmt.Errorf("send ACK: %w", err)
-	}
-
 	cs := newCallSession(callID, streamKey, nc, "outbound", rtpPort, rtcpPort)
-	cs.dialog = invTx
+	cs.dialog = dialog
 	gw.configureSession(cs)
 	if err := gw.activateReservedCall(cs); err != nil {
 		gw.metrics.setupFailures.Add(1)
@@ -362,12 +379,48 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		gw.finishSession(cs, CallStateEnded, err)
 		return "", fmt.Errorf("start outbound: %w", err)
 	}
+	teardownOnReturn = false
 	gw.metrics.callsStarted.Add(1)
 
 	slog.Info("outbound call established", "module", "sipgateway",
-		"call", callID, "target", targetURI, "stream", streamKey, "codec", nc.EncodingName)
+		"call", callID, "stream", streamKey, "codec", nc.EncodingName)
 
 	return callID, nil
+}
+
+func parseTargetURI(target, localDomain string) (sip.Uri, error) {
+	if target == "" {
+		return sip.Uri{}, ErrTargetRequired
+	}
+	if target != strings.TrimSpace(target) {
+		return sip.Uri{}, fmt.Errorf("%w: malformed target", ErrInvalidTargetURI)
+	}
+
+	if strings.HasPrefix(strings.ToLower(target), "sip:") {
+		var uri sip.Uri
+		if err := sip.ParseUri(target, &uri); err != nil || uri.Scheme != "sip" || uri.User == "" || uri.Host == "" ||
+			uri.Password != "" || uri.Wildcard || uri.HierarhicalSlashes || uri.Port < 0 || uri.Port > 65535 {
+			return sip.Uri{}, fmt.Errorf("%w: malformed target", ErrInvalidTargetURI)
+		}
+		return uri, nil
+	}
+
+	if !validBareSIPUser(target) || localDomain == "" {
+		return sip.Uri{}, fmt.Errorf("%w: malformed target", ErrInvalidTargetURI)
+	}
+	return sip.Uri{Scheme: "sip", User: target, Host: localDomain}, nil
+}
+
+func validBareSIPUser(target string) bool {
+	for _, char := range target {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		case strings.ContainsRune("-_.+!~*'()", char):
+		default:
+			return false
+		}
+	}
+	return target != ""
 }
 
 // Hangup terminates a call by its call-ID.
@@ -380,12 +433,7 @@ func (gw *Gateway) Hangup(callID string) error {
 		return fmt.Errorf("%w: %q", ErrCallNotFound, callID)
 	}
 
-	var signalErr error
-	if cs.dialog != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		signalErr = cs.dialog.SendBYE(ctx)
-		cancel()
-	}
+	signalErr := cs.dialog.teardown()
 	if signalErr != nil {
 		return fmt.Errorf("send BYE: %w", signalErr)
 	}
@@ -403,16 +451,29 @@ func (gw *Gateway) ActiveCalls() int {
 func (gw *Gateway) ListCalls() []CallSnapshot {
 	gw.mu.RLock()
 	sessions := make([]*CallSession, 0, len(gw.sessions))
+	activeIDs := make(map[string]struct{}, len(gw.sessions))
 	for _, session := range gw.sessions {
 		sessions = append(sessions, session)
+		activeIDs[session.callID] = struct{}{}
 	}
+	terminal := append([]CallSnapshot(nil), gw.terminal...)
 	gw.mu.RUnlock()
 
-	calls := make([]CallSnapshot, 0, len(sessions))
+	calls := make([]CallSnapshot, 0, len(sessions)+len(terminal))
 	for _, session := range sessions {
 		calls = append(calls, session.snapshot())
 	}
-	sort.Slice(calls, func(i, j int) bool { return calls[i].CallID < calls[j].CallID })
+	for _, snapshot := range terminal {
+		if _, active := activeIDs[snapshot.CallID]; !active {
+			calls = append(calls, snapshot)
+		}
+	}
+	sort.SliceStable(calls, func(i, j int) bool {
+		if calls[i].CallID == calls[j].CallID {
+			return calls[i].StartedAt.Before(calls[j].StartedAt)
+		}
+		return calls[i].CallID < calls[j].CallID
+	})
 	return calls
 }
 
@@ -420,11 +481,19 @@ func (gw *Gateway) ListCalls() []CallSnapshot {
 func (gw *Gateway) Call(callID string) (CallSnapshot, bool) {
 	gw.mu.RLock()
 	session, ok := gw.sessions[callID]
-	gw.mu.RUnlock()
-	if !ok {
-		return CallSnapshot{}, false
+	if ok {
+		gw.mu.RUnlock()
+		return session.snapshot(), true
 	}
-	return session.snapshot(), true
+	for i := len(gw.terminal) - 1; i >= 0; i-- {
+		if gw.terminal[i].CallID == callID {
+			snapshot := gw.terminal[i]
+			gw.mu.RUnlock()
+			return snapshot, true
+		}
+	}
+	gw.mu.RUnlock()
+	return CallSnapshot{}, false
 }
 
 // Metrics returns a stable snapshot without exposing per-call labels.
@@ -520,11 +589,13 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 		gw.mu.Unlock()
 		return false
 	}
+	session.terminate(state, err, false)
 	delete(gw.sessions, session.callID)
+	gw.addTerminalLocked(session.snapshot())
 	gw.mu.Unlock()
 
-	session.terminate(state, err, false)
 	gw.portAlloc.Free(session.rtpPort, session.rtcpPort)
+	_ = session.dialog.teardown()
 	if session.direction == "inbound" && session.stream != nil && session.publisher != nil {
 		publisher := session.stream.Publisher()
 		if publisher != nil && publisher.ID() == session.publisher.id {
@@ -535,6 +606,15 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 		gw.metrics.callsEnded.Add(1)
 	}
 	return true
+}
+
+func (gw *Gateway) addTerminalLocked(snapshot CallSnapshot) {
+	gw.terminal = append(gw.terminal, snapshot)
+	if len(gw.terminal) <= terminalHistoryLimit {
+		return
+	}
+	copy(gw.terminal, gw.terminal[len(gw.terminal)-terminalHistoryLimit:])
+	gw.terminal = gw.terminal[:terminalHistoryLimit]
 }
 
 func (gw *Gateway) streamKeyFromRequest(req *sip.Request) string {

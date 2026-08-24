@@ -223,23 +223,42 @@ func TestGatewayRTPTimeoutReleasesSessionAndPortOnce(t *testing.T) {
 }
 
 type fakeInviteDialog struct {
-	done       chan struct{}
-	response   *sip.Response
-	mu         sync.Mutex
-	acks       int
-	byes       int
-	byeErr     error
-	byeStarted chan struct{}
-	byeRelease chan struct{}
+	done              chan struct{}
+	response          *sip.Response
+	mu                sync.Mutex
+	acks              int
+	byes              int
+	ackHook           func()
+	responseHook      func()
+	rejectCanceledACK bool
+	byeErr            error
+	byeStarted        chan struct{}
+	byeRelease        chan struct{}
 }
 
-func (d *fakeInviteDialog) Done() <-chan struct{}   { return d.done }
-func (d *fakeInviteDialog) Response() *sip.Response { return d.response }
-func (d *fakeInviteDialog) Close()                  {}
-func (d *fakeInviteDialog) SendACK(context.Context) error {
+func (d *fakeInviteDialog) Done() <-chan struct{} { return d.done }
+func (d *fakeInviteDialog) Response() *sip.Response {
+	d.mu.Lock()
+	response, hook := d.response, d.responseHook
+	d.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return response
+}
+func (d *fakeInviteDialog) Close() {}
+func (d *fakeInviteDialog) SendACK(ctx context.Context) error {
 	d.mu.Lock()
 	d.acks++
+	hook := d.ackHook
+	rejectCanceled := d.rejectCanceledACK
 	d.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if rejectCanceled {
+		return ctx.Err()
+	}
 	return nil
 }
 func (d *fakeInviteDialog) SendBYE(context.Context) error {
@@ -258,6 +277,7 @@ func (d *fakeInviteDialog) SendBYE(context.Context) error {
 func TestGatewayDialsListsAndHangsUpOutboundCall(t *testing.T) {
 	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
 	stream, _ := hub.GetOrCreate("live/outbound")
+	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
 	close(dialog.done)
 	gw.sendInvite = func(_ context.Context, req *sip.Request) (inviteDialog, error) {
@@ -412,7 +432,8 @@ func TestCallSessionCannotStartAfterTermination(t *testing.T) {
 
 func TestConcurrentHangupSignalsAndCleansOutboundCallOnce(t *testing.T) {
 	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
-	_, _ = hub.GetOrCreate("live/concurrent-hangup")
+	stream, _ := hub.GetOrCreate("live/concurrent-hangup")
+	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{
 		done:       make(chan struct{}),
 		byeStarted: make(chan struct{}, 2),
