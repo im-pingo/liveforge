@@ -23,6 +23,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - WebRTC WHIP/WHEP publish/play, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
 - HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback.
 - GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and simulator coverage.
+- SIP TCP/UDP listener cancellation is treated as normal shutdown without ERROR noise; unexpected listener failures while the service context is active remain ERROR with transport metadata.
 - Optional audio transcoding for AAC, Opus, G.711, and MP3 when built with `CGO_ENABLED=1 -tags audiocodec` and FFmpeg libraries.
 
 ### Runtime Configuration
@@ -94,6 +95,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | Meaningful CLI/tool package tests | `7df71a0` |
 | Cluster peer error bounding/redaction and final security hardening | `ef20a1a` |
 | Go 1.26 DVR media route registration, strict pre-auth dispatch, and bounded lifecycle | Real-listener tests in `module/dvr/route_test.go` |
+| SIP listener shutdown logging and active-failure classification | Real-listener log tests in `module/sip/listener_shutdown_test.go` |
 | GB28181 live/playback stop route and `gb28181:control` permission | Registered and covered in `module/gb28181` and `module/api` tests |
 | Runtime callback coalescing counter | `DroppedCallbacks` status/metrics path and manager tests |
 | Cluster credential hot rotation/no-admin failure | RTP/GB transport credential tests and cluster operations recipe |
@@ -112,7 +114,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 
 Every operations recipe uses loopback-safe examples, authenticated requests, expected success/failure codes, diagnostics/metrics, rollback, and recovery. Each warns that `configs/liveforge.yaml` disables TLS/auth and uses `admin/admin`, so it must never be publicly exposed unchanged.
 
-This DVR fix restores the already documented media URL contract and does not change capabilities, prerequisites, ports, configuration, authentication, REST contracts, or operator workflows. Therefore `agent-manifest.json`, `llms.txt`, `llms-full.txt`, `README.md`, `README.zh-CN.md`, `docs/api/openapi.yaml`, `docs/config/config.schema.json`, and the recording/DVR recipe require no corresponding content change.
+The DVR route fix restores the already documented media URL contract. The SIP listener fix changes only shutdown log classification: context-cancelled listeners no longer emit ERROR, while active-context failures remain visible. Neither fix changes capabilities, prerequisites, ports, configuration, authentication, REST contracts, or operator workflows. Therefore `agent-manifest.json`, `llms.txt`, `llms-full.txt`, `README.md`, `README.zh-CN.md`, `docs/api/openapi.yaml`, `docs/config/config.schema.json`, and the operations recipes require no corresponding content change.
 
 ## Deferred Work
 

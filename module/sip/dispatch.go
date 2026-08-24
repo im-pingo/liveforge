@@ -115,7 +115,9 @@ type service struct {
 	serverID  string
 	domain    string
 
-	cancelFunc context.CancelFunc
+	cancelFunc    context.CancelFunc
+	listenerStart sync.WaitGroup
+	listenerDone  sync.WaitGroup
 }
 
 func newService() *service {
@@ -174,10 +176,19 @@ func (s *service) init(cfg config.SIPConfig) error {
 
 	for _, transport := range cfg.Transport {
 		transport := transport
+		s.listenerStart.Add(1)
+		s.listenerDone.Add(1)
+		var started sync.Once
+		markStarted := func() {
+			started.Do(s.listenerStart.Done)
+		}
+		listenerCtx := context.WithValue(ctx, sipgo.ListenReadyCtxKey, sipgo.ListenReadyFuncCtxValue(func(string, string) {
+			markStarted()
+		}))
 		go func() {
-			if err := srv.ListenAndServe(ctx, transport, cfg.Listen); err != nil {
-				slog.Error("sip listener stopped", "module", "sip", "transport", transport, "error", err)
-			}
+			defer s.listenerDone.Done()
+			defer markStarted()
+			s.serveListener(listenerCtx, srv, transport, cfg.Listen)
 		}()
 		slog.Info("listening", "module", "sip", "transport", transport, "addr", cfg.Listen)
 	}
@@ -185,10 +196,18 @@ func (s *service) init(cfg config.SIPConfig) error {
 	return nil
 }
 
+func (s *service) serveListener(ctx context.Context, srv *sipgo.Server, transport, addr string) {
+	if err := srv.ListenAndServe(ctx, transport, addr); err != nil && ctx.Err() == nil {
+		slog.Error("sip listener stopped", "module", "sip", "transport", transport, "error", err)
+	}
+}
+
 func (s *service) close() {
+	s.listenerStart.Wait()
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
+	s.listenerDone.Wait()
 }
 
 // --- SIPService interface ---
