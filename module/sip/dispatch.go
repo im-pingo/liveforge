@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -197,9 +198,11 @@ func (s *service) init(cfg config.SIPConfig) error {
 }
 
 func (s *service) serveListener(ctx context.Context, srv *sipgo.Server, transport, addr string) {
-	if err := srv.ListenAndServe(ctx, transport, addr); err != nil && ctx.Err() == nil {
-		slog.Error("sip listener stopped", "module", "sip", "transport", transport, "error", err)
+	err := srv.ListenAndServe(ctx, transport, addr)
+	if err == nil || (ctx.Err() != nil && errors.Is(err, net.ErrClosed)) {
+		return
 	}
+	slog.Error("sip listener stopped", "module", "sip", "transport", transport, "error", err)
 }
 
 func (s *service) close() {

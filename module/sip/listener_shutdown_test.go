@@ -2,6 +2,7 @@ package sip
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo"
+	sipmessage "github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 )
 
@@ -108,6 +111,31 @@ func TestSIPListenerStopFailureWhileContextActiveLogsError(t *testing.T) {
 			strings.Contains(output, `msg="sip listener stopped"`) &&
 			strings.Contains(output, "transport=tcp")
 	})
+}
+
+func TestSIPListenerStopUnexpectedFailureAfterCancellationLogsError(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	ua, err := sipgo.NewUA(sipgo.WithUserAgent("LiveForge listener classification test"))
+	if err != nil {
+		t.Fatalf("create SIP user agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ua.Close() })
+	server, err := sipgo.NewServer(ua)
+	if err != nil {
+		t.Fatalf("create SIP server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	newService().serveListener(ctx, server, "unsupported", "127.0.0.1:0")
+
+	output := logs.String()
+	if !strings.Contains(output, "level=ERROR") ||
+		!strings.Contains(output, `msg="sip listener stopped"`) ||
+		!strings.Contains(output, "transport=unsupported") ||
+		!strings.Contains(output, sipmessage.ErrTransportNotSuported.Error()) {
+		t.Fatalf("unexpected listener failure after cancellation was not logged with transport metadata:\n%s", output)
+	}
 }
 
 func captureDefaultLogs(t *testing.T) *synchronizedLogBuffer {
