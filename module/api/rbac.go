@@ -175,7 +175,8 @@ func buildSecurityHandler(next http.Handler, server *core.Server, audit *AuditSt
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := server.Config().API
 		if r.URL.Path == "/console/login" {
-			handleSecuredLogin(w, r, cfg.Console, audit, counters)
+			secure := server.HasTLS() && (cfg.TLS == nil || *cfg.TLS)
+			handleSecuredLogin(w, r, cfg.Console, secure, audit, counters)
 			return
 		}
 		if r.URL.Path == "/api/v1/server/health" {
@@ -230,9 +231,9 @@ func buildSecurityHandler(next http.Handler, server *core.Server, audit *AuditSt
 	})
 }
 
-func handleSecuredLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, audit *AuditStore, counters *SecurityCounters) {
+func handleSecuredLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, secure bool, audit *AuditStore, counters *SecurityCounters) {
 	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-	handleLogin(sw, r, cfg)
+	handleLogin(sw, r, cfg, secure)
 	if r.Method != http.MethodPost || sw.status != http.StatusUnauthorized {
 		return
 	}

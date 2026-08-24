@@ -24,7 +24,7 @@ func BuildSource(cfg config.RuntimeConfig, bootstrapPath string) (NamedSource, e
 		}
 		return NewFileSource(path)
 	case "http", "https":
-		return NewHTTPSource(HTTPSourceOptions{URL: cfg.HTTP.URL, Token: cfg.HTTP.Token, MaxBytes: cfg.HTTP.MaxBytes})
+		return NewHTTPSource(HTTPSourceOptions{URL: cfg.HTTP.URL, Token: cfg.HTTP.Token, Scheme: kind, MaxBytes: cfg.HTTP.MaxBytes})
 	case "consul":
 		return NewConsulSource(ConsulSourceOptions{Address: cfg.Consul.Address, Prefix: cfg.Consul.Prefix, Token: cfg.Consul.Token, MaxBytes: cfg.Consul.MaxBytes})
 	case "redis":

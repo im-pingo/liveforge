@@ -53,7 +53,9 @@ runtime:
     max_bytes: 4194304
 ```
 
-The client uses `If-None-Match` and `If-Modified-Since` after a successful response. `304 Not Modified` retains the snapshot. Use authenticated HTTPS and a bounded `max_bytes` value.
+The source type and URL scheme must match exactly: `runtime.source: http` requires `http://`, and `runtime.source: https` requires `https://`. Mismatches are rejected before network dispatch. Redirects are disabled for every HTTP source response, including same-scheme and same-host redirects, so bearer credentials are never forwarded through a redirect and HTTPS cannot be downgraded.
+
+The client uses `If-None-Match` and `If-Modified-Since` only from the last parsed, validated, applied, and atomically accepted snapshot. Validators returned with a malformed, invalid, or application-failed document are not committed or sent later. `304 Not Modified` retains the accepted snapshot. `X-Config-Version` is source version metadata and remains separate from the ETag validator. Use authenticated HTTPS and a bounded `max_bytes` value.
 
 ## Consul KV
 

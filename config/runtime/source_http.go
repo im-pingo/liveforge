@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,7 @@ import (
 type HTTPSourceOptions struct {
 	URL      string
 	Token    string
+	Scheme   string
 	Client   *http.Client
 	MaxBytes int64
 }
@@ -22,24 +24,38 @@ type HTTPSource struct {
 	token    string
 	client   *http.Client
 	maxBytes int64
-	etag     string
-	modified string
+	name     string
 }
 
 func NewHTTPSource(opts HTTPSourceOptions) (*HTTPSource, error) {
-	if _, err := requireURL(opts.URL, "http source url"); err != nil {
+	u, err := requireURL(opts.URL, "http source url")
+	if err != nil {
 		return nil, err
+	}
+	expectedScheme := strings.ToLower(strings.TrimSpace(opts.Scheme))
+	if expectedScheme == "" {
+		expectedScheme = strings.ToLower(u.Scheme)
+	}
+	if expectedScheme != "http" && expectedScheme != "https" {
+		return nil, fmt.Errorf("http source scheme must be http or https")
+	}
+	if !strings.EqualFold(u.Scheme, expectedScheme) {
+		return nil, fmt.Errorf("http source URL scheme %q does not match runtime source %q", u.Scheme, expectedScheme)
 	}
 	if opts.Client == nil {
 		opts.Client = &http.Client{Timeout: 10 * time.Second}
 	}
+	client := *opts.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	if opts.MaxBytes <= 0 {
 		opts.MaxBytes = 4 << 20
 	}
-	return &HTTPSource{url: opts.URL, token: opts.Token, client: opts.Client, maxBytes: opts.MaxBytes}, nil
+	return &HTTPSource{url: opts.URL, token: opts.Token, client: &client, maxBytes: opts.MaxBytes, name: expectedScheme}, nil
 }
 
-func (s *HTTPSource) Name() string { return "http" }
+func (s *HTTPSource) Name() string { return s.name }
 
 func (s *HTTPSource) Load(ctx context.Context, previous Version) (Snapshot, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
@@ -49,11 +65,11 @@ func (s *HTTPSource) Load(ctx context.Context, previous Version) (Snapshot, erro
 	if s.token != "" {
 		req.Header.Set("Authorization", "Bearer "+s.token)
 	}
-	if s.etag != "" {
-		req.Header.Set("If-None-Match", s.etag)
+	if previous.ETag != "" {
+		req.Header.Set("If-None-Match", previous.ETag)
 	}
-	if s.modified != "" {
-		req.Header.Set("If-Modified-Since", s.modified)
+	if !previous.LastModified.IsZero() {
+		req.Header.Set("If-Modified-Since", previous.LastModified.UTC().Format(http.TimeFormat))
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -61,7 +77,7 @@ func (s *HTTPSource) Load(ctx context.Context, previous Version) (Snapshot, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
-		return Snapshot{Version: previous.Value}, nil
+		return Snapshot{Version: previous.Value, ETag: previous.ETag, LastModified: previous.LastModified}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return Snapshot{}, fmt.Errorf("config endpoint returned HTTP %d", resp.StatusCode)
@@ -76,14 +92,13 @@ func (s *HTTPSource) Load(ctx context.Context, previous Version) (Snapshot, erro
 	if len(data) == 0 {
 		return Snapshot{}, fmt.Errorf("config response is empty")
 	}
-	s.etag = resp.Header.Get("ETag")
-	s.modified = resp.Header.Get("Last-Modified")
-	lastModified, _ := http.ParseTime(s.modified)
-	version := s.etag
+	etag := resp.Header.Get("ETag")
+	lastModified, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
+	version := resp.Header.Get("X-Config-Version")
 	if version == "" {
-		version = resp.Header.Get("X-Config-Version")
+		version = etag
 	}
-	return Snapshot{Data: append([]byte(nil), data...), Version: version, LastModified: lastModified}, nil
+	return Snapshot{Data: append([]byte(nil), data...), Version: version, ETag: etag, LastModified: lastModified}, nil
 }
 
 func (s *HTTPSource) Close() error { return nil }

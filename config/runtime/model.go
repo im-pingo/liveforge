@@ -32,14 +32,17 @@ type NamedSource interface {
 
 // Version identifies the source revision and normalized content hash.
 type Version struct {
-	Value string
-	Hash  string
+	Value        string
+	Hash         string
+	ETag         string
+	LastModified time.Time
 }
 
 // Snapshot is the source result before parsing and validation.
 type Snapshot struct {
 	Data         []byte
 	Version      string
+	ETag         string
 	LastModified time.Time
 }
 

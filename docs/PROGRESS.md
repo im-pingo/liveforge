@@ -18,9 +18,9 @@ Release artifacts remain conditional: source builds are available from the repos
 
 - Shared stream hub, lifecycle events, GOP/ring buffers, statistics, resource limits, graceful drain, rollback-capable module reload, and slow-consumer handling.
 - RTMP ingest/playback and FLV bridging.
-- RTSP ingest/playback over TCP interleaving and UDP, including separate audio/video track SETUP compatibility.
+- RTSP ingest/playback over TCP interleaving and UDP, including separate audio/video track SETUP compatibility with unique, in-range, session-eligible track validation before transport allocation.
 - Pure-Go SRT ingest/playback with MPEG-TS and optional encryption.
-- WebRTC WHIP/WHEP publish/play, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
+- WebRTC WHIP/WHEP publish/play with a 1 MiB SDP offer limit and HTTP 413 rejection, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
 - HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback.
 - GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and simulator coverage.
 - SIP TCP/UDP listener cancellation is treated as normal shutdown without ERROR noise; unexpected listener failures while the service context is active remain ERROR with transport metadata.
@@ -46,7 +46,8 @@ Release artifacts remain conditional: source builds are available from the repos
 - The deprecated `auth.api.bearer_token` migrates only when `api.auth.bearer_token` is empty; the current path wins when both exist.
 - Bounded in-memory audit plus structured logs for authentication failures, authorization denials, console login failures, rate-limited mutations, mutation outcomes, and accepted config application.
 - Audit metadata removes keys containing token, secret, password, or authorization.
-- Permission-aware seven-view console: streams, config, cluster, SIP, storage, security, and audit. Actions are enabled only for the active role.
+- Permission-aware console tabs, in order: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. Actions are enabled only for the active role.
+- TLS API listeners set `Secure` on the HttpOnly, SameSite=Strict `lf_session` cookie; plain HTTP development listeners leave it unset.
 - Redacted runtime config, security, cluster relay/peer, call, recording, storage, DVR, and audit status.
 
 ### Recording And DVR
@@ -54,7 +55,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording.
 - Stream pattern selection, duration/size segmentation, path templates, completion callbacks, retry/failure preservation, and storage health.
 - Authenticated recording list/status/detail, HTTP range download, and admin delete operations.
-- DVR playlist/segment serving, retention cleanup, storage/session status, and Prometheus metrics.
+- DVR playlist/segment serving with synchronous-only subscribe authorization and no asynchronous subscribe lifecycle emission, retention cleanup, storage/session status, and Prometheus metrics.
 - DVR media registration is valid on Go 1.26 and strictly dispatches only `GET /dvr/{app}/{key}.m3u8` and `GET /dvr/{app}/{key}/{filename}`; malformed or nested resources return 404 before playback authorization or storage lookup.
 
 ### SIP Gateway
@@ -114,7 +115,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 
 Every operations recipe uses loopback-safe examples, authenticated requests, expected success/failure codes, diagnostics/metrics, rollback, and recovery. Each warns that `configs/liveforge.yaml` disables TLS/auth and uses `admin/admin`, so it must never be publicly exposed unchanged.
 
-The DVR route fix restores the already documented media URL contract. The SIP listener fix changes only shutdown log classification: context-cancelled listeners no longer emit ERROR, while active-context failures remain visible. Neither fix changes capabilities, prerequisites, ports, configuration, authentication, REST contracts, or operator workflows. Therefore `agent-manifest.json`, `llms.txt`, `llms-full.txt`, `README.md`, `README.zh-CN.md`, `docs/api/openapi.yaml`, `docs/config/config.schema.json`, and the operations recipes require no corresponding content change.
+The final review synchronization records accepted-only HTTP validators, strict HTTP/HTTPS scheme matching with redirects disabled, pre-allocation RTSP SETUP validation, synchronous-only DVR authorization, TLS-bound secure console cookies, the 1 MiB WHIP/WHEP offer limit, and the canonical seven-tab console contract across the manifest, Agent summaries, user READMEs, schema, OpenAPI, and operations recipes.
 
 ## Deferred Work
 

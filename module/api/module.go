@@ -205,7 +205,7 @@ func buildAuthHandler(mux *http.ServeMux, cfg config.APIConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Login endpoint — always accessible
 		if r.URL.Path == "/console/login" {
-			handleLogin(w, r, cfg.Console)
+			handleLogin(w, r, cfg.Console, false)
 			return
 		}
 
@@ -286,7 +286,7 @@ func validateSession(r *http.Request, cfg config.ConsoleConfig) bool {
 }
 
 // handleLogin serves the login page (GET) or processes login (POST).
-func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig) {
+func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, secure bool) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(loginHTML)
@@ -315,6 +315,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfi
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400, // 24h
 	})

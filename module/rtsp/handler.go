@@ -95,6 +95,19 @@ type TransportConfig struct {
 
 // HandleSetup negotiates transport for a track.
 func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr string) *Response {
+	trackID, ok := extractTrackID(req.URL)
+	if !ok {
+		return newResponse(455, "Method Not Valid in This State", req)
+	}
+	if session != nil {
+		if setupResult := session.validateSetupTrack(trackID); setupResult != trackSetupOK {
+			if setupResult == trackSetupSessionClosed {
+				return newResponse(454, "Session Not Found", req)
+			}
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
+	}
+
 	transport := req.Headers.Get("Transport")
 	tc := parseTransportHeader(transport)
 
@@ -128,7 +141,6 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 	}
 
 	if session != nil {
-		trackID, _ := extractTrackID(req.URL)
 		ts := TrackSetup{
 			TrackID:   trackID,
 			Transport: tc,

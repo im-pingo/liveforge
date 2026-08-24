@@ -8,6 +8,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
@@ -44,6 +45,7 @@ func TestHandleSetupTCPInterleaved(t *testing.T) {
 	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
+	session.MediaInfo = &avframe.MediaInfo{VideoCodec: avframe.CodecH264}
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "3")
 	req.Headers.Set("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")
@@ -72,6 +74,7 @@ func TestHandleSetupUDP(t *testing.T) {
 		}
 	})
 	session.Transition(StateDescribed)
+	session.MediaInfo = &avframe.MediaInfo{VideoCodec: avframe.CodecH264}
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "4")
 	req.Headers.Set("Transport", "RTP/AVP;unicast;client_port=5000-5001")

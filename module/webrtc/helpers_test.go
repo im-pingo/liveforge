@@ -312,6 +312,49 @@ func TestWHIPBadSDP(t *testing.T) {
 	}
 }
 
+func TestWHIPAndWHEPSDPOfferBodyLimit(t *testing.T) {
+	const limit = 1 << 20
+	tests := []struct {
+		name       string
+		path       string
+		size       int
+		wantStatus int
+		streamKey  string
+	}{
+		{name: "whip-exact-limit", path: "/webrtc/whip/live/exact", size: limit, wantStatus: http.StatusBadRequest, streamKey: "live/exact"},
+		{name: "whip-over-limit", path: "/webrtc/whip/live/oversized", size: limit + 1, wantStatus: http.StatusRequestEntityTooLarge, streamKey: "live/oversized"},
+		{name: "whep-exact-limit", path: "/webrtc/whep/live/missing-exact", size: limit, wantStatus: http.StatusNotFound},
+		{name: "whep-over-limit", path: "/webrtc/whep/live/missing-oversized", size: limit + 1, wantStatus: http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, server := newTestModule(t)
+			body := bytes.Repeat([]byte("x"), tt.size)
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/sdp")
+			rr := httptest.NewRecorder()
+			m.httpSrv.Handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if got := server.ConnectionCount(); got != 0 {
+				t.Fatalf("connection count = %d, want 0", got)
+			}
+			if got := sessionCount(m); got != 0 {
+				t.Fatalf("stored sessions = %d, want 0", got)
+			}
+			if strings.Contains(tt.name, "over-limit") {
+				if tt.streamKey != "" {
+					if _, ok := server.StreamHub().Find(tt.streamKey); ok {
+						t.Fatal("oversized offer created stream state")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestWHIPWithValidOffer(t *testing.T) {
 	m, _ := newTestModule(t)
 

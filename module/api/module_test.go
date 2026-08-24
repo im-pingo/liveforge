@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -285,6 +286,65 @@ func TestConsoleSessionAuth(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("API with session: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestConsoleSessionCookieSecureMatchesAPIListenerTLS(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		tls        bool
+		wantSecure bool
+	}{
+		{name: "plain-http", tls: false, wantSecure: false},
+		{name: "https", tls: true, wantSecure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestConfig()
+			cfg.TLS.Auto = tc.tls
+			cfg.API.TLS = boolPtr(tc.tls)
+			cfg.API.Console.Username = "admin"
+			cfg.API.Console.Password = "pass123"
+			module, _, _ := newTestModule(t, cfg)
+
+			scheme := "http"
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			if tc.tls {
+				scheme = "https"
+				transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // test-only self-signed listener
+			}
+			client := &http.Client{
+				Transport: transport,
+				Timeout:   2 * time.Second,
+				CheckRedirect: func(*http.Request, []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+			response, err := client.PostForm(scheme+"://"+module.Addr().String()+"/console/login", url.Values{
+				"username": {"admin"},
+				"password": {"pass123"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+
+			var session *http.Cookie
+			for _, cookie := range response.Cookies() {
+				if cookie.Name == "lf_session" {
+					session = cookie
+					break
+				}
+			}
+			if session == nil {
+				t.Fatal("missing lf_session cookie")
+			}
+			if session.Secure != tc.wantSecure {
+				t.Fatalf("Secure = %v, want %v", session.Secure, tc.wantSecure)
+			}
+			if !session.HttpOnly || session.SameSite != http.SameSiteStrictMode || session.Path != "/" {
+				t.Fatalf("cookie attributes = %+v", session)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,5 +68,49 @@ func TestPlaylistPropagatesTokenToSegmentURLs(t *testing.T) {
 	playlist := GeneratePlaylistWithQuery(index, "live/cam", true, "token="+"a%2Bb")
 	if !strings.Contains(playlist, "cam/seg_000001.ts?token=a%2Bb") {
 		t.Fatalf("playlist does not propagate encoded token:\n%s", playlist)
+	}
+}
+
+func TestPlaybackAuthorizationRunsOnlySynchronousSubscribeHooks(t *testing.T) {
+	server := core.NewServer(config.Defaults())
+	var syncCalls atomic.Int64
+	asyncCalls := make(chan struct{}, 2)
+	server.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventSubscribe,
+		Mode:  core.HookSync,
+		Handler: func(*core.EventContext) error {
+			syncCalls.Add(1)
+			return nil
+		},
+	})
+	server.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventSubscribe,
+		Mode:  core.HookAsync,
+		Handler: func(*core.EventContext) error {
+			asyncCalls <- struct{}{}
+			return nil
+		},
+	})
+	m := NewModule()
+	m.server = server
+
+	playlistReq := httptest.NewRequest(http.MethodGet, "/dvr/live/cam.m3u8", nil)
+	playlistReq.SetPathValue("app", "live")
+	playlistReq.SetPathValue("key", "cam")
+	m.handlePlaylist(httptest.NewRecorder(), playlistReq)
+
+	segmentReq := httptest.NewRequest(http.MethodGet, "/dvr/live/cam/seg_000001.ts", nil)
+	segmentReq.SetPathValue("app", "live")
+	segmentReq.SetPathValue("key", "cam")
+	segmentReq.SetPathValue("filename", "seg_000001.ts")
+	m.handleSegment(httptest.NewRecorder(), segmentReq)
+
+	if got := syncCalls.Load(); got != 2 {
+		t.Fatalf("synchronous authorization calls = %d, want 2", got)
+	}
+	select {
+	case <-asyncCalls:
+		t.Fatal("media authorization emitted asynchronous subscribe lifecycle work")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

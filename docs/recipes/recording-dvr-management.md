@@ -45,6 +45,8 @@ api:
 
 `record.enabled`, `record.path`, `dvr.enabled`, `dvr.listen`, and `dvr.path` require a restart. Recording format, stream pattern, segmentation, DVR window, segment duration, and cleanup interval are hot-reload candidates. Formats are `flv`, `fmp4`, `mp4`, `ts`, and `hls`.
 
+DVR playlist and segment GETs run only synchronous `EventSubscribe` authorization hooks. They do not emit asynchronous subscribe lifecycle, notification, or cluster-origin work. Authorization denial keeps the existing 401/403 response behavior.
+
 ## Inspect And Download
 
 ```bash

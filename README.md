@@ -38,10 +38,10 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 
 ### Protocols
 
-- **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP, separate audio/video SETUP tracks), SRT, WebRTC WHIP, or GB28181
+- **Multi-protocol ingest** — Publish via RTMP, RTSP (TCP + UDP, separate eligible audio/video SETUP tracks), SRT, WebRTC WHIP, or GB28181
 - **Multi-protocol playback** — Pull via RTMP, RTSP, SRT, WebRTC WHEP, HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, or WebSocket
 - **SRT** — Secure Reliable Transport with AES encryption, low-latency MPEG-TS delivery (pure Go via `datarhei/gosrt`)
-- **WebRTC** — WHIP/WHEP with ICE Lite, GCC send-side bandwidth estimation, and browser-based publish
+- **WebRTC** — WHIP/WHEP with a 1 MiB SDP offer limit, ICE Lite, GCC send-side bandwidth estimation, and browser-based publish
 - **Codec support** — H.264, H.265/HEVC, VP8, VP9, AV1, AAC, Opus, G.711 (μ-law/A-law), MP3
 
 ### Audio Transcoding
@@ -119,7 +119,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 
 ### Management & Operations
 
-- **Web console** — Seven permission-aware views for streams, runtime config, cluster, SIP calls, recording/DVR storage, security, and audit, plus multi-protocol preview and WHIP publish
+- **Web console** — Seven permission-aware tabs with multi-protocol preview and WHIP publish: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab.
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
 - **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; segmentation, storage health, download/range/delete management, and time-shift status
@@ -270,6 +270,8 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 Open `http://localhost:8090/console` for the real-time management dashboard:
 
+The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
+
 - Live stream list with state, codecs, bitrate, FPS
 - GOP cache visualization
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, WebRTC)
@@ -277,6 +279,8 @@ Open `http://localhost:8090/console` for the real-time management dashboard:
 - Permission-aware stream kick/delete and runtime config refresh
 - Cluster relay/peer status and SIP call dial/detail/hangup
 - Recording metadata/download/delete, DVR session/storage status, security posture, and bounded audit events
+
+DVR playlist and segment GETs run synchronous subscribe authorization hooks only; they do not emit asynchronous subscribe lifecycle events.
 
 ## Configuration
 
@@ -312,7 +316,7 @@ Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}
 
 ### Runtime configuration refresh
 
-The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, Consul, and Redis examples.
+The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. For HTTP sources, the selected `http` or `https` source must match the URL scheme, redirects are disabled, and ETag/Last-Modified validators advance only after a document is accepted; `X-Config-Version` is separate version metadata. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, HTTPS, Consul, and Redis examples.
 
 Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
 

@@ -38,10 +38,10 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 
 ### 协议支持
 
-- **多协议推流** — RTMP、RTSP（TCP + UDP，兼容音视频轨分别 SETUP）、SRT、WebRTC WHIP、GB28181，兼容 OBS、FFmpeg、GStreamer 及浏览器
+- **多协议推流** — RTMP、RTSP（TCP + UDP，兼容符合会话条件的独立音视频轨 SETUP）、SRT、WebRTC WHIP、GB28181，兼容 OBS、FFmpeg、GStreamer 及浏览器
 - **多协议拉流** — RTMP、RTSP、SRT、WebRTC WHEP、HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket
 - **SRT** — 安全可靠传输，AES 加密，低延迟 MPEG-TS 传输（纯 Go 实现 `datarhei/gosrt`）
-- **WebRTC** — WHIP/WHEP、ICE Lite、GCC 发送端带宽估计、浏览器推流
+- **WebRTC** — WHIP/WHEP（SDP offer 上限 1 MiB）、ICE Lite、GCC 发送端带宽估计、浏览器推流
 - **编解码** — H.264、H.265/HEVC、VP8、VP9、AV1、AAC、Opus、G.711（μ-law/A-law）、MP3
 
 ### 音频转码
@@ -119,7 +119,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 
 ### 管理与运维
 
-- **Web 控制台** — 流、运行时配置、集群、SIP 呼叫、录制/DVR 存储、安全、审计七个权限感知视图，以及多协议预览和 WHIP 推流
+- **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
 - **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制，分段、存储健康、下载/Range/删除管理和时移状态
@@ -270,6 +270,8 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 访问 `http://localhost:8090/console` 打开实时管理仪表盘：
 
+标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
+
 - 流列表：状态、编解码器、码率、帧率
 - GOP 缓存可视化
 - 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、WebRTC）
@@ -277,6 +279,8 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 - 权限感知的踢流、删流和运行时配置刷新
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
 - 录制详情/下载/删除、DVR 会话/存储状态、安全状态和有界审计事件
+
+DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
 
 ## 配置
 
@@ -312,7 +316,7 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 
 ### 运行时配置刷新
 
-进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照；`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
+进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
 

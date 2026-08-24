@@ -2,7 +2,6 @@ package webrtc
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -53,10 +52,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offerBytes, err := io.ReadAll(r.Body)
-	if err != nil {
+	offerBytes, ok := readSDPOffer(w, r)
+	if !ok {
 		releaseConn()
-		http.Error(w, "failed to read offer", http.StatusBadRequest)
 		return
 	}
 	if m.isClosing() {

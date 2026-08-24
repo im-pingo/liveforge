@@ -63,7 +63,7 @@ curl --cacert /etc/liveforge/tls/fullchain.pem -sS -o /dev/null -w '%{http_code}
 
 Health and authorized reads return 200. Viewer deletion returns 403. Missing or invalid credentials return 401; rate limiting can return 429. Do not use `curl -k` as a production workaround.
 
-Management authentication accepts `Authorization: Bearer <token>` or a valid `lf_session` cookie issued by console login. Health is always public. When neither a management bearer nor named token is configured, compatibility mode grants anonymous admin access; use that only on an isolated development listener.
+Management authentication accepts `Authorization: Bearer <token>` or a valid `lf_session` cookie issued by console login. The cookie is HttpOnly, SameSite=Strict, scoped to `/`, and carries `Secure` whenever the API listener is configured for TLS. A plain HTTP development listener leaves `Secure` unset so local login remains usable; never use that profile on a public endpoint. Health is always public. When neither a management bearer nor named token is configured, compatibility mode grants anonymous admin access; use that only on an isolated development listener.
 
 WebRTC publish/subscribe authorization is controlled by `auth.publish` and `auth.subscribe`, not management RBAC. Browser camera/microphone access also requires HTTPS or a browser-recognized secure context; ICE/TURN and UDP reachability are separate requirements.
 

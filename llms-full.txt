@@ -9,9 +9,9 @@ LiveForge is an MIT-licensed Go 1.26+ live streaming server. It ingests, transmu
 | Capability | Publish | Play | Default port or path | Prerequisites |
 | --- | --- | --- | --- | --- |
 | RTMP | Yes | Yes | 1935 | None beyond the Go build |
-| RTSP | Yes | Yes | 8554 plus RTP range | TCP-interleaved and UDP support separate audio/video SETUP tracks; UDP needs reachable RTP ports |
+| RTSP | Yes | Yes | 8554 plus RTP range | TCP-interleaved and UDP support separate audio/video SETUP tracks; track IDs must be unique and eligible before transport allocation; UDP needs reachable RTP ports |
 | SRT | Yes | Yes | 6000 | Optional AES passphrase |
-| WebRTC WHIP/WHEP | Yes | Yes | 8443 | ICE/TURN and secure browser context where applicable |
+| WebRTC WHIP/WHEP | Yes | Yes | 8443 | SDP offers are limited to 1 MiB; ICE/TURN and secure browser context are required where applicable |
 | HLS | No | Yes | 8080, `/{stream}.m3u8` | HTTP stream module |
 | LL-HLS | No | Yes | 8080, `/{stream}.m3u8` | `http_stream.llhls.enabled=true` |
 | DASH | No | Yes | 8080, `/{stream}.mpd` | HTTP stream module |
@@ -58,20 +58,22 @@ The local Docker Compose workflow builds the image from source by default. A rel
 - SIP Gateway calls: `/api/v1/sipgateway/calls`
 - Recordings and DVR: `/api/v1/recordings*`, `/api/v1/dvr/*`
 - Security and audit: `GET /api/v1/security/status`, `GET /api/v1/audit`
-- WHIP publish: `POST /webrtc/whip/{stream_key}` with an SDP offer
-- WHEP play: `POST /webrtc/whep/{stream_key}` with an SDP offer
+- WHIP publish: `POST /webrtc/whip/{stream_key}` with an SDP offer of at most 1 MiB
+- WHEP play: `POST /webrtc/whep/{stream_key}` with an SDP offer of at most 1 MiB
 - GB28181 API: `/api/v1/gb28181/*` when SIP and GB28181 are enabled
 
 The complete HTTP contract is [docs/api/openapi.yaml](docs/api/openapi.yaml). Management responses use a JSON envelope with `code`, `message`, and optional `data`; GB28181 responses are direct JSON and WebRTC uses SDP/plain text.
-Management authentication accepts `api.auth.bearer_token`, named viewer/operator/admin tokens, or an authenticated console session. `GET /api/v1/server/health` remains public. The permission-aware console exposes streams, config, cluster, SIP, storage, security, and audit views. Viewer reads status, operator controls calls/refresh/kick/live-playback, and admin owns deletions/debug/internal mutation.
+Management authentication accepts `api.auth.bearer_token`, named viewer/operator/admin tokens, or an authenticated console session. `GET /api/v1/server/health` remains public. TLS API listeners set `Secure` on the HttpOnly, SameSite=Strict `lf_session` cookie; plain HTTP listeners leave it unset for local development. The permission-aware console tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. Viewer reads status, operator controls calls/refresh/kick/live-playback, and admin owns deletions/debug/internal mutation.
 
-Recording supports FLV, FMP4, MP4, TS, and HLS plus authenticated listing, status, metadata, range download, and deletion. DVR exposes session and storage status and serves time-shift playlists/segments on its configured listener. Use [docs/recipes/recording-dvr-management.md](docs/recipes/recording-dvr-management.md).
+Recording supports FLV, FMP4, MP4, TS, and HLS plus authenticated listing, status, metadata, range download, and deletion. DVR exposes session and storage status and serves time-shift playlists/segments on its configured listener. Playlist and segment GETs run synchronous subscribe authorization hooks only and do not emit asynchronous subscribe lifecycle work. Use [docs/recipes/recording-dvr-management.md](docs/recipes/recording-dvr-management.md).
 
 RTP/GB28181 cluster signaling paths are configurable. Node clients load current atomic credentials for every request, preferring `api.auth.bearer_token`, then the first named admin token. Rotation is hot; when auth is configured without an admin credential, the request fails locally. Peer error bodies are bounded and redacted. Use [docs/recipes/cluster-relay-operations.md](docs/recipes/cluster-relay-operations.md).
 
 ## Runtime configuration
 
-The bootstrap YAML file is read once during startup. The `config/runtime` manager then polls the selected source (`file`, `http`, `consul`, or `redis`) in a background goroutine. It parses, normalizes, validates, hashes, and atomically publishes immutable snapshots. Runtime reads are one atomic pointer load and do not perform file/network I/O, wait on channels, or contend with refresh locks.
+The bootstrap YAML file is read once during startup. The `config/runtime` manager then polls the selected source (`file`, `http`, `https`, `consul`, or `redis`) in a background goroutine. It parses, normalizes, validates, hashes, and atomically publishes immutable snapshots. Runtime reads are one atomic pointer load and do not perform file/network I/O, wait on channels, or contend with refresh locks.
+
+For HTTP sources, `runtime.source: http` requires an `http://` URL and `runtime.source: https` requires an `https://` URL. Redirects are disabled, including same-origin redirects. `ETag` and `Last-Modified` conditional validators come only from the last accepted snapshot, so malformed, invalid, or unapplied responses cannot advance them. `X-Config-Version` remains source version metadata and is not treated as an ETag.
 
 `SIGHUP` and `POST /api/v1/server/config/refresh` only schedule asynchronous refresh. A source timeout, backend failure, malformed document, or validation error keeps the last valid snapshot active and updates manager status. Hot policy changes can be delivered to reloadable modules; listener addresses, module enablement, TLS files/mode, port ranges, and audio codec enablement are classified as `restart_required`. Status and Prometheus expose accepted/rejected/application-failed changes, callback failures, superseded callbacks, and pending restart paths. Simulcast configuration remains deferred because no layer selection runtime exists.
 

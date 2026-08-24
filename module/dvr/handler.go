@@ -140,7 +140,7 @@ func (m *Module) authorizePlayback(w http.ResponseWriter, r *http.Request, strea
 			params["token"] = strings.TrimPrefix(authorization, "Bearer ")
 		}
 	}
-	err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+	err := m.server.GetEventBus().EmitSync(core.EventSubscribe, &core.EventContext{
 		StreamKey:  streamKey,
 		Protocol:   "dvr",
 		RemoteAddr: r.RemoteAddr,

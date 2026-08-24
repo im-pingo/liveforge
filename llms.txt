@@ -40,10 +40,14 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Treat release binaries as the portable default profile; use a source or Docker `audiocodec` build for audio transcoding.
 - Do not expose the sample configuration publicly: it disables auth and TLS and uses `admin/admin`.
 - Do not use `latest` when a versioned image or commit SHA is available.
-- Runtime configuration uses a background poller with lock-free snapshot reads. Sources are selectable with `runtime.source`: `file`, `http`, `consul`, or `redis`.
+- Runtime configuration uses a background poller with lock-free snapshot reads. Sources are selectable with `runtime.source`: `file`, `http`, `https`, `consul`, or `redis`.
+- HTTP source scheme must match `runtime.source`, redirects are disabled, and conditional validators come only from the last accepted snapshot.
 - Source failures keep the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes remain restart-required.
-- The console has seven permission-aware operations views: streams, config, cluster, SIP, storage, security, and audit.
+- The console tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab.
 - Recording supports FLV, FMP4, MP4, TS, and HLS with authenticated metadata/download/delete APIs and DVR status.
-- RTSP supports separate audio/video SETUP tracks for TCP-interleaved and UDP sessions.
+- DVR playlist and segment authorization runs only synchronous subscribe hooks and emits no asynchronous subscribe lifecycle work.
+- RTSP supports separate audio/video SETUP tracks for TCP-interleaved and UDP sessions; track IDs are validated for uniqueness, range, and session eligibility before transport allocation.
+- WHIP and WHEP accept SDP offer bodies up to 1 MiB; larger bodies return HTTP 413 without creating session or stream state.
+- TLS API listeners issue the `lf_session` console cookie with `Secure`; plain HTTP development listeners do not.
 - RTP/GB cluster signaling reads current credentials per request, preferring `api.auth.bearer_token`, then the first named admin token; configured auth without an admin credential fails locally.
 - Simulcast layer selection is deferred and is not implemented.

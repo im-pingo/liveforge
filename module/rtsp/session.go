@@ -168,28 +168,63 @@ func (s *RTSPSession) SetDescription(mediaInfo *avframe.MediaInfo, stream *core.
 func (s *RTSPSession) setupTrack(track TrackSetup) trackSetupResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if result := s.validateSetupTrackLocked(track.TrackID); result != trackSetupOK {
+		return result
+	}
+	if s.State == StateDescribed || s.State == StateAnnounced {
+		s.State = StateReady
+	}
+	s.lastTouch = time.Now()
+	track.Codec = s.codecForTrackLocked(track.TrackID)
+	s.Tracks = append(s.Tracks, track)
+	return trackSetupOK
+}
+
+func (s *RTSPSession) validateSetupTrack(trackID int) trackSetupResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.validateSetupTrackLocked(trackID)
+}
+
+func (s *RTSPSession) validateSetupTrackLocked(trackID int) trackSetupResult {
 	if s.closed || s.State == StateClosed {
 		return trackSetupSessionClosed
 	}
 	switch s.State {
-	case StateDescribed, StateAnnounced:
-		s.State = StateReady
-		s.lastTouch = time.Now()
-	case StateReady:
-		// Additional media tracks keep the session ready.
+	case StateDescribed, StateAnnounced, StateReady:
 	default:
 		return trackSetupInvalidState
 	}
-	if s.MediaInfo != nil {
-		index := len(s.Tracks)
-		if index == 0 && s.MediaInfo.HasVideo() {
-			track.Codec = s.MediaInfo.VideoCodec
-		} else if (index == 0 && !s.MediaInfo.HasVideo()) || index == 1 {
-			track.Codec = s.MediaInfo.AudioCodec
+	if trackID < 0 || s.MediaInfo == nil || trackID >= s.mediaTrackCountLocked() {
+		return trackSetupInvalidState
+	}
+	for _, track := range s.Tracks {
+		if track.TrackID == trackID {
+			return trackSetupInvalidState
 		}
 	}
-	s.Tracks = append(s.Tracks, track)
 	return trackSetupOK
+}
+
+func (s *RTSPSession) mediaTrackCountLocked() int {
+	count := 0
+	if s.MediaInfo.HasVideo() {
+		count++
+	}
+	if s.MediaInfo.HasAudio() {
+		count++
+	}
+	return count
+}
+
+func (s *RTSPSession) codecForTrackLocked(trackID int) avframe.CodecType {
+	if s.MediaInfo.HasVideo() {
+		if trackID == 0 {
+			return s.MediaInfo.VideoCodec
+		}
+		return s.MediaInfo.AudioCodec
+	}
+	return s.MediaInfo.AudioCodec
 }
 
 func (s *RTSPSession) SetPublisher(mediaInfo *avframe.MediaInfo, stream *core.Stream, publisher *RTSPPublisher) bool {

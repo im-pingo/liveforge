@@ -204,8 +204,23 @@ func (m *Manager) load(parent context.Context) error {
 		m.setRejected(err)
 		return err
 	}
+	version := Version{
+		Value:        result.Version,
+		Hash:         hash,
+		ETag:         result.ETag,
+		LastModified: result.LastModified,
+	}
+	if version.Value == "" {
+		version.Value = hash
+	}
 	if previous.Hash != "" && previous.Hash == hash {
-		m.setSuccess()
+		current := m.active.Load()
+		unchanged := *current
+		unchanged.Version = version
+		unchanged.LoadedAt = time.Now()
+		unchanged.LastModified = result.LastModified
+		m.active.Store(&unchanged)
+		m.setUnchangedVersion(version)
 		return nil
 	}
 	old := m.active.Load()
@@ -225,10 +240,6 @@ func (m *Manager) load(parent context.Context) error {
 	if err != nil {
 		m.setRejected(err)
 		return err
-	}
-	version := Version{Value: result.Version, Hash: hash}
-	if version.Value == "" {
-		version.Value = hash
 	}
 	applied, err := applyHotChanges(snapshotConfig(old), owned, changes)
 	if err != nil {
@@ -383,6 +394,15 @@ func (m *Manager) setAttempt() {
 
 func (m *Manager) setSuccess() {
 	m.statusMu.Lock()
+	m.status.LastSuccess = time.Now()
+	m.status.ConsecutiveFailures = 0
+	m.status.LastError = ""
+	m.statusMu.Unlock()
+}
+
+func (m *Manager) setUnchangedVersion(v Version) {
+	m.statusMu.Lock()
+	m.status.ActiveVersion = v
 	m.status.LastSuccess = time.Now()
 	m.status.ConsecutiveFailures = 0
 	m.status.LastError = ""

@@ -607,11 +607,12 @@ paths:
       operationId: publishWHIP
       summary: Publish with a WHIP SDP offer
       security: [{streamBearerAuth: []}, {streamToken: []}, {}]
-      requestBody: {required: true, content: {application/sdp: {schema: {type: string}}}}
+      requestBody: {required: true, description: SDP offer body; limited to 1 MiB (1048576 bytes)., content: {application/sdp: {schema: {type: string}}}}
       responses:
         '201': {$ref: '#/components/responses/SDPAnswer'}
         '400': {$ref: '#/components/responses/MediaBadRequest'}
         '401': {$ref: '#/components/responses/MediaUnauthorized'}
+        '413': {$ref: '#/components/responses/MediaTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMedia'}
         '429': {$ref: '#/components/responses/MediaRateLimited'}
         '500': {$ref: '#/components/responses/MediaInternalError'}
@@ -637,12 +638,13 @@ paths:
       operationId: playWHEP
       summary: Play with a WHEP SDP offer
       security: [{streamBearerAuth: []}, {streamToken: []}, {}]
-      requestBody: {required: true, content: {application/sdp: {schema: {type: string}}}}
+      requestBody: {required: true, description: SDP offer body; limited to 1 MiB (1048576 bytes)., content: {application/sdp: {schema: {type: string}}}}
       responses:
         '201': {$ref: '#/components/responses/SDPAnswer'}
         '400': {$ref: '#/components/responses/MediaBadRequest'}
         '401': {$ref: '#/components/responses/MediaUnauthorized'}
         '404': {$ref: '#/components/responses/MediaNotFound'}
+        '413': {$ref: '#/components/responses/MediaTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMedia'}
         '429': {$ref: '#/components/responses/MediaRateLimited'}
         '500': {$ref: '#/components/responses/MediaInternalError'}
@@ -734,6 +736,7 @@ components:
     MediaBadRequest: {description: Invalid stream key, body, or SDP, content: {text/plain: {schema: {type: string}}}}
     MediaUnauthorized: {description: Publish or subscribe authorization rejected, content: {text/plain: {schema: {type: string}}}}
     MediaNotFound: {description: Stream or session not found, content: {text/plain: {schema: {type: string}}}}
+    MediaTooLarge: {description: SDP offer body exceeds 1 MiB (1048576 bytes); no session or stream state is created, content: {text/plain: {schema: {type: string}}}}
     UnsupportedMedia: {description: Unsupported Content-Type or no compatible media tracks, content: {text/plain: {schema: {type: string}}}}
     MediaRateLimited: {description: Per-IP signaling limit exceeded, content: {text/plain: {schema: {type: string}}}}
     MediaInternalError: {description: Peer connection or SDP answer failure, content: {text/plain: {schema: {type: string}}}}
