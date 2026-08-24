@@ -14,19 +14,19 @@ type codecInfo struct {
 }
 
 var encodingToCodec = map[string]codecInfo{
-	"PCMU":           {avframe.CodecG711U, 8000, 0},
-	"PCMA":           {avframe.CodecG711A, 8000, 8},
-	"G722":           {avframe.CodecG722, 8000, 9},
-	"G729":           {avframe.CodecG729, 8000, 18},
-	"opus":           {avframe.CodecOpus, 48000, 111},
-	"speex":          {avframe.CodecSpeex, 16000, 102},
-	"MPEG4-GENERIC":  {avframe.CodecAAC, 44100, 101},
+	"PCMU":          {avframe.CodecG711U, 8000, 0},
+	"PCMA":          {avframe.CodecG711A, 8000, 8},
+	"G722":          {avframe.CodecG722, 8000, 9},
+	"G729":          {avframe.CodecG729, 8000, 18},
+	"opus":          {avframe.CodecOpus, 48000, 111},
+	"speex":         {avframe.CodecSpeex, 16000, 102},
+	"MPEG4-GENERIC": {avframe.CodecAAC, 44100, 101},
 }
 
 type negotiatedCodec struct {
-	Codec       avframe.CodecType
-	PT          int
-	ClockRate   int
+	Codec        avframe.CodecType
+	PT           int
+	ClockRate    int
 	EncodingName string
 }
 
@@ -64,15 +64,15 @@ func negotiateCodec(offer *sdp.MediaDescription, preferred []string) (negotiated
 
 		prio, inPreferred := priorityMap[nameUpper]
 		if !inPreferred {
-			prio = 0
+			continue
 		}
 
 		if prio > bestPriority {
 			bestPriority = prio
 			best = negotiatedCodec{
-				Codec:       info.Codec,
-				PT:          pt,
-				ClockRate:   rm.ClockRate,
+				Codec:        info.Codec,
+				PT:           pt,
+				ClockRate:    rm.ClockRate,
 				EncodingName: rm.EncodingName,
 			}
 		}
@@ -81,8 +81,14 @@ func negotiateCodec(offer *sdp.MediaDescription, preferred []string) (negotiated
 	return best, bestPriority >= 0
 }
 
-func staticPT(pt int) (struct{ EncodingName string; ClockRate int }, bool) {
-	type ptInfo struct{ EncodingName string; ClockRate int }
+func staticPT(pt int) (struct {
+	EncodingName string
+	ClockRate    int
+}, bool) {
+	type ptInfo struct {
+		EncodingName string
+		ClockRate    int
+	}
 	m := map[int]ptInfo{
 		0:  {"PCMU", 8000},
 		8:  {"PCMA", 8000},

@@ -1,9 +1,19 @@
 package sipgateway
 
 import (
+	"context"
+	"errors"
+
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// ErrGatewayDisabled is returned by control-plane operations when the module
+// was not enabled at startup.
+var ErrGatewayDisabled = errors.New("SIP gateway is disabled")
+
+var _ SIPGatewayProvider = (*Module)(nil)
 
 // Module implements core.Module for the SIP-to-stream gateway.
 type Module struct {
@@ -48,4 +58,52 @@ func (m *Module) Close() error {
 // Gateway returns the gateway instance, or nil if disabled.
 func (m *Module) Gateway() *Gateway {
 	return m.gw
+}
+
+// ListCalls returns active calls for the management API.
+func (m *Module) ListCalls() []CallSnapshot {
+	if m.gw == nil {
+		return []CallSnapshot{}
+	}
+	return m.gw.ListCalls()
+}
+
+// Call returns details for a call-ID.
+func (m *Module) Call(callID string) (CallSnapshot, bool) {
+	if m.gw == nil {
+		return CallSnapshot{}, false
+	}
+	return m.gw.Call(callID)
+}
+
+// Dial initiates an outbound SIP call.
+func (m *Module) Dial(ctx context.Context, targetURI, streamKey string) (string, error) {
+	if m.gw == nil {
+		return "", ErrGatewayDisabled
+	}
+	return m.gw.Dial(ctx, targetURI, streamKey)
+}
+
+// Hangup terminates an active SIP call.
+func (m *Module) Hangup(callID string) error {
+	if m.gw == nil {
+		return ErrGatewayDisabled
+	}
+	return m.gw.Hangup(callID)
+}
+
+// Metrics returns bounded-cardinality gateway metrics.
+func (m *Module) Metrics() MetricsSnapshot {
+	if m.gw == nil {
+		return MetricsSnapshot{}
+	}
+	return m.gw.Metrics()
+}
+
+// PrometheusCollectors exposes gateway metrics to the shared metrics module.
+func (m *Module) PrometheusCollectors() []prometheus.Collector {
+	if m.gw == nil {
+		return nil
+	}
+	return []prometheus.Collector{m.gw}
 }
