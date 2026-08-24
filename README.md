@@ -309,6 +309,8 @@ Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}
 
 The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, Consul, and Redis examples.
 
+Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
+
 ## Testing Tools
 
 ### lf-test CLI

@@ -60,6 +60,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ServerStatsResponse'
+  /api/v1/server/config:
+    get:
+      tags: [server]
+      operationId: getRuntimeConfigStatus
+      summary: Read runtime configuration source and refresh status
+      responses:
+        '200':
+          description: Redacted runtime configuration status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigRuntimeStatusResponse'
   /api/v1/streams:
     get:
       tags: [streams]
@@ -471,6 +483,27 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ServerStats'
+    ConfigRuntimeStatus:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        source: {type: string}
+        active_version: {type: string}
+        active_hash: {type: string}
+        last_attempt: {type: string, format: date-time}
+        last_success: {type: string, format: date-time}
+        consecutive_failures: {type: integer, format: int64}
+        last_error: {type: string}
+        pending_restart: {type: array, items: {type: string}}
+        callback_failures: {type: integer, format: int64}
+        dropped_callbacks: {type: integer, format: int64}
+    ConfigRuntimeStatusResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ConfigRuntimeStatus'
     StreamStats:
       type: object
       properties:

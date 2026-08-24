@@ -52,6 +52,7 @@ The local Docker Compose workflow builds the image from source by default. A rel
 - Stream list: `GET /api/v1/streams?q=optional-filter`
 - Stream detail: `GET /api/v1/streams/{stream_key}`
 - Metrics: `GET /metrics` when the metrics module is enabled
+- Runtime config status: `GET /api/v1/server/config` (redacted source/version/failure/restart state)
 - WHIP publish: `POST /webrtc/whip/{stream_key}` with an SDP offer
 - WHEP play: `POST /webrtc/whep/{stream_key}` with an SDP offer
 - GB28181 API: `/api/v1/gb28181/*` when SIP and GB28181 are enabled

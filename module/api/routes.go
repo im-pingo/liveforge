@@ -14,6 +14,7 @@ func RegisterRoutes(mux *http.ServeMux, s *core.Server) {
 	mux.HandleFunc("GET /api/v1/streams", h.handleStreams)
 	mux.HandleFunc("GET /api/v1/server/info", h.handleServerInfo)
 	mux.HandleFunc("GET /api/v1/server/stats", h.handleServerStats)
+	mux.HandleFunc("GET /api/v1/server/config", h.handleConfigStatus)
 	mux.HandleFunc("GET /api/v1/server/health", h.handleHealth)
 	mux.HandleFunc("GET /api/v1/dvr/status", h.handleDVRStatus)
 	mux.HandleFunc("DELETE /api/v1/streams/", h.handleStreamDelete)

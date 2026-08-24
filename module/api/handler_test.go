@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
@@ -331,3 +333,37 @@ func TestHandleServerStats(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHandleConfigStatus(t *testing.T) {
+	h, server := newTestHandlers(t)
+	source := &testConfigSource{}
+	manager, err := configruntime.NewManager(configruntime.Options{Source: source, Initial: config.Defaults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	server.SetConfigManager(manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/server/config", nil)
+	w := httptest.NewRecorder()
+	h.handleConfigStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var status map[string]any
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["source"] != "custom" {
+		t.Fatalf("status = %v", status)
+	}
+}
+
+type testConfigSource struct{}
+
+func (testConfigSource) Load(context.Context, configruntime.Version) (configruntime.Snapshot, error) {
+	return configruntime.Snapshot{}, nil
+}
+
+func (testConfigSource) Close() error { return nil }

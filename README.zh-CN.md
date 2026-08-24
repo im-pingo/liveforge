@@ -309,6 +309,8 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 
 进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照；`SIGHUP` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。文件、HTTP、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
+运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
+
 ## 测试工具
 
 ### lf-test 命令行工具

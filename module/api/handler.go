@@ -41,17 +41,17 @@ func writeError(w http.ResponseWriter, httpCode int, msg string) {
 
 // StreamInfo represents a single stream in the API response.
 type StreamInfo struct {
-	Key         string              `json:"key"`
-	State       string              `json:"state"`
-	Publisher   string              `json:"publisher"`
-	VideoCodec  string              `json:"video_codec"`
-	AudioCodec  string              `json:"audio_codec"`
-	GOPCacheLen    int              `json:"gop_cache_len"`
-	GOPVideoFrames int             `json:"gop_video_frames"`
-	GOPAudioFrames int             `json:"gop_audio_frames"`
-	GOPDurationMs  int64           `json:"gop_duration_ms"`
-	Subscribers    map[string]int  `json:"subscribers"`
-	Stats       *StreamStatsDetail  `json:"stats,omitempty"`
+	Key            string             `json:"key"`
+	State          string             `json:"state"`
+	Publisher      string             `json:"publisher"`
+	VideoCodec     string             `json:"video_codec"`
+	AudioCodec     string             `json:"audio_codec"`
+	GOPCacheLen    int                `json:"gop_cache_len"`
+	GOPVideoFrames int                `json:"gop_video_frames"`
+	GOPAudioFrames int                `json:"gop_audio_frames"`
+	GOPDurationMs  int64              `json:"gop_duration_ms"`
+	Subscribers    map[string]int     `json:"subscribers"`
+	Stats          *StreamStatsDetail `json:"stats,omitempty"`
 }
 
 // StreamStatsDetail contains detailed stream statistics.
@@ -87,13 +87,13 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 	gopDetail := stream.GOPCacheDetail()
 
 	info := StreamInfo{
-		Key:         stream.Key(),
-		State:       state.String(),
+		Key:            stream.Key(),
+		State:          state.String(),
 		GOPCacheLen:    gopDetail.TotalFrames,
 		GOPVideoFrames: gopDetail.VideoFrames,
 		GOPAudioFrames: gopDetail.AudioFrames,
 		GOPDurationMs:  gopDetail.DurationMs,
-		Subscribers: subs,
+		Subscribers:    subs,
 	}
 
 	if pub := stream.Publisher(); pub != nil {
@@ -256,6 +256,43 @@ func (h *Handlers) handleServerStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ServerStats{
 		Streams:     h.server.StreamHub().Count(),
 		Connections: h.server.ConnectionCount(),
+	})
+}
+
+// ConfigRuntimeStatus is the redacted runtime configuration loader status.
+type ConfigRuntimeStatus struct {
+	Enabled             bool      `json:"enabled"`
+	Source              string    `json:"source,omitempty"`
+	ActiveVersion       string    `json:"active_version,omitempty"`
+	ActiveHash          string    `json:"active_hash,omitempty"`
+	LastAttempt         time.Time `json:"last_attempt,omitempty"`
+	LastSuccess         time.Time `json:"last_success,omitempty"`
+	ConsecutiveFailures uint64    `json:"consecutive_failures"`
+	LastError           string    `json:"last_error,omitempty"`
+	PendingRestart      []string  `json:"pending_restart,omitempty"`
+	CallbackFailures    uint64    `json:"callback_failures"`
+	DroppedCallbacks    uint64    `json:"dropped_callbacks"`
+}
+
+func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeJSON(w, http.StatusOK, ConfigRuntimeStatus{})
+		return
+	}
+	status := manager.Status()
+	writeJSON(w, http.StatusOK, ConfigRuntimeStatus{
+		Enabled:             true,
+		Source:              status.Source,
+		ActiveVersion:       status.ActiveVersion.Value,
+		ActiveHash:          status.ActiveVersion.Hash,
+		LastAttempt:         status.LastAttempt,
+		LastSuccess:         status.LastSuccess,
+		ConsecutiveFailures: status.ConsecutiveFailures,
+		LastError:           status.LastError,
+		PendingRestart:      status.PendingRestart,
+		CallbackFailures:    status.CallbackFailures,
+		DroppedCallbacks:    status.DroppedCallbacks,
 	})
 }
 
