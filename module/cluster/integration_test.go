@@ -10,6 +10,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // mockRTMPServer creates a TCP listener that performs a minimal RTMP handshake
@@ -157,7 +158,8 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 		Payload:   []byte{0x12, 0x10},
 	})
 
-	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), nil, nil, 1, time.Second)
+	metrics := newRelayMetrics()
+	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), nil, nil, 1, time.Second, metrics)
 
 	done := make(chan struct{})
 	go func() {
@@ -186,6 +188,9 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Error("forward target did not stop within timeout")
 	}
+	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("forward", "rtmp")); got <= 0 {
+		t.Fatalf("forward RTMP bytes = %v, want > 0", got)
+	}
 }
 
 // TestOriginPullFromMockServer verifies origin pull can connect and receive media.
@@ -211,7 +216,8 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/pulltest")
 
-	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), nil, nil, 1, 2*time.Second, 5*time.Second)
+	metrics := newRelayMetrics()
+	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), nil, nil, 1, 2*time.Second, 5*time.Second, metrics)
 
 	done := make(chan struct{})
 	go func() {
@@ -232,6 +238,9 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	// Check that frames were written to the stream
 	if stream.VideoSeqHeader() != nil {
 		t.Log("video sequence header received")
+	}
+	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("origin", "rtmp")); got <= 0 {
+		t.Fatalf("origin RTMP bytes = %v, want > 0", got)
 	}
 }
 

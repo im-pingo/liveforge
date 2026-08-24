@@ -21,14 +21,17 @@ type ForwardTarget struct {
 	pool       *RelayPool
 	retryMax   int
 	retryDelay time.Duration
+	metrics    *RelayMetrics
 
-	mu     sync.Mutex
-	closed chan struct{}
+	mu        sync.Mutex
+	closed    chan struct{}
+	running   bool
+	startedAt time.Time
 }
 
 // NewForwardTarget creates a new forward target.
-func NewForwardTarget(streamKey, targetURL string, stream *core.Stream, transport RelayTransport, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay time.Duration) *ForwardTarget {
-	return &ForwardTarget{
+func NewForwardTarget(streamKey, targetURL string, stream *core.Stream, transport RelayTransport, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay time.Duration, relayMetrics ...*RelayMetrics) *ForwardTarget {
+	ft := &ForwardTarget{
 		streamKey:  streamKey,
 		targetURL:  targetURL,
 		stream:     stream,
@@ -39,11 +42,24 @@ func NewForwardTarget(streamKey, targetURL string, stream *core.Stream, transpor
 		retryDelay: retryDelay,
 		closed:     make(chan struct{}),
 	}
+	if len(relayMetrics) > 0 {
+		ft.metrics = relayMetrics[0]
+	}
+	return ft
 }
 
 // Run starts forwarding frames to the target server.
 // It reconnects on failure up to retryMax times with exponential backoff.
 func (ft *ForwardTarget) Run() {
+	ft.mu.Lock()
+	ft.running = true
+	ft.startedAt = time.Now()
+	ft.mu.Unlock()
+	defer func() {
+		ft.mu.Lock()
+		ft.running = false
+		ft.mu.Unlock()
+	}()
 	defer slog.Info("forward target stopped", "module", "cluster",
 		"stream", ft.streamKey, "target", ft.targetURL)
 
@@ -91,11 +107,25 @@ func (ft *ForwardTarget) Run() {
 			}
 		}
 
-		err := ft.transport.Push(ctx, ft.targetURL, ft.stream)
+		protocol := ft.transport.Scheme()
+		relayCtx, observation := observeRelay(ctx)
+		ft.metrics.RelayStarted("forward", protocol)
+		err := ft.transport.Push(relayCtx, ft.targetURL, ft.stream)
+		cancelled := ctx.Err() != nil
+		metricErr := err
+		if cancelled {
+			metricErr = nil
+		}
+		ft.metrics.RelayStopped("forward", protocol)
+		ft.metrics.RecordLatency(protocol, observation.Latency().Seconds())
+		ft.metrics.RecordPush(protocol, observation.Bytes(), metricErr)
 		cancel()
 
 		if ft.pool != nil {
 			ft.pool.Release(extractHost(ft.targetURL))
+		}
+		if cancelled {
+			return
 		}
 
 		if err != nil {
@@ -113,6 +143,21 @@ func (ft *ForwardTarget) Run() {
 			ft.health.RecordSuccess(ft.targetURL)
 		}
 	}
+}
+
+func (ft *ForwardTarget) statusSnapshot() (RelayStatus, bool) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if !ft.running {
+		return RelayStatus{}, false
+	}
+	return RelayStatus{
+		Direction: "forward",
+		Protocol:  ft.transport.Scheme(),
+		StreamKey: ft.streamKey,
+		Endpoint:  statusEndpoint(ft.targetURL),
+		StartedAt: ft.startedAt,
+	}, true
 }
 
 // Close stops the forward target.
@@ -137,20 +182,22 @@ type ForwardManager struct {
 	retryMax  int
 	retryDel  time.Duration
 
-	mu     sync.Mutex
-	active map[string][]*ForwardTarget // streamKey -> targets
-	closed chan struct{}
+	mu      sync.Mutex
+	active  map[string][]*ForwardTarget // streamKey -> targets
+	closed  chan struct{}
+	close   sync.Once
+	metrics *RelayMetrics
 }
 
 // NewForwardManager creates a new forward manager.
-func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay time.Duration) *ForwardManager {
+func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay time.Duration, relayMetrics ...*RelayMetrics) *ForwardManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
 	if retryDelay <= 0 {
 		retryDelay = 5 * time.Second
 	}
-	return &ForwardManager{
+	fm := &ForwardManager{
 		hub:       hub,
 		eventBus:  bus,
 		scheduler: scheduler,
@@ -162,6 +209,10 @@ func NewForwardManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Sched
 		active:    make(map[string][]*ForwardTarget),
 		closed:    make(chan struct{}),
 	}
+	if len(relayMetrics) > 0 {
+		fm.metrics = relayMetrics[0]
+	}
+	return fm
 }
 
 // Hooks returns event hooks for the forward manager.
@@ -224,7 +275,7 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 			continue
 		}
 
-		ft := NewForwardTarget(ctx.StreamKey, fullURL, stream, transport, fm.health, fm.pool, fm.retryMax, fm.retryDel)
+		ft := NewForwardTarget(ctx.StreamKey, fullURL, stream, transport, fm.health, fm.pool, fm.retryMax, fm.retryDel, fm.metrics)
 		fts = append(fts, ft)
 		go ft.Run()
 	}
@@ -260,17 +311,19 @@ func (fm *ForwardManager) onPublishStop(ctx *core.EventContext) error {
 
 // Close stops all active forward targets.
 func (fm *ForwardManager) Close() {
-	close(fm.closed)
+	fm.close.Do(func() {
+		close(fm.closed)
 
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
+		fm.mu.Lock()
+		defer fm.mu.Unlock()
 
-	for key, fts := range fm.active {
-		for _, ft := range fts {
-			ft.Close()
+		for key, fts := range fm.active {
+			for _, ft := range fts {
+				ft.Close()
+			}
+			delete(fm.active, key)
 		}
-		delete(fm.active, key)
-	}
+	})
 }
 
 // ActiveCount returns the number of streams being forwarded.
@@ -278,4 +331,22 @@ func (fm *ForwardManager) ActiveCount() int {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 	return len(fm.active)
+}
+
+// StatusSnapshot returns active target-level relay state.
+func (fm *ForwardManager) StatusSnapshot() []RelayStatus {
+	fm.mu.Lock()
+	targets := make([]*ForwardTarget, 0)
+	for _, streamTargets := range fm.active {
+		targets = append(targets, streamTargets...)
+	}
+	fm.mu.Unlock()
+
+	status := make([]RelayStatus, 0, len(targets))
+	for _, target := range targets {
+		if snapshot, ok := target.statusSnapshot(); ok {
+			status = append(status, snapshot)
+		}
+	}
+	return status
 }

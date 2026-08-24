@@ -12,13 +12,12 @@ type RelayMetrics struct {
 	bytesTotal *prometheus.CounterVec
 	latency    *prometheus.HistogramVec
 	packetLoss *prometheus.GaugeVec
-	registry   *prometheus.Registry
 }
 
 // NewRelayMetrics creates relay metrics registered with the default registerer.
 func NewRelayMetrics() *RelayMetrics {
 	m := newRelayMetrics()
-	prometheus.MustRegister(m.active, m.errors, m.bytesTotal, m.latency, m.packetLoss)
+	prometheus.MustRegister(m)
 	return m
 }
 
@@ -26,8 +25,7 @@ func NewRelayMetrics() *RelayMetrics {
 // registry, which is useful for test isolation.
 func NewRelayMetricsWithRegistry(reg *prometheus.Registry) *RelayMetrics {
 	m := newRelayMetrics()
-	m.registry = reg
-	reg.MustRegister(m.active, m.errors, m.bytesTotal, m.latency, m.packetLoss)
+	reg.MustRegister(m)
 	return m
 }
 
@@ -57,8 +55,26 @@ func newRelayMetrics() *RelayMetrics {
 		packetLoss: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cluster_rtp_packet_loss_ratio",
 			Help: "RTP packet loss ratio.",
-		}, []string{"stream", "direction"}),
+		}, []string{"direction"}),
 	}
+}
+
+// Describe implements prometheus.Collector.
+func (m *RelayMetrics) Describe(ch chan<- *prometheus.Desc) {
+	m.active.Describe(ch)
+	m.errors.Describe(ch)
+	m.bytesTotal.Describe(ch)
+	m.latency.Describe(ch)
+	m.packetLoss.Describe(ch)
+}
+
+// Collect implements prometheus.Collector.
+func (m *RelayMetrics) Collect(ch chan<- prometheus.Metric) {
+	m.active.Collect(ch)
+	m.errors.Collect(ch)
+	m.bytesTotal.Collect(ch)
+	m.latency.Collect(ch)
+	m.packetLoss.Collect(ch)
 }
 
 // SetActive sets the number of active relay connections for a given direction
@@ -67,9 +83,28 @@ func (m *RelayMetrics) SetActive(direction, protocol string, count float64) {
 	m.active.WithLabelValues(direction, protocol).Set(count)
 }
 
+// RelayStarted increments the number of active relay attempts.
+func (m *RelayMetrics) RelayStarted(direction, protocol string) {
+	if m == nil {
+		return
+	}
+	m.active.WithLabelValues(direction, protocol).Inc()
+}
+
+// RelayStopped decrements the number of active relay attempts.
+func (m *RelayMetrics) RelayStopped(direction, protocol string) {
+	if m == nil {
+		return
+	}
+	m.active.WithLabelValues(direction, protocol).Dec()
+}
+
 // RecordPush records bytes forwarded and any errors for a push (forward)
 // operation.
 func (m *RelayMetrics) RecordPush(protocol string, bytes int64, err error) {
+	if m == nil {
+		return
+	}
 	m.bytesTotal.WithLabelValues("forward", protocol).Add(float64(bytes))
 	if err != nil {
 		m.errors.WithLabelValues("forward", protocol, "connection").Inc()
@@ -79,6 +114,9 @@ func (m *RelayMetrics) RecordPush(protocol string, bytes int64, err error) {
 // RecordPull records bytes received and any errors for a pull (origin)
 // operation.
 func (m *RelayMetrics) RecordPull(protocol string, bytes int64, err error) {
+	if m == nil {
+		return
+	}
 	m.bytesTotal.WithLabelValues("origin", protocol).Add(float64(bytes))
 	if err != nil {
 		m.errors.WithLabelValues("origin", protocol, "connection").Inc()
@@ -87,10 +125,17 @@ func (m *RelayMetrics) RecordPull(protocol string, bytes int64, err error) {
 
 // RecordLatency records a relay latency observation for the given protocol.
 func (m *RelayMetrics) RecordLatency(protocol string, seconds float64) {
+	if m == nil {
+		return
+	}
 	m.latency.WithLabelValues(protocol).Observe(seconds)
 }
 
-// RecordPacketLoss records the packet loss ratio for a stream and direction.
-func (m *RelayMetrics) RecordPacketLoss(stream, direction string, ratio float64) {
-	m.packetLoss.WithLabelValues(stream, direction).Set(ratio)
+// RecordPacketLoss records the latest packet loss ratio for a direction. The
+// stream argument is intentionally excluded from labels to bound cardinality.
+func (m *RelayMetrics) RecordPacketLoss(_ string, direction string, ratio float64) {
+	if m == nil {
+		return
+	}
+	m.packetLoss.WithLabelValues(direction).Set(ratio)
 }

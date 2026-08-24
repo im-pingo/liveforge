@@ -2,8 +2,10 @@ package cluster
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Module implements core.Module for cluster forwarding and origin pull.
@@ -13,6 +15,8 @@ type Module struct {
 	health    *HealthTracker
 	relayPool *RelayPool
 	registry  *TransportRegistry
+	metrics   *RelayMetrics
+	close     sync.Once
 }
 
 // NewModule creates a new cluster module.
@@ -33,7 +37,10 @@ func (m *Module) Init(s *core.Server) error {
 	m.registry.Register(NewRTMPTransport())
 	m.registry.Register(NewSRTTransport(cfg.SRT))
 	m.registry.Register(NewRTSPTransport(cfg.RTSP))
-	m.registry.Register(NewRTPTransport(cfg.RTP, s))
+	m.metrics = newRelayMetrics()
+	rtpTransport := NewRTPTransport(cfg.RTP, s)
+	rtpTransport.metrics = m.metrics
+	m.registry.Register(rtpTransport)
 	m.registry.Register(NewGBTransport(cfg.GB28181, s))
 
 	if cfg.HealthCheck.Enabled {
@@ -64,6 +71,7 @@ func (m *Module) Init(s *core.Server) error {
 			m.relayPool,
 			cfg.Forward.RetryMax,
 			cfg.Forward.RetryInterval,
+			m.metrics,
 		)
 		slog.Info("cluster forward enabled", "module", "cluster",
 			"static_targets", len(cfg.Forward.Targets),
@@ -86,6 +94,7 @@ func (m *Module) Init(s *core.Server) error {
 			cfg.Origin.RetryMax,
 			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
+			m.metrics,
 		)
 		slog.Info("cluster origin pull enabled", "module", "cluster",
 			"static_servers", len(cfg.Origin.Servers),
@@ -109,19 +118,33 @@ func (m *Module) Hooks() []core.HookRegistration {
 
 // Close shuts down both forward and origin managers.
 func (m *Module) Close() error {
-	if m.forward != nil {
-		m.forward.Close()
-	}
-	if m.origin != nil {
-		m.origin.Close()
-	}
-	if m.health != nil {
-		m.health.Close()
-	}
-	if m.registry != nil {
-		m.registry.Close()
-	}
+	m.close.Do(func() {
+		if m.forward != nil {
+			m.forward.Close()
+		}
+		if m.origin != nil {
+			m.origin.Close()
+		}
+		if m.health != nil {
+			m.health.Close()
+		}
+		if m.registry != nil {
+			m.registry.Close()
+		}
+	})
 	return nil
+}
+
+// RelayMetrics returns the module's relay collector, if initialized.
+func (m *Module) RelayMetrics() *RelayMetrics { return m.metrics }
+
+// PrometheusCollectors exposes cluster collectors to the metrics module
+// without registering them globally.
+func (m *Module) PrometheusCollectors() []prometheus.Collector {
+	if m.metrics == nil {
+		return nil
+	}
+	return []prometheus.Collector{m.metrics}
 }
 
 // ForwardManager returns the forward manager, if enabled.

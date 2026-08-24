@@ -4,6 +4,9 @@ package cluster
 import (
 	"context"
 	"errors"
+	"io"
+	"sync/atomic"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 )
@@ -11,6 +14,58 @@ import (
 // ErrCodecMismatch is returned when remote node rejects all offered codecs.
 // This error is non-retryable.
 var ErrCodecMismatch = errors.New("codec mismatch: remote rejected all offered codecs")
+
+type relayObservationContextKey struct{}
+
+type relayObservation struct {
+	started   time.Time
+	bytes     atomic.Int64
+	connected atomic.Bool
+	latencyNS atomic.Int64
+}
+
+func observeRelay(ctx context.Context) (context.Context, *relayObservation) {
+	observation := &relayObservation{started: time.Now()}
+	return context.WithValue(ctx, relayObservationContextKey{}, observation), observation
+}
+
+func recordRelayBytes(ctx context.Context, count int64) {
+	if count <= 0 {
+		return
+	}
+	if observation, ok := ctx.Value(relayObservationContextKey{}).(*relayObservation); ok {
+		observation.bytes.Add(count)
+	}
+}
+
+func markRelayConnected(ctx context.Context) {
+	observation, ok := ctx.Value(relayObservationContextKey{}).(*relayObservation)
+	if !ok || !observation.connected.CompareAndSwap(false, true) {
+		return
+	}
+	observation.latencyNS.Store(time.Since(observation.started).Nanoseconds())
+}
+
+func (o *relayObservation) Bytes() int64 { return o.bytes.Load() }
+
+func (o *relayObservation) Latency() time.Duration {
+	if o.connected.Load() {
+		return time.Duration(o.latencyNS.Load())
+	}
+	return time.Since(o.started)
+}
+
+func closeOnContextDone(ctx context.Context, closer io.Closer) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = closer.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
 
 // RelayTransport is the plugin interface for cluster relay protocols.
 // Each protocol (RTMP, SRT, RTSP, RTP) implements this interface and

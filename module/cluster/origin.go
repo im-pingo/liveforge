@@ -22,14 +22,18 @@ type OriginPull struct {
 	retryMax    int
 	retryDelay  time.Duration
 	idleTimeout time.Duration
+	metrics     *RelayMetrics
 
-	mu     sync.Mutex
-	closed chan struct{}
+	mu        sync.Mutex
+	closed    chan struct{}
+	running   bool
+	startedAt time.Time
+	endpoint  string
 }
 
 // NewOriginPull creates a new origin pull instance.
-func NewOriginPull(streamKey string, servers []string, stream *core.Stream, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay, idleTimeout time.Duration) *OriginPull {
-	return &OriginPull{
+func NewOriginPull(streamKey string, servers []string, stream *core.Stream, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay, idleTimeout time.Duration, relayMetrics ...*RelayMetrics) *OriginPull {
+	op := &OriginPull{
 		streamKey:   streamKey,
 		servers:     servers,
 		stream:      stream,
@@ -41,6 +45,10 @@ func NewOriginPull(streamKey string, servers []string, stream *core.Stream, regi
 		idleTimeout: idleTimeout,
 		closed:      make(chan struct{}),
 	}
+	if len(relayMetrics) > 0 {
+		op.metrics = relayMetrics[0]
+	}
+	return op
 }
 
 // Run tries each origin server in order, pulling media data and publishing
@@ -126,7 +134,32 @@ func (op *OriginPull) pullOnce(sourceURL string) error {
 		defer op.pool.Release(host)
 	}
 
-	err = transport.Pull(ctx, sourceURL, op.stream)
+	op.mu.Lock()
+	op.running = true
+	op.startedAt = time.Now()
+	op.endpoint = sourceURL
+	op.mu.Unlock()
+	defer func() {
+		op.mu.Lock()
+		op.running = false
+		op.mu.Unlock()
+	}()
+
+	protocol := transport.Scheme()
+	relayCtx, observation := observeRelay(ctx)
+	op.metrics.RelayStarted("origin", protocol)
+	err = transport.Pull(relayCtx, sourceURL, op.stream)
+	cancelled := ctx.Err() != nil
+	metricErr := err
+	if cancelled {
+		metricErr = nil
+	}
+	op.metrics.RelayStopped("origin", protocol)
+	op.metrics.RecordLatency(protocol, observation.Latency().Seconds())
+	op.metrics.RecordPull(protocol, observation.Bytes(), metricErr)
+	if cancelled {
+		return nil
+	}
 	if err != nil {
 		if op.health != nil {
 			op.health.RecordFailure(sourceURL)
@@ -137,6 +170,21 @@ func (op *OriginPull) pullOnce(sourceURL string) error {
 		op.health.RecordSuccess(sourceURL)
 	}
 	return nil
+}
+
+func (op *OriginPull) statusSnapshot() (RelayStatus, bool) {
+	op.mu.Lock()
+	defer op.mu.Unlock()
+	if !op.running {
+		return RelayStatus{}, false
+	}
+	return RelayStatus{
+		Direction: "origin",
+		Protocol:  extractScheme(op.endpoint),
+		StreamKey: op.streamKey,
+		Endpoint:  statusEndpoint(op.endpoint),
+		StartedAt: op.startedAt,
+	}, true
 }
 
 // Close stops the origin pull.
@@ -172,13 +220,15 @@ type OriginManager struct {
 	retryDelay  time.Duration
 	idleTimeout time.Duration
 
-	mu     sync.Mutex
-	active map[string]*OriginPull
-	closed chan struct{}
+	mu      sync.Mutex
+	active  map[string]*OriginPull
+	closed  chan struct{}
+	close   sync.Once
+	metrics *RelayMetrics
 }
 
 // NewOriginManager creates a new origin manager.
-func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay, idleTimeout time.Duration) *OriginManager {
+func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Scheduler, registry *TransportRegistry, health *HealthTracker, pool *RelayPool, retryMax int, retryDelay, idleTimeout time.Duration, relayMetrics ...*RelayMetrics) *OriginManager {
 	if retryMax <= 0 {
 		retryMax = 3
 	}
@@ -188,7 +238,7 @@ func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Schedu
 	if idleTimeout <= 0 {
 		idleTimeout = 30 * time.Second
 	}
-	return &OriginManager{
+	om := &OriginManager{
 		hub:         hub,
 		eventBus:    bus,
 		scheduler:   scheduler,
@@ -201,6 +251,10 @@ func NewOriginManager(hub *core.StreamHub, bus *core.EventBus, scheduler *Schedu
 		active:      make(map[string]*OriginPull),
 		closed:      make(chan struct{}),
 	}
+	if len(relayMetrics) > 0 {
+		om.metrics = relayMetrics[0]
+	}
+	return om
 }
 
 // Hooks returns event hooks for the origin manager.
@@ -245,7 +299,7 @@ func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {
 		servers = om.health.FilterHealthy(servers)
 	}
 
-	op := NewOriginPull(ctx.StreamKey, servers, stream, om.registry, om.health, om.pool, om.retryMax, om.retryDelay, om.idleTimeout)
+	op := NewOriginPull(ctx.StreamKey, servers, stream, om.registry, om.health, om.pool, om.retryMax, om.retryDelay, om.idleTimeout, om.metrics)
 	om.active[ctx.StreamKey] = op
 
 	om.eventBus.Emit(core.EventOriginPullStart, &core.EventContext{ //nolint:errcheck
@@ -269,15 +323,17 @@ func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {
 
 // Close stops all active origin pulls.
 func (om *OriginManager) Close() {
-	close(om.closed)
+	om.close.Do(func() {
+		close(om.closed)
 
-	om.mu.Lock()
-	defer om.mu.Unlock()
+		om.mu.Lock()
+		defer om.mu.Unlock()
 
-	for key, op := range om.active {
-		op.Close()
-		delete(om.active, key)
-	}
+		for key, op := range om.active {
+			op.Close()
+			delete(om.active, key)
+		}
+	})
 }
 
 // ActiveCount returns the number of active origin pulls.
@@ -285,4 +341,22 @@ func (om *OriginManager) ActiveCount() int {
 	om.mu.Lock()
 	defer om.mu.Unlock()
 	return len(om.active)
+}
+
+// StatusSnapshot returns active origin transport state.
+func (om *OriginManager) StatusSnapshot() []RelayStatus {
+	om.mu.Lock()
+	pulls := make([]*OriginPull, 0, len(om.active))
+	for _, pull := range om.active {
+		pulls = append(pulls, pull)
+	}
+	om.mu.Unlock()
+
+	status := make([]RelayStatus, 0, len(pulls))
+	for _, pull := range pulls {
+		if snapshot, ok := pull.statusSnapshot(); ok {
+			status = append(status, snapshot)
+		}
+	}
+	return status
 }
