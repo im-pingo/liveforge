@@ -5,13 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 	"github.com/pion/rtcp"
@@ -34,6 +40,158 @@ func publishTestAudio(t *testing.T, stream *core.Stream, codec avframe.CodecType
 		info: &avframe.MediaInfo{AudioCodec: codec, SampleRate: 8000, Channels: 1},
 	}); err != nil {
 		t.Fatalf("SetPublisher: %v", err)
+	}
+}
+
+type offeredFinalClientTx struct {
+	responses chan *sip.Response
+	done      chan struct{}
+	once      sync.Once
+}
+
+func newOfferedFinalClientTx() *offeredFinalClientTx {
+	return &offeredFinalClientTx{
+		responses: make(chan *sip.Response),
+		done:      make(chan struct{}),
+	}
+}
+
+func (tx *offeredFinalClientTx) Responses() <-chan *sip.Response { return tx.responses }
+func (tx *offeredFinalClientTx) Done() <-chan struct{}           { return tx.done }
+func (tx *offeredFinalClientTx) Err() error                      { return nil }
+func (tx *offeredFinalClientTx) Terminate()                      { tx.once.Do(func() { close(tx.done) }) }
+func (tx *offeredFinalClientTx) OnTerminate(sip.FnTxTerminate) bool {
+	return true
+}
+func (tx *offeredFinalClientTx) OnRetransmission(sip.FnTxResponse) bool {
+	return false
+}
+
+type gatewayRaceRequester struct {
+	cancel     context.CancelFunc
+	inviteTx   *offeredFinalClientTx
+	senderDone chan struct{}
+
+	mu      sync.Mutex
+	invites int
+	acks    int
+	byes    int
+}
+
+func (r *gatewayRaceRequester) Request(_ context.Context, req *sip.Request) (sip.ClientTransaction, error) {
+	r.mu.Lock()
+	switch req.Method {
+	case sip.INVITE:
+		r.invites++
+	case sip.ACK:
+		r.acks++
+	case sip.BYE:
+		r.byes++
+	}
+	r.mu.Unlock()
+
+	if req.Method != sip.INVITE {
+		tx := newOfferedFinalClientTx()
+		tx.Terminate()
+		return tx, nil
+	}
+
+	offerStarted := make(chan struct{})
+	go func() {
+		close(offerStarted)
+		r.inviteTx.responses <- sip.NewResponseFromRequest(req, 200, "OK", []byte(testAudioOffer))
+		close(r.senderDone)
+	}()
+	<-offerStarted
+	runtime.Gosched()
+	r.cancel()
+	return r.inviteTx, nil
+}
+
+func (r *gatewayRaceRequester) counts() (invites, acks, byes int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.invites, r.acks, r.byes
+}
+
+func realSIPServiceWithRequester(t *testing.T, requester sipgo.ClientTransactionRequester) sipmod.SIPService {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.SIP.Listen = "127.0.0.1:0"
+	cfg.SIP.Transport = nil
+	cfg.SIP.ServerID = "test"
+	cfg.SIP.Domain = "test.local"
+	server := core.NewServer(cfg)
+	sipModule := sipmod.NewModule()
+	if err := sipModule.Init(server); err != nil {
+		t.Fatalf("init SIP module: %v", err)
+	}
+	t.Cleanup(func() { _ = sipModule.Close() })
+
+	service := sipModule.Service()
+	serviceValue := reflect.ValueOf(service).Elem()
+	clientValue := serviceValue.FieldByName("client").Elem().FieldByName("client")
+	client := reflect.NewAt(clientValue.Type(), unsafe.Pointer(clientValue.UnsafeAddr())).Elem().Interface().(*sipgo.Client)
+	client.TxRequester = requester
+	return service
+}
+
+func TestGatewayFinalizesOffered2xxFromRealSIPAdapterOnCancellation(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clientTx := newOfferedFinalClientTx()
+	requester := &gatewayRaceRequester{
+		cancel:     cancel,
+		inviteTx:   clientTx,
+		senderDone: make(chan struct{}),
+	}
+	realService := realSIPServiceWithRequester(t, requester)
+
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	stream, _ := hub.GetOrCreate("live/adapter-cancel-race")
+	publishTestAudio(t, stream, avframe.CodecG711A)
+	var inviteDone <-chan struct{}
+	gw.sendInvite = func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
+		tx, err := realService.SendInvite(ctx, req)
+		if tx != nil {
+			inviteDone = tx.Done()
+		}
+		return tx, err
+	}
+
+	dialDone := make(chan error, 1)
+	go func() {
+		_, err := gw.Dial(ctx, "alice", stream.Key())
+		dialDone <- err
+	}()
+
+	select {
+	case err := <-dialDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Dial error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Gateway.Dial did not terminate after caller cancellation")
+	}
+	select {
+	case <-requester.senderDone:
+	case <-time.After(time.Second):
+		t.Fatal("final-response sender remained blocked after Gateway.Dial returned")
+	}
+	select {
+	case <-inviteDone:
+	case <-time.After(time.Second):
+		t.Fatal("real InviteTransaction collector remained blocked after Gateway.Dial returned")
+	}
+
+	invites, acks, byes := requester.counts()
+	if invites != 1 || acks != 1 || byes != 1 {
+		t.Fatalf("SIP signaling INVITE=%d ACK=%d BYE=%d, want exactly 1 each", invites, acks, byes)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("ActiveCalls = %d, want 0 after canceled 2xx", got)
 	}
 }
 

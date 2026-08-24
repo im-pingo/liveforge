@@ -17,6 +17,12 @@ type sipClient struct {
 }
 
 func (c *sipClient) writeRequest(ctx context.Context, req *sip.Request) error {
+	if req.IsAck() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return c.client.WriteRequest(req)
+	}
 	_, err := c.client.TransactionRequest(ctx, req)
 	return err
 }
@@ -181,15 +187,16 @@ func (s *service) SendInvite(ctx context.Context, req *sip.Request) (*InviteTran
 	}
 
 	invTx := &InviteTransaction{
-		clientTx: tx,
-		client:   s.client,
-		request:  req,
-		done:     make(chan struct{}),
+		clientTx:       tx,
+		client:         s.client,
+		request:        req,
+		done:           make(chan struct{}),
+		closeRequested: make(chan struct{}),
 	}
 
 	// Wait for final response in background
 	go func() {
-		defer invTx.Close()
+		defer invTx.finish()
 		responses := tx.Responses()
 		storeFinal := func(resp *sip.Response) bool {
 			if resp == nil || resp.StatusCode < 200 {
@@ -212,6 +219,9 @@ func (s *service) SendInvite(ctx context.Context, req *sip.Request) (*InviteTran
 		for {
 			select {
 			case <-ctx.Done():
+				storeReadyFinal()
+				return
+			case <-invTx.closeRequested:
 				storeReadyFinal()
 				return
 			case <-tx.Done():

@@ -318,8 +318,11 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 			resp = invTx.Response()
 			if resp == nil {
 				invTx.Close()
-				gw.metrics.setupFailures.Add(1)
-				return "", ctx.Err()
+				resp = invTx.Response()
+				if resp == nil {
+					gw.metrics.setupFailures.Add(1)
+					return "", ctx.Err()
+				}
 			}
 		}
 	case <-invTx.Done():
