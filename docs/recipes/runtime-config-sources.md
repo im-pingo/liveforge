@@ -19,12 +19,13 @@ export OPERATOR_TOKEN='replace-me'
 The source, poll interval, load timeout, and source connection settings are bootstrap-controlled and require restart to change.
 
 Configuration accepts explicit default sentinels where the owning module defines
-one. `runtime.http.max_bytes: 0` and `runtime.consul.max_bytes: 0` select a 4 MiB
-limit. `sip.gateway.max_calls: 0`, `cluster.health_check.evict_threshold: 0`, and
-`api.audit.max_entries: 0` select 100 calls, 3 failures, and 1000 entries.
-Explicit empty RTSP, WebRTC, and GB28181 port ranges select their documented
-module fallback behavior; negative sentinel values are invalid. See the field
-descriptions in `docs/config/config.schema.json` for the exact range behavior.
+one. Any non-positive `runtime.http.max_bytes` or `runtime.consul.max_bytes`
+selects a 4 MiB limit. Any non-positive `sip.gateway.max_calls`,
+`cluster.health_check.evict_threshold`, or `api.audit.max_entries` selects 100
+calls, 3 failures, or 1000 entries respectively. Explicit empty RTSP, WebRTC,
+and GB28181 port ranges select their documented module fallback behavior;
+non-empty ranges must contain two ordered positive ports. See the field
+descriptions in `docs/config/config.schema.json` for exact range behavior.
 
 ## Local File
 

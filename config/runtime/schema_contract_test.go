@@ -58,50 +58,77 @@ runtime:
 	}
 }
 
-func TestConfigSchemaRejectsNegativeSentinelValues(t *testing.T) {
+func TestConfigSchemaAcceptsNegativeScalarDefaultSentinels(t *testing.T) {
+	schema := loadConfigSchema(t)
+	document := map[string]any{
+		"sip":     map[string]any{"gateway": map[string]any{"max_calls": -1}},
+		"cluster": map[string]any{"health_check": map[string]any{"evict_threshold": -1}},
+		"api":     map[string]any{"audit": map[string]any{"max_entries": -1}},
+		"runtime": map[string]any{"http": map[string]any{"max_bytes": -1}, "consul": map[string]any{"max_bytes": -1}},
+	}
+	if err := validateSchemaValue(schema, schema, document, "$"); err != nil {
+		t.Fatalf("schema rejected source-supported negative default sentinels: %v", err)
+	}
+
+	const yamlDocument = `
+sip:
+  gateway:
+    max_calls: -1
+cluster:
+  health_check:
+    evict_threshold: -1
+api:
+  audit:
+    max_entries: -1
+runtime:
+  http:
+    max_bytes: -1
+  consul:
+    max_bytes: -1
+`
+	cfg, err := ParseDocument([]byte(yamlDocument))
+	if err != nil {
+		t.Fatalf("runtime parser rejected source-supported negative default sentinels: %v", err)
+	}
+	if cfg.SIP.Gateway.MaxCalls != -1 || cfg.Cluster.HealthCheck.EvictThreshold != -1 ||
+		cfg.API.Audit.MaxEntries != -1 || cfg.Runtime.HTTP.MaxBytes != -1 || cfg.Runtime.Consul.MaxBytes != -1 {
+		t.Fatalf("runtime parser did not preserve negative sentinels: max_calls=%d evict_threshold=%d max_entries=%d http_max_bytes=%d consul_max_bytes=%d",
+			cfg.SIP.Gateway.MaxCalls, cfg.Cluster.HealthCheck.EvictThreshold, cfg.API.Audit.MaxEntries,
+			cfg.Runtime.HTTP.MaxBytes, cfg.Runtime.Consul.MaxBytes)
+	}
+}
+
+func TestConfigSchemaRejectsRuntimeInvalidPortRanges(t *testing.T) {
 	schema := loadConfigSchema(t)
 	tests := []struct {
-		name     string
-		document map[string]any
+		name         string
+		document     map[string]any
+		yamlDocument string
 	}{
 		{
-			name:     "rtsp range",
-			document: map[string]any{"rtsp": map[string]any{"rtp_port_range": []any{-1, 2}}},
+			name:         "rtsp range",
+			document:     map[string]any{"rtsp": map[string]any{"rtp_port_range": []any{-1, 2}}},
+			yamlDocument: "rtsp:\n  rtp_port_range: [-1, 2]\n",
 		},
 		{
-			name:     "webrtc range",
-			document: map[string]any{"webrtc": map[string]any{"udp_port_range": []any{-1, 2}}},
+			name:         "webrtc range",
+			document:     map[string]any{"webrtc": map[string]any{"udp_port_range": []any{-1, 2}}},
+			yamlDocument: "webrtc:\n  udp_port_range: [-1, 2]\n",
 		},
 		{
-			name:     "gb28181 range",
-			document: map[string]any{"gb28181": map[string]any{"rtp_port_range": []any{-1, 2}}},
-		},
-		{
-			name:     "sip max calls",
-			document: map[string]any{"sip": map[string]any{"gateway": map[string]any{"max_calls": -1}}},
-		},
-		{
-			name:     "cluster eviction",
-			document: map[string]any{"cluster": map[string]any{"health_check": map[string]any{"evict_threshold": -1}}},
-		},
-		{
-			name:     "audit entries",
-			document: map[string]any{"api": map[string]any{"audit": map[string]any{"max_entries": -1}}},
-		},
-		{
-			name:     "http max bytes",
-			document: map[string]any{"runtime": map[string]any{"http": map[string]any{"max_bytes": -1}}},
-		},
-		{
-			name:     "consul max bytes",
-			document: map[string]any{"runtime": map[string]any{"consul": map[string]any{"max_bytes": -1}}},
+			name:         "gb28181 range",
+			document:     map[string]any{"gb28181": map[string]any{"rtp_port_range": []any{-1, 2}}},
+			yamlDocument: "gb28181:\n  rtp_port_range: [-1, 2]\n",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := validateSchemaValue(schema, schema, tt.document, "$"); err == nil {
-				t.Fatal("schema accepted a negative value")
+				t.Fatal("schema accepted a runtime-invalid port range")
+			}
+			if _, err := ParseDocument([]byte(tt.yamlDocument)); err == nil {
+				t.Fatal("runtime parser accepted a runtime-invalid port range")
 			}
 		})
 	}

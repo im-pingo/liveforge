@@ -141,7 +141,7 @@
       "properties": {
         "enabled": {"type": "boolean"}, "listen": {"type": "string"}, "transport": {"type": "array", "items": {"type": "string", "enum": ["udp", "tcp"]}}, "server_id": {"type": "string"}, "domain": {"type": "string"},
         "auth": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}}},
-        "gateway": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "stream_prefix": {"type": "string"}, "rtp_port_range": {"$ref": "#/$defs/port_range"}, "codecs": {"type": "array", "items": {"type": "string"}}, "max_calls": {"type": "integer", "minimum": 0, "description": "Maximum concurrent calls; 0 selects the gateway default of 100."}}}
+        "gateway": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "stream_prefix": {"type": "string"}, "rtp_port_range": {"$ref": "#/$defs/port_range"}, "codecs": {"type": "array", "items": {"type": "string"}}, "max_calls": {"type": "integer", "description": "Maximum concurrent calls; any non-positive value selects the gateway default of 100."}}}
       }
     },
     "gb28181": {
@@ -222,7 +222,7 @@
     },
     "cluster_health": {
       "type": "object", "additionalProperties": false,
-      "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "interval": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "evict_threshold": {"type": "integer", "minimum": 0, "description": "Consecutive failures before eviction; 0 selects the health tracker default of 3.", "x-liveforge-reload": "hot_reload"}}
+      "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "interval": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "evict_threshold": {"type": "integer", "description": "Consecutive failures before eviction; any non-positive value selects the health tracker default of 3.", "x-liveforge-reload": "hot_reload"}}
     },
     "cluster_relay_pool": {"type": "object", "additionalProperties": false, "properties": {"max_per_host": {"type": "integer", "minimum": 1}}},
     "cluster_srt": {"type": "object", "additionalProperties": false, "properties": {"latency": {"$ref": "#/$defs/duration"}, "passphrase": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "pbkeylen": {"type": "integer", "enum": [0, 16, 24, 32]}}},
@@ -255,7 +255,7 @@
           "tokens": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["token", "role"], "properties": {"name": {"type": "string"}, "token": {"type": "string", "minLength": 1, "writeOnly": true, "x-liveforge-secret": true}, "role": {"type": "string", "enum": ["viewer", "operator", "admin"]}}}}
         }},
         "console": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload", "properties": {"username": {"type": "string"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "role": {"type": "string", "enum": ["viewer", "operator", "admin"]}}},
-        "audit": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "properties": {"max_entries": {"type": "integer", "minimum": 0, "description": "Bounded in-memory audit capacity; 0 selects the default of 1000 entries."}}}
+        "audit": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "properties": {"max_entries": {"type": "integer", "description": "Bounded in-memory audit capacity; any non-positive value selects the default of 1000 entries."}}}
       }
     },
     "runtime": {
@@ -264,8 +264,8 @@
       "properties": {
         "source": {"type": "string", "enum": ["file", "http", "https", "consul", "redis"]}, "poll_interval": {"$ref": "#/$defs/duration"}, "load_timeout": {"$ref": "#/$defs/duration"},
         "file": {"type": "object", "additionalProperties": false, "properties": {"path": {"type": "string"}}},
-        "http": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string"}, "token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "max_bytes": {"type": "integer", "minimum": 0, "description": "Maximum response bytes; 0 selects the 4 MiB source default."}}},
-        "consul": {"type": "object", "additionalProperties": false, "properties": {"address": {"type": "string"}, "prefix": {"type": "string", "minLength": 1}, "token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "max_bytes": {"type": "integer", "minimum": 0, "description": "Maximum response bytes; 0 selects the 4 MiB source default."}}},
+        "http": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string"}, "token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "max_bytes": {"type": "integer", "description": "Maximum response bytes; any non-positive value selects the 4 MiB source default."}}},
+        "consul": {"type": "object", "additionalProperties": false, "properties": {"address": {"type": "string"}, "prefix": {"type": "string", "minLength": 1}, "token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "max_bytes": {"type": "integer", "description": "Maximum response bytes; any non-positive value selects the 4 MiB source default."}}},
         "redis": {"type": "object", "additionalProperties": false, "properties": {"addr": {"type": "string"}, "username": {"type": "string"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "db": {"type": "integer", "minimum": 0}, "prefix": {"type": "string"}, "hash": {"type": "string"}, "version_key": {"type": "string"}, "tls": {"type": "boolean"}}}
       }
     }
