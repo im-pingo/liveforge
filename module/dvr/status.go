@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// DVRStatusProvider exposes bounded DVR management state to the API module.
+type DVRStatusProvider interface {
+	DVRStatus() DVRStatusSnapshot
+	DVRSession(string) (DVRSessionStatus, bool)
+}
+
 type DVRMetricsSnapshot struct {
 	SegmentsWritten uint64 `json:"segments_written"`
 	SegmentBytes    uint64 `json:"segment_bytes"`

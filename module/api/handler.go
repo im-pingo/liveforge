@@ -13,11 +13,19 @@ import (
 // so it can be registered on any http.ServeMux (httpstream, standalone API, etc.).
 type Handlers struct {
 	server *core.Server
+	audit  *AuditStore
 }
 
 // NewHandlers creates API handlers backed by the given server.
 func NewHandlers(s *core.Server) *Handlers {
-	return &Handlers{server: s}
+	return &Handlers{server: s, audit: NewAuditStore(s.Config().API.Audit.MaxEntries)}
+}
+
+func newHandlersWithAudit(s *core.Server, audit *AuditStore) *Handlers {
+	if audit == nil {
+		audit = NewAuditStore(s.Config().API.Audit.MaxEntries)
+	}
+	return &Handlers{server: s, audit: audit}
 }
 
 // apiResponse is the standard API response envelope.
@@ -296,27 +304,56 @@ func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handlers) handleConfigRefresh(w http.ResponseWriter, r *http.Request) {
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime config manager unavailable")
+		return
+	}
+	if err := manager.Refresh(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scheduled"})
+}
+
+func (h *Handlers) handleAudit(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.audit.Entries())
+}
+
+type SecurityTokenStatus struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+type SecurityStatus struct {
+	LegacyBearerConfigured bool                  `json:"legacy_bearer_configured"`
+	Tokens                 []SecurityTokenStatus `json:"tokens"`
+	ConsoleConfigured      bool                  `json:"console_configured"`
+	ConsoleRole            string                `json:"console_role,omitempty"`
+	AuditEnabled           bool                  `json:"audit_enabled"`
+	AuditEntries           int                   `json:"audit_entries"`
+	AuditEvents            uint64                `json:"audit_events_total"`
+}
+
+func (h *Handlers) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
+	cfg := h.server.Config().API
+	tokens := make([]SecurityTokenStatus, 0, len(cfg.Auth.Tokens))
+	for _, binding := range cfg.Auth.Tokens {
+		tokens = append(tokens, SecurityTokenStatus{Name: binding.Name, Role: defaultRole(binding.Role)})
+	}
+	entries := h.audit.Entries()
+	writeJSON(w, http.StatusOK, SecurityStatus{
+		LegacyBearerConfigured: cfg.Auth.BearerToken != "",
+		Tokens:                 tokens,
+		ConsoleConfigured:      cfg.Console.Username != "",
+		ConsoleRole:            defaultRole(cfg.Console.Role),
+		AuditEnabled:           true,
+		AuditEntries:           len(entries),
+		AuditEvents:            h.audit.Total(),
+	})
+}
+
 func (h *Handlers) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
-}
-
-// DVRStatusProvider is implemented by the DVR module to expose session status.
-type DVRStatusProvider interface {
-	SessionStatus() any
-}
-
-func (h *Handlers) handleDVRStatus(w http.ResponseWriter, r *http.Request) {
-	mod := h.server.ModuleByName("dvr")
-	if mod == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "sessions": []any{}})
-		return
-	}
-
-	provider, ok := mod.(DVRStatusProvider)
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": []any{}})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": provider.SessionStatus()})
 }

@@ -99,6 +99,47 @@ auth:
 	}
 }
 
+func TestLoadMigratesLegacyManagementBearerToken(t *testing.T) {
+	yaml := `
+auth:
+  api:
+    bearer_token: legacy-token
+`
+	path := filepath.Join(t.TempDir(), "legacy-auth.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.BearerToken != "legacy-token" {
+		t.Fatalf("migrated bearer token=%q", cfg.API.Auth.BearerToken)
+	}
+}
+
+func TestLoadPrefersCurrentManagementBearerTokenPath(t *testing.T) {
+	yaml := `
+auth:
+  api:
+    bearer_token: legacy-token
+api:
+  auth:
+    bearer_token: current-token
+`
+	path := filepath.Join(t.TempDir(), "current-auth.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.BearerToken != "current-token" {
+		t.Fatalf("current bearer token was overridden: %q", cfg.API.Auth.BearerToken)
+	}
+}
+
 func TestLoadConfigSRT(t *testing.T) {
 	yaml := `
 srt:

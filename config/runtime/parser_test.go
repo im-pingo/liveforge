@@ -24,6 +24,13 @@ func TestParseDocumentRejectsInvalidRuntimeValues(t *testing.T) {
 	}
 }
 
+func TestParseDocumentRejectsInvalidAPIRoleAndDuplicateToken(t *testing.T) {
+	_, err := ParseDocument([]byte("api:\n  auth:\n    tokens:\n      - name: first\n        token: same\n        role: viewer\n      - name: second\n        token: same\n        role: owner\n"))
+	if err == nil {
+		t.Fatal("expected invalid role or duplicate token error")
+	}
+}
+
 func TestDiffClassifiesHotRestartAndImmutablePaths(t *testing.T) {
 	oldCfg := config.Defaults()
 	newCfg := config.Defaults()
@@ -46,5 +53,56 @@ func TestDiffClassifiesHotRestartAndImmutablePaths(t *testing.T) {
 	}
 	if classes["rtmp.listen"] != ChangeRestart {
 		t.Fatalf("rtmp class = %q", classes["rtmp.listen"])
+	}
+}
+
+func TestClassifyModuleEnablementAndStructuralGCCAsRestartRequired(t *testing.T) {
+	paths := []string{
+		"auth.enabled", "notify.http.enabled", "notify.websocket.enabled",
+		"record.enabled", "dvr.enabled", "dvr.listen", "cluster.forward.enabled",
+		"cluster.origin.enabled", "webrtc.gcc.enabled", "stream.ring_buffer_size",
+	}
+	for _, path := range paths {
+		if got := classifyPath(path); got != ChangeRestart {
+			t.Errorf("classifyPath(%q) = %q, want restart_required", path, got)
+		}
+	}
+	if got := classifyPath("auth.publish.token.secret"); got != ChangeHot {
+		t.Errorf("auth token class = %q, want hot", got)
+	}
+}
+
+func TestClassifyClusterPolicyAndTransportPaths(t *testing.T) {
+	for _, path := range []string{"cluster.forward.targets", "cluster.forward.retry_max", "cluster.origin.servers", "cluster.health_check.interval"} {
+		if got := classifyPath(path); got != ChangeHot {
+			t.Errorf("classifyPath(%q) = %q, want hot", path, got)
+		}
+	}
+	for _, path := range []string{"cluster.relay_pool.max_per_host", "cluster.srt.passphrase", "cluster.rtp.port_range", "cluster.rtsp.transport"} {
+		if got := classifyPath(path); got != ChangeRestart {
+			t.Errorf("classifyPath(%q) = %q, want restart", path, got)
+		}
+	}
+}
+
+func TestClassifyOnlyImplementedRuntimePoliciesAsHot(t *testing.T) {
+	for _, path := range []string{
+		"server.log_level", "server.drain_timeout", "limits.max_streams", "limits.rate_limit.rate",
+		"stream.gop_cache_num", "auth.subscribe.callback.url", "notify.http.endpoints",
+		"record.path", "dvr.window", "api.auth.tokens", "api.console.role",
+		"http_stream.hls.segment_duration", "http_stream.dash.playlist_size", "http_stream.llhls.container",
+		"webrtc.gcc.max_bitrate",
+	} {
+		if got := classifyPath(path); got != ChangeHot {
+			t.Errorf("classifyPath(%q)=%q want hot_reload", path, got)
+		}
+	}
+	for _, path := range []string{
+		"notify.websocket.path", "notify.alive_interval", "api.listen", "api.tls", "api.audit.max_entries",
+		"http_stream.cors", "webrtc.ice_servers", "metrics.path", "runtime.poll_interval",
+	} {
+		if got := classifyPath(path); got != ChangeRestart {
+			t.Errorf("classifyPath(%q)=%q want restart_required", path, got)
+		}
 	}
 }

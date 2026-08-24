@@ -10,10 +10,11 @@ import (
 )
 
 var (
-	ErrClosed        = errors.New("config runtime manager is closed")
-	ErrNotStarted    = errors.New("config runtime manager is not started")
-	ErrNoInitial     = errors.New("config runtime source did not produce an initial snapshot")
-	ErrInvalidSource = errors.New("config runtime source is nil")
+	ErrClosed          = errors.New("config runtime manager is closed")
+	ErrNotStarted      = errors.New("config runtime manager is not started")
+	ErrNoInitial       = errors.New("config runtime source did not produce an initial snapshot")
+	ErrInvalidSource   = errors.New("config runtime source is nil")
+	ErrImmutableChange = errors.New("immutable configuration change")
 )
 
 // ConfigSource loads a complete configuration document. Implementations must not
@@ -68,7 +69,12 @@ type ChangeSet struct {
 // ConfigSnapshot is immutable after publication. Config is owned by the
 // manager; consumers must treat it as read-only.
 type ConfigSnapshot struct {
-	Config         *config.Config
+	// Config is the effective runtime view. Restart-required values remain at
+	// their last applied values until the process restarts.
+	Config *config.Config
+	// DesiredConfig retains the latest valid source values, including changes
+	// that are waiting for a restart. Consumers should normally read Config.
+	DesiredConfig  *config.Config
 	Version        Version
 	Source         string
 	LoadedAt       time.Time

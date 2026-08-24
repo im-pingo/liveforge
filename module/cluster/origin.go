@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
@@ -267,6 +268,28 @@ func (om *OriginManager) Hooks() []core.HookRegistration {
 			Handler:  om.onSubscribe,
 		},
 	}
+}
+
+func (om *OriginManager) UpdatePolicy(cfg config.OriginConfig, health *HealthTracker) {
+	retryMax := cfg.RetryMax
+	if retryMax <= 0 {
+		retryMax = 3
+	}
+	retryDelay := cfg.RetryDelay
+	if retryDelay <= 0 {
+		retryDelay = 2 * time.Second
+	}
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 30 * time.Second
+	}
+	om.mu.Lock()
+	om.scheduler = NewScheduler(cfg.ScheduleURL, cfg.Servers, cfg.SchedulePriority, cfg.ScheduleTimeout)
+	om.retryMax = retryMax
+	om.retryDelay = retryDelay
+	om.idleTimeout = idleTimeout
+	om.health = health
+	om.mu.Unlock()
 }
 
 func (om *OriginManager) onSubscribe(ctx *core.EventContext) error {

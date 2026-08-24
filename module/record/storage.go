@@ -73,6 +73,16 @@ type Storage interface {
 	Health(context.Context) StorageHealth
 }
 
+// RecordingProvider exposes recording management without coupling callers to
+// the local storage implementation.
+type RecordingProvider interface {
+	ListRecordings(context.Context) ([]RecordingInfo, error)
+	Recording(context.Context, string) (RecordingInfo, error)
+	OpenRecording(context.Context, string) (ReadSeekCloser, RecordingInfo, error)
+	DeleteRecording(context.Context, string) error
+	RecordingStatus(context.Context) RecordingStatusSnapshot
+}
+
 // WriteObject is private until Complete atomically publishes it.
 type WriteObject interface {
 	io.WriteSeeker

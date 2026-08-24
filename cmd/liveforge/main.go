@@ -49,8 +49,10 @@ func newRuntimeManager(cfg *config.Config, configPath string, server *core.Serve
 			if snapshot == nil || snapshot.Config == nil {
 				return nil
 			}
-			server.UpdateConfigSnapshot(snapshot)
-			logger.Init(snapshot.Config.Server.LogLevel)
+			if err := server.UpdateConfigSnapshot(snapshot); err != nil {
+				return fmt.Errorf("apply runtime config: %w", err)
+			}
+			logger.Init(server.Config().Server.LogLevel)
 			slog.Info("config snapshot published", "version", snapshot.Version.Value, "changes", len(changeSet.Changes), "restart_required", len(changeSet.Restart))
 			return nil
 		},

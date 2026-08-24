@@ -29,6 +29,7 @@ type HealthTracker struct {
 	probeInterval  time.Duration
 	probeTimeout   time.Duration
 	closed         chan struct{}
+	reload         chan struct{}
 }
 
 // NewHealthTracker creates a health tracker from cluster config.
@@ -51,9 +52,41 @@ func NewHealthTracker(cfg config.HealthCheckConfig) *HealthTracker {
 		probeInterval:  interval,
 		probeTimeout:   timeout,
 		closed:         make(chan struct{}),
+		reload:         make(chan struct{}, 1),
 	}
 	go ht.recoveryLoop()
 	return ht
+}
+
+// UpdateConfig publishes health thresholds and resets the recovery interval.
+func (ht *HealthTracker) UpdateConfig(cfg config.HealthCheckConfig) {
+	evict := cfg.EvictThreshold
+	if evict <= 0 {
+		evict = 3
+	}
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ht.mu.Lock()
+	ht.evictThreshold = evict
+	ht.probeInterval = interval
+	ht.probeTimeout = timeout
+	ht.mu.Unlock()
+	select {
+	case ht.reload <- struct{}{}:
+	default:
+	}
+}
+
+func (ht *HealthTracker) evictThresholdValue() int {
+	ht.mu.RLock()
+	defer ht.mu.RUnlock()
+	return ht.evictThreshold
 }
 
 // RecordSuccess records a successful relay connection to the given URL.
@@ -168,14 +201,18 @@ func (ht *HealthTracker) Close() {
 
 // recoveryLoop periodically probes evicted nodes via TCP dial.
 func (ht *HealthTracker) recoveryLoop() {
-	ticker := time.NewTicker(ht.probeInterval)
-	defer ticker.Stop()
-
 	for {
+		ht.mu.RLock()
+		interval := ht.probeInterval
+		ht.mu.RUnlock()
+		timer := time.NewTimer(interval)
 		select {
 		case <-ht.closed:
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-ht.reload:
+			timer.Stop()
+		case <-timer.C:
 			ht.probeEvicted()
 		}
 	}
@@ -183,6 +220,7 @@ func (ht *HealthTracker) recoveryLoop() {
 
 func (ht *HealthTracker) probeEvicted() {
 	ht.mu.RLock()
+	timeout := ht.probeTimeout
 	var evicted []string
 	for host, ns := range ht.nodes {
 		if ns.Evicted {
@@ -192,7 +230,7 @@ func (ht *HealthTracker) probeEvicted() {
 	ht.mu.RUnlock()
 
 	for _, host := range evicted {
-		conn, err := net.DialTimeout("tcp", host, ht.probeTimeout)
+		conn, err := net.DialTimeout("tcp", host, timeout)
 		if err != nil {
 			continue
 		}

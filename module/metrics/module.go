@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -38,6 +39,21 @@ func (m *Module) Init(s *core.Server) error {
 	registry.MustRegister(m.collector)
 	registry.MustRegister(collectors.NewGoCollector())
 	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	for _, name := range s.ModuleNames() {
+		module := s.ModuleByName(name)
+		provider, ok := module.(interface{ PrometheusCollectors() []prometheus.Collector })
+		if !ok {
+			continue
+		}
+		for _, collector := range provider.PrometheusCollectors() {
+			if collector == nil {
+				continue
+			}
+			if err := registry.Register(collector); err != nil {
+				return fmt.Errorf("metrics: register collector from %s: %w", name, err)
+			}
+		}
+	}
 
 	path := cfg.Path
 	if path == "" {

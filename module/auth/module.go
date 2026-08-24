@@ -2,6 +2,7 @@ package auth
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -9,6 +10,7 @@ import (
 
 // Module implements authentication for publish and subscribe events.
 type Module struct {
+	mu  sync.RWMutex
 	cfg config.AuthConfig
 }
 
@@ -22,8 +24,19 @@ func (m *Module) Name() string { return "auth" }
 
 // Init reads auth config from the server.
 func (m *Module) Init(s *core.Server) error {
+	m.mu.Lock()
 	m.cfg = s.Config().Auth
+	m.mu.Unlock()
 	slog.Info("enabled", "module", "auth", "publish_mode", m.cfg.Publish.Mode, "subscribe_mode", m.cfg.Subscribe.Mode)
+	return nil
+}
+
+// OnReload atomically publishes new authentication rules. In-flight checks
+// finish against their captured rule while subsequent checks use the new one.
+func (m *Module) OnReload(s *core.Server) error {
+	m.mu.Lock()
+	m.cfg = s.Config().Auth
+	m.mu.Unlock()
 	return nil
 }
 
@@ -49,7 +62,10 @@ func (m *Module) Hooks() []core.HookRegistration {
 func (m *Module) Close() error { return nil }
 
 func (m *Module) onPublish(ctx *core.EventContext) error {
-	if err := checkAuth(m.cfg.Publish, ctx, "publish"); err != nil {
+	m.mu.RLock()
+	rule := m.cfg.Publish
+	m.mu.RUnlock()
+	if err := checkAuth(rule, ctx, "publish"); err != nil {
 		slog.Warn("publish rejected", "module", "auth", "stream", ctx.StreamKey, "remote", ctx.RemoteAddr, "error", err)
 		return err
 	}
@@ -57,7 +73,10 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 }
 
 func (m *Module) onSubscribe(ctx *core.EventContext) error {
-	if err := checkAuth(m.cfg.Subscribe, ctx, "subscribe"); err != nil {
+	m.mu.RLock()
+	rule := m.cfg.Subscribe
+	m.mu.RUnlock()
+	if err := checkAuth(rule, ctx, "subscribe"); err != nil {
 		slog.Warn("subscribe rejected", "module", "auth", "stream", ctx.StreamKey, "remote", ctx.RemoteAddr, "error", err)
 		return err
 	}

@@ -58,6 +58,24 @@ func validateConfig(cfg *config.Config) error {
 	if (cfg.TLS.CertFile == "") != (cfg.TLS.KeyFile == "") {
 		return fmt.Errorf("tls.cert_file and tls.key_file must be configured together")
 	}
+	seenTokens := make(map[string]struct{}, len(cfg.API.Auth.Tokens))
+	for i, binding := range cfg.API.Auth.Tokens {
+		if binding.Token == "" {
+			return fmt.Errorf("api.auth.tokens[%d].token must not be empty", i)
+		}
+		switch strings.ToLower(binding.Role) {
+		case "viewer", "operator", "admin":
+		default:
+			return fmt.Errorf("api.auth.tokens[%d].role must be viewer, operator, or admin", i)
+		}
+		if _, exists := seenTokens[binding.Token]; exists {
+			return fmt.Errorf("api.auth.tokens contains a duplicate token")
+		}
+		seenTokens[binding.Token] = struct{}{}
+	}
+	if role := strings.ToLower(cfg.API.Console.Role); role != "" && role != "viewer" && role != "operator" && role != "admin" {
+		return fmt.Errorf("api.console.role must be viewer, operator, or admin")
+	}
 	return nil
 }
 
@@ -158,29 +176,125 @@ func diffMaps(prefix string, oldMap, newMap map[string]any, changes *[]Change) {
 	}
 }
 
+func applyHotChanges(current, desired *config.Config, changes []Change) (*config.Config, error) {
+	if current == nil {
+		return cloneConfig(desired)
+	}
+	currentMap, err := configMap(current)
+	if err != nil {
+		return nil, err
+	}
+	desiredMap, err := configMap(desired)
+	if err != nil {
+		return nil, err
+	}
+	for _, change := range changes {
+		if change.Class != ChangeHot {
+			continue
+		}
+		parts := strings.Split(change.Path, ".")
+		value, ok := mapPathValue(desiredMap, parts)
+		if !ok {
+			return nil, fmt.Errorf("hot configuration path %q is missing", change.Path)
+		}
+		if !setMapPath(currentMap, parts, value) {
+			return nil, fmt.Errorf("hot configuration path %q cannot be applied", change.Path)
+		}
+	}
+	data, err := yaml.Marshal(currentMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal effective config: %w", err)
+	}
+	return ParseDocument(data)
+}
+
+func mapPathValue(root map[string]any, parts []string) (any, bool) {
+	current := root
+	for i, part := range parts {
+		value, ok := current[part]
+		if !ok {
+			return nil, false
+		}
+		if i == len(parts)-1 {
+			return value, true
+		}
+		next, ok := value.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current = next
+	}
+	return nil, false
+}
+
+func setMapPath(root map[string]any, parts []string, value any) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	current := root
+	for _, part := range parts[:len(parts)-1] {
+		next, ok := current[part].(map[string]any)
+		if !ok {
+			return false
+		}
+		current = next
+	}
+	current[parts[len(parts)-1]] = value
+	return true
+}
+
 func classifyPath(path string) ChangeClass {
 	if path == "server.name" || strings.HasPrefix(path, "server.name.") {
 		return ChangeImmutable
 	}
-	if strings.HasPrefix(path, "stream.simulcast") {
+	switch {
+	case path == "server.log_level", path == "server.drain_timeout":
+		return ChangeHot
+	case strings.HasPrefix(path, "limits."):
+		return ChangeHot
+	case strings.HasPrefix(path, "stream.simulcast"), path == "stream.ring_buffer_size":
 		return ChangeRestart
-	}
-	root := path
-	if i := strings.IndexByte(root, '.'); i >= 0 {
-		root = root[:i]
-	}
-	switch root {
-	case "rtmp", "rtsp", "http_stream", "websocket", "webrtc", "srt", "sip", "gb28181", "tls", "audio_codec", "api", "metrics":
-		if strings.HasSuffix(path, ".hls.segment_duration") || strings.HasSuffix(path, ".hls.playlist_size") ||
-			strings.HasSuffix(path, ".dash.segment_duration") || strings.HasSuffix(path, ".dash.playlist_size") ||
-			strings.HasPrefix(path, "http_stream.llhls") || strings.HasPrefix(path, "webrtc.gcc") {
+	case strings.HasPrefix(path, "stream."):
+		return ChangeHot
+	case path == "auth.enabled":
+		return ChangeRestart
+	case strings.HasPrefix(path, "auth."):
+		return ChangeHot
+	case strings.HasPrefix(path, "notify.http.endpoints"):
+		return ChangeHot
+	case strings.HasPrefix(path, "notify."):
+		return ChangeRestart
+	case strings.HasPrefix(path, "record."):
+		if path == "record.enabled" {
+			return ChangeRestart
+		}
+		return ChangeHot
+	case strings.HasPrefix(path, "dvr."):
+		if path == "dvr.enabled" || path == "dvr.listen" {
+			return ChangeRestart
+		}
+		return ChangeHot
+	case strings.HasPrefix(path, "api.auth."), strings.HasPrefix(path, "api.console."):
+		return ChangeHot
+	case strings.HasPrefix(path, "api."):
+		return ChangeRestart
+	case strings.HasPrefix(path, "cluster."):
+		if strings.HasPrefix(path, "cluster.forward.") || strings.HasPrefix(path, "cluster.origin.") || strings.HasPrefix(path, "cluster.health_check.") {
+			if path == "cluster.forward.enabled" || path == "cluster.origin.enabled" || path == "cluster.health_check.enabled" {
+				return ChangeRestart
+			}
 			return ChangeHot
 		}
 		return ChangeRestart
-	case "runtime":
-		return ChangeRestart
-	default:
+	case strings.HasPrefix(path, "http_stream.hls."), strings.HasPrefix(path, "http_stream.dash."), strings.HasPrefix(path, "http_stream.llhls."):
 		return ChangeHot
+	case strings.HasPrefix(path, "webrtc.gcc."):
+		if path == "webrtc.gcc.enabled" {
+			return ChangeRestart
+		}
+		return ChangeHot
+	default:
+		return ChangeRestart
 	}
 }
 

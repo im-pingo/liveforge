@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -419,5 +421,22 @@ func TestServerUpdateConfigSnapshotRecordsPendingRestart(t *testing.T) {
 	paths := s.PendingRestartChanges()
 	if len(paths) != 1 || paths[0] != "rtmp.listen" {
 		t.Fatalf("pending restart paths = %v", paths)
+	}
+}
+
+type failingReloadModule struct{}
+
+func (failingReloadModule) Name() string              { return "failing-reload" }
+func (failingReloadModule) Init(*Server) error        { return nil }
+func (failingReloadModule) Hooks() []HookRegistration { return nil }
+func (failingReloadModule) Close() error              { return nil }
+func (failingReloadModule) OnReload(*Server) error    { return errors.New("policy rejected") }
+
+func TestServerUpdateConfigSnapshotReturnsReloadFailure(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(cfg)
+	s.RegisterModule(failingReloadModule{})
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: cfg}); err == nil || !strings.Contains(err.Error(), "failing-reload") {
+		t.Fatalf("reload error = %v", err)
 	}
 }

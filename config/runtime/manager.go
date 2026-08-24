@@ -95,7 +95,7 @@ func NewManager(opts Options) (*Manager, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.active.Store(&ConfigSnapshot{Config: cfg, Version: Version{Hash: hash}, Source: name, LoadedAt: time.Now()})
+		m.active.Store(&ConfigSnapshot{Config: cfg, DesiredConfig: cfg, Version: Version{Hash: hash}, Source: name, LoadedAt: time.Now()})
 		m.status.ActiveVersion = Version{Hash: hash}
 	}
 	go m.callbackLoop()
@@ -206,10 +206,17 @@ func (m *Manager) load(parent context.Context) error {
 		return nil
 	}
 	old := m.active.Load()
-	changes, err := diffConfigs(snapshotConfig(old), cfg)
+	changes, err := diffConfigs(snapshotDesiredConfig(old), cfg)
 	if err != nil {
 		m.setFailure(err)
 		return err
+	}
+	for _, change := range changes {
+		if change.Class == ChangeImmutable {
+			err := fmt.Errorf("%w: %s", ErrImmutableChange, change.Path)
+			m.setFailure(err)
+			return err
+		}
 	}
 	owned, err := cloneConfig(cfg)
 	if err != nil {
@@ -220,13 +227,23 @@ func (m *Manager) load(parent context.Context) error {
 	if version.Value == "" {
 		version.Value = hash
 	}
+	applied, err := applyHotChanges(snapshotConfig(old), owned, changes)
+	if err != nil {
+		m.setFailure(err)
+		return err
+	}
+	pendingChanges, err := diffConfigs(applied, owned)
+	if err != nil {
+		m.setFailure(err)
+		return err
+	}
 	pending := make([]string, 0)
-	for _, change := range changes {
+	for _, change := range pendingChanges {
 		if change.Class == ChangeRestart {
 			pending = append(pending, change.Path)
 		}
 	}
-	next := &ConfigSnapshot{Config: owned, Version: version, Source: m.sourceName, LoadedAt: time.Now(), LastModified: result.LastModified, Changes: changes, PendingRestart: pending}
+	next := &ConfigSnapshot{Config: applied, DesiredConfig: owned, Version: version, Source: m.sourceName, LoadedAt: time.Now(), LastModified: result.LastModified, Changes: changes, PendingRestart: pending}
 	m.active.Store(next)
 	m.updateKeys(next)
 	m.setSuccessVersion(version, pending)
@@ -244,6 +261,16 @@ func (m *Manager) load(parent context.Context) error {
 func snapshotConfig(s *ConfigSnapshot) *config.Config {
 	if s == nil {
 		return nil
+	}
+	return s.Config
+}
+
+func snapshotDesiredConfig(s *ConfigSnapshot) *config.Config {
+	if s == nil {
+		return nil
+	}
+	if s.DesiredConfig != nil {
+		return s.DesiredConfig
 	}
 	return s.Config
 }

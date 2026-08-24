@@ -19,6 +19,13 @@ type FeedbackRouter struct {
 	aggregateWindow time.Duration // minimum interval between forwarded PLIs in aggregate mode
 }
 
+// UpdateConfig replaces routing thresholds without interrupting subscribers.
+func (r *FeedbackRouter) UpdateConfig(cfg config.FeedbackConfig) {
+	r.mu.Lock()
+	r.cfg = cfg
+	r.mu.Unlock()
+}
+
 // NewFeedbackRouter creates a feedback router with the given configuration.
 func NewFeedbackRouter(cfg config.FeedbackConfig) *FeedbackRouter {
 	return &FeedbackRouter{
@@ -38,7 +45,10 @@ func (r *FeedbackRouter) SetSubscriberCount(n int) {
 // and current subscriber count. For auto mode, it selects passthrough,
 // aggregate, or drop based on thresholds.
 func (r *FeedbackRouter) EffectiveMode() FeedbackMode {
-	mode := parseFeedbackMode(r.cfg.DefaultMode)
+	r.mu.Lock()
+	cfg := r.cfg
+	r.mu.Unlock()
+	mode := parseFeedbackMode(cfg.DefaultMode)
 	if mode != FeedbackAuto {
 		return mode
 	}
@@ -47,8 +57,8 @@ func (r *FeedbackRouter) EffectiveMode() FeedbackMode {
 	count := r.subscriberCount
 	r.mu.Unlock()
 
-	pt := r.cfg.AutoThresholds.PassthroughMax
-	ag := r.cfg.AutoThresholds.AggregateMax
+	pt := cfg.AutoThresholds.PassthroughMax
+	ag := cfg.AutoThresholds.AggregateMax
 
 	switch {
 	case pt > 0 && count <= pt:

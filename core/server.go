@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -67,31 +68,35 @@ func (s *Server) Config() *config.Config {
 // Reloadable modules. Errors from individual modules are logged but do not
 // stop the reload process.
 func (s *Server) UpdateConfig(cfg *config.Config) {
-	s.updateConfig(cfg, nil)
+	_ = s.updateConfig(cfg, nil)
 }
 
 // UpdateConfigSnapshot publishes a validated runtime snapshot and records
 // changes that require a process restart. Existing module reload callbacks are
 // still invoked for the hot portion of the snapshot.
-func (s *Server) UpdateConfigSnapshot(snapshot *configruntime.ConfigSnapshot) {
+func (s *Server) UpdateConfigSnapshot(snapshot *configruntime.ConfigSnapshot) error {
 	if snapshot == nil || snapshot.Config == nil {
-		return
+		return nil
 	}
-	s.updateConfig(snapshot.Config, snapshot.PendingRestart)
+	return s.updateConfig(snapshot.Config, snapshot.PendingRestart)
 }
 
-func (s *Server) updateConfig(cfg *config.Config, pending []string) {
+func (s *Server) updateConfig(cfg *config.Config, pending []string) error {
 	s.configPtr.Store(cfg)
+	s.hub.UpdatePolicy(cfg.Stream, cfg.Limits)
 	s.pendingMu.Lock()
 	s.pendingRestart = append([]string(nil), pending...)
 	s.pendingMu.Unlock()
+	var reloadErrors []error
 	for _, m := range s.modules {
 		if r, ok := m.(Reloadable); ok {
 			if err := r.OnReload(s); err != nil {
 				slog.Error("module reload failed", "module", m.Name(), "error", err)
+				reloadErrors = append(reloadErrors, fmt.Errorf("%s: %w", m.Name(), err))
 			}
 		}
 	}
+	return errors.Join(reloadErrors...)
 }
 
 // PendingRestartChanges returns configuration paths that are active in the

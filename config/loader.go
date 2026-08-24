@@ -105,6 +105,7 @@ func defaults() *Config {
 		},
 		API: APIConfig{
 			Listen: ":8090",
+			Audit:  AuditConfig{MaxEntries: 1000},
 		},
 		Metrics: MetricsConfig{
 			Listen: ":9090",
@@ -151,6 +152,9 @@ func normalize(cfg *Config) {
 	switch strings.ToLower(cfg.HTTP.LLHLS.Container) {
 	case "mpegts", "mpeg-ts":
 		cfg.HTTP.LLHLS.Container = "ts"
+	}
+	if cfg.API.Auth.BearerToken == "" && cfg.Auth.API.BearerToken != "" {
+		cfg.API.Auth.BearerToken = cfg.Auth.API.BearerToken
 	}
 }
 

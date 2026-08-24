@@ -10,11 +10,11 @@ import (
 
 // StreamHub manages all active streams.
 type StreamHub struct {
-	mu               sync.RWMutex
-	streams          map[string]*Stream
-	config           config.StreamConfig
-	limits           config.LimitsConfig
-	eventBus         *EventBus
+	mu                sync.RWMutex
+	streams           map[string]*Stream
+	config            config.StreamConfig
+	limits            config.LimitsConfig
+	eventBus          *EventBus
 	audioCodecEnabled bool
 }
 
@@ -33,6 +33,31 @@ func (h *StreamHub) SetAudioCodecEnabled(enabled bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.audioCodecEnabled = enabled
+}
+
+// UpdatePolicy publishes hot stream and limit policies to the hub and all
+// existing streams. Structural resources such as ring-buffer capacity remain
+// unchanged for existing streams and are applied when a stream is recreated.
+func (h *StreamHub) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfig) {
+	h.mu.Lock()
+	h.config = cfg
+	h.limits = limits
+	streams := make([]*Stream, 0, len(h.streams))
+	for _, stream := range h.streams {
+		streams = append(streams, stream)
+	}
+	h.mu.Unlock()
+
+	for _, stream := range streams {
+		stream.UpdatePolicy(cfg, limits)
+	}
+}
+
+// Limits returns the current hub limits without exposing mutable state.
+func (h *StreamHub) Limits() config.LimitsConfig {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.limits
 }
 
 // GetOrCreate returns an existing stream or creates a new one.

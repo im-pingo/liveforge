@@ -252,6 +252,15 @@ api:
   listen: ":8090"
   auth:
     bearer_token: "${API_TOKEN}"
+    # Named tokens support viewer, operator, and admin roles. Keep tokens in
+    # environment-expanded private configuration, never in source control.
+    tokens: []
+    # - name: monitoring
+    #   token: "${MONITORING_API_TOKEN}"
+    #   role: viewer
   console:
     username: "admin"
     password: "admin"
+    role: admin
+  audit:
+    max_entries: 1000

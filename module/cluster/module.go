@@ -116,6 +116,23 @@ func (m *Module) Hooks() []core.HookRegistration {
 	return hooks
 }
 
+// OnReload updates scheduling, retry, idle, and health policies for new relay
+// attempts. Transport credentials, port ranges, pool capacity, and module
+// enablement remain restart-required.
+func (m *Module) OnReload(s *core.Server) error {
+	cfg := s.Config().Cluster
+	if m.health != nil {
+		m.health.UpdateConfig(cfg.HealthCheck)
+	}
+	if m.forward != nil {
+		m.forward.UpdatePolicy(cfg.Forward, m.health)
+	}
+	if m.origin != nil {
+		m.origin.UpdatePolicy(cfg.Origin, m.health)
+	}
+	return nil
+}
+
 // Close shuts down both forward and origin managers.
 func (m *Module) Close() error {
 	m.close.Do(func() {

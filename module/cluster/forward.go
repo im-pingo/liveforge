@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
 
@@ -231,6 +232,23 @@ func (fm *ForwardManager) Hooks() []core.HookRegistration {
 			Handler:  fm.onPublishStop,
 		},
 	}
+}
+
+func (fm *ForwardManager) UpdatePolicy(cfg config.ForwardConfig, health *HealthTracker) {
+	retryMax := cfg.RetryMax
+	if retryMax <= 0 {
+		retryMax = 3
+	}
+	retryDelay := cfg.RetryInterval
+	if retryDelay <= 0 {
+		retryDelay = 5 * time.Second
+	}
+	fm.mu.Lock()
+	fm.scheduler = NewScheduler(cfg.ScheduleURL, cfg.Targets, cfg.SchedulePriority, cfg.ScheduleTimeout)
+	fm.retryMax = retryMax
+	fm.retryDel = retryDelay
+	fm.health = health
+	fm.mu.Unlock()
 }
 
 func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {

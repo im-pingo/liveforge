@@ -5,20 +5,26 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/ratelimit"
 )
 
 // Module implements the HTTP streaming module for FLV, TS, FMP4, HLS, and DASH.
 type Module struct {
-	server   *core.Server
-	listener net.Listener
-	httpSrv  *http.Server
-	limiter  *ratelimit.Limiter
-	wg       sync.WaitGroup
+	server    *core.Server
+	policyMu  sync.Mutex
+	policy    config.HTTPConfig
+	listener  net.Listener
+	httpSrv   *http.Server
+	limiter   *ratelimit.Limiter
+	limiterMu sync.RWMutex
+	rateCfg   config.RateLimitConfig
+	wg        sync.WaitGroup
 
 	// Track which stream instances have muxer callbacks registered.
 	registeredMu sync.Mutex
@@ -54,6 +60,9 @@ func (m *Module) Name() string { return "httpstream" }
 func (m *Module) Init(s *core.Server) error {
 	m.server = s
 	cfg := s.Config()
+	m.policyMu.Lock()
+	m.policy = cfg.HTTP
+	m.policyMu.Unlock()
 
 	ln, err := s.MakeListenerAutoTLS(cfg.HTTP.Listen, cfg.HTTP.TLS)
 	if err != nil {
@@ -64,12 +73,21 @@ func (m *Module) Init(s *core.Server) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/{path...}", m.handleWebSocket)
 	mux.HandleFunc("/{path...}", m.handleStream)
-	var handler http.Handler = mux
+	handler := http.Handler(mux)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
 		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
-		handler = m.limiter.Wrap(handler)
 	}
-	m.httpSrv = &http.Server{Handler: handler}
+	m.rateCfg = cfg.Limits.RateLimit
+	m.httpSrv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.limiterMu.RLock()
+		limiter := m.limiter
+		m.limiterMu.RUnlock()
+		if limiter != nil && !limiter.AllowRequest(r) {
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.HTTP.TLS == nil || *cfg.HTTP.TLS) {
@@ -104,6 +122,62 @@ func (m *Module) Hooks() []core.HookRegistration {
 			Priority: 100,
 			Handler:  m.onStreamDestroy,
 		},
+	}
+}
+
+// OnReload stops segment managers that captured HLS/DASH/LL-HLS policy so
+// subsequent requests recreate them from the new immutable server snapshot.
+// Listener, TLS, CORS, and module enablement changes remain restart-required.
+func (m *Module) OnReload(s *core.Server) error {
+	m.server = s
+	m.updateRateLimiter(s.Config().Limits.RateLimit)
+	next := s.Config().HTTP
+	m.policyMu.Lock()
+	previous := m.policy
+	m.policy = next
+	m.policyMu.Unlock()
+	if reflect.DeepEqual(previous.HLS, next.HLS) && reflect.DeepEqual(previous.DASH, next.DASH) && reflect.DeepEqual(previous.LLHLS, next.LLHLS) {
+		return nil
+	}
+	m.hlsMu.Lock()
+	for key, manager := range m.hlsManagers {
+		manager.Stop()
+		delete(m.hlsManagers, key)
+	}
+	m.hlsMu.Unlock()
+	m.dashMu.Lock()
+	for key, manager := range m.dashManagers {
+		manager.Stop()
+		delete(m.dashManagers, key)
+	}
+	m.dashMu.Unlock()
+	m.llhlsMu.Lock()
+	for key, manager := range m.llhlsManagers {
+		manager.Stop()
+		delete(m.llhlsManagers, key)
+	}
+	m.llhlsMu.Unlock()
+	return nil
+}
+
+func (m *Module) updateRateLimiter(cfg config.RateLimitConfig) {
+	m.limiterMu.RLock()
+	unchanged := m.rateCfg == cfg
+	m.limiterMu.RUnlock()
+	if unchanged {
+		return
+	}
+	var next *ratelimit.Limiter
+	if cfg.Enabled && cfg.Rate > 0 {
+		next = ratelimit.New(cfg.Rate, cfg.Burst)
+	}
+	m.limiterMu.Lock()
+	old := m.limiter
+	m.limiter = next
+	m.rateCfg = cfg
+	m.limiterMu.Unlock()
+	if old != nil {
+		old.Close()
 	}
 }
 
@@ -210,8 +284,12 @@ func (m *Module) Close() error {
 		cancel()
 	}
 
-	if m.limiter != nil {
-		m.limiter.Close()
+	m.limiterMu.Lock()
+	limiter := m.limiter
+	m.limiter = nil
+	m.limiterMu.Unlock()
+	if limiter != nil {
+		limiter.Close()
 	}
 
 	// Stop all HLS managers

@@ -130,7 +130,58 @@ func (s *Stream) Key() string {
 
 // Config returns the stream configuration.
 func (s *Stream) Config() config.StreamConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.config
+}
+
+// UpdatePolicy applies runtime-safe stream policy values. The ring buffer and
+// muxer capacity are intentionally not resized in place; new streams receive
+// those structural values from StreamHub.
+func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfig) {
+	s.mu.Lock()
+	s.config = cfg
+	s.limits = limits
+	if !cfg.GOPCache || cfg.GOPCacheNum <= 0 {
+		s.gopCache = nil
+	} else if len(s.gopCache) > cfg.GOPCacheNum {
+		s.gopCache = append([][]*avframe.AVFrame(nil), s.gopCache[len(s.gopCache)-cfg.GOPCacheNum:]...)
+	}
+	if cfg.AudioCacheMs <= 0 {
+		s.audioCache = nil
+	} else if len(s.audioCache) > 0 {
+		cutoff := s.audioCache[len(s.audioCache)-1].DTS - int64(cfg.AudioCacheMs)
+		first := 0
+		for first < len(s.audioCache) && s.audioCache[first].DTS < cutoff {
+			first++
+		}
+		if first > 0 {
+			s.audioCache = append([]*avframe.AVFrame(nil), s.audioCache[first:]...)
+		}
+	}
+	if s.noPublisherTimer != nil {
+		s.noPublisherTimer.Stop()
+		s.noPublisherTimer = nil
+	}
+	if s.state == StreamStateNoPublisher && cfg.NoPublisherTimeout > 0 {
+		s.noPublisherTimer = time.AfterFunc(cfg.NoPublisherTimeout, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.state == StreamStateNoPublisher {
+				s.state = StreamStateDestroying
+			}
+		})
+	}
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+	s.checkIdleTimeout()
+	feedback := s.feedbackRouter
+	s.mu.Unlock()
+	if feedback != nil {
+		feedback.UpdateConfig(cfg.Feedback)
+	}
 }
 
 // State returns the current stream state.

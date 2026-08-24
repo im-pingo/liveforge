@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -38,6 +39,7 @@ func BuildPayload(eventName string, ctx *core.EventContext) *NotifyPayload {
 
 // HTTPSender delivers webhook notifications to configured endpoints.
 type HTTPSender struct {
+	mu        sync.RWMutex
 	endpoints []config.NotifyEndpointConfig
 	client    *http.Client
 	queue     chan *NotifyPayload
@@ -99,7 +101,10 @@ func (s *HTTPSender) deliver(p *NotifyPayload) {
 		return
 	}
 
-	for _, ep := range s.endpoints {
+	s.mu.RLock()
+	endpoints := append([]config.NotifyEndpointConfig(nil), s.endpoints...)
+	s.mu.RUnlock()
+	for _, ep := range endpoints {
 		if !matchEvent(ep.Events, p.Event) {
 			continue
 		}
@@ -117,6 +122,20 @@ func (s *HTTPSender) deliver(p *NotifyPayload) {
 
 		s.deliverToEndpoint(client, ep, body, retries)
 	}
+}
+
+// UpdateEndpoints publishes a copied endpoint list for subsequent deliveries.
+func (s *HTTPSender) UpdateEndpoints(endpoints []config.NotifyEndpointConfig) {
+	s.mu.Lock()
+	s.endpoints = append([]config.NotifyEndpointConfig(nil), endpoints...)
+	s.mu.Unlock()
+}
+
+// Endpoints returns a copy of the active webhook policy.
+func (s *HTTPSender) Endpoints() []config.NotifyEndpointConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]config.NotifyEndpointConfig(nil), s.endpoints...)
 }
 
 func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndpointConfig, body []byte, retries int) {

@@ -323,7 +323,9 @@ type AuthConfig struct {
 	Enabled   bool           `yaml:"enabled"`
 	Publish   AuthRuleConfig `yaml:"publish"`
 	Subscribe AuthRuleConfig `yaml:"subscribe"`
-	API       APIAuthConfig  `yaml:"api"`
+	// API is the deprecated pre-api.auth management token location. Normalize
+	// migrates it when the current API auth path is not configured.
+	API APIAuthConfig `yaml:"api"`
 }
 
 // AuthRuleConfig holds auth rule for publish or subscribe.
@@ -347,7 +349,15 @@ type CallbackConfig struct {
 
 // APIAuthConfig holds API auth settings.
 type APIAuthConfig struct {
-	BearerToken string `yaml:"bearer_token"`
+	BearerToken string         `yaml:"bearer_token"`
+	Tokens      []APIAuthToken `yaml:"tokens"`
+}
+
+// APIAuthToken binds a named management token to a fixed RBAC role.
+type APIAuthToken struct {
+	Name  string `yaml:"name"`
+	Token string `yaml:"token"`
+	Role  string `yaml:"role"`
 }
 
 // NotifyConfig holds notification settings.
@@ -501,10 +511,18 @@ type APIConfig struct {
 	TLS     *bool         `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 	Auth    APIAuthConfig `yaml:"auth"`
 	Console ConsoleConfig `yaml:"console"`
+	Audit   AuditConfig   `yaml:"audit"`
 }
 
 // ConsoleConfig holds console login credentials.
 type ConsoleConfig struct {
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	Role     string `yaml:"role"`
+}
+
+// AuditConfig controls the bounded in-memory management audit trail. Audit
+// entries are also emitted as structured logs.
+type AuditConfig struct {
+	MaxEntries int `yaml:"max_entries"`
 }
