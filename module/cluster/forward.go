@@ -24,10 +24,10 @@ type ForwardTarget struct {
 	retryDelay time.Duration
 	metrics    *RelayMetrics
 
-	mu        sync.Mutex
-	closed    chan struct{}
-	running   bool
-	startedAt time.Time
+	mu            sync.Mutex
+	closed        chan struct{}
+	attemptActive bool
+	startedAt     time.Time
 }
 
 // NewForwardTarget creates a new forward target.
@@ -52,15 +52,6 @@ func NewForwardTarget(streamKey, targetURL string, stream *core.Stream, transpor
 // Run starts forwarding frames to the target server.
 // It reconnects on failure up to retryMax times with exponential backoff.
 func (ft *ForwardTarget) Run() {
-	ft.mu.Lock()
-	ft.running = true
-	ft.startedAt = time.Now()
-	ft.mu.Unlock()
-	defer func() {
-		ft.mu.Lock()
-		ft.running = false
-		ft.mu.Unlock()
-	}()
 	defer slog.Info("forward target stopped", "module", "cluster",
 		"stream", ft.streamKey, "target", ft.targetURL)
 
@@ -109,17 +100,23 @@ func (ft *ForwardTarget) Run() {
 		}
 
 		protocol := ft.transport.Scheme()
-		relayCtx, observation := observeRelay(ctx)
-		ft.metrics.RelayStarted("forward", protocol)
+		ft.mu.Lock()
+		ft.attemptActive = true
+		ft.startedAt = time.Now()
+		ft.mu.Unlock()
+		relayCtx := observeRelay(ctx, ft.metrics, relayDirectionForward, protocol)
+		ft.metrics.RelayStarted(relayDirectionForward, protocol)
 		err := ft.transport.Push(relayCtx, ft.targetURL, ft.stream)
+		ft.mu.Lock()
+		ft.attemptActive = false
+		ft.mu.Unlock()
 		cancelled := ctx.Err() != nil
 		metricErr := err
 		if cancelled {
 			metricErr = nil
 		}
-		ft.metrics.RelayStopped("forward", protocol)
-		ft.metrics.RecordLatency(protocol, observation.Latency().Seconds())
-		ft.metrics.RecordPush(protocol, observation.Bytes(), metricErr)
+		ft.metrics.RelayStopped(relayDirectionForward, protocol)
+		ft.metrics.RecordPush(protocol, 0, metricErr)
 		cancel()
 
 		if ft.pool != nil {
@@ -149,7 +146,7 @@ func (ft *ForwardTarget) Run() {
 func (ft *ForwardTarget) statusSnapshot() (RelayStatus, bool) {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
-	if !ft.running {
+	if !ft.attemptActive {
 		return RelayStatus{}, false
 	}
 	return RelayStatus{

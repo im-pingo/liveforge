@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,9 +28,9 @@ type blockingRelayTransport struct {
 func (t *blockingRelayTransport) Scheme() string { return t.scheme }
 
 func (t *blockingRelayTransport) Push(ctx context.Context, _ string, _ *core.Stream) error {
-	t.once.Do(func() { close(t.started) })
 	recordRelayBytes(ctx, t.bytes)
 	markRelayConnected(ctx)
+	t.once.Do(func() { close(t.started) })
 	select {
 	case <-t.release:
 		return t.err
@@ -43,6 +44,28 @@ func (t *blockingRelayTransport) Pull(ctx context.Context, _ string, _ *core.Str
 }
 
 func (t *blockingRelayTransport) Close() error { return nil }
+
+type retryRelayTransport struct {
+	attempts      atomic.Int32
+	firstReturned chan struct{}
+}
+
+func (t *retryRelayTransport) Scheme() string { return "test" }
+
+func (t *retryRelayTransport) Push(ctx context.Context, _ string, _ *core.Stream) error {
+	if t.attempts.Add(1) == 1 {
+		close(t.firstReturned)
+		return errors.New("relay attempt failed")
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (t *retryRelayTransport) Pull(ctx context.Context, _ string, _ *core.Stream) error {
+	return t.Push(ctx, "", nil)
+}
+
+func (t *retryRelayTransport) Close() error { return nil }
 
 func TestRelayMetricsPacketLossUsesBoundedLabels(t *testing.T) {
 	reg := prometheus.NewRegistry()
@@ -146,6 +169,123 @@ func TestForwardTargetRecordsLifecycleMetrics(t *testing.T) {
 	target.Close()
 }
 
+func TestForwardTargetExportsBytesWhileTransportIsActive(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := NewRelayMetricsWithRegistry(reg)
+	transport := &blockingRelayTransport{
+		scheme:  "test",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		bytes:   4,
+	}
+	hub, _ := newTestHub()
+	stream, _ := hub.GetOrCreate("live/test")
+	target := NewForwardTarget("live/test", "test://peer/live/test", stream, transport, nil, nil, 1, time.Millisecond, metrics)
+	done := make(chan struct{})
+	go func() {
+		target.Run()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		target.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("forward target did not stop during cleanup")
+		}
+	})
+
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("forward transport did not start")
+	}
+
+	expected := `
+		# HELP cluster_relay_bytes_total Total bytes relayed.
+		# TYPE cluster_relay_bytes_total counter
+		cluster_relay_bytes_total{direction="forward",protocol="test"} 4
+	`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "cluster_relay_bytes_total"); err != nil {
+		t.Fatalf("live forward byte metric: %v", err)
+	}
+}
+
+func TestForwardTargetExportsConnectionLatencyWhileTransportIsActive(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := NewRelayMetricsWithRegistry(reg)
+	transport := &blockingRelayTransport{
+		scheme:  "test",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	hub, _ := newTestHub()
+	stream, _ := hub.GetOrCreate("live/test")
+	target := NewForwardTarget("live/test", "test://peer/live/test", stream, transport, nil, nil, 1, time.Millisecond, metrics)
+	done := make(chan struct{})
+	go func() {
+		target.Run()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		target.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("forward target did not stop during cleanup")
+		}
+	})
+
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("forward transport did not start")
+	}
+
+	if got := testutil.CollectAndCount(metrics.latency); got != 1 {
+		t.Fatalf("live connection latency series = %d, want 1", got)
+	}
+}
+
+func TestForwardTargetBackoffIsNotReportedAsActiveRelay(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := NewRelayMetricsWithRegistry(reg)
+	transport := &retryRelayTransport{firstReturned: make(chan struct{})}
+	hub, _ := newTestHub()
+	stream, _ := hub.GetOrCreate("live/test")
+	target := NewForwardTarget("live/test", "test://peer/live/test", stream, transport, nil, nil, 2, time.Second, metrics)
+	done := make(chan struct{})
+	go func() {
+		target.Run()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		target.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("forward target did not stop during cleanup")
+		}
+	})
+
+	select {
+	case <-transport.firstReturned:
+	case <-time.After(time.Second):
+		t.Fatal("first relay attempt did not return")
+	}
+	deadline := time.Now().Add(time.Second)
+	for testutil.ToFloat64(metrics.active.WithLabelValues("forward", "test")) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("relay did not enter backoff")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if status, ok := target.statusSnapshot(); ok {
+		t.Fatalf("backoff worker reported as active relay: %+v", status)
+	}
+}
+
 type writingRelayTransport struct{}
 
 func (t *writingRelayTransport) Scheme() string { return "write" }
@@ -179,6 +319,49 @@ func TestOriginPullRecordsBytesFromActualStreamWrite(t *testing.T) {
 	`
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "cluster_relay_bytes_total"); err != nil {
 		t.Fatalf("origin byte metric: %v", err)
+	}
+}
+
+func TestOriginPullExportsMetricsWhileTransportIsActive(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := NewRelayMetricsWithRegistry(reg)
+	transport := &blockingRelayTransport{
+		scheme:  "test",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		bytes:   7,
+	}
+	hub, _ := newTestHub()
+	stream, _ := hub.GetOrCreate("live/test")
+	registry := newTestRegistry()
+	registry.Register(transport)
+	pull := NewOriginPull("live/test", nil, stream, registry, nil, nil, 1, time.Millisecond, time.Second, metrics)
+	done := make(chan error, 1)
+	go func() { done <- pull.pullOnce("test://peer/live/test") }()
+	t.Cleanup(func() {
+		pull.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("origin pull did not stop during cleanup")
+		}
+	})
+
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("origin transport did not start")
+	}
+	expected := `
+		# HELP cluster_relay_bytes_total Total bytes relayed.
+		# TYPE cluster_relay_bytes_total counter
+		cluster_relay_bytes_total{direction="origin",protocol="test"} 7
+	`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "cluster_relay_bytes_total"); err != nil {
+		t.Fatalf("live origin byte metric: %v", err)
+	}
+	if got := testutil.CollectAndCount(metrics.latency); got != 1 {
+		t.Fatalf("live origin connection latency series = %d, want 1", got)
 	}
 }
 
@@ -333,7 +516,7 @@ func TestModuleClusterStatusCapsRelayAndPeerSnapshots(t *testing.T) {
 		transport := &blockingRelayTransport{scheme: "test"}
 		target := NewForwardTarget(streamKey, fmt.Sprintf("test://peer/%03d", i), stream, transport, health, nil, 1, time.Millisecond)
 		target.mu.Lock()
-		target.running = true
+		target.attemptActive = true
 		target.startedAt = time.Now()
 		target.mu.Unlock()
 		fm.active[streamKey] = []*ForwardTarget{target}

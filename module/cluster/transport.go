@@ -19,14 +19,20 @@ type relayObservationContextKey struct{}
 
 type relayObservation struct {
 	started   time.Time
-	bytes     atomic.Int64
+	metrics   *RelayMetrics
+	direction string
+	protocol  string
 	connected atomic.Bool
-	latencyNS atomic.Int64
 }
 
-func observeRelay(ctx context.Context) (context.Context, *relayObservation) {
-	observation := &relayObservation{started: time.Now()}
-	return context.WithValue(ctx, relayObservationContextKey{}, observation), observation
+func observeRelay(ctx context.Context, metrics *RelayMetrics, direction, protocol string) context.Context {
+	observation := &relayObservation{
+		started:   time.Now(),
+		metrics:   metrics,
+		direction: direction,
+		protocol:  protocol,
+	}
+	return context.WithValue(ctx, relayObservationContextKey{}, observation)
 }
 
 func recordRelayBytes(ctx context.Context, count int64) {
@@ -34,7 +40,7 @@ func recordRelayBytes(ctx context.Context, count int64) {
 		return
 	}
 	if observation, ok := ctx.Value(relayObservationContextKey{}).(*relayObservation); ok {
-		observation.bytes.Add(count)
+		observation.metrics.recordBytes(observation.direction, observation.protocol, count)
 	}
 }
 
@@ -43,16 +49,7 @@ func markRelayConnected(ctx context.Context) {
 	if !ok || !observation.connected.CompareAndSwap(false, true) {
 		return
 	}
-	observation.latencyNS.Store(time.Since(observation.started).Nanoseconds())
-}
-
-func (o *relayObservation) Bytes() int64 { return o.bytes.Load() }
-
-func (o *relayObservation) Latency() time.Duration {
-	if o.connected.Load() {
-		return time.Duration(o.latencyNS.Load())
-	}
-	return time.Since(o.started)
+	observation.metrics.RecordLatency(observation.protocol, time.Since(observation.started).Seconds())
 }
 
 func closeOnContextDone(ctx context.Context, closer io.Closer) func() {

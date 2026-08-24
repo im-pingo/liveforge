@@ -147,17 +147,16 @@ func (op *OriginPull) pullOnce(sourceURL string) error {
 	}()
 
 	protocol := transport.Scheme()
-	relayCtx, observation := observeRelay(ctx)
-	op.metrics.RelayStarted("origin", protocol)
+	relayCtx := observeRelay(ctx, op.metrics, relayDirectionOrigin, protocol)
+	op.metrics.RelayStarted(relayDirectionOrigin, protocol)
 	err = transport.Pull(relayCtx, sourceURL, op.stream)
 	cancelled := ctx.Err() != nil
 	metricErr := err
 	if cancelled {
 		metricErr = nil
 	}
-	op.metrics.RelayStopped("origin", protocol)
-	op.metrics.RecordLatency(protocol, observation.Latency().Seconds())
-	op.metrics.RecordPull(protocol, observation.Bytes(), metricErr)
+	op.metrics.RelayStopped(relayDirectionOrigin, protocol)
+	op.metrics.RecordPull(protocol, 0, metricErr)
 	if cancelled {
 		return nil
 	}

@@ -5,6 +5,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+const (
+	relayDirectionForward = "forward"
+	relayDirectionOrigin  = "origin"
+)
+
 // RelayMetrics holds Prometheus metrics for cluster relay transports.
 type RelayMetrics struct {
 	active     *prometheus.GaugeVec
@@ -99,13 +104,20 @@ func (m *RelayMetrics) RelayStopped(direction, protocol string) {
 	m.active.WithLabelValues(direction, protocol).Dec()
 }
 
+func (m *RelayMetrics) recordBytes(direction, protocol string, bytes int64) {
+	if m == nil || bytes <= 0 {
+		return
+	}
+	m.bytesTotal.WithLabelValues(direction, protocol).Add(float64(bytes))
+}
+
 // RecordPush records bytes forwarded and any errors for a push (forward)
 // operation.
 func (m *RelayMetrics) RecordPush(protocol string, bytes int64, err error) {
 	if m == nil {
 		return
 	}
-	m.bytesTotal.WithLabelValues("forward", protocol).Add(float64(bytes))
+	m.recordBytes(relayDirectionForward, protocol, bytes)
 	if err != nil {
 		m.errors.WithLabelValues("forward", protocol, "connection").Inc()
 	}
@@ -117,7 +129,7 @@ func (m *RelayMetrics) RecordPull(protocol string, bytes int64, err error) {
 	if m == nil {
 		return
 	}
-	m.bytesTotal.WithLabelValues("origin", protocol).Add(float64(bytes))
+	m.recordBytes(relayDirectionOrigin, protocol, bytes)
 	if err != nil {
 		m.errors.WithLabelValues("origin", protocol, "connection").Inc()
 	}

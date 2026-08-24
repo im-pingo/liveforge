@@ -180,6 +180,12 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 		})
 		time.Sleep(33 * time.Millisecond)
 	}
+	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("forward", "rtmp")); got <= 0 {
+		t.Fatalf("live forward RTMP bytes = %v, want > 0", got)
+	}
+	if got := testutil.CollectAndCount(metrics.latency); got != 1 {
+		t.Fatalf("live forward RTMP connection latency series = %d, want 1", got)
+	}
 
 	ft.Close()
 
@@ -187,9 +193,6 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Error("forward target did not stop within timeout")
-	}
-	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("forward", "rtmp")); got <= 0 {
-		t.Fatalf("forward RTMP bytes = %v, want > 0", got)
 	}
 }
 
@@ -227,6 +230,12 @@ func TestOriginPullFromMockServer(t *testing.T) {
 
 	// Wait for some frames to be received
 	time.Sleep(500 * time.Millisecond)
+	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("origin", "rtmp")); got <= 0 {
+		t.Fatalf("live origin RTMP bytes = %v, want > 0", got)
+	}
+	if got := testutil.CollectAndCount(metrics.latency); got != 1 {
+		t.Fatalf("live origin RTMP connection latency series = %d, want 1", got)
+	}
 	op.Close()
 
 	select {
@@ -238,9 +247,6 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	// Check that frames were written to the stream
 	if stream.VideoSeqHeader() != nil {
 		t.Log("video sequence header received")
-	}
-	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("origin", "rtmp")); got <= 0 {
-		t.Fatalf("origin RTMP bytes = %v, want > 0", got)
 	}
 }
 
@@ -419,13 +425,6 @@ func handleMockOriginServer(conn net.Conn) {
 						time.Sleep(33 * time.Millisecond)
 					}
 
-					// Send unpublish notification
-					unpub, _ := rtmp.AMF0Encode("onStatus", float64(0), nil,
-						map[string]any{"code": "NetStream.Play.UnpublishNotify"},
-					)
-					cw.WriteMessage(5, &rtmp.Message{
-						TypeID: rtmp.MsgAMF0Command, Length: uint32(len(unpub)), StreamID: 1, Payload: unpub,
-					})
 				}()
 			}
 		}
