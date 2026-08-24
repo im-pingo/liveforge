@@ -306,16 +306,28 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", fmt.Errorf("send INVITE: %w", err)
 	}
 
-	// Wait for final response
+	// Prefer an already-completed transaction over caller cancellation. The
+	// response is stored before Done closes, so the cancellation branch also
+	// probes Response to cover that publication window.
+	var resp *sip.Response
 	select {
 	case <-ctx.Done():
-		invTx.Close()
-		gw.metrics.setupFailures.Add(1)
-		return "", ctx.Err()
+		select {
+		case <-invTx.Done():
+		default:
+			resp = invTx.Response()
+			if resp == nil {
+				invTx.Close()
+				gw.metrics.setupFailures.Add(1)
+				return "", ctx.Err()
+			}
+		}
 	case <-invTx.Done():
 	}
 
-	resp := invTx.Response()
+	if resp == nil {
+		resp = invTx.Response()
+	}
 	if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		gw.metrics.setupFailures.Add(1)
 		if resp != nil {
@@ -337,6 +349,10 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	if err != nil {
 		gw.metrics.setupFailures.Add(1)
 		return "", fmt.Errorf("send ACK: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		gw.metrics.setupFailures.Add(1)
+		return "", err
 	}
 
 	answerSDP, err := sdp.Parse(resp.Body())
@@ -392,14 +408,15 @@ func parseTargetURI(target, localDomain string) (sip.Uri, error) {
 	if target == "" {
 		return sip.Uri{}, ErrTargetRequired
 	}
-	if target != strings.TrimSpace(target) {
+	if !validSIPURIASCII(target) {
 		return sip.Uri{}, fmt.Errorf("%w: malformed target", ErrInvalidTargetURI)
 	}
 
 	if strings.HasPrefix(strings.ToLower(target), "sip:") {
 		var uri sip.Uri
 		if err := sip.ParseUri(target, &uri); err != nil || uri.Scheme != "sip" || uri.User == "" || uri.Host == "" ||
-			uri.Password != "" || uri.Wildcard || uri.HierarhicalSlashes || uri.Port < 0 || uri.Port > 65535 {
+			uri.Password != "" || uri.Wildcard || uri.HierarhicalSlashes || uri.Port < 0 || uri.Port > 65535 ||
+			(explicitSIPPort(target) && uri.Port == 0) || !validSIPUser(uri.User) || !validSIPHost(uri.Host) {
 			return sip.Uri{}, fmt.Errorf("%w: malformed target", ErrInvalidTargetURI)
 		}
 		return uri, nil
@@ -409,6 +426,79 @@ func parseTargetURI(target, localDomain string) (sip.Uri, error) {
 		return sip.Uri{}, fmt.Errorf("%w: malformed target", ErrInvalidTargetURI)
 	}
 	return sip.Uri{Scheme: "sip", User: target, Host: localDomain}, nil
+}
+
+func validSIPURIASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] <= 0x20 || value[i] >= 0x7f {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func explicitSIPPort(target string) bool {
+	at := strings.LastIndexByte(target, '@')
+	if at < 0 || at+1 == len(target) {
+		return false
+	}
+	hostPort := target[at+1:]
+	if end := strings.IndexAny(hostPort, ";?"); end >= 0 {
+		hostPort = hostPort[:end]
+	}
+	if strings.HasPrefix(hostPort, "[") {
+		closeBracket := strings.IndexByte(hostPort, ']')
+		return closeBracket >= 0 && closeBracket+1 < len(hostPort) && hostPort[closeBracket+1] == ':'
+	}
+	return strings.ContainsRune(hostPort, ':')
+}
+
+func validSIPUser(user string) bool {
+	for i := 0; i < len(user); i++ {
+		char := user[i]
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		case strings.ContainsRune("-_.!~*'()&=+$,;?/", rune(char)):
+		case char == '%' && i+2 < len(user) && isHex(user[i+1]) && isHex(user[i+2]):
+			i += 2
+		default:
+			return false
+		}
+	}
+	return user != ""
+}
+
+func isHex(char byte) bool {
+	return char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F'
+}
+
+func validSIPHost(host string) bool {
+	if strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]") {
+		if len(host) < 3 || host[0] != '[' || host[len(host)-1] != ']' {
+			return false
+		}
+		return net.ParseIP(host[1:len(host)-1]) != nil
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			char := label[i]
+			if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validBareSIPUser(target string) bool {

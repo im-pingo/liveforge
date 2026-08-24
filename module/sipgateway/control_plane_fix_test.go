@@ -145,13 +145,31 @@ func TestGatewayRejectsMalformedSIPURI(t *testing.T) {
 	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
 	stream, _ := hub.GetOrCreate("live/uri-invalid")
 	publishTestAudio(t, stream, avframe.CodecG711A)
+	invites := 0
+	gw.sendInvite = func(context.Context, *sip.Request) (inviteDialog, error) {
+		invites++
+		return nil, errors.New("unexpected INVITE")
+	}
 
-	for _, target := range []string{"alice@example.com", "sip:alice", "sip:@example.com", "sip:alice@example.com:70000", "http:alice@example.com"} {
+	for _, target := range []string{
+		"alice@example.com",
+		"sip:alice",
+		"sip:@example.com",
+		"sip:alice@example.com:0",
+		"sip:alice@example.com:70000",
+		"sip:alice\r\nInjected@example.com",
+		"sip:ali ce@example.com",
+		"sip:alice@invalid_host.example.com",
+		"http:alice@example.com",
+	} {
 		t.Run(target, func(t *testing.T) {
 			if _, err := gw.Dial(context.Background(), target, stream.Key()); !errors.Is(err, ErrInvalidTargetURI) {
 				t.Fatalf("Dial(%q) error = %v, want ErrInvalidTargetURI", target, err)
 			}
 		})
+	}
+	if invites != 0 {
+		t.Fatalf("malformed targets sent %d INVITEs, want 0", invites)
 	}
 }
 
@@ -208,18 +226,44 @@ func TestGatewayAcknowledges2xxAfterCallerContextCancellation(t *testing.T) {
 		return dialog, nil
 	}
 
-	callID, err := gw.Dial(ctx, "alice", stream.Key())
-	if err != nil {
-		t.Fatalf("Dial after 2xx caller cancellation: %v", err)
-	}
-	if err := gw.Hangup(callID); err != nil {
-		t.Fatalf("Hangup: %v", err)
+	if _, err := gw.Dial(ctx, "alice", stream.Key()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Dial error = %v, want context.Canceled", err)
 	}
 	dialog.mu.Lock()
 	acks, byes := dialog.acks, dialog.byes
 	dialog.mu.Unlock()
 	if acks != 1 || byes != 1 {
 		t.Fatalf("dialog signaling ACK=%d BYE=%d, want 1 each", acks, byes)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("ActiveCalls = %d, want 0 after caller cancellation", got)
+	}
+}
+
+func TestGatewayFinalizesReady2xxWhenCallerAlreadyCanceled(t *testing.T) {
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	stream, _ := hub.GetOrCreate("live/simultaneous-ready")
+	publishTestAudio(t, stream, avframe.CodecG711A)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dialog := &fakeInviteDialog{done: make(chan struct{})}
+	close(dialog.done)
+	gw.sendInvite = func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+		dialog.response = sip.NewResponseFromRequest(req, 200, "OK", []byte(testAudioOffer))
+		return dialog, nil
+	}
+
+	if _, err := gw.Dial(ctx, "alice", stream.Key()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Dial error = %v, want context.Canceled", err)
+	}
+	dialog.mu.Lock()
+	acks, byes := dialog.acks, dialog.byes
+	dialog.mu.Unlock()
+	if acks != 1 || byes != 1 {
+		t.Fatalf("simultaneous ready signaling ACK=%d BYE=%d, want 1 each", acks, byes)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("ActiveCalls = %d, want 0 after canceled 2xx", got)
 	}
 }
 

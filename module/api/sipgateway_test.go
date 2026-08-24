@@ -93,13 +93,21 @@ func TestSIPGatewayMalformedTargetIsBadRequest(t *testing.T) {
 	stub := &sipGatewayStub{dialErr: sipgateway.ErrInvalidTargetURI}
 	server.RegisterModule(stub)
 	h := NewHandlers(server)
-	body := []byte(`{"target_uri":"sip:alice","stream_key":"live/audio"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sipgateway/calls", bytes.NewReader(body))
-	w := httptest.NewRecorder()
 
-	h.handleSIPGatewayDial(w, req)
+	for _, target := range []string{"sip:alice\r\nInjected@example.com", "sip:alice@example.com:0"} {
+		t.Run(target, func(t *testing.T) {
+			body, err := json.Marshal(map[string]string{"target_uri": target, "stream_key": "live/audio"})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sipgateway/calls", bytes.NewReader(body))
+			w := httptest.NewRecorder()
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("malformed target status = %d body=%s, want 400", w.Code, w.Body.String())
+			h.handleSIPGatewayDial(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("malformed target status = %d body=%s, want 400", w.Code, w.Body.String())
+			}
+		})
 	}
 }
