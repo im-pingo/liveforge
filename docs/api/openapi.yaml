@@ -26,8 +26,6 @@ info:
 servers:
   - url: http://127.0.0.1:8090
     description: Default local management listener
-  - url: https://127.0.0.1:8443
-    description: Default local WebRTC signaling listener
 security:
   - bearerAuth: []
   - consoleSession: []
@@ -55,6 +53,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/HealthResponse'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/server/info:
     get:
       tags: [server]
@@ -487,9 +486,9 @@ paths:
         '404': {$ref: '#/components/responses/GBNotFound'}
         '429': {$ref: '#/components/responses/GBRateLimited'}
         '500': {$ref: '#/components/responses/GBInternalError'}
-  /api/v1/gb28181/channels/{channelId}/catalog:
+  /api/v1/gb28181/channels/{channelOrDeviceId}/catalog:
     parameters:
-      - {$ref: '#/components/parameters/ChannelId'}
+      - {$ref: '#/components/parameters/ChannelOrDeviceId'}
     post:
       tags: [gb28181]
       operationId: queryGB28181Catalog
@@ -544,6 +543,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/RelayNotFound'}
         '406': {$ref: '#/components/responses/RelayNotAcceptable'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/RelayUnavailable'}
   /api/relay/pull:
     post:
@@ -561,7 +561,7 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/RelayNotFound'}
         '406': {$ref: '#/components/responses/RelayNotAcceptable'}
-        '503': {$ref: '#/components/responses/RelayUnavailable'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/relay/gb/push:
     post:
       tags: [internal-cluster]
@@ -576,6 +576,7 @@ paths:
         '400': {$ref: '#/components/responses/RelayBadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/RelayUnavailable'}
   /api/relay/gb/pull:
     post:
@@ -592,7 +593,13 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/RelayNotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /webrtc/whip/{streamKey}:
+    servers:
+      - url: '{scheme}://127.0.0.1:8443'
+        description: Local WebRTC signaling listener; the checked-in sample uses plain HTTP.
+        variables:
+          scheme: {default: http, enum: [http, https], description: Select https when WebRTC TLS is enabled.}
     parameters:
       - {$ref: '#/components/parameters/StreamKey'}
     post:
@@ -614,8 +621,15 @@ paths:
       operationId: optionsWHIP
       summary: Handle CORS preflight
       security: []
-      responses: {'204': {description: CORS preflight accepted}}
+      responses:
+        '204': {description: CORS preflight accepted}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
   /webrtc/whep/{streamKey}:
+    servers:
+      - url: '{scheme}://127.0.0.1:8443'
+        description: Local WebRTC signaling listener; the checked-in sample uses plain HTTP.
+        variables:
+          scheme: {default: http, enum: [http, https], description: Select https when WebRTC TLS is enabled.}
     parameters:
       - {$ref: '#/components/parameters/StreamKey'}
     post:
@@ -638,8 +652,15 @@ paths:
       operationId: optionsWHEP
       summary: Handle CORS preflight
       security: []
-      responses: {'204': {description: CORS preflight accepted}}
+      responses:
+        '204': {description: CORS preflight accepted}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
   /webrtc/session/{sessionId}:
+    servers:
+      - url: '{scheme}://127.0.0.1:8443'
+        description: Local WebRTC signaling listener; the checked-in sample uses plain HTTP.
+        variables:
+          scheme: {default: http, enum: [http, https], description: Select https when WebRTC TLS is enabled.}
     parameters:
       - {$ref: '#/components/parameters/SessionId'}
     delete:
@@ -667,7 +688,9 @@ paths:
       operationId: optionsWebRTCSession
       summary: Handle CORS preflight
       security: []
-      responses: {'204': {description: CORS preflight accepted}}
+      responses:
+        '204': {description: CORS preflight accepted}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque management token}
@@ -679,6 +702,7 @@ components:
     RecordingPath: {name: recordingPath, in: path, required: true, description: URL-decoded recording ID relative to configured storage; traversal is rejected., schema: {type: string}}
     DeviceId: {name: deviceId, in: path, required: true, schema: {type: string}}
     ChannelId: {name: channelId, in: path, required: true, schema: {type: string}}
+    ChannelOrDeviceId: {name: channelOrDeviceId, in: path, required: true, description: A channel ID (resolved to its parent device) or a device ID., schema: {type: string}}
     SessionId: {name: sessionId, in: path, required: true, schema: {type: string}}
     CallId: {name: callId, in: path, required: true, schema: {type: string}}
   responses:
