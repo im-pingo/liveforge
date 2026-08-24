@@ -45,6 +45,7 @@ type RTPTransport struct {
 	cfg     config.ClusterRTPConfig
 	ports   *portalloc.PortAllocator
 	hub     *core.StreamHub
+	server  *core.Server
 	metrics *RelayMetrics
 }
 
@@ -124,9 +125,10 @@ func NewRTPTransport(cfg config.ClusterRTPConfig, s *core.Server) *RTPTransport 
 	}
 
 	t := &RTPTransport{
-		cfg:   cfg,
-		ports: ports,
-		hub:   s.StreamHub(),
+		cfg:    cfg,
+		ports:  ports,
+		hub:    s.StreamHub(),
+		server: s,
 	}
 
 	// Register signaling handlers.
@@ -162,7 +164,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	// POST SDP offer to signaling endpoint.
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s", host, t.cfg.SignalingPath, url.QueryEscape(streamKey))
-	answerBody, err := postSDP(ctx, sigURL, offerSDP)
+	answerBody, err := t.postSDP(ctx, sigURL, offerSDP)
 	if err != nil {
 		return fmt.Errorf("signaling POST to %s: %w", sigURL, err)
 	}
@@ -362,7 +364,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 
 	// POST SDP offer to signaling endpoint.
 	sigURL := fmt.Sprintf("http://%s%s/pull?stream=%s", host, t.cfg.SignalingPath, url.QueryEscape(streamKey))
-	answerBody, err := postSDP(ctx, sigURL, offerSDP)
+	answerBody, err := t.postSDP(ctx, sigURL, offerSDP)
 	if err != nil {
 		return fmt.Errorf("signaling POST to %s: %w", sigURL, err)
 	}
@@ -885,13 +887,16 @@ func parseRTPURL(rawURL string) (host, streamKey string, err error) {
 	return host, streamKey, nil
 }
 
-// postSDP posts SDP data to a URL and returns the response body.
-func postSDP(ctx context.Context, sigURL string, sdpData []byte) ([]byte, error) {
+// postSDP posts SDP data to a peer using the current management credential.
+func (t *RTPTransport) postSDP(ctx context.Context, sigURL string, sdpData []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sigURL, bytes.NewReader(sdpData))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/sdp")
+	if err := authorizePeerRequest(req, t.server); err != nil {
+		return nil, fmt.Errorf("authorize peer signaling: %w", err)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

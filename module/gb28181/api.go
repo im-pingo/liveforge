@@ -26,6 +26,7 @@ func registerAPI(s *core.Server, m *Module) {
 	// Channels
 	s.RegisterAPIHandler("GET "+apiPrefix+"/channels", http.HandlerFunc(m.apiListChannels))
 	s.RegisterAPIHandler("POST "+apiPrefix+"/channels/", http.HandlerFunc(m.apiChannelAction))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/channels/", http.HandlerFunc(m.apiChannelAction))
 
 	// Sessions
 	s.RegisterAPIHandler("GET "+apiPrefix+"/sessions", http.HandlerFunc(m.apiListSessions))

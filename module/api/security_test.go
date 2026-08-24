@@ -397,6 +397,52 @@ func TestGB28181MutationsUseExplicitPermissionsAndAuditThroughRealMux(t *testing
 	}
 }
 
+func TestGB28181StopPermissionThroughRealMux(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.API.Auth.Tokens = []config.APIAuthToken{
+		{Name: "readonly", Token: "view-token", Role: "viewer"},
+		{Name: "operations", Token: "ops-token", Role: "operator"},
+	}
+	server := core.NewServer(cfg)
+	mutations := 0
+	server.RegisterAPIHandler("DELETE /api/v1/gb28181/channels/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mutations++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	audit := NewAuditStore(16)
+	mux := http.NewServeMux()
+	registerRoutes(mux, server, audit)
+	handler := buildSecurityHandler(mux, server, audit)
+
+	for _, action := range []string{"play", "playback"} {
+		t.Run(action, func(t *testing.T) {
+			before := mutations
+			for _, request := range []struct {
+				token string
+				want  int
+			}{
+				{token: "view-token", want: http.StatusForbidden},
+				{token: "ops-token", want: http.StatusNoContent},
+			} {
+				req := httptest.NewRequest(http.MethodDelete, "/api/v1/gb28181/channels/channel-1/"+action, nil)
+				req.Header.Set("Authorization", "Bearer "+request.token)
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				if w.Code != request.want {
+					t.Fatalf("token=%q status=%d want=%d body=%s", request.token, w.Code, request.want, w.Body.String())
+				}
+				entry := audit.Entries()[len(audit.Entries())-1]
+				if entry.Action != "gb28181:control" {
+					t.Fatalf("token=%q action=%q want gb28181:control", request.token, entry.Action)
+				}
+			}
+			if mutations != before+1 {
+				t.Fatalf("handler mutations=%d want=%d", mutations, before+1)
+			}
+		})
+	}
+}
+
 func TestRateLimitedDestructiveRequestIsAudited(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.API.Auth.BearerToken = "admin-token"

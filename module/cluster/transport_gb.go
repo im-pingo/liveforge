@@ -25,9 +25,10 @@ import (
 // Uses SDP-over-HTTP signaling similar to RTPTransport, but encapsulates
 // frames in MPEG-PS format within RTP packets.
 type GBTransport struct {
-	cfg   config.ClusterGBConfig
-	ports *portalloc.PortAllocator
-	hub   *core.StreamHub
+	cfg    config.ClusterGBConfig
+	ports  *portalloc.PortAllocator
+	hub    *core.StreamHub
+	server *core.Server
 }
 
 // NewGBTransport creates a new GB28181 relay transport.
@@ -53,9 +54,10 @@ func NewGBTransport(cfg config.ClusterGBConfig, s *core.Server) *GBTransport {
 	}
 
 	t := &GBTransport{
-		cfg:   cfg,
-		ports: ports,
-		hub:   s.StreamHub(),
+		cfg:    cfg,
+		ports:  ports,
+		hub:    s.StreamHub(),
+		server: s,
 	}
 
 	// Register signaling handlers.
@@ -89,24 +91,12 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s&port=%d",
 		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sigURL, nil)
+	body, err := t.postSignal(ctx, sigURL)
 	if err != nil {
 		return fmt.Errorf("signaling request: %w", err)
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec
-	if err != nil {
-		return fmt.Errorf("signaling request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("signaling rejected: %d %s", resp.StatusCode, string(body))
 	}
 
 	// Read remote port from response
-	body, _ := io.ReadAll(resp.Body)
 	remotePort, _ := strconv.Atoi(string(bytes.TrimSpace(body)))
 	if remotePort == 0 {
 		return fmt.Errorf("invalid remote port from signaling")
@@ -232,20 +222,8 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 	sigURL := fmt.Sprintf("http://%s%s/pull?stream=%s&port=%d",
 		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sigURL, nil)
-	if err != nil {
+	if _, err := t.postSignal(ctx, sigURL); err != nil {
 		return fmt.Errorf("signaling request: %w", err)
-	}
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec
-	if err != nil {
-		return fmt.Errorf("signaling request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("signaling rejected: %d %s", resp.StatusCode, string(body))
 	}
 
 	slog.Info("gb relay pull started", "module", "cluster", "source", sourceURL, "local_port", rtpPort)
@@ -319,6 +297,30 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 			psBuf = psBuf[:0]
 		}
 	}
+}
+
+func (t *GBTransport) postSignal(ctx context.Context, sigURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sigURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	if err := authorizePeerRequest(req, t.server); err != nil {
+		return nil, fmt.Errorf("authorize peer signaling: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read signaling response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("signaling rejected: %d %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 func (t *GBTransport) Close() error { return nil }

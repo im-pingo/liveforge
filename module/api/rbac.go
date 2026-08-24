@@ -96,7 +96,7 @@ func permissionForRequest(r *http.Request) string {
 		return "gb28181:delete"
 	case r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/gb28181/channels/"):
 		return "gb28181:control"
-	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/v1/gb28181/channels/") && strings.HasSuffix(p, "/play"):
+	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/v1/gb28181/channels/") && (strings.HasSuffix(p, "/play") || strings.HasSuffix(p, "/playback")):
 		return "gb28181:control"
 	case strings.HasPrefix(p, "/api/v1/gb28181/") && r.Method != http.MethodGet:
 		return "gb28181:manage"

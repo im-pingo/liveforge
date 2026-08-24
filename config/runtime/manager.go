@@ -355,7 +355,12 @@ func (m *Manager) callbackLoop() {
 }
 
 func (m *Manager) enqueueCallback(set ChangeSet) {
-	m.pendingCallback.Store(&set)
+	previous := m.pendingCallback.Swap(&set)
+	if previous != nil {
+		m.statusMu.Lock()
+		m.status.DroppedCallbacks++
+		m.statusMu.Unlock()
+	}
 	select {
 	case m.callbackCh <- struct{}{}:
 	default:

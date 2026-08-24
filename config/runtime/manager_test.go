@@ -281,8 +281,8 @@ func TestManagerCoalescesNotificationsWithoutLosingLatestSnapshot(t *testing.T) 
 		select {
 		case version := <-notified:
 			if version == "three" {
-				if got := m.Status().DroppedCallbacks; got != 0 {
-					t.Fatalf("dropped callbacks=%d want=0", got)
+				if got := m.Status().DroppedCallbacks; got != 1 {
+					t.Fatalf("dropped callbacks=%d want=1", got)
 				}
 				return
 			}
