@@ -74,6 +74,10 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 		},
 	})
 	for _, requestPath := range []string{
+		"/dvr/live",
+		"/dvr/live/./camera.m3u8",
+		"/dvr/live/../camera.m3u8",
+		"/dvr/live//camera.m3u8",
 		"/dvr/live/camera.m3u",
 		"/dvr/live/.m3u8",
 		"/dvr/%2e%2e/camera.m3u8",
@@ -88,6 +92,9 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 		if response.status != http.StatusNotFound {
 			t.Errorf("GET %s status=%d want=%d body=%q", requestPath, response.status, http.StatusNotFound, response.body)
 		}
+		if response.location != "" {
+			t.Errorf("GET %s returned redirect Location %q", requestPath, response.location)
+		}
 	}
 	if got := authorizationCalls.Load(); got != 0 {
 		t.Fatalf("malformed routes reached authorization %d time(s)", got)
@@ -95,8 +102,9 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 }
 
 type dvrRouteResponse struct {
-	status int
-	body   string
+	status   int
+	body     string
+	location string
 }
 
 func getDVRRoute(t *testing.T, client *http.Client, url string) dvrRouteResponse {
@@ -110,7 +118,7 @@ func getDVRRoute(t *testing.T, client *http.Client, url string) dvrRouteResponse
 	if err != nil {
 		t.Fatalf("read GET %s: %v", url, err)
 	}
-	return dvrRouteResponse{status: response.StatusCode, body: string(body)}
+	return dvrRouteResponse{status: response.StatusCode, body: string(body), location: response.Header.Get("Location")}
 }
 
 func startDVRRouteServer(t *testing.T) (*core.Server, *Module, func()) {

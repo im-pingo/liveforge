@@ -10,6 +10,24 @@ import (
 	"github.com/im-pingo/liveforge/core"
 )
 
+func strictDVRMediaRoutes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath := r.URL.Path
+		if requestPath != "/dvr" && !strings.HasPrefix(requestPath, "/dvr/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		remainder := strings.TrimPrefix(requestPath, "/dvr/")
+		app, resource, hasResource := strings.Cut(remainder, "/")
+		if requestPath == "/dvr" || path.Clean(requestPath) != requestPath || !hasResource || app == "" || resource == "" {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (m *Module) handleMedia(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("app")
 	resource := r.PathValue("resource")
