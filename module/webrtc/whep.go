@@ -19,6 +19,12 @@ import (
 
 // handleWHEP handles POST /webrtc/whep/{path...} for WHEP playback.
 func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
+	if !m.beginSetup() {
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.endSetup()
+
 	streamKey := r.PathValue("path")
 	if streamKey == "" {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
@@ -50,6 +56,11 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		releaseConn()
 		http.Error(w, "failed to read offer", http.StatusBadRequest)
+		return
+	}
+	if m.isClosing() {
+		releaseConn()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -114,7 +125,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := uuid.New().String()
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
-	m.storeSession(sess)
 	lifecycleCtx := *subscribeCtx
 	lifecycleCtx.SubscriberID = sessionID
 	sess.setCleanup(func() {
@@ -122,6 +132,11 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		sess.stopLifecycle(m.server.GetEventBus(), core.EventSubscribeStop, &lifecycleCtx)
 		releaseConn()
 	})
+	if !m.storeSession(sess) {
+		sess.Close()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Parse the offer SDP to determine which media types the client requests.
 	// Only add tracks that match an m-line in the offer; adding tracks without

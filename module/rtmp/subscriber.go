@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -31,6 +32,8 @@ type Subscriber struct {
 	muxer  *flvpkg.Muxer
 }
 
+var subscriberSequence atomic.Uint64
+
 // NewSubscriber creates a new RTMP subscriber.
 func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream, skipCfg *config.SkipTrackerConfig) *Subscriber {
 	return NewSubscriberWithCapabilities(streamKey, conn, cw, stream, skipCfg, PeerCapabilities{}, nil)
@@ -40,7 +43,7 @@ func NewSubscriber(streamKey string, conn net.Conn, cw *ChunkWriter, stream *cor
 // negotiation state.
 func NewSubscriberWithCapabilities(streamKey string, conn net.Conn, cw *ChunkWriter, stream *core.Stream, skipCfg *config.SkipTrackerConfig, caps PeerCapabilities, onFailure func(error)) *Subscriber {
 	return &Subscriber{
-		id:        "rtmp-sub-" + streamKey,
+		id:        fmt.Sprintf("rtmp-sub-%s-%d", streamKey, subscriberSequence.Add(1)),
 		conn:      conn,
 		cw:        cw,
 		stream:    stream,

@@ -85,6 +85,146 @@ func TestEventBusSerializesPublishLifecyclePerGeneration(t *testing.T) {
 	}
 }
 
+func TestEventBusLifecycleConsumersDoNotBlockEachOther(t *testing.T) {
+	bus := NewEventBus()
+	blockedStart := make(chan struct{})
+	releaseBlocked := make(chan struct{})
+	blockedStop := make(chan struct{})
+	independentOrder := make(chan EventType, 2)
+
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Priority: 10, Consumer: "blocked", Handler: func(*EventContext) error {
+		close(blockedStart)
+		<-releaseBlocked
+		return nil
+	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Priority: 10, Consumer: "blocked", Handler: func(*EventContext) error {
+		close(blockedStop)
+		return nil
+	}})
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Priority: 20, Consumer: "independent", Handler: func(*EventContext) error {
+		independentOrder <- EventPublish
+		return nil
+	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Priority: 20, Consumer: "independent", Handler: func(*EventContext) error {
+		independentOrder <- EventPublishStop
+		return nil
+	}})
+
+	ctx := &EventContext{StreamKey: "live/consumers", PublisherID: "publisher-1"}
+	bus.EmitAsync(EventPublish, ctx)
+	select {
+	case <-blockedStart:
+	case <-time.After(time.Second):
+		t.Fatal("blocked consumer did not enter start")
+	}
+	select {
+	case event := <-independentOrder:
+		if event != EventPublish {
+			t.Fatalf("independent first event = %v, want publish", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked consumer starved independent start")
+	}
+
+	bus.EmitAsync(EventPublishStop, ctx)
+	select {
+	case event := <-independentOrder:
+		if event != EventPublishStop {
+			t.Fatalf("independent second event = %v, want publish-stop", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked consumer starved independent stop")
+	}
+	select {
+	case <-blockedStop:
+		t.Fatal("blocked consumer stop overtook its own start")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseBlocked)
+	select {
+	case <-blockedStop:
+	case <-time.After(time.Second):
+		t.Fatal("blocked consumer did not drain after start released")
+	}
+}
+
+func TestEventBusLifecycleQueueBackpressureIsBoundedAndObservable(t *testing.T) {
+	bus := NewEventBus()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Consumer: "blocked", Handler: func(*EventContext) error {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return nil
+	}})
+	ctx := &EventContext{StreamKey: "live/saturated", PublisherID: "publisher-1"}
+	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+		t.Fatalf("initial lifecycle admission: %v", err)
+	}
+	<-entered
+	for i := 0; i < maxLifecycleQueueDepth; i++ {
+		if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+			t.Fatalf("queue admission %d: %v", i, err)
+		}
+	}
+	if err := bus.EmitAsync(EventPublish, ctx); !errors.Is(err, ErrAsyncBackpressure) {
+		t.Fatalf("saturated admission error = %v, want %v", err, ErrAsyncBackpressure)
+	}
+	if got := bus.AsyncStats().Rejected; got != 1 {
+		t.Fatalf("rejected dispatches = %d, want 1", got)
+	}
+
+	close(release)
+	waitEventBusLanesReleased(t, bus)
+	if got := calls.Load(); got != int32(maxLifecycleQueueDepth+1) {
+		t.Fatalf("accepted lifecycle calls = %d, want %d", got, maxLifecycleQueueDepth+1)
+	}
+}
+
+func TestEventBusLifecycleWorkerRecoversPanicAndReleasesLane(t *testing.T) {
+	bus := NewEventBus()
+	stopRan := make(chan struct{})
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Consumer: "panic", Handler: func(*EventContext) error {
+		panic("test panic")
+	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "panic", Handler: func(*EventContext) error {
+		close(stopRan)
+		return nil
+	}})
+	ctx := &EventContext{StreamKey: "live/panic", PublisherID: "publisher-1"}
+	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.EmitAsync(EventPublishStop, ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopRan:
+	case <-time.After(time.Second):
+		t.Fatal("panic prevented lifecycle stop from draining")
+	}
+	waitEventBusLanesReleased(t, bus)
+}
+
+func waitEventBusLanesReleased(t *testing.T, bus *EventBus) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		bus.asyncMu.Lock()
+		remaining := len(bus.lifecycleLanes)
+		bus.asyncMu.Unlock()
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("completed lifecycle lanes leaked dispatcher state")
+}
+
 func TestEventBusLifecycleGenerationsRunIndependentlyAndReleaseState(t *testing.T) {
 	bus := NewEventBus()
 	blocked := make(chan struct{})

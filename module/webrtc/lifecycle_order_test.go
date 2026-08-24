@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,31 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
+
+type blockingOfferBody struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	reader  *strings.Reader
+}
+
+func newBlockingOfferBody(offer string) *blockingOfferBody {
+	return &blockingOfferBody{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		reader:  strings.NewReader(offer),
+	}
+}
+
+func (b *blockingOfferBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.reader.Read(p)
+}
+
+func (b *blockingOfferBody) Close() error { return nil }
+
+var _ io.ReadCloser = (*blockingOfferBody)(nil)
 
 func TestSessionLifecycleSerializesBlockedStartBeforeStop(t *testing.T) {
 	for _, test := range []struct {
@@ -130,6 +156,87 @@ func TestSessionLifecycleSuppressesStartAfterStop(t *testing.T) {
 	case event := <-events:
 		t.Fatalf("start-after-stop emitted event %v", event)
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestModuleCloseWaitsForInFlightSetupAndRejectsLateSession(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		path  string
+		event core.EventType
+	}{
+		{name: "WHIP", path: "/webrtc/whip/live/shutdown", event: core.EventPublish},
+		{name: "WHEP", path: "/webrtc/whep/live/shutdown", event: core.EventSubscribe},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, server := newTestModule(t)
+			var lifecycleEvents atomic.Int32
+			server.GetEventBus().Register(core.HookRegistration{
+				Event: test.event,
+				Mode:  core.HookAsync,
+				Handler: func(*core.EventContext) error {
+					lifecycleEvents.Add(1)
+					return nil
+				},
+			})
+
+			body := newBlockingOfferBody("v=0\r\n")
+			req := httptest.NewRequest(http.MethodPost, test.path, body)
+			req.Header.Set("Content-Type", "application/sdp")
+			rr := httptest.NewRecorder()
+			handlerDone := make(chan struct{})
+			go func() {
+				m.httpSrv.Handler.ServeHTTP(rr, req)
+				close(handlerDone)
+			}()
+
+			select {
+			case <-body.entered:
+			case <-time.After(time.Second):
+				t.Fatal("setup handler did not start reading the offer")
+			}
+
+			closeDone := make(chan struct{})
+			go func() {
+				_ = m.Close()
+				close(closeDone)
+			}()
+
+			closeReturnedEarly := false
+			select {
+			case <-closeDone:
+				closeReturnedEarly = true
+			case <-time.After(50 * time.Millisecond):
+			}
+			close(body.release)
+
+			select {
+			case <-handlerDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("setup handler did not return after releasing the offer")
+			}
+			select {
+			case <-closeDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("module close did not return after setup handler exited")
+			}
+
+			if closeReturnedEarly {
+				t.Error("module close returned while a setup handler was still active")
+			}
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Errorf("setup status = %d, want 503: %s", rr.Code, rr.Body.String())
+			}
+			if got := sessionCount(m); got != 0 {
+				t.Errorf("session count = %d, want 0", got)
+			}
+			if got := server.ConnectionCount(); got != 0 {
+				t.Errorf("connection count = %d, want 0", got)
+			}
+			if got := lifecycleEvents.Load(); got != 0 {
+				t.Errorf("lifecycle events = %d, want 0", got)
+			}
+		})
 	}
 }
 

@@ -271,8 +271,8 @@ func (h *Handler) onPlay(vals []any) error {
 			h.streamKey = h.app + "/" + cleanName
 			mergedParams := mergeParams(h.appParams, params)
 
-			// Emit subscribe event BEFORE action — auth hooks can reject
-			if err := h.eventBus.Emit(core.EventSubscribe, &core.EventContext{
+			// Authorization is synchronous and independent from lifecycle start.
+			if err := h.eventBus.EmitSync(core.EventSubscribe, &core.EventContext{
 				StreamKey:  h.streamKey,
 				Protocol:   "rtmp",
 				RemoteAddr: h.conn.RemoteAddr().String(),
@@ -310,14 +310,21 @@ func (h *Handler) onPlay(vals []any) error {
 	sub := NewSubscriberWithCapabilities(h.streamKey, h.conn, h.cw, stream, h.skipCfg, h.caps, func(err error) {
 		slog.Warn("rtmp subscriber cannot represent stream codec", "subscriber", "rtmp-sub-"+h.streamKey, "error", err)
 	})
+	lifecycleCtx := &core.EventContext{
+		StreamKey:    h.streamKey,
+		SubscriberID: sub.ID(),
+		Protocol:     "rtmp",
+		RemoteAddr:   h.conn.RemoteAddr().String(),
+	}
+	if err := h.eventBus.EmitAsync(core.EventSubscribe, lifecycleCtx); err != nil {
+		stream.RemoveSubscriber("rtmp")
+		_ = sub.Close()
+		return fmt.Errorf("play %s: %w", h.streamKey, err)
+	}
 	go func() {
 		defer func() {
 			stream.RemoveSubscriber("rtmp")
-			h.eventBus.Emit(core.EventSubscribeStop, &core.EventContext{
-				StreamKey:  h.streamKey,
-				Protocol:   "rtmp",
-				RemoteAddr: h.conn.RemoteAddr().String(),
-			})
+			h.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx) //nolint:errcheck
 		}()
 		sub.WriteLoop()
 	}()

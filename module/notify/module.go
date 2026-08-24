@@ -93,6 +93,7 @@ func (m *Module) Hooks() []core.HookRegistration {
 			Event:    eventType,
 			Mode:     core.HookAsync,
 			Priority: 90,
+			Consumer: "notify",
 			Handler:  m.onEvent(eventName),
 		})
 	}

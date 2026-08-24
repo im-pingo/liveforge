@@ -35,13 +35,14 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	streamKey := app + "/" + key
 
-	// Emit subscribe event (auth hooks can reject)
-	if err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+	// Run authorization independently from lifecycle delivery.
+	subscribeCtx := &core.EventContext{
 		StreamKey:  streamKey,
 		Protocol:   "ws-" + format,
 		RemoteAddr: r.RemoteAddr,
 		Params:     queryToMap(r.URL.Query()),
-	}); err != nil {
+	}
+	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -61,14 +62,16 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 
+	lifecycleCtx := *subscribeCtx
+	lifecycleCtx.SubscriberID = nextSubscriberID(lifecycleCtx.Protocol, streamKey)
+	if err := m.server.GetEventBus().EmitAsync(core.EventSubscribe, &lifecycleCtx); err != nil {
+		_ = conn.Close(websocket.StatusTryAgainLater, "subscriber lifecycle capacity exceeded")
+		return
+	}
+	defer m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &lifecycleCtx) //nolint:errcheck
+
 	slog.Info("ws subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveWebSocket(r.Context(), conn, format, stream)
-
-	m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "ws-" + format,
-		RemoteAddr: r.RemoteAddr,
-	}) //nolint:errcheck
 }
 
 func (m *Module) serveWebSocket(ctx context.Context, conn *websocket.Conn, format string, stream *core.Stream) {

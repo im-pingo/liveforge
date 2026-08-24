@@ -148,6 +148,7 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	}
 
 	if err := stream.SetPublisher(pub); err != nil {
+		terminateAcceptedDialog(invTx)
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("set publisher: %w", err)
 	}

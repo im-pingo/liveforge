@@ -1,9 +1,24 @@
 package core
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
+
+const (
+	maxLifecycleQueueDepth = 8
+	maxLifecycleLanes      = 4096
+)
+
+var ErrAsyncBackpressure = errors.New("event bus async lifecycle capacity exceeded")
+
+type AsyncDispatchStats struct {
+	Rejected uint64
+}
 
 // EventBus dispatches events to registered hook handlers.
 type EventBus struct {
@@ -12,17 +27,20 @@ type EventBus struct {
 
 	asyncMu        sync.Mutex
 	lifecycleLanes map[lifecycleLaneKey]*lifecycleLane
+	autoConsumers  map[autoConsumerKey]uint64
+	asyncRejected  atomic.Uint64
 }
 
 type lifecycleLaneKey struct {
 	streamKey string
 	clientID  string
 	publish   bool
+	consumer  string
 }
 
 type lifecycleDispatch struct {
-	ctx   *EventContext
-	hooks []HookRegistration
+	ctx  *EventContext
+	hook HookRegistration
 }
 
 type lifecycleLane struct {
@@ -30,11 +48,17 @@ type lifecycleLane struct {
 	running bool
 }
 
+type autoConsumerKey struct {
+	event    EventType
+	priority int
+}
+
 // NewEventBus creates a new EventBus.
 func NewEventBus() *EventBus {
 	return &EventBus{
 		hooks:          make(map[EventType][]HookRegistration),
 		lifecycleLanes: make(map[lifecycleLaneKey]*lifecycleLane),
+		autoConsumers:  make(map[autoConsumerKey]uint64),
 	}
 }
 
@@ -42,6 +66,14 @@ func NewEventBus() *EventBus {
 func (b *EventBus) Register(h HookRegistration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if h.Consumer == "" && h.Mode == HookAsync {
+		if family, ok := lifecycleFamily(h.Event); ok {
+			key := autoConsumerKey{event: h.Event, priority: h.Priority}
+			ordinal := b.autoConsumers[key]
+			b.autoConsumers[key] = ordinal + 1
+			h.Consumer = fmt.Sprintf("auto:%d:%d:%d", family, h.Priority, ordinal)
+		}
+	}
 
 	hooks := append(b.hooks[h.Event], h)
 	sort.Slice(hooks, func(i, j int) bool {
@@ -58,8 +90,7 @@ func (b *EventBus) Emit(event EventType, ctx *EventContext) error {
 	if err := b.EmitSync(event, ctx); err != nil {
 		return err
 	}
-	b.EmitAsync(event, ctx)
-	return nil
+	return b.EmitAsync(event, ctx)
 }
 
 // EmitSync runs only synchronous hooks and returns the first rejection.
@@ -75,20 +106,25 @@ func (b *EventBus) EmitSync(event EventType, ctx *EventContext) error {
 	return nil
 }
 
-// EmitAsync starts only asynchronous lifecycle hooks.
-func (b *EventBus) EmitAsync(event EventType, ctx *EventContext) {
+// EmitAsync starts only asynchronous hooks. Lifecycle admission is bounded
+// and atomic across consumers; callers receive ErrAsyncBackpressure rather
+// than a partial start/stop delivery when capacity is exhausted.
+func (b *EventBus) EmitAsync(event EventType, ctx *EventContext) error {
 	hooks := asyncHooks(b.snapshot(event))
 	if len(hooks) == 0 {
-		return
+		return nil
 	}
-	ctx = cloneEventContext(ctx)
 	if key, ok := eventLifecycleKey(event, ctx); ok {
-		b.enqueueLifecycle(key, lifecycleDispatch{ctx: ctx, hooks: hooks})
-		return
+		return b.enqueueLifecycle(key, hooks, ctx)
 	}
 	for _, hook := range hooks {
-		go hook.Handler(ctx) //nolint:errcheck
+		go runAsyncHook(hook, cloneEventContext(ctx))
 	}
+	return nil
+}
+
+func (b *EventBus) AsyncStats() AsyncDispatchStats {
+	return AsyncDispatchStats{Rejected: b.asyncRejected.Load()}
 }
 
 func asyncHooks(hooks []HookRegistration) []HookRegistration {
@@ -121,22 +157,70 @@ func eventLifecycleKey(event EventType, ctx *EventContext) (lifecycleLaneKey, bo
 	}
 }
 
-func (b *EventBus) enqueueLifecycle(key lifecycleLaneKey, dispatch lifecycleDispatch) {
-	b.asyncMu.Lock()
-	lane := b.lifecycleLanes[key]
-	if lane == nil {
-		lane = &lifecycleLane{}
-		b.lifecycleLanes[key] = lane
+func lifecycleFamily(event EventType) (uint8, bool) {
+	switch event {
+	case EventPublish, EventPublishStop:
+		return 1, true
+	case EventSubscribe, EventSubscribeStop:
+		return 2, true
+	default:
+		return 0, false
 	}
-	lane.queue = append(lane.queue, dispatch)
-	startWorker := !lane.running
-	if startWorker {
-		lane.running = true
+}
+
+func (b *EventBus) enqueueLifecycle(base lifecycleLaneKey, hooks []HookRegistration, ctx *EventContext) error {
+	type laneStart struct {
+		key  lifecycleLaneKey
+		lane *lifecycleLane
+	}
+	counts := make(map[lifecycleLaneKey]int, len(hooks))
+	for _, hook := range hooks {
+		key := base
+		key.consumer = hook.Consumer
+		counts[key]++
+	}
+
+	b.asyncMu.Lock()
+	newLanes := 0
+	for key, count := range counts {
+		lane := b.lifecycleLanes[key]
+		if lane == nil {
+			if count > maxLifecycleQueueDepth {
+				b.asyncMu.Unlock()
+				b.asyncRejected.Add(1)
+				return ErrAsyncBackpressure
+			}
+			newLanes++
+			continue
+		}
+		if len(lane.queue)+count > maxLifecycleQueueDepth {
+			b.asyncMu.Unlock()
+			b.asyncRejected.Add(1)
+			return ErrAsyncBackpressure
+		}
+	}
+	if len(b.lifecycleLanes)+newLanes > maxLifecycleLanes {
+		b.asyncMu.Unlock()
+		b.asyncRejected.Add(1)
+		return ErrAsyncBackpressure
+	}
+	starts := make([]laneStart, 0, newLanes)
+	for _, hook := range hooks {
+		key := base
+		key.consumer = hook.Consumer
+		lane := b.lifecycleLanes[key]
+		if lane == nil {
+			lane = &lifecycleLane{running: true}
+			b.lifecycleLanes[key] = lane
+			starts = append(starts, laneStart{key: key, lane: lane})
+		}
+		lane.queue = append(lane.queue, lifecycleDispatch{ctx: cloneEventContext(ctx), hook: hook})
 	}
 	b.asyncMu.Unlock()
-	if startWorker {
-		go b.runLifecycleLane(key, lane)
+	for _, start := range starts {
+		go b.runLifecycleLane(start.key, start.lane)
 	}
+	return nil
 }
 
 func (b *EventBus) runLifecycleLane(key lifecycleLaneKey, lane *lifecycleLane) {
@@ -155,10 +239,17 @@ func (b *EventBus) runLifecycleLane(key lifecycleLaneKey, lane *lifecycleLane) {
 		lane.queue = lane.queue[1:]
 		b.asyncMu.Unlock()
 
-		for _, hook := range dispatch.hooks {
-			_ = hook.Handler(dispatch.ctx)
-		}
+		runAsyncHook(dispatch.hook, dispatch.ctx)
 	}
+}
+
+func runAsyncHook(hook HookRegistration, ctx *EventContext) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("async event hook panicked", "event", hook.Event, "consumer", hook.Consumer, "panic", recovered)
+		}
+	}()
+	_ = hook.Handler(ctx)
 }
 
 func cloneEventContext(ctx *EventContext) *EventContext {

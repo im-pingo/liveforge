@@ -114,12 +114,14 @@ func (m *Module) Hooks() []core.HookRegistration {
 			Event:    core.EventPublishStop,
 			Mode:     core.HookAsync,
 			Priority: 100,
+			Consumer: "httpstream",
 			Handler:  m.onPublishStop,
 		},
 		{
 			Event:    core.EventStreamDestroy,
 			Mode:     core.HookAsync,
 			Priority: 100,
+			Consumer: "httpstream",
 			Handler:  m.onStreamDestroy,
 		},
 	}

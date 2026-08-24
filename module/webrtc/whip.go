@@ -20,6 +20,12 @@ import (
 
 // handleWHIP handles POST /webrtc/whip/{path...} for WHIP publish.
 func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
+	if !m.beginSetup() {
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.endSetup()
+
 	streamKey := r.PathValue("path")
 	if streamKey == "" {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
@@ -51,6 +57,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		releaseConn()
 		http.Error(w, "failed to read offer", http.StatusBadRequest)
+		return
+	}
+	if m.isClosing() {
+		releaseConn()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -86,7 +97,6 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	pub.info.Store(&avframe.MediaInfo{})
 
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
-	m.storeSession(sess)
 
 	var (
 		videoDetected bool
@@ -106,6 +116,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		sess.stopLifecycle(m.server.GetEventBus(), core.EventPublishStop, &lifecycleCtx)
 		releaseConn()
 	})
+	if !m.storeSession(sess) {
+		sess.Close()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 
 	setPublisherOnce := func() {
 		pubMu.Lock()

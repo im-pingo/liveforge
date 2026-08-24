@@ -330,7 +330,7 @@ func TestSubscriberIDAndOptions(t *testing.T) {
 	cw := NewChunkWriter(conn, DefaultChunkSize)
 	sub := NewSubscriber("live/test", conn, cw, stream, nil)
 
-	if sub.ID() != "rtmp-sub-live/test" {
+	if !strings.HasPrefix(sub.ID(), "rtmp-sub-live/test-") {
 		t.Errorf("ID = %q", sub.ID())
 	}
 	if sub.Options().StartMode != core.StartModeGOP {

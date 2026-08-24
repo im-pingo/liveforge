@@ -1,8 +1,10 @@
 package srt
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	gosrt "github.com/datarhei/gosrt"
@@ -19,17 +21,26 @@ type Subscriber struct {
 	streamKey string
 	hub       *core.StreamHub
 	eventBus  *core.EventBus
+	id        string
 	skipCfg   *config.SkipTrackerConfig
 	closed    chan struct{}
 }
 
+var subscriberSequence atomic.Uint64
+
 // NewSubscriber creates a new SRT subscriber.
 func NewSubscriber(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *core.EventBus, skipCfg *config.SkipTrackerConfig) *Subscriber {
+	generation := subscriberSequence.Add(1)
+	id := fmt.Sprintf("srt-sub-%s-local-%d", streamKey, generation)
+	if conn != nil {
+		id = fmt.Sprintf("srt-sub-%s-%d-%d-%d", streamKey, conn.SocketId(), conn.PeerSocketId(), generation)
+	}
 	return &Subscriber{
 		conn:      conn,
 		streamKey: streamKey,
 		hub:       hub,
 		eventBus:  bus,
+		id:        id,
 		skipCfg:   skipCfg,
 		closed:    make(chan struct{}),
 	}
@@ -51,15 +62,17 @@ func (s *Subscriber) Run() {
 	}
 	defer stream.RemoveSubscriber("srt")
 
-	s.eventBus.Emit(core.EventSubscribe, &core.EventContext{ //nolint:errcheck
-		StreamKey:  s.streamKey,
-		Protocol:   "srt",
-		RemoteAddr: s.conn.RemoteAddr().String(),
-	})
-	defer s.eventBus.Emit(core.EventSubscribeStop, &core.EventContext{ //nolint:errcheck
-		StreamKey: s.streamKey,
-		Protocol:  "srt",
-	})
+	lifecycleCtx := &core.EventContext{
+		StreamKey:    s.streamKey,
+		SubscriberID: s.id,
+		Protocol:     "srt",
+		RemoteAddr:   s.conn.RemoteAddr().String(),
+	}
+	if err := s.eventBus.EmitAsync(core.EventSubscribe, lifecycleCtx); err != nil {
+		slog.Error("subscriber lifecycle admission failed", "module", "srt", "stream", s.streamKey, "error", err)
+		return
+	}
+	defer s.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx) //nolint:errcheck
 
 	// Wait for sequence headers to initialize the TS muxer.
 	if !s.waitForSequenceHeaders(stream) {

@@ -191,7 +191,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 			Protocol:   "srt",
 			RemoteAddr: req.RemoteAddr().String(),
 		}
-		if err := m.eventBus.Emit(core.EventSubscribe, ctx); err != nil {
+		if err := m.eventBus.EmitSync(core.EventSubscribe, ctx); err != nil {
 			slog.Warn("subscribe auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT

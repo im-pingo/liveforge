@@ -47,6 +47,9 @@ func (d *failingACKDialog) Close() { d.closed.Store(true) }
 type successfulInviteDialog struct {
 	response *sip.Response
 	done     chan struct{}
+	ackCalls atomic.Int32
+	byeCalls atomic.Int32
+	closed   atomic.Bool
 }
 
 func newSuccessfulInviteDialog(req *sip.Request) *successfulInviteDialog {
@@ -59,9 +62,15 @@ func newSuccessfulInviteDialog(req *sip.Request) *successfulInviteDialog {
 
 func (d *successfulInviteDialog) Done() <-chan struct{}         { return d.done }
 func (d *successfulInviteDialog) Response() *sip.Response       { return d.response }
-func (d *successfulInviteDialog) SendACK(context.Context) error { return nil }
-func (d *successfulInviteDialog) SendBYE(context.Context) error { return nil }
-func (d *successfulInviteDialog) Close()                        {}
+func (d *successfulInviteDialog) SendACK(context.Context) error { d.ackCalls.Add(1); return nil }
+func (d *successfulInviteDialog) SendBYE(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.byeCalls.Add(1)
+	return nil
+}
+func (d *successfulInviteDialog) Close() { d.closed.Store(true) }
 
 type failingFinalResponseTransaction struct {
 	*captureServerTransaction
@@ -269,6 +278,99 @@ func TestOutboundACKFailureTerminatesDialogAndRollsBack(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 			if starts.Load() != 0 || stops.Load() != 0 {
 				t.Fatalf("failed setup emitted lifecycle start/stop = %d/%d", starts.Load(), stops.Load())
+			}
+		})
+	}
+}
+
+func TestOutboundPublisherConflictTerminatesAcceptedDialogAndRollsBack(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		streamKey string
+		run       func(*handler, *Device, inviteSender) error
+	}{
+		{
+			name:      "live",
+			streamKey: "gb28181/channel",
+			run: func(h *handler, device *Device, send inviteSender) error {
+				_, err := (&inviteClient{sipService: failingInviteService{}, handler: h, sendInvite: send}).invite(context.Background(), device, "channel", nil)
+				return err
+			},
+		},
+		{
+			name:      "playback",
+			streamKey: "gb28181/channel/playback",
+			run: func(h *handler, device *Device, send inviteSender) error {
+				_, err := (&playbackClient{sipService: failingInviteService{}, handler: h, sendInvite: send}).playback(
+					context.Background(), device, "channel", time.Now(), time.Now().Add(time.Minute), nil,
+				)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bus := core.NewEventBus()
+			hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, bus)
+			ports, err := portalloc.New(42180, 42181)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream, err := hub.GetOrCreate(test.streamKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			existing := NewPublisher("existing-generation", nil)
+			if err := stream.SetPublisher(existing); err != nil {
+				t.Fatal(err)
+			}
+			sessions := NewSessionManager()
+			h := &handler{sessions: sessions, hub: hub, bus: bus, ports: ports, prefix: "gb28181"}
+			device := &Device{DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp"}
+			var dialog *successfulInviteDialog
+			send := func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+				dialog = newSuccessfulInviteDialog(req)
+				return dialog, nil
+			}
+			var starts, stops atomic.Int32
+			for event, counter := range map[core.EventType]*atomic.Int32{core.EventPublish: &starts, core.EventPublishStop: &stops} {
+				bus.Register(core.HookRegistration{Event: event, Mode: core.HookAsync, Handler: func(*core.EventContext) error {
+					counter.Add(1)
+					return nil
+				}})
+			}
+
+			err = test.run(h, device, send)
+			if err == nil {
+				t.Fatal("publisher conflict unexpectedly succeeded")
+			}
+			if dialog.ackCalls.Load() != 1 || dialog.byeCalls.Load() != 1 || !dialog.closed.Load() {
+				t.Fatalf("accepted dialog cleanup: ACK=%d BYE=%d closed=%v", dialog.ackCalls.Load(), dialog.byeCalls.Load(), dialog.closed.Load())
+			}
+			if got := len(sessions.All()); got != 0 {
+				t.Fatalf("publisher conflict left %d sessions", got)
+			}
+			if got := stream.Publisher(); got != existing {
+				t.Fatalf("publisher conflict replaced existing publisher: got=%p want=%p", got, existing)
+			}
+			existing.mu.Lock()
+			existingClosed := existing.closed
+			existing.mu.Unlock()
+			if existingClosed {
+				t.Fatal("rollback closed the existing publisher")
+			}
+			reused, err := NewRTPReceiver(42180, NewPublisher("reuse", nil))
+			if err != nil {
+				t.Fatalf("publisher conflict left receiver socket open: %v", err)
+			}
+			reused.Close()
+			rtpPort, rtcpPort, err := ports.AllocatePair()
+			if err != nil || rtpPort != 42180 || rtcpPort != 42181 {
+				t.Fatalf("publisher conflict did not release allocator pair: %d/%d, %v", rtpPort, rtcpPort, err)
+			}
+			ports.Free(rtpPort, rtcpPort)
+			time.Sleep(20 * time.Millisecond)
+			if starts.Load() != 0 || stops.Load() != 0 {
+				t.Fatalf("publisher conflict emitted lifecycle start/stop = %d/%d", starts.Load(), stops.Load())
 			}
 		})
 	}

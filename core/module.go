@@ -52,6 +52,9 @@ type HookRegistration struct {
 	Event    EventType
 	Mode     HookMode
 	Priority int // lower = higher priority, executed first
+	// Consumer pairs lifecycle start/stop hooks that belong to one observer.
+	// Distinct consumers receive independent ordered dispatch lanes.
+	Consumer string
 	Handler  EventHandler
 }
 

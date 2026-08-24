@@ -129,12 +129,14 @@ func (m *Module) Hooks() []core.HookRegistration {
 			Event:    core.EventPublish,
 			Mode:     core.HookAsync,
 			Priority: 60,
+			Consumer: "dvr",
 			Handler:  m.onPublish,
 		},
 		{
 			Event:    core.EventPublishStop,
 			Mode:     core.HookAsync,
 			Priority: 60,
+			Consumer: "dvr",
 			Handler:  m.onPublishStop,
 		},
 	}

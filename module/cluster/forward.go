@@ -220,12 +220,14 @@ func (fm *ForwardManager) Hooks() []core.HookRegistration {
 			Event:    core.EventPublish,
 			Mode:     core.HookAsync,
 			Priority: 100,
+			Consumer: "cluster-forward",
 			Handler:  fm.onPublish,
 		},
 		{
 			Event:    core.EventPublishStop,
 			Mode:     core.HookAsync,
 			Priority: 100,
+			Consumer: "cluster-forward",
 			Handler:  fm.onPublishStop,
 		},
 	}

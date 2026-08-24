@@ -140,6 +140,7 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	}
 
 	if err := stream.SetPublisher(pub); err != nil {
+		terminateAcceptedDialog(invTx)
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("set playback publisher: %w", err)
 	}

@@ -264,6 +264,7 @@ func (om *OriginManager) Hooks() []core.HookRegistration {
 			Event:    core.EventSubscribe,
 			Mode:     core.HookAsync,
 			Priority: 100,
+			Consumer: "cluster-origin",
 			Handler:  om.onSubscribe,
 		},
 	}
