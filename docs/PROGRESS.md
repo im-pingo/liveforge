@@ -212,7 +212,7 @@
 | Feature | Status |
 |---------|--------|
 | SIP Gateway | Implemented in `module/sipgateway/`; productization and deployment hardening can continue separately |
-| Runtime config API/metrics status endpoint | Manager status exists; public control-plane exposure remains follow-up work |
+| Runtime config API/metrics status endpoint | **Done** — redacted `GET /api/v1/server/config` exposes source/version/failure/restart status; Prometheus export remains follow-up work |
 | AI media analysis and semantic search | Roadmap work; no runtime integration claimed |
 
 ---
