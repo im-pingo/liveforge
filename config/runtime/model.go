@@ -58,7 +58,7 @@ type Change struct {
 	Class ChangeClass
 }
 
-// ChangeSet is delivered asynchronously after a snapshot is published.
+// ChangeSet describes one accepted configuration transition.
 type ChangeSet struct {
 	Previous Version
 	Current  Version
@@ -86,15 +86,18 @@ type ConfigSnapshot struct {
 // Status is a point-in-time copy of manager health. Error text is source
 // generated and must never contain credentials.
 type Status struct {
-	Source              string
-	ActiveVersion       Version
-	LastAttempt         time.Time
-	LastSuccess         time.Time
-	ConsecutiveFailures uint64
-	LastError           string
-	PendingRestart      []string
-	CallbackFailures    uint64
-	DroppedCallbacks    uint64
+	Source                         string
+	ActiveVersion                  Version
+	LastAttempt                    time.Time
+	LastSuccess                    time.Time
+	ConsecutiveFailures            uint64
+	LastError                      string
+	PendingRestart                 []string
+	CallbackFailures               uint64
+	DroppedCallbacks               uint64
+	ConfigChangesAccepted          uint64
+	ConfigChangesRejected          uint64
+	ConfigChangesApplicationFailed uint64
 }
 
 // Options controls a Manager.
@@ -105,5 +108,10 @@ type Options struct {
 	LoadTimeout    time.Duration
 	Initial        *config.Config
 	CallbackBuffer int
-	OnChange       func(ChangeSet) error
+	// Apply validates and applies a candidate on the manager's background
+	// worker before it becomes visible to snapshot and typed-key readers.
+	Apply func(*ConfigSnapshot, ChangeSet) error
+	// OnChange observes accepted transitions asynchronously. Notifications are
+	// coalesced under load, but the latest accepted transition is never dropped.
+	OnChange func(ChangeSet) error
 }

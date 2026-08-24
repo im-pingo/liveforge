@@ -53,16 +53,27 @@ func (m *Module) Init(s *core.Server) error {
 // OnReload atomically applies recording policy for new sessions. Active
 // sessions retain their creation policy so their current file finishes safely.
 func (m *Module) OnReload(s *core.Server) error {
+	commit, err := m.PrepareReload(s)
+	if err != nil {
+		return err
+	}
+	commit()
+	return nil
+}
+
+// PrepareReload validates and constructs recording storage before any module
+// publishes candidate policy. The commit is an atomic pointer swap.
+func (m *Module) PrepareReload(s *core.Server) (func(), error) {
 	cfg := s.Config().Record
 	if current := m.runtime.Load(); current != nil {
 		cfg.Enabled = current.cfg.Enabled
 	}
 	storage, template, err := newStorageForConfig(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	m.runtime.Store(&recordRuntime{cfg: cfg, storage: storage, template: template})
-	return nil
+	next := &recordRuntime{cfg: cfg, storage: storage, template: template}
+	return func() { m.runtime.Store(next) }, nil
 }
 
 // Policy returns a copy of the active recording policy.

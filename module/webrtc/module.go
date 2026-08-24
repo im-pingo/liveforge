@@ -205,7 +205,6 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 // available to new sessions. GCC enablement, listener, ICE mode, candidates,
 // and port ranges remain restart-required because they shape the Pion API.
 func (m *Module) OnReload(s *core.Server) error {
-	m.server = s
 	rl := s.Config().Limits.RateLimit
 	m.limiterMu.RLock()
 	unchanged := m.rateCfg == rl

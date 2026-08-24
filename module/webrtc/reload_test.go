@@ -2,11 +2,38 @@ package webrtc
 
 import (
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
+
+func TestReloadDoesNotRaceStableServerPointerReads(t *testing.T) {
+	cfg := config.Defaults()
+	server := core.NewServer(cfg)
+	m := NewModule()
+	m.server = server
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			if err := m.OnReload(server); err != nil {
+				t.Errorf("reload: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			_ = m.gccConfig().MaxBitrate
+		}
+	}()
+	wg.Wait()
+}
 
 func TestGCCConfigReadsCurrentSnapshotForNewSessions(t *testing.T) {
 	cfg := config.Defaults()

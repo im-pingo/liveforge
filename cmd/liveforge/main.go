@@ -38,17 +38,12 @@ func newRuntimeManager(cfg *config.Config, configPath string, server *core.Serve
 	if err != nil {
 		return nil, err
 	}
-	var manager *configruntime.Manager
-	manager, err = configruntime.NewManager(configruntime.Options{
+	manager, err := configruntime.NewManager(configruntime.Options{
 		Source:       source,
 		PollInterval: cfg.Runtime.PollInterval,
 		LoadTimeout:  cfg.Runtime.LoadTimeout,
 		Initial:      cfg,
-		OnChange: func(changeSet configruntime.ChangeSet) error {
-			snapshot := manager.Snapshot()
-			if snapshot == nil || snapshot.Config == nil {
-				return nil
-			}
+		Apply: func(snapshot *configruntime.ConfigSnapshot, changeSet configruntime.ChangeSet) error {
 			if err := server.UpdateConfigSnapshot(snapshot); err != nil {
 				return fmt.Errorf("apply runtime config: %w", err)
 			}
@@ -63,6 +58,16 @@ func newRuntimeManager(cfg *config.Config, configPath string, server *core.Serve
 	}
 	server.SetConfigManager(manager)
 	return manager, nil
+}
+
+func initializeServerAndRuntime(ctx context.Context, server *core.Server, manager *configruntime.Manager) error {
+	if err := server.Init(); err != nil {
+		return fmt.Errorf("server init: %w", err)
+	}
+	if err := manager.Start(ctx); err != nil {
+		return fmt.Errorf("start runtime config manager: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -87,11 +92,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to configure runtime config manager: %v", err)
 	}
-	if err := manager.Start(context.Background()); err != nil {
-		_ = manager.Close()
-		log.Fatalf("failed to start runtime config manager: %v", err)
-	}
-
 	if cfg.AudioCodec.Enabled {
 		s.StreamHub().SetAudioCodecEnabled(true)
 	}
@@ -171,8 +171,10 @@ func main() {
 		s.RegisterModule(metricsmod.NewModule())
 	}
 
-	if err := s.Init(); err != nil {
-		log.Fatalf("server init failed: %v", err)
+	if err := initializeServerAndRuntime(context.Background(), s, manager); err != nil {
+		s.Shutdown()
+		_ = manager.Close()
+		log.Fatalf("server startup failed: %v", err)
 	}
 
 	slog.Info("server started", "version", version, "name", cfg.Server.Name)

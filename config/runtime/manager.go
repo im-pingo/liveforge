@@ -19,6 +19,7 @@ type Manager struct {
 	sourceName   string
 	pollInterval time.Duration
 	loadTimeout  time.Duration
+	apply        func(*ConfigSnapshot, ChangeSet) error
 	onChange     func(ChangeSet) error
 
 	active atomic.Pointer[ConfigSnapshot]
@@ -39,8 +40,9 @@ type Manager struct {
 	keys     []keyBinding
 	keyNames map[string]struct{}
 
-	callbackCh   chan ChangeSet
-	callbackDone chan struct{}
+	callbackCh      chan struct{}
+	callbackDone    chan struct{}
+	pendingCallback atomic.Pointer[ChangeSet]
 }
 
 // NewManager validates options and seeds the optional bootstrap snapshot.
@@ -74,11 +76,12 @@ func NewManager(opts Options) (*Manager, error) {
 		sourceName:    name,
 		pollInterval:  opts.PollInterval,
 		loadTimeout:   opts.LoadTimeout,
+		apply:         opts.Apply,
 		onChange:      opts.OnChange,
 		workerDone:    make(chan struct{}),
 		initialResult: make(chan error, 1),
 		refreshCh:     make(chan struct{}, 1),
-		callbackCh:    make(chan ChangeSet, opts.CallbackBuffer),
+		callbackCh:    make(chan struct{}, 1),
 		callbackDone:  make(chan struct{}),
 		keyNames:      make(map[string]struct{}),
 		status:        Status{Source: name},
@@ -184,7 +187,7 @@ func (m *Manager) load(parent context.Context) error {
 	m.setAttempt()
 	result, err := m.source.Load(ctx, previous)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	if len(result.Data) == 0 && result.Version != "" && result.Version == previous.Value {
@@ -193,12 +196,12 @@ func (m *Manager) load(parent context.Context) error {
 	}
 	cfg, err := ParseDocument(result.Data)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	hash, err := configHash(cfg)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	if previous.Hash != "" && previous.Hash == hash {
@@ -208,19 +211,19 @@ func (m *Manager) load(parent context.Context) error {
 	old := m.active.Load()
 	changes, err := diffConfigs(snapshotDesiredConfig(old), cfg)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	for _, change := range changes {
 		if change.Class == ChangeImmutable {
 			err := fmt.Errorf("%w: %s", ErrImmutableChange, change.Path)
-			m.setFailure(err)
+			m.setRejected(err)
 			return err
 		}
 	}
 	owned, err := cloneConfig(cfg)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	version := Version{Value: result.Version, Hash: hash}
@@ -229,12 +232,12 @@ func (m *Manager) load(parent context.Context) error {
 	}
 	applied, err := applyHotChanges(snapshotConfig(old), owned, changes)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	pendingChanges, err := diffConfigs(applied, owned)
 	if err != nil {
-		m.setFailure(err)
+		m.setRejected(err)
 		return err
 	}
 	pending := make([]string, 0)
@@ -244,16 +247,18 @@ func (m *Manager) load(parent context.Context) error {
 		}
 	}
 	next := &ConfigSnapshot{Config: applied, DesiredConfig: owned, Version: version, Source: m.sourceName, LoadedAt: time.Now(), LastModified: result.LastModified, Changes: changes, PendingRestart: pending}
+	set := ChangeSet{Previous: previous, Current: version, Changes: append([]Change(nil), changes...), Restart: append([]string(nil), pending...)}
+	if (old == nil || len(changes) > 0) && m.apply != nil {
+		if err := m.apply(next, set); err != nil {
+			m.setApplicationFailure(err)
+			return err
+		}
+	}
 	m.active.Store(next)
 	m.updateKeys(next)
-	m.setSuccessVersion(version, pending)
+	m.setAcceptedVersion(version, pending)
 	if len(changes) > 0 && m.onChange != nil {
-		set := ChangeSet{Previous: previous, Current: version, Changes: append([]Change(nil), changes...), Restart: append([]string(nil), pending...)}
-		select {
-		case m.callbackCh <- set:
-		default:
-			m.incrementDropped()
-		}
+		m.enqueueCallback(set)
 	}
 	return nil
 }
@@ -330,16 +335,30 @@ func (m *Manager) Close() error {
 
 func (m *Manager) callbackLoop() {
 	defer close(m.callbackDone)
-	for set := range m.callbackCh {
-		if m.onChange == nil {
-			continue
+	for range m.callbackCh {
+		for {
+			set := m.pendingCallback.Swap(nil)
+			if set == nil {
+				break
+			}
+			if m.onChange == nil {
+				continue
+			}
+			if err := m.onChange(*set); err != nil {
+				m.statusMu.Lock()
+				m.status.CallbackFailures++
+				m.statusMu.Unlock()
+				slog.Error("runtime config callback failed", "error", err)
+			}
 		}
-		if err := m.onChange(set); err != nil {
-			m.statusMu.Lock()
-			m.status.CallbackFailures++
-			m.statusMu.Unlock()
-			slog.Error("runtime config callback failed", "error", err)
-		}
+	}
+}
+
+func (m *Manager) enqueueCallback(set ChangeSet) {
+	m.pendingCallback.Store(&set)
+	select {
+	case m.callbackCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -365,26 +384,30 @@ func (m *Manager) setSuccess() {
 	m.statusMu.Unlock()
 }
 
-func (m *Manager) setSuccessVersion(v Version, pending []string) {
+func (m *Manager) setAcceptedVersion(v Version, pending []string) {
 	m.statusMu.Lock()
 	m.status.ActiveVersion = v
 	m.status.LastSuccess = time.Now()
 	m.status.ConsecutiveFailures = 0
 	m.status.LastError = ""
 	m.status.PendingRestart = append([]string(nil), pending...)
+	m.status.ConfigChangesAccepted++
 	m.statusMu.Unlock()
 }
 
-func (m *Manager) setFailure(err error) {
+func (m *Manager) setRejected(err error) {
 	m.statusMu.Lock()
 	m.status.ConsecutiveFailures++
 	m.status.LastError = err.Error()
+	m.status.ConfigChangesRejected++
 	m.statusMu.Unlock()
 }
 
-func (m *Manager) incrementDropped() {
+func (m *Manager) setApplicationFailure(err error) {
 	m.statusMu.Lock()
-	m.status.DroppedCallbacks++
+	m.status.ConsecutiveFailures++
+	m.status.LastError = err.Error()
+	m.status.ConfigChangesApplicationFailed++
 	m.statusMu.Unlock()
 }
 

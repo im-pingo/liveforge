@@ -432,11 +432,87 @@ func (failingReloadModule) Hooks() []HookRegistration { return nil }
 func (failingReloadModule) Close() error              { return nil }
 func (failingReloadModule) OnReload(*Server) error    { return errors.New("policy rejected") }
 
+type configAppliedModule struct {
+	mockModule
+	applied int
+}
+
+type countingReloadModule struct {
+	mockModule
+	reloads int
+}
+
+func (m *countingReloadModule) OnReload(*Server) error { m.reloads++; return nil }
+
+type prepareRejectModule struct{ mockModule }
+
+func (m *prepareRejectModule) OnReload(*Server) error { return errors.New("must not apply") }
+func (m *prepareRejectModule) PrepareReload(*Server) (func(), error) {
+	return nil, errors.New("prepare rejected")
+}
+
+func TestServerPrepareFailureDoesNotMutateAnyReloadableModule(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(cfg)
+	first := &countingReloadModule{mockModule: mockModule{name: "first"}}
+	s.RegisterModule(first)
+	s.RegisterModule(&prepareRejectModule{mockModule: mockModule{name: "reject-in-prepare"}})
+	next := config.Defaults()
+	next.Limits.MaxStreams = 11
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: next}); err == nil || !strings.Contains(err.Error(), "prepare rejected") {
+		t.Fatalf("prepare error=%v", err)
+	}
+	if first.reloads != 0 {
+		t.Fatalf("module mutated before prepare phase completed: reloads=%d", first.reloads)
+	}
+	if s.Config() != cfg {
+		t.Fatal("prepare-rejected config was published")
+	}
+}
+
+func (m *configAppliedModule) OnConfigApplied(*configruntime.ConfigSnapshot) { m.applied++ }
+
+func TestServerNotifiesConfigAppliedOnlyAfterSuccessfulCommit(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(cfg)
+	notifier := &configAppliedModule{mockModule: mockModule{name: "config-applied"}}
+	s.RegisterModule(notifier)
+	next := config.Defaults()
+	next.Limits.MaxStreams = 3
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: next}); err != nil {
+		t.Fatal(err)
+	}
+	if notifier.applied != 1 {
+		t.Fatalf("successful commit notifications=%d want=1", notifier.applied)
+	}
+
+	failing := NewServer(next)
+	failingNotifier := &configAppliedModule{mockModule: mockModule{name: "config-applied"}}
+	failing.RegisterModule(failingReloadModule{})
+	failing.RegisterModule(failingNotifier)
+	rejected := config.Defaults()
+	rejected.Limits.MaxStreams = 4
+	if err := failing.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: rejected}); err == nil {
+		t.Fatal("expected reload failure")
+	}
+	if failingNotifier.applied != 0 {
+		t.Fatalf("rejected commit notifications=%d want=0", failingNotifier.applied)
+	}
+}
+
 func TestServerUpdateConfigSnapshotReturnsReloadFailure(t *testing.T) {
 	cfg := config.Defaults()
 	s := NewServer(cfg)
 	s.RegisterModule(failingReloadModule{})
-	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: cfg}); err == nil || !strings.Contains(err.Error(), "failing-reload") {
+	next := config.Defaults()
+	next.Limits.MaxStreams = 17
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: next, PendingRestart: []string{"rtmp.listen"}}); err == nil || !strings.Contains(err.Error(), "failing-reload") {
 		t.Fatalf("reload error = %v", err)
+	}
+	if s.Config() != cfg || s.Config().Limits.MaxStreams != cfg.Limits.MaxStreams {
+		t.Fatalf("rejected config was published: %+v", s.Config().Limits)
+	}
+	if pending := s.PendingRestartChanges(); len(pending) != 0 {
+		t.Fatalf("rejected pending restart paths were published: %v", pending)
 	}
 }

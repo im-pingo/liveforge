@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/ratelimit"
 )
@@ -64,6 +65,7 @@ func (m *Module) Init(s *core.Server) error {
 		m.limiterMu.RUnlock()
 		if limiter != nil && !limiter.AllowRequest(r) {
 			m.security.rateLimitDenials.Add(1)
+			m.auditRateLimitDenial(r)
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
@@ -85,6 +87,26 @@ func (m *Module) Init(s *core.Server) error {
 	}()
 
 	return nil
+}
+
+func (m *Module) auditRateLimitDenial(r *http.Request) {
+	permission := permissionForRequest(r)
+	if m.audit == nil || !isAuditedOperation(permission) {
+		return
+	}
+	p, ok := resolvePrincipal(r, m.server.Config().API)
+	if !ok {
+		p = principal{Name: "unknown"}
+	}
+	m.audit.Record(AuditEntry{
+		RequestID:  newRequestID(),
+		Principal:  p.Name,
+		Role:       p.Role,
+		Action:     permission,
+		Resource:   r.URL.Path,
+		Result:     "failed",
+		RemoteAddr: r.RemoteAddr,
+	})
 }
 
 // SecurityMetrics returns bounded-label management security counters.
@@ -129,23 +151,22 @@ func (m *Module) OnReload(s *core.Server) error {
 			old.Close()
 		}
 	}
-	if m.audit != nil {
-		source := "runtime"
-		version := ""
-		if manager := s.ConfigManager(); manager != nil {
-			status := manager.Status()
-			source = status.Source
-			version = status.ActiveVersion.Value
-		}
-		m.audit.Record(AuditEntry{
-			Principal: "config-source:" + source,
-			Role:      "system",
-			Action:    "config:apply",
-			Resource:  version,
-			Result:    "success",
-		})
-	}
 	return nil
+}
+
+// OnConfigApplied records success only after the server has committed the
+// candidate and every reloadable module has accepted it.
+func (m *Module) OnConfigApplied(snapshot *configruntime.ConfigSnapshot) {
+	if m.audit == nil || snapshot == nil {
+		return
+	}
+	m.audit.Record(AuditEntry{
+		Principal: "config-source:" + snapshot.Source,
+		Role:      "system",
+		Action:    "config:apply",
+		Resource:  snapshot.Version.Value,
+		Result:    "success",
+	})
 }
 
 // Hooks returns the module's event hooks (none for the API module).

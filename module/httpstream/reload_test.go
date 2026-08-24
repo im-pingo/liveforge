@@ -2,12 +2,40 @@ package httpstream
 
 import (
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
+
+func TestReloadDoesNotRaceStableServerPointerReads(t *testing.T) {
+	cfg := config.Defaults()
+	server := core.NewServer(cfg)
+	m := NewModule()
+	m.server = server
+	m.policy = cfg.HTTP
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			if err := m.OnReload(server); err != nil {
+				t.Errorf("reload: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			_ = m.server.Config().HTTP.HLS.PlaylistSize
+		}
+	}()
+	wg.Wait()
+}
 
 func TestOnReloadStopsSegmentManagersSoNewPolicyIsUsed(t *testing.T) {
 	cfg := config.Defaults()

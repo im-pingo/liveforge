@@ -1,8 +1,33 @@
 package runtime
 
-import "testing"
+import (
+	"testing"
 
-import "github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/config"
+)
+
+func TestParseDocumentExpandsEnvironmentLikeBootstrapLoad(t *testing.T) {
+	t.Setenv("LIVEFORGE_TEST_API_TOKEN", "runtime-admin-secret")
+	t.Setenv("LIVEFORGE_TEST_PUBLISH_SECRET", "runtime-publish-secret")
+
+	cfg, err := ParseDocument([]byte(`api:
+  auth:
+    bearer_token: "${LIVEFORGE_TEST_API_TOKEN}"
+auth:
+  publish:
+    token:
+      secret: "${LIVEFORGE_TEST_PUBLISH_SECRET}"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.BearerToken != "runtime-admin-secret" {
+		t.Fatalf("runtime bearer token=%q, want expanded value", cfg.API.Auth.BearerToken)
+	}
+	if cfg.Auth.Publish.Token.Secret != "runtime-publish-secret" {
+		t.Fatalf("runtime publish secret=%q, want expanded value", cfg.Auth.Publish.Token.Secret)
+	}
+}
 
 func TestParseDocumentAppliesDefaultsAndNormalizesContainer(t *testing.T) {
 	cfg, err := ParseDocument([]byte("http_stream:\n  llhls:\n    container: mpeg-ts\n"))
@@ -28,6 +53,39 @@ func TestParseDocumentRejectsInvalidAPIRoleAndDuplicateToken(t *testing.T) {
 	_, err := ParseDocument([]byte("api:\n  auth:\n    tokens:\n      - name: first\n        token: same\n        role: viewer\n      - name: second\n        token: same\n        role: owner\n"))
 	if err == nil {
 		t.Fatal("expected invalid role or duplicate token error")
+	}
+}
+
+func TestParseDocumentRejectsIncompleteOrBlankConsoleCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{name: "username only", doc: "api:\n  console:\n    username: admin\n    password: \"\"\n"},
+		{name: "password only", doc: "api:\n  console:\n    username: \"\"\n    password: secret\n"},
+		{name: "blank username", doc: "api:\n  console:\n    username: \"   \"\n    password: secret\n"},
+		{name: "blank password", doc: "api:\n  console:\n    username: admin\n    password: \"   \"\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := ParseDocument([]byte(tt.doc)); err == nil {
+				t.Fatal("expected incomplete console credentials to be rejected")
+			}
+		})
+	}
+}
+
+func TestParseDocumentRejectsLegacyAndNamedTokenCollision(t *testing.T) {
+	_, err := ParseDocument([]byte(`api:
+  auth:
+    bearer_token: shared-secret
+    tokens:
+      - name: readonly
+        token: shared-secret
+        role: viewer
+`))
+	if err == nil {
+		t.Fatal("expected legacy and named bearer collision to be rejected")
 	}
 }
 

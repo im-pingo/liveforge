@@ -106,6 +106,12 @@ func TestMetricsExposeRuntimeConfigHealth(t *testing.T) {
 			t.Errorf("missing %s", name)
 		}
 	}
+	for _, result := range []string{"accepted", "rejected", "application_failed"} {
+		metric := `liveforge_config_changes_total{result="` + result + `"}`
+		if !strings.Contains(string(body), metric) {
+			t.Errorf("missing bounded config change metric %s", metric)
+		}
+	}
 }
 
 type securityMetricStub struct{}

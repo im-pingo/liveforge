@@ -194,6 +194,10 @@ func (h *Handlers) handleStreamDelete(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 	// Path: /api/v1/streams/{key}/kick — extract key by removing prefix and /kick suffix
 	key := extractStreamKey(r.URL.Path, "/api/v1/streams/")
+	if !strings.HasSuffix(key, "/kick") {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	key = strings.TrimSuffix(key, "/kick")
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "missing stream key")
@@ -269,17 +273,20 @@ func (h *Handlers) handleServerStats(w http.ResponseWriter, r *http.Request) {
 
 // ConfigRuntimeStatus is the redacted runtime configuration loader status.
 type ConfigRuntimeStatus struct {
-	Enabled             bool      `json:"enabled"`
-	Source              string    `json:"source,omitempty"`
-	ActiveVersion       string    `json:"active_version,omitempty"`
-	ActiveHash          string    `json:"active_hash,omitempty"`
-	LastAttempt         time.Time `json:"last_attempt,omitempty"`
-	LastSuccess         time.Time `json:"last_success,omitempty"`
-	ConsecutiveFailures uint64    `json:"consecutive_failures"`
-	LastError           string    `json:"last_error,omitempty"`
-	PendingRestart      []string  `json:"pending_restart,omitempty"`
-	CallbackFailures    uint64    `json:"callback_failures"`
-	DroppedCallbacks    uint64    `json:"dropped_callbacks"`
+	Enabled                        bool      `json:"enabled"`
+	Source                         string    `json:"source,omitempty"`
+	ActiveVersion                  string    `json:"active_version,omitempty"`
+	ActiveHash                     string    `json:"active_hash,omitempty"`
+	LastAttempt                    time.Time `json:"last_attempt,omitempty"`
+	LastSuccess                    time.Time `json:"last_success,omitempty"`
+	ConsecutiveFailures            uint64    `json:"consecutive_failures"`
+	LastError                      string    `json:"last_error,omitempty"`
+	PendingRestart                 []string  `json:"pending_restart,omitempty"`
+	CallbackFailures               uint64    `json:"callback_failures"`
+	DroppedCallbacks               uint64    `json:"dropped_callbacks"`
+	ConfigChangesAccepted          uint64    `json:"config_changes_accepted"`
+	ConfigChangesRejected          uint64    `json:"config_changes_rejected"`
+	ConfigChangesApplicationFailed uint64    `json:"config_changes_application_failed"`
 }
 
 func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
@@ -290,17 +297,20 @@ func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := manager.Status()
 	writeJSON(w, http.StatusOK, ConfigRuntimeStatus{
-		Enabled:             true,
-		Source:              status.Source,
-		ActiveVersion:       status.ActiveVersion.Value,
-		ActiveHash:          status.ActiveVersion.Hash,
-		LastAttempt:         status.LastAttempt,
-		LastSuccess:         status.LastSuccess,
-		ConsecutiveFailures: status.ConsecutiveFailures,
-		LastError:           status.LastError,
-		PendingRestart:      status.PendingRestart,
-		CallbackFailures:    status.CallbackFailures,
-		DroppedCallbacks:    status.DroppedCallbacks,
+		Enabled:                        true,
+		Source:                         status.Source,
+		ActiveVersion:                  status.ActiveVersion.Value,
+		ActiveHash:                     status.ActiveVersion.Hash,
+		LastAttempt:                    status.LastAttempt,
+		LastSuccess:                    status.LastSuccess,
+		ConsecutiveFailures:            status.ConsecutiveFailures,
+		LastError:                      status.LastError,
+		PendingRestart:                 status.PendingRestart,
+		CallbackFailures:               status.CallbackFailures,
+		DroppedCallbacks:               status.DroppedCallbacks,
+		ConfigChangesAccepted:          status.ConfigChangesAccepted,
+		ConfigChangesRejected:          status.ConfigChangesRejected,
+		ConfigChangesApplicationFailed: status.ConfigChangesApplicationFailed,
 	})
 }
 

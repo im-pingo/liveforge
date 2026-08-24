@@ -49,12 +49,12 @@ type principalContextKey struct{}
 var rolePermissions = map[string]map[string]bool{
 	"viewer": {
 		"server:read": true, "streams:read": true, "cluster:read": true,
-		"sip:read": true, "recordings:read": true, "audit:read": true,
+		"sip:read": true, "recordings:read": true, "audit:read": true, "gb28181:read": true,
 	},
 	"operator": {
 		"server:read": true, "streams:read": true, "cluster:read": true,
 		"sip:read": true, "recordings:read": true, "audit:read": true,
-		"streams:kick": true, "sip:calls": true, "config:reload": true,
+		"streams:kick": true, "sip:calls": true, "config:reload": true, "gb28181:control": true,
 	},
 	"admin": {"*": true},
 }
@@ -92,6 +92,14 @@ func permissionForRequest(r *http.Request) string {
 		return "sip:read"
 	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/v1/recordings/"):
 		return "recordings:delete"
+	case r.Method == http.MethodDelete && (strings.HasPrefix(p, "/api/v1/gb28181/devices/") || strings.HasPrefix(p, "/api/v1/gb28181/sessions/")):
+		return "gb28181:delete"
+	case r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/gb28181/channels/"):
+		return "gb28181:control"
+	case strings.HasPrefix(p, "/api/v1/gb28181/") && r.Method != http.MethodGet:
+		return "gb28181:manage"
+	case strings.HasPrefix(p, "/api/v1/gb28181"):
+		return "gb28181:read"
 	case strings.HasPrefix(p, "/api/v1/recordings") || strings.HasPrefix(p, "/api/v1/dvr"):
 		return "recordings:read"
 	case strings.HasPrefix(p, "/api/v1/cluster"):
@@ -102,6 +110,8 @@ func permissionForRequest(r *http.Request) string {
 		return "audit:read"
 	case strings.HasPrefix(p, "/api/v1/streams"):
 		return "streams:read"
+	case strings.HasPrefix(p, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions:
+		return "server:mutate"
 	default:
 		return "server:read"
 	}
@@ -239,7 +249,7 @@ func handleSecuredLogin(w http.ResponseWriter, r *http.Request, cfg config.Conso
 
 func isAuditedOperation(permission string) bool {
 	switch permission {
-	case "streams:delete", "streams:kick", "sip:calls", "recordings:delete", "config:reload":
+	case "streams:delete", "streams:kick", "sip:calls", "recordings:delete", "config:reload", "gb28181:delete", "gb28181:control", "gb28181:manage", "server:mutate":
 		return true
 	default:
 		return false

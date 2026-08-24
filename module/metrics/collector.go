@@ -17,6 +17,7 @@ type Collector struct {
 	configPending   *prometheus.Desc
 	configCallbacks *prometheus.Desc
 	configDropped   *prometheus.Desc
+	configChanges   *prometheus.Desc
 	apiAuthFailures *prometheus.Desc
 	apiRBACFailures *prometheus.Desc
 	apiRateDenials  *prometheus.Desc
@@ -69,6 +70,10 @@ func NewCollector(s *core.Server) *Collector {
 		configDropped: prometheus.NewDesc(
 			prometheus.BuildFQName(ns, "config", "callbacks_dropped"),
 			"Total runtime configuration callbacks dropped because the callback queue was full.", nil, nil,
+		),
+		configChanges: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "config", "changes_total"),
+			"Total runtime configuration changes by terminal result.", []string{"result"}, nil,
 		),
 		apiAuthFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(ns, "api", "authentication_failures_total"),
@@ -139,6 +144,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.configPending
 	ch <- c.configCallbacks
 	ch <- c.configDropped
+	ch <- c.configChanges
 	ch <- c.apiAuthFailures
 	ch <- c.apiRBACFailures
 	ch <- c.apiRateDenials
@@ -167,6 +173,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.configPending, prometheus.GaugeValue, float64(len(status.PendingRestart)))
 		ch <- prometheus.MustNewConstMetric(c.configCallbacks, prometheus.CounterValue, float64(status.CallbackFailures))
 		ch <- prometheus.MustNewConstMetric(c.configDropped, prometheus.CounterValue, float64(status.DroppedCallbacks))
+		ch <- prometheus.MustNewConstMetric(c.configChanges, prometheus.CounterValue, float64(status.ConfigChangesAccepted), "accepted")
+		ch <- prometheus.MustNewConstMetric(c.configChanges, prometheus.CounterValue, float64(status.ConfigChangesRejected), "rejected")
+		ch <- prometheus.MustNewConstMetric(c.configChanges, prometheus.CounterValue, float64(status.ConfigChangesApplicationFailed), "application_failed")
 	}
 	if module := c.server.ModuleByName("api"); module != nil {
 		if provider, ok := module.(interface{ SecurityMetricValues() map[string]float64 }); ok {

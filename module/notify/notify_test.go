@@ -1,13 +1,17 @@
 package notify
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +19,35 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestWebhookFailureLogsRedactedEndpoint(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("network failure included secret-query-value")
+	})}
+	ep := config.NotifyEndpointConfig{
+		URL: "https://webhook-user:webhook-password@example.test/private/signature-value?token=secret-query-value&signature=query-signature",
+	}
+	NewHTTPSender(nil).deliverToEndpoint(client, ep, []byte(`{"event":"test"}`), 1)
+
+	output := logs.String()
+	if !strings.Contains(output, "https://example.test") {
+		t.Fatalf("sanitized endpoint origin missing from log: %s", output)
+	}
+	for _, secret := range []string{"webhook-user", "webhook-password", "private", "signature-value", "secret-query-value", "query-signature", "token="} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("webhook log exposed %q: %s", secret, output)
+		}
+	}
+}
 
 func TestBuildPayload(t *testing.T) {
 	ctx := &core.EventContext{

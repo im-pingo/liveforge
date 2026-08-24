@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -148,9 +149,10 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 			time.Sleep(backoff)
 		}
 
+		logTarget := webhookLogTarget(ep.URL)
 		req, err := http.NewRequest(http.MethodPost, ep.URL, bytes.NewReader(body))
 		if err != nil {
-			slog.Error("request error", "module", "notify", "error", err)
+			slog.Error("request error", "module", "notify", "endpoint", logTarget, "reason", "invalid endpoint URL")
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -162,7 +164,7 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 
 		resp, err := client.Do(req)
 		if err != nil {
-			slog.Warn("POST failed", "module", "notify", "url", ep.URL, "attempt", attempt+1, "max_retries", retries, "error", err)
+			slog.Warn("POST failed", "module", "notify", "endpoint", logTarget, "attempt", attempt+1, "max_retries", retries, "reason", "delivery failed")
 			continue
 		}
 		resp.Body.Close()
@@ -170,8 +172,16 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return // success
 		}
-		slog.Warn("POST unexpected status", "module", "notify", "url", ep.URL, "attempt", attempt+1, "max_retries", retries, "status", resp.StatusCode)
+		slog.Warn("POST unexpected status", "module", "notify", "endpoint", logTarget, "attempt", attempt+1, "max_retries", retries, "status", resp.StatusCode)
 	}
+}
+
+func webhookLogTarget(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 // matchEvent checks if the payload event matches the endpoint's event filter.

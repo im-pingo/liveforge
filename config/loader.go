@@ -25,6 +25,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	normalize(cfg)
+	if err := Validate(cfg); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }

@@ -129,7 +129,6 @@ func (m *Module) Hooks() []core.HookRegistration {
 // subsequent requests recreate them from the new immutable server snapshot.
 // Listener, TLS, CORS, and module enablement changes remain restart-required.
 func (m *Module) OnReload(s *core.Server) error {
-	m.server = s
 	m.updateRateLimiter(s.Config().Limits.RateLimit)
 	next := s.Config().HTTP
 	m.policyMu.Lock()

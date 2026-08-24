@@ -358,6 +358,11 @@ func TestHandleConfigStatus(t *testing.T) {
 	if status["source"] != "custom" {
 		t.Fatalf("status = %v", status)
 	}
+	for _, field := range []string{"config_changes_accepted", "config_changes_rejected", "config_changes_application_failed"} {
+		if _, ok := status[field]; !ok {
+			t.Fatalf("config status omitted %q: %v", field, status)
+		}
+	}
 }
 
 type testConfigSource struct{}

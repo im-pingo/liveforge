@@ -184,6 +184,157 @@ func TestManagerRejectsImmutableChanges(t *testing.T) {
 	}
 }
 
+func TestManagerApplicationFailureDoesNotPublishCandidateOrTypedKeys(t *testing.T) {
+	initial := config.Defaults()
+	desired := config.Defaults()
+	desired.Limits.MaxStreams = 42
+	data, err := normalizedBytes(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyErr := errors.New("module rejected policy")
+	m, err := NewManager(Options{
+		Source:  &mutableSource{snapshot: Snapshot{Data: data, Version: "rejected"}},
+		Initial: initial,
+		Apply: func(snapshot *ConfigSnapshot, _ ChangeSet) error {
+			if snapshot.Config.Limits.MaxStreams != 42 {
+				t.Fatalf("candidate max_streams=%d want=42", snapshot.Config.Limits.MaxStreams)
+			}
+			return applyErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	key, err := RegisterKey(m, "limits.max_streams", ChangeHot, func(cfg *config.Config) int { return cfg.Limits.MaxStreams })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.load(context.Background()); !errors.Is(err, applyErr) {
+		t.Fatalf("load error=%v want=%v", err, applyErr)
+	}
+	if got := m.Snapshot().Config.Limits.MaxStreams; got != initial.Limits.MaxStreams {
+		t.Fatalf("active max_streams=%d want=%d", got, initial.Limits.MaxStreams)
+	}
+	if got := key.Load(); got != initial.Limits.MaxStreams {
+		t.Fatalf("typed key max_streams=%d want=%d", got, initial.Limits.MaxStreams)
+	}
+	status := m.Status()
+	if status.ActiveVersion.Value == "rejected" || status.ConfigChangesApplicationFailed != 1 || status.ConfigChangesAccepted != 0 {
+		t.Fatalf("status after application rejection=%+v", status)
+	}
+}
+
+func TestManagerCoalescesNotificationsWithoutLosingLatestSnapshot(t *testing.T) {
+	initial := config.Defaults()
+	source := &mutableSource{}
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	notified := make(chan string, 4)
+	var once sync.Once
+	m, err := NewManager(Options{
+		Source:         source,
+		Initial:        initial,
+		CallbackBuffer: 1,
+		OnChange: func(set ChangeSet) error {
+			once.Do(func() {
+				close(firstStarted)
+				<-releaseFirst
+			})
+			notified <- set.Current.Value
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	loadVersion := func(version string, maxStreams int) {
+		t.Helper()
+		cfg := config.Defaults()
+		cfg.Limits.MaxStreams = maxStreams
+		data, err := normalizedBytes(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source.Set(Snapshot{Data: data, Version: version})
+		if err := m.load(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loadVersion("one", 1)
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first notification did not start")
+	}
+	loadVersion("two", 2)
+	loadVersion("three", 3)
+	close(releaseFirst)
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case version := <-notified:
+			if version == "three" {
+				if got := m.Status().DroppedCallbacks; got != 0 {
+					t.Fatalf("dropped callbacks=%d want=0", got)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("latest accepted snapshot was never notified")
+		}
+	}
+}
+
+func TestManagerCountsAcceptedRejectedAndApplicationFailedChanges(t *testing.T) {
+	initial := config.Defaults()
+	source := &mutableSource{}
+	m, err := NewManager(Options{
+		Source:  source,
+		Initial: initial,
+		Apply: func(snapshot *ConfigSnapshot, _ ChangeSet) error {
+			if snapshot.Config.Limits.MaxStreams == 3 {
+				return errors.New("application failed")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	valid := config.Defaults()
+	valid.Limits.MaxStreams = 1
+	data, _ := normalizedBytes(valid)
+	source.Set(Snapshot{Data: data, Version: "accepted"})
+	if err := m.load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	source.Set(Snapshot{Data: []byte("api:\n  console:\n    username: admin\n"), Version: "rejected"})
+	if err := m.load(context.Background()); err == nil {
+		t.Fatal("expected invalid document rejection")
+	}
+	failed := config.Defaults()
+	failed.Limits.MaxStreams = 3
+	data, _ = normalizedBytes(failed)
+	source.Set(Snapshot{Data: data, Version: "application-failed"})
+	if err := m.load(context.Background()); err == nil {
+		t.Fatal("expected application failure")
+	}
+
+	status := m.Status()
+	if status.ConfigChangesAccepted != 1 || status.ConfigChangesRejected != 1 || status.ConfigChangesApplicationFailed != 1 {
+		t.Fatalf("config change counters=%+v", status)
+	}
+}
+
 func BenchmarkSnapshotRead(b *testing.B) {
 	m, err := NewManager(Options{Source: &blockingSource{release: make(chan struct{})}, Initial: &config.Config{}})
 	if err != nil {

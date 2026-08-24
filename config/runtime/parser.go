@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -16,8 +17,15 @@ import (
 
 // ParseDocument parses YAML or JSON into a defaulted and normalized config.
 func ParseDocument(data []byte) (*config.Config, error) {
+	return parseDocument(data, true)
+}
+
+func parseDocument(data []byte, expandEnvironment bool) (*config.Config, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, fmt.Errorf("configuration document is empty")
+	}
+	if expandEnvironment {
+		data = []byte(os.ExpandEnv(string(data)))
 	}
 	cfg := config.Defaults()
 	if err := yaml.Unmarshal(data, cfg); err != nil {
@@ -31,8 +39,8 @@ func ParseDocument(data []byte) (*config.Config, error) {
 }
 
 func validateConfig(cfg *config.Config) error {
-	if cfg == nil {
-		return fmt.Errorf("configuration is nil")
+	if err := config.Validate(cfg); err != nil {
+		return err
 	}
 	if cfg.Server.DrainTimeout < 0 {
 		return fmt.Errorf("server.drain_timeout must not be negative")
@@ -57,24 +65,6 @@ func validateConfig(cfg *config.Config) error {
 	}
 	if (cfg.TLS.CertFile == "") != (cfg.TLS.KeyFile == "") {
 		return fmt.Errorf("tls.cert_file and tls.key_file must be configured together")
-	}
-	seenTokens := make(map[string]struct{}, len(cfg.API.Auth.Tokens))
-	for i, binding := range cfg.API.Auth.Tokens {
-		if binding.Token == "" {
-			return fmt.Errorf("api.auth.tokens[%d].token must not be empty", i)
-		}
-		switch strings.ToLower(binding.Role) {
-		case "viewer", "operator", "admin":
-		default:
-			return fmt.Errorf("api.auth.tokens[%d].role must be viewer, operator, or admin", i)
-		}
-		if _, exists := seenTokens[binding.Token]; exists {
-			return fmt.Errorf("api.auth.tokens contains a duplicate token")
-		}
-		seenTokens[binding.Token] = struct{}{}
-	}
-	if role := strings.ToLower(cfg.API.Console.Role); role != "" && role != "viewer" && role != "operator" && role != "admin" {
-		return fmt.Errorf("api.console.role must be viewer, operator, or admin")
 	}
 	return nil
 }
@@ -111,7 +101,7 @@ func cloneConfig(cfg *config.Config) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseDocument(b)
+	return parseDocument(b, false)
 }
 
 func configMap(cfg *config.Config) (map[string]any, error) {
@@ -205,7 +195,7 @@ func applyHotChanges(current, desired *config.Config, changes []Change) (*config
 	if err != nil {
 		return nil, fmt.Errorf("marshal effective config: %w", err)
 	}
-	return ParseDocument(data)
+	return parseDocument(data, false)
 }
 
 func mapPathValue(root map[string]any, parts []string) (any, bool) {

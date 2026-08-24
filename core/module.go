@@ -1,10 +1,12 @@
 package core
 
+import configruntime "github.com/im-pingo/liveforge/config/runtime"
+
 // EventType identifies a lifecycle or media event.
 type EventType uint16
 
 const (
-	EventStreamCreate    EventType = iota + 1
+	EventStreamCreate EventType = iota + 1
 	EventStreamDestroy
 	EventPublish
 	EventPublishStop
@@ -27,7 +29,7 @@ const (
 type HookMode uint8
 
 const (
-	HookSync  HookMode = iota + 1
+	HookSync HookMode = iota + 1
 	HookAsync
 )
 
@@ -64,4 +66,16 @@ type Module interface {
 // changed need to do anything in OnReload.
 type Reloadable interface {
 	OnReload(s *Server) error
+}
+
+// ReloadPreparer lets a module validate and construct candidate policy state
+// before any reloadable module is mutated. The returned commit must not fail.
+type ReloadPreparer interface {
+	PrepareReload(s *Server) (commit func(), err error)
+}
+
+// ConfigApplied is notified after every reloadable module accepted a runtime
+// snapshot and the server committed it.
+type ConfigApplied interface {
+	OnConfigApplied(snapshot *configruntime.ConfigSnapshot)
 }
