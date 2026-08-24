@@ -190,18 +190,38 @@ func (s *service) SendInvite(ctx context.Context, req *sip.Request) (*InviteTran
 	// Wait for final response in background
 	go func() {
 		defer invTx.Close()
+		responses := tx.Responses()
+		storeFinal := func(resp *sip.Response) bool {
+			if resp == nil || resp.StatusCode < 200 {
+				return false
+			}
+			invTx.mu.Lock()
+			invTx.response = resp
+			invTx.mu.Unlock()
+			return true
+		}
+		storeReadyFinal := func() {
+			select {
+			case resp, ok := <-responses:
+				if ok {
+					storeFinal(resp)
+				}
+			default:
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
+				storeReadyFinal()
 				return
-			case resp, ok := <-tx.Responses():
+			case <-tx.Done():
+				storeReadyFinal()
+				return
+			case resp, ok := <-responses:
 				if !ok {
 					return
 				}
-				if resp.StatusCode >= 200 {
-					invTx.mu.Lock()
-					invTx.response = resp
-					invTx.mu.Unlock()
+				if storeFinal(resp) {
 					return
 				}
 			}

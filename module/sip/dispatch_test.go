@@ -1,12 +1,46 @@
 package sip
 
 import (
+	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 )
+
+type offeredResponseClientTx struct {
+	responses chan *sip.Response
+	done      chan struct{}
+	once      sync.Once
+}
+
+func newOfferedResponseClientTx() *offeredResponseClientTx {
+	return &offeredResponseClientTx{
+		responses: make(chan *sip.Response),
+		done:      make(chan struct{}),
+	}
+}
+
+func (tx *offeredResponseClientTx) Responses() <-chan *sip.Response { return tx.responses }
+func (tx *offeredResponseClientTx) Done() <-chan struct{}           { return tx.done }
+func (tx *offeredResponseClientTx) Err() error                      { return nil }
+func (tx *offeredResponseClientTx) Terminate()                      { tx.once.Do(func() { close(tx.done) }) }
+func (tx *offeredResponseClientTx) OnTerminate(sip.FnTxTerminate) bool {
+	return true
+}
+func (tx *offeredResponseClientTx) OnRetransmission(sip.FnTxResponse) bool {
+	return false
+}
+
+type clientTxRequesterFunc func(context.Context, *sip.Request) (sip.ClientTransaction, error)
+
+func (f clientTxRequesterFunc) Request(ctx context.Context, req *sip.Request) (sip.ClientTransaction, error) {
+	return f(ctx, req)
+}
 
 // mockServerTx is a minimal mock implementing sip.ServerTransaction.
 // It captures responses passed to Respond for later assertions.
@@ -70,6 +104,93 @@ func (m *mockServerTx) responseCount() int {
 // makeTestRequest creates a minimal SIP request for the given method.
 func makeTestRequest(method sip.RequestMethod) *sip.Request {
 	return sip.NewRequest(method, sip.Uri{Host: "localhost", Port: 5060})
+}
+
+func TestSendInviteRetainsOfferedFinalResponseWhenCallerCanceled(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previousProcs) })
+
+	ua, err := sipgo.NewUA()
+	if err != nil {
+		t.Fatalf("NewUA: %v", err)
+	}
+	t.Cleanup(func() { _ = ua.Close() })
+	client, err := sipgo.NewClient(ua)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	service := newService()
+	service.client = &sipClient{client: client}
+
+	const attempts = 64
+	lost := 0
+	for range attempts {
+		clientTx := newOfferedResponseClientTx()
+		client.TxRequester = clientTxRequesterFunc(func(context.Context, *sip.Request) (sip.ClientTransaction, error) {
+			return clientTx, nil
+		})
+		offerStarted := make(chan struct{})
+		offerDone := make(chan struct{})
+		go func() {
+			close(offerStarted)
+			select {
+			case clientTx.responses <- sip.NewResponse(200, "OK"):
+			case <-clientTx.done:
+			}
+			close(offerDone)
+		}()
+		<-offerStarted
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		inviteTx, err := service.SendInvite(ctx, makeTestRequest(sip.INVITE))
+		if err != nil {
+			t.Fatalf("SendInvite: %v", err)
+		}
+		select {
+		case <-inviteTx.Done():
+		case <-time.After(time.Second):
+			t.Fatal("InviteTransaction did not finish after final response or cancellation")
+		}
+		<-offerDone
+		if inviteTx.Response() == nil {
+			lost++
+		}
+	}
+
+	if lost != 0 {
+		t.Fatalf("lost %d of %d final responses offered before cancellation wait", lost, attempts)
+	}
+}
+
+func TestSendInviteCollectorStopsWhenClientTransactionTerminates(t *testing.T) {
+	ua, err := sipgo.NewUA()
+	if err != nil {
+		t.Fatalf("NewUA: %v", err)
+	}
+	t.Cleanup(func() { _ = ua.Close() })
+	client, err := sipgo.NewClient(ua)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	clientTx := newOfferedResponseClientTx()
+	client.TxRequester = clientTxRequesterFunc(func(context.Context, *sip.Request) (sip.ClientTransaction, error) {
+		return clientTx, nil
+	})
+	service := newService()
+	service.client = &sipClient{client: client}
+
+	inviteTx, err := service.SendInvite(context.Background(), makeTestRequest(sip.INVITE))
+	if err != nil {
+		t.Fatalf("SendInvite: %v", err)
+	}
+	clientTx.Terminate()
+
+	select {
+	case <-inviteTx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("InviteTransaction collector remained blocked after client transaction termination")
+	}
 }
 
 // ---------------------------------------------------------------------------
