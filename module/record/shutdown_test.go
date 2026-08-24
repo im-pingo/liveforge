@@ -341,8 +341,13 @@ func TestModuleRepublishSurvivesFinalizerLongerThanDrainTimeout(t *testing.T) {
 			t.Fatal("new publish did not resume after old finalizer")
 		}
 	}
-	if replacement := m.sessions["live/slow-republish"]; replacement == nil || replacement == oldSession {
+	replacement := m.sessions["live/slow-republish"]
+	if replacement == nil || replacement == oldSession {
 		t.Fatalf("new publish was lost: replacement=%p old=%p", replacement, oldSession)
+	}
+	replacement.Stop()
+	if !replacement.WaitUntil(time.Now().Add(time.Second)) {
+		t.Fatal("replacement finalizer did not finish")
 	}
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
