@@ -44,6 +44,14 @@ type TrackSetup struct {
 	Multicast *MulticastTransport // non-nil for UDP multicast
 }
 
+type trackSetupResult int
+
+const (
+	trackSetupOK trackSetupResult = iota
+	trackSetupSessionClosed
+	trackSetupInvalidState
+)
+
 // RTSPSession represents an RTSP session with state management.
 type RTSPSession struct {
 	ID         string
@@ -157,11 +165,20 @@ func (s *RTSPSession) SetDescription(mediaInfo *avframe.MediaInfo, stream *core.
 	return true
 }
 
-func (s *RTSPSession) AddTrack(track TrackSetup) bool {
+func (s *RTSPSession) setupTrack(track TrackSetup) trackSetupResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.State == StateClosed {
-		return false
+		return trackSetupSessionClosed
+	}
+	switch s.State {
+	case StateDescribed, StateAnnounced:
+		s.State = StateReady
+		s.lastTouch = time.Now()
+	case StateReady:
+		// Additional media tracks keep the session ready.
+	default:
+		return trackSetupInvalidState
 	}
 	if s.MediaInfo != nil {
 		index := len(s.Tracks)
@@ -172,7 +189,7 @@ func (s *RTSPSession) AddTrack(track TrackSetup) bool {
 		}
 	}
 	s.Tracks = append(s.Tracks, track)
-	return true
+	return trackSetupOK
 }
 
 func (s *RTSPSession) SetPublisher(mediaInfo *avframe.MediaInfo, stream *core.Stream, publisher *RTSPPublisher) bool {

@@ -64,6 +64,13 @@ func TestHandleSetupUDP(t *testing.T) {
 	pa, _ := portalloc.New(10000, 10010)
 	h := NewHandler(nil, pa, nil)
 	session := NewRTSPSession("test-id", "live/room1")
+	t.Cleanup(func() {
+		for _, track := range session.Snapshot().Tracks {
+			if track.UDP != nil {
+				track.UDP.Close()
+			}
+		}
+	})
 	session.Transition(StateDescribed)
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(http.Header)}
 	req.Headers.Set("CSeq", "4")

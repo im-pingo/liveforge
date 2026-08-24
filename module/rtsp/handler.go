@@ -135,14 +135,18 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 			UDP:       udpTransport,
 			Multicast: mcastTransport,
 		}
-		if !session.AddTrack(ts) {
+		setupResult := session.setupTrack(ts)
+		if setupResult != trackSetupOK {
 			if udpTransport != nil {
 				udpTransport.Close()
 			}
 			if mcastTransport != nil {
 				mcastTransport.Close()
 			}
-			return newResponse(454, "Session Not Found", req)
+			if setupResult == trackSetupSessionClosed {
+				return newResponse(454, "Session Not Found", req)
+			}
+			return newResponse(455, "Method Not Valid in This State", req)
 		}
 	}
 
@@ -158,9 +162,6 @@ func (h *Handler) HandleSetup(req *Request, session *RTSPSession, remoteAddr str
 	}
 	if session != nil {
 		resp.Headers.Set("Session", session.Snapshot().ID+";timeout=60")
-		if err := session.Transition(StateReady); err != nil {
-			return newResponse(455, "Method Not Valid in This State", req)
-		}
 	}
 	return resp
 }
