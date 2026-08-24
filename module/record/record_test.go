@@ -1,6 +1,11 @@
 package record
 
 import (
+	"bytes"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,6 +286,71 @@ func TestFileWriterFormat(t *testing.T) {
 		t.Errorf("Format = %q, want fmp4", w.Format())
 	}
 	w.Close()
+}
+
+func TestFileWriterExpandsConfiguredExtensionPlaceholder(t *testing.T) {
+	tests := []struct {
+		format string
+		ext    string
+	}{
+		{format: "flv", ext: ".flv"},
+		{format: "mp4", ext: ".mp4"},
+		{format: "fmp4", ext: ".mp4"},
+		{format: "ts", ext: ".ts"},
+		{format: "hls", ext: ".ts"},
+	}
+	for _, test := range tests {
+		t.Run(test.format, func(t *testing.T) {
+			writer, err := NewFileWriter("live/ext", config.RecordConfig{
+				Format: test.format,
+				Path:   filepath.Join(t.TempDir(), "{stream_key}.{ext}"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			if got := writer.RecordingID(); !strings.HasSuffix(got, test.ext) || strings.Contains(got, "{ext}") {
+				t.Fatalf("recording id = %q, want suffix %q", got, test.ext)
+			}
+		})
+	}
+}
+
+func TestFileCompleteCallbackFailureLogsRedactedEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	callback, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+	callback.User = url.UserPassword("callback-user", "callback-password")
+	callback.Path = "/callback-path-credential/signature-value"
+	callback.RawQuery = "token=secret-query-value&signature=query-signature"
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	writer, err := NewFileWriter("live/callback", config.RecordConfig{
+		Format:         "flv",
+		Path:           filepath.Join(t.TempDir(), "{stream_key}.flv"),
+		OnFileComplete: config.FileCompleteConfig{URL: callback.String()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+
+	output := logs.String()
+	if !strings.Contains(output, server.URL) {
+		t.Fatalf("sanitized callback origin missing from log: %s", output)
+	}
+	for _, secret := range []string{"callback-user", "callback-password", "callback-path-credential", "signature-value", "secret-query-value", "query-signature", "token="} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("callback log exposed %q: %s", secret, output)
+		}
+	}
 }
 
 func TestFMP4FileWriterCreatesFile(t *testing.T) {

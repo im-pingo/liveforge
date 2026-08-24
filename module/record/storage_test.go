@@ -145,3 +145,136 @@ func TestStorageTemplateUsesConfiguredFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalStorageRecoversCrashPartialWithoutOverwritingFailure(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "live/cam")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(dir, "crash.flv.partial")
+	if err := os.WriteFile(partial, []byte("crash bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existingFailed := filepath.Join(dir, "crash.flv.failed")
+	if err := os.WriteFile(existingFailed, []byte("older failure"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := storage.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("recovered items = %+v", items)
+	}
+	if data, err := os.ReadFile(existingFailed); err != nil || string(data) != "older failure" {
+		t.Fatalf("existing failure data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Fatalf("partial still visible: %v", err)
+	}
+	var recovered RecordingInfo
+	for _, item := range items {
+		if item.ID != "live/cam/crash.flv.failed" {
+			recovered = item
+		}
+	}
+	if recovered.State != RecordingFailed || recovered.Error == "" || recovered.Size != int64(len("crash bytes")) {
+		t.Fatalf("recovered = %+v", recovered)
+	}
+	reader, _, err := storage.Open(context.Background(), recovered.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "crash bytes" {
+		t.Fatalf("recovered data=%q err=%v", data, err)
+	}
+}
+
+func TestLocalStorageCreateDoesNotFollowIntermediateSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "live")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Create(context.Background(), "live/cam/file.flv", RecordingInfo{}); !errors.Is(err, ErrInvalidRecordingID) {
+		t.Fatalf("create error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "cam")); !os.IsNotExist(err) {
+		t.Fatalf("outside directory was created before rejection: %v", err)
+	}
+}
+
+func TestLocalStoragePendingFinalizePinsOriginalDirectory(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := storage.Create(context.Background(), "live/cam/file.flv", RecordingInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := object.Write([]byte("safe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "live"), filepath.Join(root, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "live")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(outside, "cam"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	attackPartial := filepath.Join(outside, "cam/file.flv.partial")
+	if err := os.WriteFile(attackPartial, []byte("attack"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := object.Complete(context.Background(), RecordingInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	safeData, err := os.ReadFile(filepath.Join(root, "moved/cam/file.flv"))
+	if err != nil || string(safeData) != "safe" {
+		t.Fatalf("safe data=%q err=%v", safeData, err)
+	}
+	attackData, err := os.ReadFile(attackPartial)
+	if err != nil || string(attackData) != "attack" {
+		t.Fatalf("outside partial data=%q err=%v", attackData, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "cam/file.flv")); !os.IsNotExist(err) {
+		t.Fatalf("outside final created: %v", err)
+	}
+}
+
+func TestStandaloneFileWriterClosesPrivateStorageBoundary(t *testing.T) {
+	cfg := config.RecordConfig{
+		Format: "flv",
+		Path:   filepath.Join(t.TempDir(), "{stream_key}.flv"),
+	}
+	writer, err := NewFileWriter("live/private", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage, ok := writer.storage.(*LocalStorage)
+	if !ok {
+		t.Fatalf("storage type = %T", writer.storage)
+	}
+	writer.Close()
+	if _, err := storage.List(context.Background()); err == nil {
+		t.Fatal("standalone writer left its private storage boundary open")
+	}
+}

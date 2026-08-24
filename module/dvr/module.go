@@ -2,6 +2,8 @@ package dvr
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,27 +14,34 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/localfs"
 )
 
 // Module implements core.Module for DVR/time-shift playback.
 type Module struct {
-	server   *core.Server
-	policy   atomic.Pointer[config.DVRConfig]
-	listener net.Listener
-	httpSrv  *http.Server
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	sessions map[string]*Session
-	reloadCh chan struct{}
-	metrics  DVRMetrics
+	server    *core.Server
+	policy    atomic.Pointer[config.DVRConfig]
+	listener  net.Listener
+	httpSrv   *http.Server
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+	sessions  map[string]*Session
+	reloadCh  chan struct{}
+	metrics   DVRMetrics
+	storage   *dvrStorage
+	closing   bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
 }
 
 // NewModule creates a new DVR module.
 func NewModule() *Module {
 	return &Module{
-		sessions: make(map[string]*Session),
-		reloadCh: make(chan struct{}, 1),
+		sessions:  make(map[string]*Session),
+		reloadCh:  make(chan struct{}, 1),
+		closeDone: make(chan struct{}),
 	}
 }
 
@@ -44,9 +53,16 @@ func (m *Module) Init(s *core.Server) error {
 	m.server = s
 	cfg := s.Config().DVR
 	m.storePolicy(cfg)
+	storage, err := newDVRStorage(cfg.Path)
+	if err != nil {
+		return err
+	}
+	m.storage = storage
 
 	ln, err := s.MakeListenerAutoTLS(cfg.Listen, nil)
 	if err != nil {
+		_ = storage.Close()
+		m.storage = nil
 		return err
 	}
 	m.listener = ln
@@ -85,6 +101,7 @@ func (m *Module) OnReload(s *core.Server) error {
 	current := m.Policy()
 	cfg.Enabled = current.Enabled
 	cfg.Listen = current.Listen
+	cfg.Path = current.Path
 	m.storePolicy(cfg)
 	select {
 	case m.reloadCh <- struct{}{}:
@@ -125,6 +142,24 @@ func (m *Module) Hooks() []core.HookRegistration {
 
 // Close shuts down the DVR server and stops all sessions.
 func (m *Module) Close() error {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.close()
+		close(m.closeDone)
+	})
+	<-m.closeDone
+	return m.closeErr
+}
+
+func (m *Module) close() error {
+	m.mu.Lock()
+	m.closing = true
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+		session.Stop()
+	}
+	m.mu.Unlock()
+
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -132,21 +167,53 @@ func (m *Module) Close() error {
 		m.httpSrv.Close()
 	}
 
-	m.mu.Lock()
-	sessions := make([]*Session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		sessions = append(sessions, s)
+	deadline := time.Now().Add(m.drainTimeout())
+	pending := 0
+	for _, session := range sessions {
+		if !session.WaitUntil(deadline) {
+			pending++
+		}
 	}
-	m.mu.Unlock()
-
-	for _, s := range sessions {
-		s.Stop()
-		s.Wait()
+	wgDone := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(wgDone)
+	}()
+	var wgErr error
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		wgErr = fmt.Errorf("dvr: drain timeout waiting for module workers")
+	} else {
+		timer := time.NewTimer(remaining)
+		select {
+		case <-wgDone:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			wgErr = fmt.Errorf("dvr: drain timeout waiting for module workers")
+		}
 	}
-
-	m.wg.Wait()
+	for _, session := range sessions {
+		session.closeStorage()
+	}
+	if m.storage != nil {
+		_ = m.storage.Close()
+	}
 	slog.Info("stopped", "module", "dvr")
-	return nil
+	if pending > 0 {
+		return errors.Join(fmt.Errorf("dvr: drain timeout with %d session(s) still finalizing", pending), wgErr)
+	}
+	return wgErr
+}
+
+func (m *Module) drainTimeout() time.Duration {
+	if m.server != nil {
+		if timeout := m.server.Config().Server.DrainTimeout; timeout > 0 {
+			return timeout
+		}
+	}
+	return 10 * time.Second
 }
 
 func (m *Module) onPublish(ctx *core.EventContext) error {
@@ -160,33 +227,59 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 		return nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	existing := m.sessions[ctx.StreamKey]
-	if existing != nil && existing.IsLive() {
-		return nil
-	}
-
-	var existingIndex *SegmentIndex
-	startSeq := 0
-	if existing != nil {
-		existingIndex = existing.Index()
-		if last, ok := existingIndex.Last(); ok {
-			startSeq = last.SeqNum + 1
+	for {
+		m.mu.Lock()
+		if m.closing {
+			m.mu.Unlock()
+			return nil
 		}
-	}
 
-	session, err := newSession(ctx.StreamKey, stream, cfg, existingIndex, startSeq, &m.metrics)
-	if err != nil {
-		slog.Error("failed to start dvr session", "module", "dvr", "stream", ctx.StreamKey, "error", err)
+		existing := m.sessions[ctx.StreamKey]
+		if existing != nil && existing.IsLive() {
+			m.mu.Unlock()
+			return nil
+		}
+		if existing != nil && existing.IsStopping() {
+			m.mu.Unlock()
+			if !existing.WaitUntil(time.Now().Add(m.drainTimeout())) {
+				return nil
+			}
+			continue
+		}
+
+		var existingIndex *SegmentIndex
+		var existingDir *localfs.Dir
+		var err error
+		startSeq := 0
+		if existing != nil {
+			existingIndex = existing.Index()
+			existingDir = existing.dir
+			if last, ok := existingIndex.Last(); ok {
+				startSeq = last.SeqNum + 1
+			}
+		}
+
+		if m.storage == nil {
+			m.storage, err = newDVRStorage(cfg.Path)
+			if err != nil {
+				m.mu.Unlock()
+				slog.Error("failed to open dvr storage", "module", "dvr", "stream", ctx.StreamKey, "error", err)
+				return nil
+			}
+		}
+		session, err := newSessionWithStorage(ctx.StreamKey, stream, cfg, existingIndex, startSeq, &m.metrics, m.storage, existingDir, false)
+		if err != nil {
+			m.mu.Unlock()
+			slog.Error("failed to start dvr session", "module", "dvr", "stream", ctx.StreamKey, "error", err)
+			return nil
+		}
+
+		m.sessions[ctx.StreamKey] = session
+		m.mu.Unlock()
+		go session.Run()
+		slog.Info("started", "module", "dvr", "stream", ctx.StreamKey)
 		return nil
 	}
-
-	m.sessions[ctx.StreamKey] = session
-	go session.Run()
-	slog.Info("started", "module", "dvr", "stream", ctx.StreamKey)
-	return nil
 }
 
 func (m *Module) onPublishStop(ctx *core.EventContext) error {

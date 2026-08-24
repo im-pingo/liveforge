@@ -1,6 +1,8 @@
 package dvr
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/localfs"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 	"github.com/im-pingo/liveforge/pkg/util"
@@ -23,28 +26,32 @@ type Session struct {
 	cfg       config.DVRConfig
 	index     *SegmentIndex
 	segDir    string
+	storage   *dvrStorage
+	dir       *localfs.Dir
+	ownsStore bool
 
-	muxer        *ts.Muxer
-	segFile      segmentFile
-	segFinalPath string
-	segStartDTS  int64
-	lastDTS      int64
-	segSeqNum    int
-	wallStart    time.Time
+	muxer       *ts.Muxer
+	segFile     segmentFile
+	segPending  *localfs.Pending
+	segFinal    string
+	segStartDTS int64
+	lastDTS     int64
+	segSeqNum   int
+	wallStart   time.Time
 
 	videoSeq   []byte
 	audioSeq   []byte
 	videoCodec avframe.CodecType
 	audioCodec avframe.CodecType
 
-	reader        *util.RingReader[*avframe.AVFrame]
-	done          chan struct{}
-	finished      chan struct{}
-	stopped       atomic.Bool
-	startedAt     time.Time
-	lastError     atomic.Pointer[string]
-	metrics       *DVRMetrics
-	createSegment func(string) (segmentFile, error)
+	reader      *util.RingReader[*avframe.AVFrame]
+	done        chan struct{}
+	finished    chan struct{}
+	lifecycle   atomic.Uint32
+	startedAt   time.Time
+	lastError   atomic.Pointer[string]
+	metrics     *DVRMetrics
+	wrapSegment func(segmentFile) segmentFile
 }
 
 type segmentFile interface {
@@ -54,34 +61,69 @@ type segmentFile interface {
 	Name() string
 }
 
+const (
+	sessionActive uint32 = iota
+	sessionStopping
+	sessionStopped
+)
+
 // NewSession creates a DVR session for the given stream.
 func NewSession(streamKey string, stream *core.Stream, cfg config.DVRConfig, existingIndex *SegmentIndex, startSeq int) (*Session, error) {
 	return newSession(streamKey, stream, cfg, existingIndex, startSeq, nil)
 }
 
 func newSession(streamKey string, stream *core.Stream, cfg config.DVRConfig, existingIndex *SegmentIndex, startSeq int, metrics *DVRMetrics) (*Session, error) {
+	storage, err := newDVRStorage(cfg.Path)
+	if err != nil {
+		return nil, err
+	}
+	session, err := newSessionWithStorage(streamKey, stream, cfg, existingIndex, startSeq, metrics, storage, nil, true)
+	if err != nil {
+		_ = storage.Close()
+		return nil, err
+	}
+	return session, nil
+}
+
+func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVRConfig, existingIndex *SegmentIndex, startSeq int, metrics *DVRMetrics, storage *dvrStorage, existingDir *localfs.Dir, ownsStore bool) (*Session, error) {
 	if !validStreamKey(streamKey) {
 		return nil, fmt.Errorf("dvr: invalid stream key")
 	}
+	dir := existingDir
 	segDir := resolvePath(cfg.Path, streamKey)
-	if err := os.MkdirAll(segDir, 0755); err != nil {
-		return nil, fmt.Errorf("dvr: create dir %s: %w", segDir, err)
-	}
-
-	idx := existingIndex
-	if idx == nil {
-		idx = NewSegmentIndex()
+	if dir == nil {
+		var err error
+		dir, segDir, err = storage.openStreamDir(cfg.Path, streamKey)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if metrics == nil {
 		metrics = &DVRMetrics{}
 	}
-	return &Session{
+	idx := existingIndex
+	recoveredPartials := 0
+	if idx == nil {
+		var err error
+		idx, startSeq, recoveredPartials, err = rebuildSegmentIndex(dir, segDir, cfg.SegmentDuration, startSeq)
+		if err != nil {
+			if existingDir == nil {
+				_ = dir.Close()
+			}
+			return nil, err
+		}
+	}
+
+	session := &Session{
 		streamKey:   streamKey,
 		stream:      stream,
 		cfg:         cfg,
 		index:       idx,
 		segDir:      segDir,
+		storage:     storage,
+		dir:         dir,
+		ownsStore:   ownsStore,
 		segStartDTS: -1,
 		lastDTS:     -1,
 		segSeqNum:   startSeq,
@@ -90,17 +132,19 @@ func newSession(streamKey string, stream *core.Stream, cfg config.DVRConfig, exi
 		finished:    make(chan struct{}),
 		startedAt:   time.Now().UTC(),
 		metrics:     metrics,
-		createSegment: func(path string) (segmentFile, error) {
-			return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
-		},
-	}, nil
+	}
+	if recoveredPartials > 0 {
+		metrics.writeFailures.Add(uint64(recoveredPartials))
+		session.setLastError(fmt.Errorf("dvr: recovered %d crash partial segment(s)", recoveredPartials))
+	}
+	return session, nil
 }
 
 // Run starts the DVR segment writing loop. Blocks until Stop or stream closes.
 func (s *Session) Run() {
 	defer func() {
 		s.closeSegment(false)
-		s.stopped.Store(true)
+		s.lifecycle.Store(sessionStopped)
 		close(s.finished)
 	}()
 
@@ -139,6 +183,26 @@ func (s *Session) Run() {
 
 // Wait blocks until Run has finalized the current segment.
 func (s *Session) Wait() { <-s.finished }
+
+func (s *Session) WaitUntil(deadline time.Time) bool {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		select {
+		case <-s.finished:
+			return true
+		default:
+			return false
+		}
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-s.finished:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
 
 func (s *Session) processFrame(frame *avframe.AVFrame) {
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -191,24 +255,36 @@ func (s *Session) shouldSplit() bool {
 
 func (s *Session) openSegment() {
 	filename := fmt.Sprintf("seg_%06d.ts", s.segSeqNum)
-	finalPath := filepath.Join(s.segDir, filename)
-	partialPath := finalPath + ".partial"
-	if _, err := os.Lstat(partialPath); err == nil {
-		orphanPath := fmt.Sprintf("%s.orphan-%d.failed", finalPath, time.Now().UnixNano())
-		if err := os.Rename(partialPath, orphanPath); err != nil {
+	for {
+		if _, err := s.dir.Stat(filename); errors.Is(err, localfs.ErrNotFound) {
+			break
+		} else if err != nil {
+			s.setLastError(err)
+			s.metrics.writeFailures.Add(1)
+			return
+		}
+		s.segSeqNum++
+		filename = fmt.Sprintf("seg_%06d.ts", s.segSeqNum)
+	}
+	partialName := filename + ".partial"
+	if _, err := s.dir.Stat(partialName); err == nil {
+		stamp := time.Now().UnixNano()
+		if _, err := s.dir.MoveToUnique(partialName, func(attempt int) string {
+			return fmt.Sprintf("%s.orphan-%d.failed", filename, stamp+int64(attempt))
+		}); err != nil {
 			s.setLastError(err)
 			s.metrics.writeFailures.Add(1)
 			return
 		}
 		s.setLastError(fmt.Errorf("dvr: preserved orphan partial segment"))
 		s.metrics.writeFailures.Add(1)
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, localfs.ErrNotFound) {
 		s.setLastError(err)
 		s.metrics.writeFailures.Add(1)
 		return
 	}
 
-	f, err := s.createSegment(partialPath)
+	pending, err := s.dir.CreatePending(partialName, 0644)
 	if err != nil {
 		slog.Error("dvr: create segment", "stream", s.streamKey, "error", err)
 		s.setLastError(err)
@@ -216,8 +292,13 @@ func (s *Session) openSegment() {
 		return
 	}
 
-	s.segFile = f
-	s.segFinalPath = finalPath
+	file := segmentFile(pending.File)
+	if s.wrapSegment != nil {
+		file = s.wrapSegment(file)
+	}
+	s.segFile = file
+	s.segPending = pending
+	s.segFinal = filename
 	s.wallStart = time.Now()
 	s.segStartDTS = -1
 }
@@ -226,7 +307,6 @@ func (s *Session) closeSegment(failed bool) {
 	if s.segFile == nil {
 		return
 	}
-	partialPath := s.segFile.Name()
 	if !failed {
 		if err := s.segFile.Sync(); err != nil {
 			failed = true
@@ -240,24 +320,17 @@ func (s *Session) closeSegment(failed bool) {
 		s.metrics.writeFailures.Add(1)
 	}
 	if failed {
-		failedPath := s.segFinalPath + ".failed"
-		if err := os.Rename(partialPath, failedPath); err != nil {
-			s.setLastError(err)
-		}
+		s.preservePending("write")
 		s.segSeqNum++
-		s.segFile = nil
-		s.segFinalPath = ""
-		s.segStartDTS = -1
+		s.resetSegment()
 		return
 	}
-	if err := os.Rename(partialPath, s.segFinalPath); err != nil {
+	if err := s.segPending.PublishAs(s.segFinal); err != nil {
 		s.setLastError(err)
 		s.metrics.writeFailures.Add(1)
-		_ = os.Rename(partialPath, s.segFinalPath+".failed")
+		s.preservePending("publish")
 		s.segSeqNum++
-		s.segFile = nil
-		s.segFinalPath = ""
-		s.segStartDTS = -1
+		s.resetSegment()
 		return
 	}
 
@@ -266,13 +339,13 @@ func (s *Session) closeSegment(failed bool) {
 		dur = float64(s.lastDTS-s.segStartDTS) / 1000.0
 	}
 
-	info, _ := os.Stat(s.segFinalPath)
+	info, _ := s.segPending.StatSibling(s.segFinal)
 	size := int64(0)
 	if info != nil {
 		size = info.Size()
 	}
 
-	filename := filepath.Base(s.segFinalPath)
+	filename := s.segFinal
 	s.index.Add(Segment{
 		SeqNum:    s.segSeqNum,
 		StartTime: s.wallStart,
@@ -280,7 +353,7 @@ func (s *Session) closeSegment(failed bool) {
 		Duration:  dur,
 		Filename:  filename,
 		Size:      size,
-		DiskPath:  s.segFinalPath,
+		DiskPath:  filepath.Join(s.segDir, filename),
 	})
 	s.metrics.segmentsWritten.Add(1)
 	if size > 0 {
@@ -288,8 +361,24 @@ func (s *Session) closeSegment(failed bool) {
 	}
 
 	s.segSeqNum++
+	s.resetSegment()
+}
+
+func (s *Session) preservePending(label string) {
+	stamp := time.Now().UnixNano()
+	if _, err := s.segPending.PreserveAs(func(attempt int) string {
+		return fmt.Sprintf("%s.%s-%d.failed", s.segFinal, label, stamp+int64(attempt))
+	}); err != nil {
+		s.setLastError(err)
+	}
+}
+
+func (s *Session) resetSegment() {
+	_ = s.segPending.Close()
 	s.segFile = nil
-	s.segFinalPath = ""
+	s.segPending = nil
+	s.segFinal = ""
+	s.segStartDTS = -1
 }
 
 func (s *Session) writeSegment(data []byte) error {
@@ -331,22 +420,49 @@ func (s *Session) Status() SessionStatus {
 
 // Stop signals the session to exit its write loop.
 func (s *Session) Stop() {
+	if !s.lifecycle.CompareAndSwap(sessionActive, sessionStopping) {
+		return
+	}
 	select {
 	case <-s.done:
 	default:
 		close(s.done)
 	}
-	s.stopped.Store(true)
 }
 
 // IsLive returns true if the stream is still publishing.
 func (s *Session) IsLive() bool {
-	return !s.stopped.Load()
+	return s.lifecycle.Load() == sessionActive
 }
+
+func (s *Session) IsStopping() bool { return s.lifecycle.Load() == sessionStopping }
 
 // Index returns the session's segment index.
 func (s *Session) Index() *SegmentIndex {
 	return s.index
+}
+
+func (s *Session) openIndexedSegment(segment Segment) (*os.File, os.FileInfo, error) {
+	return s.dir.Open(segment.Filename)
+}
+
+func (s *Session) cleanBefore(cutoff time.Time) CleanupResult {
+	return s.index.CleanBeforeWithRemover(cutoff, func(segment Segment) error {
+		err := s.dir.Remove(segment.Filename)
+		if errors.Is(err, localfs.ErrNotFound) {
+			return nil
+		}
+		return err
+	})
+}
+
+func (s *Session) closeStorage() {
+	if s.dir != nil {
+		_ = s.dir.Close()
+	}
+	if s.ownsStore && s.storage != nil {
+		_ = s.storage.Close()
+	}
 }
 
 func resolvePath(pathTemplate, streamKey string) string {
@@ -363,4 +479,48 @@ func validStreamKey(streamKey string) bool {
 	}
 	clean := filepath.Clean(filepath.FromSlash(streamKey))
 	return clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
+}
+
+func rebuildSegmentIndex(dir *localfs.Dir, segDir string, segmentDuration time.Duration, minimumNext int) (*SegmentIndex, int, int, error) {
+	entries, err := dir.List(context.Background())
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("dvr: scan retained segments: %w", err)
+	}
+	idx := NewSegmentIndex()
+	next := minimumNext
+	recovered := 0
+	duration := segmentDuration.Seconds()
+	if duration <= 0 {
+		duration = 6
+	}
+	for _, entry := range entries {
+		filename := filepath.Base(filepath.FromSlash(entry.RelPath))
+		if strings.HasSuffix(filename, ".ts.partial") {
+			finalName := strings.TrimSuffix(filename, ".partial")
+			stamp := time.Now().UnixNano()
+			if _, err := dir.MoveToUnique(filename, func(attempt int) string {
+				return fmt.Sprintf("%s.orphan-%d.failed", finalName, stamp+int64(attempt))
+			}); err != nil {
+				return nil, 0, recovered, fmt.Errorf("dvr: preserve crash partial: %w", err)
+			}
+			recovered++
+			continue
+		}
+		seq := parseSeqNum(filename)
+		if seq < 0 {
+			continue
+		}
+		idx.Add(Segment{
+			SeqNum:    seq,
+			StartTime: entry.ModTime,
+			Duration:  duration,
+			Filename:  filename,
+			Size:      entry.Size,
+			DiskPath:  filepath.Join(segDir, filename),
+		})
+		if seq >= next {
+			next = seq + 1
+		}
+	}
+	return idx, next, recovered, nil
 }

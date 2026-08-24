@@ -147,7 +147,7 @@ func TestClassifyOnlyImplementedRuntimePoliciesAsHot(t *testing.T) {
 	for _, path := range []string{
 		"server.log_level", "server.drain_timeout", "limits.max_streams", "limits.rate_limit.rate",
 		"stream.gop_cache_num", "auth.subscribe.callback.url", "notify.http.endpoints",
-		"record.path", "dvr.window", "api.auth.tokens", "api.console.role",
+		"dvr.window", "api.auth.tokens", "api.console.role",
 		"http_stream.hls.segment_duration", "http_stream.dash.playlist_size", "http_stream.llhls.container",
 		"webrtc.gcc.max_bitrate",
 	} {
@@ -157,7 +157,7 @@ func TestClassifyOnlyImplementedRuntimePoliciesAsHot(t *testing.T) {
 	}
 	for _, path := range []string{
 		"notify.websocket.path", "notify.alive_interval", "api.listen", "api.tls", "api.audit.max_entries",
-		"http_stream.cors", "webrtc.ice_servers", "metrics.path", "runtime.poll_interval",
+		"http_stream.cors", "webrtc.ice_servers", "metrics.path", "runtime.poll_interval", "record.path", "dvr.path",
 	} {
 		if got := classifyPath(path); got != ChangeRestart {
 			t.Errorf("classifyPath(%q)=%q want restart_required", path, got)

@@ -6,15 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/internal/localfs"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -96,6 +96,7 @@ const metadataSuffix = ".liveforge.json"
 
 type LocalStorage struct {
 	root string
+	fs   *localfs.Root
 }
 
 func newStorageForConfig(cfg config.RecordConfig) (*LocalStorage, string, error) {
@@ -138,94 +139,77 @@ func NewLocalStorage(root string) (*LocalStorage, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("record storage root: %w", ErrInvalidRecordingID)
 	}
-	abs, err := filepath.Abs(root)
+	boundary, err := localfs.OpenRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("record storage root: %w", err)
+		return nil, fmt.Errorf("record storage root: %w", mapStorageError(err))
 	}
-	if err := os.MkdirAll(abs, 0755); err != nil {
-		return nil, fmt.Errorf("record storage root: %w", err)
+	storage := &LocalStorage{root: boundary.Path(), fs: boundary}
+	if err := storage.recoverPartials(context.Background()); err != nil {
+		_ = boundary.Close()
+		return nil, err
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return nil, fmt.Errorf("record storage root: %w", err)
-	}
-	return &LocalStorage{root: filepath.Clean(resolved)}, nil
+	return storage, nil
 }
 
 func (s *LocalStorage) Root() string { return s.root }
+
+func (s *LocalStorage) Close() error { return s.fs.Close() }
 
 func (s *LocalStorage) Create(ctx context.Context, id string, info RecordingInfo) (WriteObject, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	finalPath, cleanID, err := s.objectPath(id, false)
+	cleanID, err := cleanRecordingID(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0755); err != nil {
-		return nil, fmt.Errorf("create recording directory: %w", err)
-	}
-	if err := s.ensureContained(filepath.Dir(finalPath)); err != nil {
-		return nil, err
-	}
-	if _, err := os.Lstat(finalPath); err == nil {
+	if _, err := s.fs.Stat(cleanID); err == nil {
 		return nil, fmt.Errorf("create recording: file already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("create recording: %w", err)
+	} else if !errors.Is(err, localfs.ErrNotFound) {
+		return nil, fmt.Errorf("create recording: %w", mapStorageError(err))
 	}
-	partialPath := finalPath + ".partial"
-	file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
+	pending, err := s.fs.CreatePending(cleanID+".partial", 0644)
 	if err != nil {
-		return nil, fmt.Errorf("create recording: %w", err)
+		return nil, fmt.Errorf("create recording: %w", mapStorageError(err))
 	}
 	info.ID = cleanID
 	info.State = RecordingActive
 	if info.StartedAt.IsZero() {
 		info.StartedAt = time.Now().UTC()
 	}
-	return &localWriteObject{storage: s, file: file, finalPath: finalPath, partialPath: partialPath, info: info}, nil
+	return &localWriteObject{
+		storage:   s,
+		pending:   pending,
+		file:      pending.File,
+		finalID:   cleanID,
+		finalBase: filepath.Base(filepath.FromSlash(cleanID)),
+		info:      info,
+	}, nil
 }
 
 func (s *LocalStorage) List(ctx context.Context) ([]RecordingInfo, error) {
-	items := make([]RecordingInfo, 0)
-	err := filepath.WalkDir(s.root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	entries, err := s.fs.List(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("list recordings: %w", mapStorageError(err))
+	}
+	items := make([]RecordingInfo, 0, len(entries))
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.RelPath, metadataSuffix) || strings.HasSuffix(entry.RelPath, ".partial") {
+			continue
 		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if entry.IsDir() || strings.HasSuffix(entry.Name(), metadataSuffix) || strings.HasSuffix(entry.Name(), ".partial") {
-			return nil
-		}
-		fileInfo, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !fileInfo.Mode().IsRegular() {
-			return nil
-		}
-		id, err := filepath.Rel(s.root, path)
-		if err != nil {
-			return err
-		}
-		item := s.readMetadata(path)
-		item.ID = filepath.ToSlash(id)
-		item.Size = fileInfo.Size()
+		item := s.readMetadata(entry.RelPath)
+		item.ID = entry.RelPath
+		item.Size = entry.Size
 		if item.StartedAt.IsZero() {
-			item.StartedAt = fileInfo.ModTime().UTC()
+			item.StartedAt = entry.ModTime.UTC()
 		}
 		if item.State == "" {
 			item.State = RecordingCompleted
-			if strings.HasSuffix(path, ".failed") {
+			if strings.HasSuffix(entry.RelPath, ".failed") {
 				item.State = RecordingFailed
 			}
 		}
 		items = append(items, item)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list recordings: %w", err)
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].StartedAt.Equal(items[j].StartedAt) {
@@ -240,21 +224,15 @@ func (s *LocalStorage) Stat(ctx context.Context, id string) (RecordingInfo, erro
 	if err := ctx.Err(); err != nil {
 		return RecordingInfo{}, err
 	}
-	path, cleanID, err := s.objectPath(id, true)
+	cleanID, err := cleanRecordingID(id)
 	if err != nil {
 		return RecordingInfo{}, err
 	}
-	fileInfo, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return RecordingInfo{}, ErrRecordingNotFound
-	}
+	fileInfo, err := s.fs.Stat(cleanID)
 	if err != nil {
-		return RecordingInfo{}, fmt.Errorf("stat recording: %w", err)
+		return RecordingInfo{}, mapStorageError(err)
 	}
-	if !fileInfo.Mode().IsRegular() {
-		return RecordingInfo{}, ErrRecordingNotFound
-	}
-	info := s.readMetadata(path)
+	info := s.readMetadata(cleanID)
 	info.ID = cleanID
 	info.Size = fileInfo.Size()
 	if info.StartedAt.IsZero() {
@@ -262,7 +240,7 @@ func (s *LocalStorage) Stat(ctx context.Context, id string) (RecordingInfo, erro
 	}
 	if info.State == "" {
 		info.State = RecordingCompleted
-		if strings.HasSuffix(path, ".failed") {
+		if strings.HasSuffix(cleanID, ".failed") {
 			info.State = RecordingFailed
 		}
 	}
@@ -277,16 +255,13 @@ func (s *LocalStorage) Open(ctx context.Context, id string) (ReadSeekCloser, Rec
 	if info.State == RecordingActive {
 		return nil, RecordingInfo{}, ErrRecordingNotReady
 	}
-	path, _, err := s.objectPath(id, true)
+	cleanID, err := cleanRecordingID(id)
 	if err != nil {
 		return nil, RecordingInfo{}, err
 	}
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, RecordingInfo{}, ErrRecordingNotFound
-	}
+	file, _, err := s.fs.Open(cleanID)
 	if err != nil {
-		return nil, RecordingInfo{}, fmt.Errorf("open recording: %w", err)
+		return nil, RecordingInfo{}, fmt.Errorf("open recording: %w", mapStorageError(err))
 	}
 	return file, info, nil
 }
@@ -295,25 +270,22 @@ func (s *LocalStorage) Delete(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	path, _, err := s.objectPath(id, true)
+	cleanID, err := cleanRecordingID(id)
 	if err != nil {
 		return err
 	}
-	fileInfo, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return ErrRecordingNotFound
-	}
+	fileInfo, err := s.fs.Stat(cleanID)
 	if err != nil {
-		return fmt.Errorf("stat recording for deletion: %w", err)
+		return mapStorageError(err)
 	}
-	if !fileInfo.Mode().IsRegular() || strings.HasSuffix(path, ".partial") {
+	if !fileInfo.Mode().IsRegular() || strings.HasSuffix(cleanID, ".partial") {
 		return ErrRecordingNotReady
 	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("delete recording: %w", err)
+	if err := s.fs.Remove(cleanID); err != nil {
+		return fmt.Errorf("delete recording: %w", mapStorageError(err))
 	}
-	if err := os.Remove(path + metadataSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("delete recording metadata: %w", err)
+	if err := s.fs.Remove(cleanID + metadataSuffix); err != nil && !errors.Is(err, localfs.ErrNotFound) {
+		return fmt.Errorf("delete recording metadata: %w", mapStorageError(err))
 	}
 	return nil
 }
@@ -324,8 +296,8 @@ func (s *LocalStorage) Health(ctx context.Context) StorageHealth {
 		health.Error = err.Error()
 		return health
 	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(s.root, &stat); err != nil {
+	var stat unix.Statfs_t
+	if err := s.fs.Fstatfs(&stat); err != nil {
 		health.Error = err.Error()
 		return health
 	}
@@ -337,47 +309,20 @@ func (s *LocalStorage) Health(ctx context.Context) StorageHealth {
 	return health
 }
 
-func (s *LocalStorage) objectPath(id string, requireExisting bool) (string, string, error) {
+func cleanRecordingID(id string) (string, error) {
 	id = filepath.ToSlash(strings.TrimSpace(id))
 	if id == "" || id == "." || strings.ContainsRune(id, '\x00') || strings.Contains(id, "\\") || filepath.IsAbs(id) {
-		return "", "", ErrInvalidRecordingID
+		return "", ErrInvalidRecordingID
 	}
 	clean := filepath.Clean(filepath.FromSlash(id))
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", "", ErrInvalidRecordingID
+		return "", ErrInvalidRecordingID
 	}
-	path := filepath.Join(s.root, clean)
-	if err := s.ensureLexicallyContained(path); err != nil {
-		return "", "", err
-	}
-	if requireExisting {
-		if _, err := os.Lstat(path); err == nil {
-			if err := s.ensureContained(path); err != nil {
-				return "", "", err
-			}
-		}
-	}
-	return path, filepath.ToSlash(clean), nil
+	return filepath.ToSlash(clean), nil
 }
 
-func (s *LocalStorage) ensureLexicallyContained(path string) error {
-	rel, err := filepath.Rel(s.root, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return ErrInvalidRecordingID
-	}
-	return nil
-}
-
-func (s *LocalStorage) ensureContained(path string) error {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolve recording path: %w", err)
-	}
-	return s.ensureLexicallyContained(resolved)
-}
-
-func (s *LocalStorage) readMetadata(path string) RecordingInfo {
-	data, err := os.ReadFile(path + metadataSuffix)
+func (s *LocalStorage) readMetadata(id string) RecordingInfo {
+	data, err := s.fs.ReadFile(id + metadataSuffix)
 	if err != nil {
 		return RecordingInfo{}
 	}
@@ -388,36 +333,29 @@ func (s *LocalStorage) readMetadata(path string) RecordingInfo {
 	return info
 }
 
-func (s *LocalStorage) writeMetadata(path string, info RecordingInfo) error {
+func (s *LocalStorage) writeMetadata(id string, info RecordingInfo) error {
 	data, err := json.Marshal(info)
 	if err != nil {
 		return err
 	}
-	temp := path + metadataSuffix + ".partial"
-	if err := os.WriteFile(temp, data, 0644); err != nil {
-		return err
-	}
-	if err := os.Rename(temp, path+metadataSuffix); err != nil {
-		_ = os.Remove(temp)
-		return err
-	}
-	return nil
+	return s.fs.WriteFileAtomic(id+metadataSuffix, data, 0644)
 }
 
 type localWriteObject struct {
-	storage     *LocalStorage
-	file        *os.File
-	finalPath   string
-	partialPath string
-	info        RecordingInfo
-	closed      bool
+	storage   *LocalStorage
+	pending   *localfs.Pending
+	file      *os.File
+	finalID   string
+	finalBase string
+	info      RecordingInfo
+	closed    bool
 }
 
 func (o *localWriteObject) Write(p []byte) (int, error) { return o.file.Write(p) }
 func (o *localWriteObject) Seek(offset int64, whence int) (int64, error) {
 	return o.file.Seek(offset, whence)
 }
-func (o *localWriteObject) Name() string { return o.partialPath }
+func (o *localWriteObject) Name() string { return o.pending.Name() }
 func (o *localWriteObject) Sync() error  { return o.file.Sync() }
 
 func (o *localWriteObject) Complete(ctx context.Context, update RecordingInfo) (RecordingInfo, error) {
@@ -434,29 +372,33 @@ func (o *localWriteObject) Complete(ctx context.Context, update RecordingInfo) (
 		return o.failAfterClose(update, err)
 	}
 	o.closed = true
-	if err := os.Rename(o.partialPath, o.finalPath); err != nil {
+	if err := o.pending.PublishAs(o.finalBase); err != nil {
 		return o.failClosed(update, err)
 	}
 	info := mergeRecordingInfo(o.info, update)
 	info.ID = o.info.ID
 	info.State = RecordingCompleted
 	info.CompletedAt = time.Now().UTC()
-	if stat, err := os.Stat(o.finalPath); err == nil {
+	if stat, err := o.pending.StatSibling(o.finalBase); err == nil {
 		info.Size = stat.Size()
 	}
-	if err := o.storage.writeMetadata(o.finalPath, info); err != nil {
-		failedPath := o.finalPath + ".failed"
-		if renameErr := os.Rename(o.finalPath, failedPath); renameErr != nil {
+	if err := o.writeMetadataSibling(o.finalBase, info); err != nil {
+		failedID, renameErr := o.pending.MoveSiblingToUnique(o.finalBase, failedNameCandidate(o.finalBase))
+		if renameErr != nil {
+			_ = o.pending.Close()
 			return info, fmt.Errorf("write recording metadata: %w; preserve failed recording: %v", err, renameErr)
 		}
-		info.ID += ".failed"
+		info.ID = failedID
 		info.State = RecordingFailed
 		info.Error = "write recording metadata: " + err.Error()
-		if metadataErr := o.storage.writeMetadata(failedPath, info); metadataErr != nil {
+		if metadataErr := o.writeMetadataSibling(filepath.Base(filepath.FromSlash(failedID)), info); metadataErr != nil {
+			_ = o.pending.Close()
 			return info, fmt.Errorf("write recording metadata: %w; write failed metadata: %v", err, metadataErr)
 		}
+		_ = o.pending.Close()
 		return info, fmt.Errorf("write recording metadata: %w", err)
 	}
+	_ = o.pending.Close()
 	return info, nil
 }
 
@@ -479,24 +421,86 @@ func (o *localWriteObject) failAfterClose(update RecordingInfo, cause error) (Re
 }
 
 func (o *localWriteObject) failClosed(update RecordingInfo, cause error) (RecordingInfo, error) {
-	failedPath := o.finalPath + ".failed"
-	if err := os.Rename(o.partialPath, failedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	failedID, err := o.pending.PreserveAs(failedNameCandidate(o.finalBase))
+	if err != nil {
+		_ = o.pending.Close()
 		return RecordingInfo{}, fmt.Errorf("preserve failed recording: %w (original error: %v)", err, cause)
 	}
 	info := mergeRecordingInfo(o.info, update)
-	info.ID += ".failed"
+	info.ID = failedID
 	info.State = RecordingFailed
 	info.CompletedAt = time.Now().UTC()
 	if cause != nil {
 		info.Error = cause.Error()
 	}
-	if stat, err := os.Stat(failedPath); err == nil {
+	failedBase := filepath.Base(filepath.FromSlash(failedID))
+	if stat, err := o.pending.StatSibling(failedBase); err == nil {
 		info.Size = stat.Size()
 	}
-	if err := o.storage.writeMetadata(failedPath, info); err != nil {
+	if err := o.writeMetadataSibling(failedBase, info); err != nil {
+		_ = o.pending.Close()
 		return info, fmt.Errorf("write failed recording metadata: %w", err)
 	}
+	_ = o.pending.Close()
 	return info, nil
+}
+
+func (o *localWriteObject) writeMetadataSibling(mediaBase string, info RecordingInfo) error {
+	data, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+	return o.pending.WriteSiblingAtomic(mediaBase+metadataSuffix, data, 0644)
+}
+
+func failedNameCandidate(finalBase string) func(int) string {
+	stamp := time.Now().UnixNano()
+	return func(attempt int) string {
+		if attempt == 0 {
+			return finalBase + ".failed"
+		}
+		return fmt.Sprintf("%s.orphan-%d-%d.failed", finalBase, stamp, attempt)
+	}
+}
+
+func (s *LocalStorage) recoverPartials(ctx context.Context) error {
+	entries, err := s.fs.List(ctx, "")
+	if err != nil {
+		return fmt.Errorf("recover recording partials: %w", mapStorageError(err))
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.RelPath, ".partial") || strings.HasSuffix(entry.RelPath, metadataSuffix+".partial") {
+			continue
+		}
+		original := strings.TrimSuffix(filepath.Base(filepath.FromSlash(entry.RelPath)), ".partial")
+		failedID, err := s.fs.MoveToUnique(entry.RelPath, failedNameCandidate(original))
+		if err != nil {
+			return fmt.Errorf("recover recording partial %q: %w", entry.RelPath, mapStorageError(err))
+		}
+		info := RecordingInfo{
+			ID:          failedID,
+			State:       RecordingFailed,
+			Size:        entry.Size,
+			StartedAt:   entry.ModTime.UTC(),
+			CompletedAt: time.Now().UTC(),
+			Error:       "recovered incomplete recording after process interruption",
+		}
+		if err := s.writeMetadata(failedID, info); err != nil {
+			return fmt.Errorf("write recovered recording metadata: %w", mapStorageError(err))
+		}
+	}
+	return nil
+}
+
+func mapStorageError(err error) error {
+	switch {
+	case errors.Is(err, localfs.ErrInvalidPath):
+		return ErrInvalidRecordingID
+	case errors.Is(err, localfs.ErrNotFound):
+		return ErrRecordingNotFound
+	default:
+		return err
+	}
 }
 
 func mergeRecordingInfo(base, update RecordingInfo) RecordingInfo {

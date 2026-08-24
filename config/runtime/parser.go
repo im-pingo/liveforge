@@ -255,12 +255,12 @@ func classifyPath(path string) ChangeClass {
 	case strings.HasPrefix(path, "notify."):
 		return ChangeRestart
 	case strings.HasPrefix(path, "record."):
-		if path == "record.enabled" {
+		if path == "record.enabled" || path == "record.path" {
 			return ChangeRestart
 		}
 		return ChangeHot
 	case strings.HasPrefix(path, "dvr."):
-		if path == "dvr.enabled" || path == "dvr.listen" {
+		if path == "dvr.enabled" || path == "dvr.listen" || path == "dvr.path" {
 			return ChangeRestart
 		}
 		return ChangeHot

@@ -70,9 +70,15 @@ func (m *Module) handleSegment(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	file, info, err := session.openIndexedSegment(seg)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
 
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	http.ServeFile(w, r, seg.DiskPath)
+	http.ServeContent(w, r, seg.Filename, info.ModTime(), file)
 }
 
 func (m *Module) authorizePlayback(w http.ResponseWriter, r *http.Request, streamKey string) bool {

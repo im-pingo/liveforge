@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -194,6 +197,9 @@ type FileWriter struct {
 	headerDone   bool
 	segmentIndex int
 	metrics      *RecordingMetrics
+	ownsStorage  bool
+	storageOnce  sync.Once
+	storageErr   error
 }
 
 // NewFileWriter creates a new file writer for the given stream key.
@@ -202,7 +208,13 @@ func NewFileWriter(streamKey string, cfg config.RecordConfig) (*FileWriter, erro
 	if err != nil {
 		return nil, err
 	}
-	return newFileWriterWithStorage(streamKey, cfg, storage, template, nil)
+	writer, err := newFileWriterWithStorage(streamKey, cfg, storage, template, nil)
+	if err != nil {
+		_ = storage.Close()
+		return nil, err
+	}
+	writer.ownsStorage = true
+	return writer, nil
 }
 
 func newFileWriterWithStorage(streamKey string, cfg config.RecordConfig, storage Storage, pathTemplate string, metrics *RecordingMetrics) (*FileWriter, error) {
@@ -294,7 +306,19 @@ func (w *FileWriter) Close() {
 
 // CloseWithError finalizes a successful file or preserves it as failed.
 func (w *FileWriter) CloseWithError(cause error) error {
-	return w.finishCurrent(cause)
+	return errors.Join(w.finishCurrent(cause), w.closeOwnedStorage())
+}
+
+func (w *FileWriter) closeOwnedStorage() error {
+	if !w.ownsStorage {
+		return nil
+	}
+	w.storageOnce.Do(func() {
+		if closer, ok := w.storage.(interface{ Close() error }); ok {
+			w.storageErr = closer.Close()
+		}
+	})
+	return w.storageErr
 }
 
 // FilePath returns the current file path (for testing).
@@ -365,6 +389,14 @@ func (w *FileWriter) expandPath() string {
 	p = strings.ReplaceAll(p, "{stream_key}", streamDir)
 	p = strings.ReplaceAll(p, "{date}", now.Format("2006-01-02"))
 	p = strings.ReplaceAll(p, "{time}", fmt.Sprintf("%s_%04d", now.Format("150405"), w.segmentIndex))
+	ext := "flv"
+	switch w.Format() {
+	case "mp4", "fmp4":
+		ext = "mp4"
+	case "ts":
+		ext = "ts"
+	}
+	p = strings.ReplaceAll(p, "{ext}", ext)
 	return filepath.ToSlash(filepath.Clean(p))
 }
 
@@ -489,8 +521,16 @@ func (w *FileWriter) notifyFileComplete() {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body)) //nolint:gosec
 	if err != nil {
-		slog.Error("file complete callback error", "module", "record", "error", err)
+		slog.Error("file complete callback error", "module", "record", "endpoint", callbackLogTarget(url), "reason", "delivery failed")
 		return
 	}
 	resp.Body.Close()
+}
+
+func callbackLogTarget(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }

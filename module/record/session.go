@@ -79,6 +79,26 @@ func (s *RecordSession) Run() {
 // Wait blocks until Run has finalized the current recording.
 func (s *RecordSession) Wait() { <-s.finished }
 
+func (s *RecordSession) WaitUntil(deadline time.Time) bool {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		select {
+		case <-s.finished:
+			return true
+		default:
+			return false
+		}
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-s.finished:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func (s *RecordSession) run() error {
 
 	// Write sequence headers first if available

@@ -2,10 +2,12 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -13,12 +15,16 @@ import (
 
 // Module implements stream recording to FLV files.
 type Module struct {
-	server   *core.Server
-	runtime  atomic.Pointer[recordRuntime]
-	mu       sync.Mutex
-	sessions map[string]*RecordSession // streamKey -> session
-	history  []RecordingSessionStatus
-	metrics  RecordingMetrics
+	server    *core.Server
+	runtime   atomic.Pointer[recordRuntime]
+	mu        sync.Mutex
+	sessions  map[string]*RecordSession // streamKey -> session
+	history   []RecordingSessionStatus
+	metrics   RecordingMetrics
+	closing   bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
 }
 
 type recordRuntime struct {
@@ -30,7 +36,8 @@ type recordRuntime struct {
 // NewModule creates a new record module.
 func NewModule() *Module {
 	return &Module{
-		sessions: make(map[string]*RecordSession),
+		sessions:  make(map[string]*RecordSession),
+		closeDone: make(chan struct{}),
 	}
 }
 
@@ -67,6 +74,9 @@ func (m *Module) PrepareReload(s *core.Server) (func(), error) {
 	cfg := s.Config().Record
 	if current := m.runtime.Load(); current != nil {
 		cfg.Enabled = current.cfg.Enabled
+		cfg.Path = current.cfg.Path
+		next := &recordRuntime{cfg: cfg, storage: current.storage, template: current.template}
+		return func() { m.runtime.Store(next) }, nil
 	}
 	storage, template, err := newStorageForConfig(cfg)
 	if err != nil {
@@ -104,20 +114,51 @@ func (m *Module) Hooks() []core.HookRegistration {
 
 // Close stops all active recording sessions.
 func (m *Module) Close() error {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.close()
+		close(m.closeDone)
+	})
+	<-m.closeDone
+	return m.closeErr
+}
+
+func (m *Module) close() error {
 	m.mu.Lock()
+	m.closing = true
 	sessions := make([]*RecordSession, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessions = append(sessions, s)
+		s.Stop()
 	}
 	m.sessions = make(map[string]*RecordSession)
 	m.mu.Unlock()
 
-	for _, s := range sessions {
-		s.Stop()
-		s.Wait()
+	deadline := time.Now().Add(m.drainTimeout())
+	pending := 0
+	for _, session := range sessions {
+		if !session.WaitUntil(deadline) {
+			pending++
+		}
+	}
+	if runtime := m.runtime.Load(); runtime != nil {
+		if closer, ok := runtime.storage.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 	}
 	slog.Info("stopped", "module", "record")
+	if pending > 0 {
+		return fmt.Errorf("record: drain timeout with %d session(s) still finalizing", pending)
+	}
 	return nil
+}
+
+func (m *Module) drainTimeout() time.Duration {
+	if m.server != nil {
+		if timeout := m.server.Config().Server.DrainTimeout; timeout > 0 {
+			return timeout
+		}
+	}
+	return 10 * time.Second
 }
 
 func (m *Module) onPublish(ctx *core.EventContext) error {
@@ -137,6 +178,9 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return nil
+	}
 
 	if _, exists := m.sessions[ctx.StreamKey]; exists {
 		return nil // already recording

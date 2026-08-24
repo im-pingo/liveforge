@@ -60,7 +60,7 @@ func (m *Module) cleanExpiredSegments() {
 			continue
 		}
 
-		result := session.Index().CleanBeforeWithResult(cutoff)
+		result := session.cleanBefore(cutoff)
 		m.metrics.cleanupDeleted.Add(result.Deleted)
 		m.metrics.cleanupBytes.Add(result.Bytes)
 		m.metrics.cleanupFailures.Add(result.Failures)
@@ -72,6 +72,7 @@ func (m *Module) cleanExpiredSegments() {
 			m.mu.Lock()
 			if m.sessions[key] == session {
 				delete(m.sessions, key)
+				session.closeStorage()
 			}
 			m.mu.Unlock()
 			slog.Info("dvr session expired", "module", "dvr", "stream", key)

@@ -9,7 +9,7 @@ import (
 )
 
 func TestModuleOnReloadAppliesCleanupPolicy(t *testing.T) {
-	initial := &config.Config{DVR: config.DVRConfig{Enabled: true, Listen: ":10000", Window: time.Hour, CleanupInterval: time.Minute}}
+	initial := &config.Config{DVR: config.DVRConfig{Enabled: true, Listen: ":10000", Path: "/old/dvr/{stream_key}", Window: time.Hour, CleanupInterval: time.Minute}}
 	server := core.NewServer(initial)
 	m := NewModule()
 	m.server = server
@@ -20,6 +20,7 @@ func TestModuleOnReloadAppliesCleanupPolicy(t *testing.T) {
 	next.DVR.CleanupInterval = 5 * time.Second
 	next.DVR.Enabled = false
 	next.DVR.Listen = ":20000"
+	next.DVR.Path = "/new/dvr/{stream_key}"
 	server.UpdateConfig(&next)
 	if err := m.OnReload(server); err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ func TestModuleOnReloadAppliesCleanupPolicy(t *testing.T) {
 	if policy.Window != 10*time.Minute || policy.CleanupInterval != 5*time.Second {
 		t.Fatalf("policy = %+v", policy)
 	}
-	if !policy.Enabled || policy.Listen != ":10000" {
+	if !policy.Enabled || policy.Listen != ":10000" || policy.Path != "/old/dvr/{stream_key}" {
 		t.Fatalf("restart-required policy changed in place: %+v", policy)
 	}
 }

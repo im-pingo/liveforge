@@ -38,7 +38,10 @@ func TestModuleDVRStatusAndDetail(t *testing.T) {
 
 func TestModuleCleanupMetrics(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "expired.ts")
+	path := filepath.Join(dir, "live/cleanup/expired.ts")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("expired"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +52,7 @@ func TestModuleCleanupMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	session.Stop()
-	session.Index().Add(Segment{SeqNum: 1, StartTime: time.Now().Add(-time.Hour), Size: 7, DiskPath: path})
+	session.Index().Add(Segment{SeqNum: 1, StartTime: time.Now().Add(-time.Hour), Filename: "expired.ts", Size: 7, DiskPath: path})
 	m := NewModule()
 	m.storePolicy(config.DVRConfig{Path: filepath.Join(dir, "{stream_key}"), Window: time.Minute})
 	m.sessions["live/cleanup"] = session

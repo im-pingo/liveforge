@@ -74,6 +74,18 @@ func (idx *SegmentIndex) CleanBefore(cutoff time.Time) []Segment {
 // CleanBeforeWithResult deletes expired files and only removes successfully
 // deleted entries from the index. Failed deletions remain visible for retry.
 func (idx *SegmentIndex) CleanBeforeWithResult(cutoff time.Time) CleanupResult {
+	return idx.CleanBeforeWithRemover(cutoff, func(seg Segment) error {
+		err := os.Remove(seg.DiskPath)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	})
+}
+
+// CleanBeforeWithRemover applies the caller's storage boundary while keeping
+// failed deletions indexed for a later cleanup retry.
+func (idx *SegmentIndex) CleanBeforeWithRemover(cutoff time.Time, remove func(Segment) error) CleanupResult {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
@@ -84,8 +96,7 @@ func (idx *SegmentIndex) CleanBeforeWithResult(cutoff time.Time) CleanupResult {
 			remaining = append(remaining, seg)
 			continue
 		}
-		err := os.Remove(seg.DiskPath)
-		if err != nil && !os.IsNotExist(err) {
+		if err := remove(seg); err != nil {
 			result.Failures++
 			remaining = append(remaining, seg)
 			continue
