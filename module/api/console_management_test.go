@@ -1,10 +1,17 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chromedp/chromedp"
 	"golang.org/x/net/html"
 )
 
@@ -120,9 +127,29 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 		t.Fatalf("navigation views = %v, want %v", views, wantViews)
 	}
 	for _, view := range views {
-		if elements["view-"+view] == nil {
-			t.Errorf("navigation view %q has no matching container", view)
+		tab := elements["tab-"+view]
+		panel := elements["view-"+view]
+		if tab == nil {
+			t.Errorf("navigation view %q has no stable tab id", view)
+			continue
 		}
+		if panel == nil {
+			t.Errorf("navigation view %q has no matching container", view)
+			continue
+		}
+		if got := consoleAttribute(tab, "aria-controls"); got != "view-"+view {
+			t.Errorf("tab %q aria-controls = %q", view, got)
+		}
+		if got := consoleAttribute(panel, "role"); got != "tabpanel" {
+			t.Errorf("panel %q role = %q, want tabpanel", view, got)
+		}
+		if got := consoleAttribute(panel, "aria-labelledby"); got != "tab-"+view {
+			t.Errorf("panel %q aria-labelledby = %q", view, got)
+		}
+	}
+	modal := elements["modal"]
+	if modal == nil || consoleAttribute(modal, "role") != "dialog" || consoleAttribute(modal, "aria-modal") != "true" || consoleAttribute(modal, "aria-labelledby") != "modal-title" || consoleAttribute(modal, "aria-describedby") != "modal-msg" {
+		t.Error("confirmation modal is missing dialog naming and modality semantics")
 	}
 }
 
@@ -173,6 +200,8 @@ func TestConsoleManagementActionsAreConfirmedAndPermissionAware(t *testing.T) {
 		{"SIP dial", `(?s)function dialSIPCall\([^}]*apiFetch\("/api/v1/sipgateway/calls",\s*\{\s*method:\s*"POST"`},
 		{"SIP hangup", `(?s)function hangupSIPCall\([^}]*showModal\([^}]*apiFetch\("/api/v1/sipgateway/calls/"[^}]*method:\s*"DELETE"`},
 		{"recording delete", `(?s)function deleteRecording\([^}]*showModal\([^}]*apiFetch\("/api/v1/recordings/"[^}]*method:\s*"DELETE"`},
+		{"stream kick promise", `(?s)function kickStream\([^}]*showModal\([^}]*return apiFetch\("/api/v1/streams/"`},
+		{"stream delete promise", `(?s)function deleteStream\([^}]*showModal\([^}]*return apiFetch\("/api/v1/streams/"`},
 	} {
 		if !regexp.MustCompile(contract.pattern).MatchString(script) {
 			t.Errorf("%s contract is missing", contract.name)
@@ -186,6 +215,212 @@ func TestConsoleManagementActionsAreConfirmedAndPermissionAware(t *testing.T) {
 	if !strings.Contains(script, "canManage") || !strings.Contains(script, "applyManagementPermissions") {
 		t.Error("management controls are not permission-aware")
 	}
+}
+
+func TestConsoleManagementDynamicActionsUseDOMBindings(t *testing.T) {
+	_, script := consoleDocument(t)
+	for _, function := range []string{"renderStreams", "renderSIPCalls", "renderRecordings", "renderDVR", "renderDevicesTable", "renderSessionsTable"} {
+		source := consoleFunctionSource(t, script, function)
+		if strings.Contains(source, "onclick=") {
+			t.Errorf("%s still constructs inline click handlers", function)
+		}
+	}
+	for _, required := range []string{`dataset.action`, `dataset.actionId`, `addEventListener("click"`, "dynamicActionHandlers"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("dynamic DOM action binding is missing %q", required)
+		}
+	}
+}
+
+type consoleDynamicActionProbe struct {
+	Actions            []string          `json:"actions"`
+	Values             map[string]string `json:"values"`
+	Invoked            map[string]string `json:"invoked"`
+	InlineHandlerCount int               `json:"inlineHandlerCount"`
+	InjectedAttribute  bool              `json:"injectedAttribute"`
+}
+
+type consoleInteractionProbe struct {
+	ArrowSelected       string `json:"arrowSelected"`
+	ArrowFocus          string `json:"arrowFocus"`
+	HomeSelected        string `json:"homeSelected"`
+	EndSelected         string `json:"endSelected"`
+	InitialModalFocus   string `json:"initialModalFocus"`
+	TabWrapFocus        string `json:"tabWrapFocus"`
+	ShiftTabWrapFocus   string `json:"shiftTabWrapFocus"`
+	ContainedModalFocus string `json:"containedModalFocus"`
+	EscapeClosed        bool   `json:"escapeClosed"`
+	RestoredFocus       string `json:"restoredFocus"`
+	PendingDisabled     bool   `json:"pendingDisabled"`
+	PendingOpen         bool   `json:"pendingOpen"`
+	SettledDisabled     bool   `json:"settledDisabled"`
+	SettledOpen         bool   `json:"settledOpen"`
+}
+
+func withConsoleBrowser(t *testing.T, run func(context.Context)) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping management console browser behavior in short mode")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/console" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(consoleHTML)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/console/static/") {
+			w.Header().Set("Content-Type", "application/javascript")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+	)...)
+	defer allocCancel()
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
+	defer browserCancel()
+	if err := chromedp.Run(browserCtx, chromedp.Navigate(server.URL+"/console"), chromedp.WaitReady("body")); err != nil {
+		if strings.Contains(err.Error(), "websocket url timeout") || strings.Contains(err.Error(), "executable file not found") {
+			t.Skipf("headless Chrome unavailable: %v", err)
+		}
+		t.Fatalf("open management console: %v", err)
+	}
+	if err := chromedp.Run(browserCtx, chromedp.Evaluate(`stopActiveViewPolling()`, nil)); err != nil {
+		t.Fatalf("stop console polling: %v", err)
+	}
+	run(browserCtx)
+}
+
+func TestConsoleManagementBrowserBehavior(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		hostile := "quote\" apostrophe' slash\\ line\nreturn\rseparator\u2028paragraph\u2029<>&"
+		hostileJSON, err := json.Marshal(hostile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dynamic consoleDynamicActionProbe
+		dynamicExpression := fmt.Sprintf(`(function() {
+			var hostile = %s;
+			managementRole = "admin";
+			renderStreams([{key:hostile,state:"publishing",publisher:"publisher",subscribers:{},stats:{}}]);
+			renderSIPCalls([{call_id:hostile,direction:"outbound",stream_key:hostile,state:"active"}]);
+			renderRecordings([{id:hostile,stream_key:hostile,state:"completed"}]);
+			renderDVR({sessions:[{stream_key:hostile,live:true}]});
+			gbExpandedDevices[hostile] = true;
+			gbDeviceChannels[hostile] = [{channel_id:hostile,name:hostile,status:"ON",ptz_type:1}];
+			renderDevicesTable([{device_id:hostile,status:"online",channel_count:1}]);
+			renderSessionsTable([{id:hostile,channel_id:hostile,stream_key:hostile,direction:"play",state:"streaming"}]);
+			var nodes = Array.from(document.querySelectorAll("[data-action-id]"));
+			var invoked = {};
+			nodes.forEach(function(node) {
+				dynamicActionHandlers[node.dataset.action] = function(value) { invoked[node.dataset.action] = value; };
+				node.click();
+			});
+			var values = {};
+			nodes.forEach(function(node) { values[node.dataset.action] = node.dataset.actionId; });
+			return {
+				actions: nodes.map(function(node) { return node.dataset.action; }).sort(),
+				values: values,
+				invoked: invoked,
+				inlineHandlerCount: nodes.filter(function(node) { return node.hasAttribute("onclick"); }).length,
+				injectedAttribute: !!document.querySelector("[data-injected]")
+			};
+		})()`, hostileJSON)
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(dynamicExpression, &dynamic)); err != nil {
+			t.Fatalf("probe hostile management identifiers: %v", err)
+		}
+		wantActions := []string{"dvr-detail", "gb-catalog", "gb-close-session", "gb-delete-device", "gb-play", "gb-playback", "gb-preview", "gb-ptz", "gb-stop", "gb-toggle-device", "recording-delete", "recording-detail", "recording-download", "sip-detail", "sip-hangup", "stream-delete", "stream-kick", "stream-preview"}
+		if strings.Join(dynamic.Actions, ",") != strings.Join(wantActions, ",") {
+			t.Fatalf("dynamic actions = %v, want %v", dynamic.Actions, wantActions)
+		}
+		if dynamic.InlineHandlerCount != 0 || dynamic.InjectedAttribute {
+			t.Fatalf("unsafe dynamic DOM: inline=%d injected=%v", dynamic.InlineHandlerCount, dynamic.InjectedAttribute)
+		}
+		for _, action := range wantActions {
+			if dynamic.Values[action] != hostile || dynamic.Invoked[action] != hostile {
+				t.Errorf("action %q value=%q invoked=%q", action, dynamic.Values[action], dynamic.Invoked[action])
+			}
+		}
+
+		var interaction consoleInteractionProbe
+		interactionExpression := `(function() {
+			dynamicActionHandlers = createDynamicActionHandlers();
+			updateGB28181Tab([]);
+			switchTab("streams");
+			var streamTab = document.getElementById("tab-streams");
+			streamTab.focus();
+			streamTab.dispatchEvent(new KeyboardEvent("keydown", {key:"ArrowRight", bubbles:true}));
+			var arrowSelected = activeTab;
+			var arrowFocus = document.activeElement.id;
+			document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {key:"Home", bubbles:true}));
+			var homeSelected = activeTab;
+			document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {key:"End", bubbles:true}));
+			var endSelected = activeTab;
+
+			switchTab("config");
+			var trigger = document.getElementById("config-refresh");
+			trigger.disabled = false;
+			trigger.focus();
+			showModal("Confirm action", "Confirm description", function() { return Promise.resolve(); });
+			var initialModalFocus = document.activeElement.id;
+			document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {key:"Tab", bubbles:true}));
+			var tabWrapFocus = document.activeElement.id;
+			document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {key:"Tab", shiftKey:true, bubbles:true}));
+			var shiftTabWrapFocus = document.activeElement.id;
+			document.getElementById("stream-search").focus();
+			var containedModalFocus = document.activeElement.id;
+			document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", bubbles:true}));
+			var escapeClosed = !document.getElementById("modal").classList.contains("active");
+			var restoredFocus = document.activeElement.id;
+
+			window.__resolveConsoleMutation = null;
+			apiFetch = function() { return new Promise(function(resolve) { window.__resolveConsoleMutation = resolve; }); };
+			trigger.focus();
+			kickStream("deferred/stream");
+			document.getElementById("modal-confirm").click();
+			var pendingDisabled = document.getElementById("modal-confirm").disabled;
+			var pendingOpen = document.getElementById("modal").classList.contains("active");
+			return {
+				arrowSelected:arrowSelected, arrowFocus:arrowFocus, homeSelected:homeSelected, endSelected:endSelected,
+				initialModalFocus:initialModalFocus, tabWrapFocus:tabWrapFocus, shiftTabWrapFocus:shiftTabWrapFocus,
+				containedModalFocus:containedModalFocus,
+				escapeClosed:escapeClosed, restoredFocus:restoredFocus,
+				pendingDisabled:pendingDisabled, pendingOpen:pendingOpen
+			};
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(interactionExpression, &interaction)); err != nil {
+			t.Fatalf("probe keyboard and deferred behavior: %v", err)
+		}
+		var settled struct {
+			Disabled bool `json:"disabled"`
+			Open     bool `json:"open"`
+		}
+		if err := chromedp.Run(browserCtx,
+			chromedp.Evaluate(`window.__resolveConsoleMutation({})`, nil),
+			chromedp.Sleep(10*time.Millisecond),
+			chromedp.Evaluate(`({disabled:document.getElementById("modal-confirm").disabled,open:document.getElementById("modal").classList.contains("active")})`, &settled),
+		); err != nil {
+			t.Fatalf("settle deferred destructive action: %v", err)
+		}
+		interaction.SettledDisabled = settled.Disabled
+		interaction.SettledOpen = settled.Open
+		if interaction.ArrowSelected != "config" || interaction.ArrowFocus != "tab-config" || interaction.HomeSelected != "streams" || interaction.EndSelected != "security" {
+			t.Errorf("tab keyboard behavior = %#v", interaction)
+		}
+		if interaction.InitialModalFocus != "modal-confirm" || interaction.TabWrapFocus != "modal-cancel" || interaction.ShiftTabWrapFocus != "modal-confirm" || interaction.ContainedModalFocus != "modal-confirm" || !interaction.EscapeClosed || interaction.RestoredFocus != "config-refresh" {
+			t.Errorf("modal focus behavior = %#v", interaction)
+		}
+		if !interaction.PendingDisabled || !interaction.PendingOpen || interaction.SettledDisabled || interaction.SettledOpen {
+			t.Errorf("deferred destructive behavior = %#v", interaction)
+		}
+	})
 }
 
 func TestConsoleManagementPollingStopsForHiddenViews(t *testing.T) {

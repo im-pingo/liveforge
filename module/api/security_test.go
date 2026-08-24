@@ -338,6 +338,7 @@ func TestGB28181MutationsUseExplicitPermissionsAndAuditThroughRealMux(t *testing
 	for pattern := range map[string]struct{}{
 		"DELETE /api/v1/gb28181/devices/":  {},
 		"DELETE /api/v1/gb28181/sessions/": {},
+		"DELETE /api/v1/gb28181/channels/": {},
 		"POST /api/v1/gb28181/channels/":   {},
 		"POST /api/relay/push":             {},
 	} {
@@ -363,6 +364,7 @@ func TestGB28181MutationsUseExplicitPermissionsAndAuditThroughRealMux(t *testing
 		{name: "delete device", method: http.MethodDelete, path: "/api/v1/gb28181/devices/device-1", pattern: "DELETE /api/v1/gb28181/devices/", permission: "gb28181:delete", allowedFor: "admin-token"},
 		{name: "delete session", method: http.MethodDelete, path: "/api/v1/gb28181/sessions/session-1", pattern: "DELETE /api/v1/gb28181/sessions/", permission: "gb28181:delete", allowedFor: "admin-token"},
 		{name: "control channel", method: http.MethodPost, path: "/api/v1/gb28181/channels/channel-1/ptz", pattern: "POST /api/v1/gb28181/channels/", permission: "gb28181:control", allowedFor: "ops-token"},
+		{name: "stop channel", method: http.MethodDelete, path: "/api/v1/gb28181/channels/channel-1/play", pattern: "DELETE /api/v1/gb28181/channels/", permission: "gb28181:control", allowedFor: "ops-token"},
 		{name: "unclassified cross-module mutation", method: http.MethodPost, path: "/api/relay/push", pattern: "POST /api/relay/push", permission: "server:mutate", allowedFor: "admin-token"},
 	}
 	for _, tt := range tests {

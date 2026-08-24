@@ -788,16 +788,16 @@ select:focus-visible {
   </div>
 
   <div class="nav-tabs" id="nav-tabs" role="tablist" aria-label="Management views">
-    <button class="nav-tab active" data-view="streams" role="tab" aria-selected="true" onclick="switchTab('streams')">Streams</button>
-    <button class="nav-tab" data-view="gb28181" id="nav-gb28181" role="tab" aria-selected="false" onclick="switchTab('gb28181')" hidden>GB28181</button>
-    <button class="nav-tab" data-view="config" role="tab" aria-selected="false" onclick="switchTab('config')">Config</button>
-    <button class="nav-tab" data-view="cluster" role="tab" aria-selected="false" onclick="switchTab('cluster')">Cluster</button>
-    <button class="nav-tab" data-view="sip" role="tab" aria-selected="false" onclick="switchTab('sip')">SIP Calls</button>
-    <button class="nav-tab" data-view="storage" role="tab" aria-selected="false" onclick="switchTab('storage')">Storage</button>
-    <button class="nav-tab" data-view="security" role="tab" aria-selected="false" onclick="switchTab('security')">Security</button>
+    <button class="nav-tab active" id="tab-streams" data-view="streams" role="tab" aria-selected="true" aria-controls="view-streams" tabindex="0">Streams</button>
+    <button class="nav-tab" id="tab-gb28181" data-view="gb28181" role="tab" aria-selected="false" aria-controls="view-gb28181" tabindex="-1" hidden>GB28181</button>
+    <button class="nav-tab" id="tab-config" data-view="config" role="tab" aria-selected="false" aria-controls="view-config" tabindex="-1">Config</button>
+    <button class="nav-tab" id="tab-cluster" data-view="cluster" role="tab" aria-selected="false" aria-controls="view-cluster" tabindex="-1">Cluster</button>
+    <button class="nav-tab" id="tab-sip" data-view="sip" role="tab" aria-selected="false" aria-controls="view-sip" tabindex="-1">SIP Calls</button>
+    <button class="nav-tab" id="tab-storage" data-view="storage" role="tab" aria-selected="false" aria-controls="view-storage" tabindex="-1">Storage</button>
+    <button class="nav-tab" id="tab-security" data-view="security" role="tab" aria-selected="false" aria-controls="view-security" tabindex="-1">Security</button>
   </div>
 
-  <div id="view-streams">
+  <div id="view-streams" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
   <div class="stats">
     <div class="stat-card">
       <div class="stat-label">Active Streams</div>
@@ -856,7 +856,7 @@ select:focus-visible {
   </div>
   </div><!-- /view-streams -->
 
-  <div id="view-gb28181" hidden>
+  <div id="view-gb28181" role="tabpanel" aria-labelledby="tab-gb28181" tabindex="0" hidden>
     <div class="stats">
       <div class="stat-card">
         <div class="stat-label">Devices Online</div>
@@ -921,7 +921,7 @@ select:focus-visible {
     </div>
   </div><!-- /view-gb28181 -->
 
-  <div id="view-config" class="ops-view" hidden>
+  <div id="view-config" class="ops-view" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
     <div class="ops-toolbar">
       <h2>Runtime Config</h2>
       <div class="ops-toolbar-actions">
@@ -949,7 +949,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-cluster" class="ops-view" hidden>
+  <div id="view-cluster" class="ops-view" role="tabpanel" aria-labelledby="tab-cluster" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Cluster Relays</h2></div>
     <div class="ops-error" id="cluster-error"></div>
     <div class="stats">
@@ -968,7 +968,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-sip" class="ops-view" hidden>
+  <div id="view-sip" class="ops-view" role="tabpanel" aria-labelledby="tab-sip" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>SIP Gateway Calls</h2></div>
     <div class="ops-error" id="sip-error"></div>
     <form class="ops-form" onsubmit="dialSIPCall(event)">
@@ -986,7 +986,7 @@ select:focus-visible {
     <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
   </div>
 
-  <div id="view-storage" class="ops-view" hidden>
+  <div id="view-storage" class="ops-view" role="tabpanel" aria-labelledby="tab-storage" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Recordings &amp; DVR</h2></div>
     <div class="ops-error" id="storage-error"></div>
     <div class="stats">
@@ -1007,7 +1007,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-security" class="ops-view" hidden>
+  <div id="view-security" class="ops-view" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Security &amp; Audit</h2></div>
     <div class="ops-error" id="security-error"></div>
     <div class="stats">
@@ -1034,12 +1034,12 @@ select:focus-visible {
 </div>
 
 <!-- Confirm modal -->
-<div class="modal-overlay" id="modal">
+<div class="modal-overlay" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-msg">
   <div class="modal">
     <h3 id="modal-title">Confirm</h3>
     <p id="modal-msg"></p>
     <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="modal-cancel">Cancel</button>
       <button class="btn btn-danger" id="modal-confirm">Confirm</button>
     </div>
   </div>
@@ -1305,38 +1305,72 @@ function formatUptime(sec) {
 
 /* --- Confirm modal --- */
 var pendingAction = null;
+var modalReturnFocus = null;
 function showModal(title, msg, onConfirm) {
+  modalReturnFocus = document.activeElement;
   document.getElementById("modal-title").textContent = title;
   document.getElementById("modal-msg").textContent = msg;
   document.getElementById("modal").classList.add("active");
+  document.getElementById("modal-confirm").disabled = false;
   pendingAction = onConfirm;
+  document.getElementById("modal-confirm").focus();
 }
 function closeModal() {
   document.getElementById("modal").classList.remove("active");
   pendingAction = null;
+  var returnFocus = modalReturnFocus;
+  modalReturnFocus = null;
+  if (returnFocus && returnFocus.isConnected) returnFocus.focus();
 }
+document.getElementById("modal-cancel").addEventListener("click", closeModal);
 document.getElementById("modal-confirm").addEventListener("click", function() {
   if (!pendingAction) return;
   var action = pendingAction;
   pendingAction = null;
   var button = document.getElementById("modal-confirm");
   button.disabled = true;
-  Promise.resolve(action()).finally(function() {
+  Promise.resolve().then(action).finally(function() {
     button.disabled = false;
     closeModal();
   });
 });
+document.getElementById("modal").addEventListener("keydown", function(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  var focusable = Array.from(this.querySelectorAll("button:not([disabled])"));
+  if (!focusable.length) return;
+  var first = focusable[0];
+  var last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+document.addEventListener("focusin", function(event) {
+  var modal = document.getElementById("modal");
+  if (modal.classList.contains("active") && !modal.contains(event.target)) {
+    var confirm = document.getElementById("modal-confirm");
+    (confirm.disabled ? document.getElementById("modal-cancel") : confirm).focus();
+  }
+});
 
 function kickStream(key) {
   showModal("Kick Publisher", 'Disconnect the publisher from "' + key + '"?', function() {
-    apiFetch("/api/v1/streams/" + encodeURIComponent(key) + "/kick", { method: "POST" })
+    return apiFetch("/api/v1/streams/" + encodeURIComponent(key) + "/kick", { method: "POST" })
       .then(function() { refreshActiveView(); })
       .catch(function(err) { showManagementError("streams", err); });
   });
 }
 function deleteStream(key) {
   showModal("Delete Stream", 'Remove stream "' + key + '" entirely?', function() {
-    apiFetch("/api/v1/streams/" + encodeURIComponent(key), { method: "DELETE" })
+    return apiFetch("/api/v1/streams/" + encodeURIComponent(key), { method: "DELETE" })
       .then(function() { refreshActiveView(); })
       .catch(function(err) { showManagementError("streams", err); });
   });
@@ -2128,8 +2162,6 @@ function refresh(signal) {
     .then(function(data) {
       var streams = (data && data.streams) || [];
       var nextStreamMedia = Object.create(null);
-      var tbody = document.getElementById("tbody");
-      var empty = document.getElementById("empty");
       var totalSubs = 0;
       var publishing = 0;
 
@@ -2150,84 +2182,81 @@ function refresh(signal) {
       document.getElementById("stat-subs").textContent = totalSubs;
       document.getElementById("updated").textContent = new Date().toLocaleTimeString();
 
-      if (streams.length === 0) {
-        tbody.innerHTML = "";
-        empty.style.display = "block";
-        return;
-      }
-      empty.style.display = "none";
-
-      streams.sort(function(a, b) {
-        if (a.key < b.key) return -1;
-        if (a.key > b.key) return 1;
-        return 0;
-      });
-
-      var html = "";
-      for (var i = 0; i < streams.length; i++) {
-        var s = streams[i];
-        var st = s.stats || {};
-
-        var codecs = "";
-        if (s.video_codec) codecs += '<span class="codec-tag video">' + esc(s.video_codec) + '</span> ';
-        if (s.audio_codec) codecs += '<span class="codec-tag audio">' + esc(s.audio_codec) + '</span>';
-        if (!codecs) codecs = '<span style="color:#555">-</span>';
-
-        var subHtml = "";
-        var subKeys = Object.keys(s.subscribers || {}).sort();
-        for (var j = 0; j < subKeys.length; j++) {
-          var fmt = subKeys[j];
-          var cnt = s.subscribers[fmt];
-          var cls = cnt > 0 ? "sub-pill active" : "sub-pill";
-          subHtml += '<span class="' + cls + '">' + esc(fmt.toUpperCase()) + ' <span class="count">' + cnt + '</span></span>';
-        }
-        if (!subHtml) subHtml = '<span style="color:#555;font-size:12px">-</span>';
-
-        var safeKey = esc(s.key).replace(/'/g, "\\'");
-        var acts = '<div class="actions">';
-        if (s.state === "publishing") {
-          acts += '<button class="btn btn-play" onclick="openPlayer(\'' + safeKey + '\')">Preview</button>';
-        }
-        if (s.publisher && canManage("operator")) {
-          acts += '<button class="btn btn-warn" onclick="kickStream(\'' + safeKey + '\')">Kick</button>';
-        }
-        if (canManage("admin")) {
-          acts += '<button class="btn btn-danger" onclick="deleteStream(\'' + safeKey + '\')">Delete</button>';
-        }
-        acts += '</div>';
-
-        // GOP cache cell
-        var gopLen = s.gop_cache_len || 0;
-        var gopV = s.gop_video_frames || 0;
-        var gopA = s.gop_audio_frames || 0;
-        var gopMs = s.gop_duration_ms || 0;
-        var gopSec = (gopMs / 1000).toFixed(1);
-        // Bar width: assume max ~120 frames in a GOP (2s @60fps), cap at 100%
-        var gopPct = Math.min(gopLen / 120 * 100, 100);
-        var gopHtml = '<div class="gop-cell">'
-          + '<div class="gop-bar-wrap"><div class="gop-bar" style="width:' + gopPct.toFixed(0) + '%"></div></div>'
-          + '<div class="gop-label"><b>' + gopLen + '</b> frames &middot; ' + gopSec + 's'
-          + ' <span style="color:var(--blue)">V' + gopV + '</span>'
-          + ' <span style="color:#c084fc">A' + gopA + '</span></div></div>';
-
-        var uptimeHtml = st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : '<span style="color:#555">-</span>';
-
-        html += "<tr>"
-          + '<td class="stream-key">' + esc(s.key) + "</td>"
-          + '<td><span class="state state-' + esc(s.state) + '">' + esc(s.state.replace("_", " ")) + '</span></td>'
-          + '<td class="publisher-id">' + (s.publisher ? esc(s.publisher) : '<span style="color:#555">-</span>') + "</td>"
-          + "<td>" + codecs + "</td>"
-          + '<td class="mono">' + formatBitrate(st.bitrate_kbps) + "</td>"
-          + '<td class="mono">' + (st.fps ? st.fps.toFixed(1) : "-") + "</td>"
-          + '<td class="mono">' + uptimeHtml + "</td>"
-          + "<td>" + gopHtml + "</td>"
-          + '<td><div class="subs">' + subHtml + "</div></td>"
-          + "<td>" + acts + "</td>"
-          + "</tr>";
-      }
-      tbody.innerHTML = html;
+      renderStreams(streams);
     })
     .catch(function(err) { showManagementError("streams", err); });
+}
+
+function renderStreams(streams) {
+  streams = streams || [];
+  var tbody = document.getElementById("tbody");
+  var empty = document.getElementById("empty");
+  tbody.replaceChildren();
+  empty.style.display = streams.length ? "none" : "block";
+  streams.slice().sort(function(a, b) { return String(a.key).localeCompare(String(b.key)); }).forEach(function(s) {
+    var st = s.stats || {};
+    var row = tbody.insertRow();
+    appendTextCell(row, s.key, "stream-key");
+
+    var stateCell = row.insertCell();
+    var state = document.createElement("span");
+    state.className = "state state-" + String(s.state || "").replace(/[^a-z0-9_-]/gi, "-");
+    state.textContent = String(s.state || "").replace("_", " ");
+    stateCell.appendChild(state);
+    appendTextCell(row, s.publisher || "-", "publisher-id");
+
+    var codecCell = row.insertCell();
+    ["video", "audio"].forEach(function(kind) {
+      var value = s[kind + "_codec"];
+      if (!value) return;
+      var tag = document.createElement("span");
+      tag.className = "codec-tag " + kind;
+      tag.textContent = value;
+      codecCell.appendChild(tag);
+    });
+    if (!codecCell.childNodes.length) codecCell.textContent = "-";
+    appendTextCell(row, formatBitrate(st.bitrate_kbps), "mono");
+    appendTextCell(row, st.fps ? st.fps.toFixed(1) : "-", "mono");
+    appendTextCell(row, st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : "-", "mono");
+
+    var gopCell = row.insertCell();
+    var gop = document.createElement("div");
+    gop.className = "gop-cell";
+    var barWrap = document.createElement("div");
+    barWrap.className = "gop-bar-wrap";
+    var bar = document.createElement("div");
+    bar.className = "gop-bar";
+    bar.style.width = Math.min((s.gop_cache_len || 0) / 120 * 100, 100).toFixed(0) + "%";
+    barWrap.appendChild(bar);
+    var gopLabel = document.createElement("div");
+    gopLabel.className = "gop-label";
+    gopLabel.textContent = (s.gop_cache_len || 0) + " frames · " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+    gop.appendChild(barWrap);
+    gop.appendChild(gopLabel);
+    gopCell.appendChild(gop);
+
+    var subscriberCell = row.insertCell();
+    var subscriberList = document.createElement("div");
+    subscriberList.className = "subs";
+    var subscriberKeys = Object.keys(s.subscribers || {}).sort();
+    subscriberKeys.forEach(function(format) {
+      var count = s.subscribers[format];
+      var pill = document.createElement("span");
+      pill.className = count > 0 ? "sub-pill active" : "sub-pill";
+      pill.textContent = format.toUpperCase() + " " + count;
+      subscriberList.appendChild(pill);
+    });
+    if (!subscriberKeys.length) subscriberList.textContent = "-";
+    subscriberCell.appendChild(subscriberList);
+
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (s.state === "publishing") appendActionButton(actions, "Preview", "btn-play", "stream-preview", s.key);
+    if (s.publisher && canManage("operator")) appendActionButton(actions, "Kick", "btn-warn", "stream-kick", s.key);
+    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "stream-delete", s.key);
+    actionCell.appendChild(actions);
+  });
 }
 
 /* --- DVR Status --- */
@@ -2650,9 +2679,54 @@ function formatDurationSeconds(value) {
   return seconds > 0 ? formatUptime(seconds) : "-";
 }
 
-function safeActionValue(value) {
-  return esc(String(value || "")).replace(/'/g, "\\'");
+function appendTextCell(row, value, className) {
+  var cell = row.insertCell();
+  if (className) cell.className = className;
+  cell.textContent = value == null ? "" : String(value);
+  return cell;
 }
+
+function appendActionButton(container, label, className, action, actionID) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn" + (className ? " " + className : "");
+  button.textContent = label;
+  button.dataset.action = action;
+  button.dataset.actionId = String(actionID == null ? "" : actionID);
+  container.appendChild(button);
+  return button;
+}
+
+function createDynamicActionHandlers() {
+  return {
+    "stream-preview": function(value) { openPlayer(value); },
+    "stream-kick": function(value) { kickStream(value); },
+    "stream-delete": function(value) { deleteStream(value); },
+    "sip-detail": function(value) { loadSIPCall(value); },
+    "sip-hangup": function(value) { hangupSIPCall(value); },
+    "recording-detail": function(value) { loadRecording(value); },
+    "recording-download": function(value) { downloadRecording(value); },
+    "recording-delete": function(value) { deleteRecording(value); },
+    "dvr-detail": function(value) { loadDVRSession(value); },
+    "gb-toggle-device": function(value) { toggleDevice(value); },
+    "gb-catalog": function(value) { gbCatalog(value); },
+    "gb-delete-device": function(value) { gbDeleteDevice(value); },
+    "gb-play": function(value) { gbPlay(value); },
+    "gb-stop": function(value) { gbStop(value); },
+    "gb-ptz": function(value) { openPTZ(value); },
+    "gb-playback": function(value) { openPlayback(value); },
+    "gb-preview": function(value) { openPlayer(value); },
+    "gb-close-session": function(value) { gbCloseSession(value); }
+  };
+}
+
+var dynamicActionHandlers = createDynamicActionHandlers();
+document.addEventListener("click", function(event) {
+  var button = event.target.closest("[data-action]");
+  if (!button) return;
+  var handler = dynamicActionHandlers[button.dataset.action];
+  if (handler) handler(button.dataset.actionId);
+});
 
 function renderEmptyTable(tbodyID, emptyID, rows) {
   document.getElementById(tbodyID).innerHTML = rows;
@@ -2731,15 +2805,30 @@ function refreshSIPCalls(signal) {
     document.getElementById("sip-inbound").textContent = metrics.active_inbound || 0;
     document.getElementById("sip-outbound").textContent = metrics.active_outbound || 0;
     document.getElementById("sip-network-failures").textContent = metrics.network_failures_total || 0;
-    var rows = calls.map(function(call) {
-      var callID = safeActionValue(call.call_id);
-      var rtp = (call.rtp_packets_sent || 0) + " tx / " + (call.rtp_packets_received || 0) + " rx";
-      var actions = '<button class="btn" onclick="loadSIPCall(\'' + callID + '\')">Details</button>';
-      if (canManage("operator")) actions += ' <button class="btn btn-danger" onclick="hangupSIPCall(\'' + callID + '\')">Hang up</button>';
-      return "<tr><td class=\"mono\">" + esc(call.call_id) + "</td><td>" + esc(call.direction) + "</td><td class=\"stream-key\">" + esc(call.stream_key) + "</td><td>" + esc(call.codec || "-") + "</td><td>" + esc(call.state) + "</td><td class=\"mono\">" + rtp + "</td><td><div class=\"actions\">" + actions + "</div></td></tr>";
-    }).join("");
-    renderEmptyTable("sip-calls-tbody", "sip-calls-empty", rows);
+    renderSIPCalls(calls);
   }).catch(function(err) { showManagementError("sip", err); });
+}
+
+function renderSIPCalls(calls) {
+  calls = calls || [];
+  var tbody = document.getElementById("sip-calls-tbody");
+  tbody.replaceChildren();
+  document.getElementById("sip-calls-empty").style.display = calls.length ? "none" : "block";
+  calls.forEach(function(call) {
+    var row = tbody.insertRow();
+    appendTextCell(row, call.call_id, "mono");
+    appendTextCell(row, call.direction);
+    appendTextCell(row, call.stream_key, "stream-key");
+    appendTextCell(row, call.codec || "-");
+    appendTextCell(row, call.state);
+    appendTextCell(row, (call.rtp_packets_sent || 0) + " tx / " + (call.rtp_packets_received || 0) + " rx", "mono");
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    appendActionButton(actions, "Details", "", "sip-detail", call.call_id);
+    if (canManage("operator")) appendActionButton(actions, "Hang up", "btn-danger", "sip-hangup", call.call_id);
+    actionCell.appendChild(actions);
+  });
 }
 
 function dialSIPCall(event) {
@@ -2782,27 +2871,46 @@ function recordingURL(recordingID) {
 function renderRecordings(items) {
   items = items || [];
   document.getElementById("recording-count").textContent = items.length;
-  var rows = items.map(function(item) {
-    var id = safeActionValue(item.id);
-    var actions = '<button class="btn" onclick="loadRecording(\'' + id + '\')">Details</button>';
-    if (item.state === "completed") actions += ' <button class="btn btn-play" onclick="downloadRecording(\'' + id + '\')">Download</button>';
-    if (canManage("admin")) actions += ' <button class="btn btn-danger" onclick="deleteRecording(\'' + id + '\')">Delete</button>';
-    return "<tr><td class=\"mono\">" + esc(item.id) + "</td><td class=\"stream-key\">" + esc(item.stream_key || "-") + "</td><td>" + esc(item.format || "-") + "</td><td>" + esc(item.state || "-") + "</td><td class=\"mono\">" + formatBytes(item.size_bytes) + "</td><td>" + formatDate(item.completed_at) + "</td><td><div class=\"actions\">" + actions + "</div></td></tr>";
-  }).join("");
-  renderEmptyTable("recordings-tbody", "recordings-empty", rows);
+  var tbody = document.getElementById("recordings-tbody");
+  tbody.replaceChildren();
+  document.getElementById("recordings-empty").style.display = items.length ? "none" : "block";
+  items.forEach(function(item) {
+    var row = tbody.insertRow();
+    appendTextCell(row, item.id, "mono");
+    appendTextCell(row, item.stream_key || "-", "stream-key");
+    appendTextCell(row, item.format || "-");
+    appendTextCell(row, item.state || "-");
+    appendTextCell(row, formatBytes(item.size_bytes), "mono");
+    appendTextCell(row, formatDate(item.completed_at));
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    appendActionButton(actions, "Details", "", "recording-detail", item.id);
+    if (item.state === "completed") appendActionButton(actions, "Download", "btn-play", "recording-download", item.id);
+    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "recording-delete", item.id);
+    actionCell.appendChild(actions);
+  });
 }
 
 function renderDVR(data) {
   data = data || {};
   var sessions = data.sessions || [];
   document.getElementById("storage-dvr-sessions").textContent = sessions.length;
-  var rows = sessions.map(function(session) {
-    var key = safeActionValue(session.stream_key);
-    var state = session.live ? '<span class="health-good">Live</span>' : "Closed";
-    var windowText = formatDate(session.oldest_segment) + " / " + formatDate(session.newest_segment);
-    return "<tr><td class=\"stream-key\">" + esc(session.stream_key) + "</td><td>" + state + "</td><td>" + (session.segments || 0) + "</td><td>" + formatDurationSeconds(session.duration_sec) + "</td><td class=\"mono\">" + formatBytes(session.bytes) + "</td><td>" + windowText + "</td><td><button class=\"btn\" onclick=\"loadDVRSession('" + key + "')\">Details</button></td></tr>";
-  }).join("");
-  renderEmptyTable("dvr-tbody", "dvr-empty", rows);
+  var tbody = document.getElementById("dvr-tbody");
+  tbody.replaceChildren();
+  document.getElementById("dvr-empty").style.display = sessions.length ? "none" : "block";
+  sessions.forEach(function(session) {
+    var row = tbody.insertRow();
+    appendTextCell(row, session.stream_key, "stream-key");
+    var stateCell = appendTextCell(row, session.live ? "Live" : "Closed");
+    if (session.live) stateCell.className = "health-good";
+    appendTextCell(row, session.segments || 0);
+    appendTextCell(row, formatDurationSeconds(session.duration_sec));
+    appendTextCell(row, formatBytes(session.bytes), "mono");
+    appendTextCell(row, formatDate(session.oldest_segment) + " / " + formatDate(session.newest_segment));
+    var actionCell = row.insertCell();
+    appendActionButton(actionCell, "Details", "", "dvr-detail", session.stream_key);
+  });
 }
 
 function refreshStorage(signal) {
@@ -2963,7 +3071,7 @@ var gbDeviceChannels = {};
 
 function updateGB28181Tab(modules) {
   gbHasModule = modules && modules.indexOf("gb28181") >= 0;
-  var tab = document.getElementById("nav-gb28181");
+  var tab = document.getElementById("tab-gb28181");
   if (tab) tab.hidden = !gbHasModule;
   if (!gbHasModule && activeTab === "gb28181") switchTab("streams");
 }
@@ -2982,6 +3090,7 @@ function switchTab(name) {
     var active = tabs[j].getAttribute("data-view") === name;
     tabs[j].classList.toggle("active", active);
     tabs[j].setAttribute("aria-selected", active ? "true" : "false");
+    tabs[j].tabIndex = active ? 0 : -1;
   }
   var views = document.querySelectorAll("[id^=\"view-\"]");
   for (var k = 0; k < views.length; k++) {
@@ -2990,6 +3099,30 @@ function switchTab(name) {
   }
   startActiveViewPolling();
 }
+
+function visibleManagementTabs() {
+  return Array.from(document.querySelectorAll(".nav-tab")).filter(function(tab) { return !tab.hidden; });
+}
+
+document.getElementById("nav-tabs").addEventListener("click", function(event) {
+  var tab = event.target.closest(".nav-tab");
+  if (tab && !tab.hidden) switchTab(tab.getAttribute("data-view"));
+});
+
+document.getElementById("nav-tabs").addEventListener("keydown", function(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  var tabs = visibleManagementTabs();
+  var current = tabs.indexOf(event.target.closest(".nav-tab"));
+  if (current < 0) return;
+  event.preventDefault();
+  var next = current;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = tabs.length - 1;
+  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+  if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+  switchTab(tabs[next].getAttribute("data-view"));
+  tabs[next].focus();
+});
 
 function refreshGB28181(signal) {
   return Promise.all([
@@ -3017,86 +3150,105 @@ function refreshGB28181(signal) {
 function renderDevicesTable(devices) {
   var tbody = document.getElementById("gb-devices-tbody");
   var empty = document.getElementById("gb-devices-empty");
+  tbody.replaceChildren();
   if (devices.length === 0) {
-    tbody.innerHTML = "";
     empty.style.display = "block";
     return;
   }
   empty.style.display = "none";
-  var html = "";
-  for (var i = 0; i < devices.length; i++) {
-    var d = devices[i];
+  devices.forEach(function(d) {
     var badgeCls = d.status === "online" ? "badge-online" : "badge-offline";
-    var safeID = esc(d.device_id);
     var expanded = gbExpandedDevices[d.device_id];
-    var arrow = expanded ? "&#9660;" : "&#9654;";
     var timeStr = d.last_keepalive ? new Date(d.last_keepalive).toLocaleTimeString() : "-";
-
-    html += '<tr class="ch-toggle" onclick="toggleDevice(\'' + safeID + '\')">'
-      + '<td style="width:24px;text-align:center;color:var(--text2)">' + arrow + '</td>'
-      + '<td style="font-family:monospace;font-size:13px">' + safeID + '</td>'
-      + '<td>' + esc(d.remote_addr) + '</td>'
-      + '<td>' + esc(d.transport || "udp").toUpperCase() + '</td>'
-      + '<td><span class="badge ' + badgeCls + '">' + esc(d.status) + '</span></td>'
-      + '<td>' + (d.channel_count || 0) + '</td>'
-      + '<td>' + timeStr + '</td>'
-      + '<td><div class="actions">'
-      + (canManage("operator") ? '<button class="btn btn-play" onclick="event.stopPropagation();gbCatalog(\'' + safeID + '\')">Catalog</button>' : '')
-      + (canManage("admin") ? '<button class="btn btn-danger" onclick="event.stopPropagation();gbDeleteDevice(\'' + safeID + '\')">Delete</button>' : '')
-      + '</div></td></tr>';
+    var row = tbody.insertRow();
+    row.className = "ch-toggle";
+    var toggleCell = row.insertCell();
+    toggleCell.style.width = "24px";
+    var toggle = appendActionButton(toggleCell, expanded ? "▼" : "▶", "", "gb-toggle-device", d.device_id);
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    toggle.setAttribute("aria-label", (expanded ? "Collapse " : "Expand ") + d.device_id);
+    appendTextCell(row, d.device_id, "mono");
+    appendTextCell(row, d.remote_addr);
+    appendTextCell(row, String(d.transport || "udp").toUpperCase());
+    var statusCell = row.insertCell();
+    var badge = document.createElement("span");
+    badge.className = "badge " + badgeCls;
+    badge.textContent = d.status;
+    statusCell.appendChild(badge);
+    appendTextCell(row, d.channel_count || 0);
+    appendTextCell(row, timeStr);
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (canManage("operator")) appendActionButton(actions, "Catalog", "btn-play", "gb-catalog", d.device_id);
+    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "gb-delete-device", d.device_id);
+    actionCell.appendChild(actions);
 
     // Expanded channel rows
     if (expanded && gbDeviceChannels[d.device_id]) {
       var channels = gbDeviceChannels[d.device_id];
-      for (var j = 0; j < channels.length; j++) {
-        var ch = channels[j];
+      channels.forEach(function(ch) {
         var chStatus = (ch.status || "").toUpperCase() === "ON" ? "badge-on" : "badge-off";
-        var chID = esc(ch.channel_id);
-        html += '<tr class="channel-row">'
-          + '<td></td>'
-          + '<td style="font-family:monospace;font-size:12px">' + chID + '</td>'
-          + '<td>' + esc(ch.name) + '</td>'
-          + '<td></td>'
-          + '<td><span class="badge ' + chStatus + '">' + esc(ch.status || "OFF") + '</span></td>'
-          + '<td>' + (ch.ptz_type > 0 ? "PTZ-" + ch.ptz_type : "-") + '</td>'
-          + '<td></td>'
-          + '<td><div class="actions">'
-          + (canManage("operator") ? '<button class="btn btn-play" onclick="gbPlay(\'' + chID + '\')">Play</button>'
-            + '<button class="btn btn-warn" onclick="gbStop(\'' + chID + '\')">Stop</button>'
-            + '<button class="btn" style="background:var(--blue);color:#fff" onclick="openPTZ(\'' + chID + '\')">PTZ</button>'
-            + '<button class="btn" style="background:var(--yellow);color:#000" onclick="openPlayback(\'' + chID + '\')">Playback</button>' : '')
-          + '</div></td></tr>';
-      }
+        var channelRow = tbody.insertRow();
+        channelRow.className = "channel-row";
+        appendTextCell(channelRow, "");
+        appendTextCell(channelRow, ch.channel_id, "mono");
+        appendTextCell(channelRow, ch.name);
+        appendTextCell(channelRow, "");
+        var channelStatusCell = channelRow.insertCell();
+        var channelBadge = document.createElement("span");
+        channelBadge.className = "badge " + chStatus;
+        channelBadge.textContent = ch.status || "OFF";
+        channelStatusCell.appendChild(channelBadge);
+        appendTextCell(channelRow, ch.ptz_type > 0 ? "PTZ-" + ch.ptz_type : "-");
+        appendTextCell(channelRow, "");
+        var channelActionCell = channelRow.insertCell();
+        var channelActions = document.createElement("div");
+        channelActions.className = "actions";
+        if (canManage("operator")) {
+          appendActionButton(channelActions, "Play", "btn-play", "gb-play", ch.channel_id);
+          appendActionButton(channelActions, "Stop", "btn-warn", "gb-stop", ch.channel_id);
+          var ptz = appendActionButton(channelActions, "PTZ", "", "gb-ptz", ch.channel_id);
+          ptz.style.background = "var(--blue)";
+          ptz.style.color = "#fff";
+          var playback = appendActionButton(channelActions, "Playback", "", "gb-playback", ch.channel_id);
+          playback.style.background = "var(--yellow)";
+          playback.style.color = "#000";
+        }
+        channelActionCell.appendChild(channelActions);
+      });
     }
-  }
-  tbody.innerHTML = html;
+  });
 }
 
 function renderSessionsTable(sessions) {
   var tbody = document.getElementById("gb-sessions-tbody");
   var empty = document.getElementById("gb-sessions-empty");
+  tbody.replaceChildren();
   if (sessions.length === 0) {
-    tbody.innerHTML = "";
     empty.style.display = "block";
     return;
   }
   empty.style.display = "none";
-  var html = "";
-  for (var i = 0; i < sessions.length; i++) {
-    var s = sessions[i];
+  sessions.forEach(function(s) {
     var stCls = s.state === "streaming" ? "state-publishing" : "state-idle";
-    html += '<tr>'
-      + '<td style="font-family:monospace;font-size:12px">' + esc(s.id).substring(0, 20) + '</td>'
-      + '<td style="font-family:monospace;font-size:12px">' + esc(s.channel_id) + '</td>'
-      + '<td class="stream-key">' + esc(s.stream_key) + '</td>'
-      + '<td>' + esc(s.direction) + '</td>'
-      + '<td><span class="state ' + stCls + '">' + esc(s.state) + '</span></td>'
-      + '<td><div class="actions">'
-      + '<button class="btn btn-play" onclick="openPlayer(\'' + esc(s.stream_key).replace(/'/g, "\\'") + '\')">Preview</button>'
-      + (canManage("admin") ? '<button class="btn btn-danger" onclick="gbCloseSession(\'' + esc(s.id).replace(/'/g, "\\'") + '\')">Close</button>' : '')
-      + '</div></td></tr>';
-  }
-  tbody.innerHTML = html;
+    var row = tbody.insertRow();
+    appendTextCell(row, String(s.id || "").substring(0, 20), "mono");
+    appendTextCell(row, s.channel_id, "mono");
+    appendTextCell(row, s.stream_key, "stream-key");
+    appendTextCell(row, s.direction);
+    var stateCell = row.insertCell();
+    var state = document.createElement("span");
+    state.className = "state " + stCls;
+    state.textContent = s.state;
+    stateCell.appendChild(state);
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    appendActionButton(actions, "Preview", "btn-play", "gb-preview", s.stream_key);
+    if (canManage("admin")) appendActionButton(actions, "Close", "btn-danger", "gb-close-session", s.id);
+    actionCell.appendChild(actions);
+  });
 }
 
 /* Device actions */
