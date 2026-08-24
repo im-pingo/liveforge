@@ -32,6 +32,7 @@ func TestRBACRoleMatrix(t *testing.T) {
 		{"viewer", "streams:read", true},
 		{"viewer", "streams:kick", false},
 		{"operator", "streams:kick", true},
+		{"operator", "gb28181:read", true},
 		{"operator", "streams:delete", false},
 		{"admin", "streams:delete", true},
 		{"admin", "recordings:delete", true},

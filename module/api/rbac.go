@@ -53,7 +53,7 @@ var rolePermissions = map[string]map[string]bool{
 	},
 	"operator": {
 		"server:read": true, "streams:read": true, "cluster:read": true,
-		"sip:read": true, "recordings:read": true, "audit:read": true,
+		"sip:read": true, "recordings:read": true, "audit:read": true, "gb28181:read": true,
 		"streams:kick": true, "sip:calls": true, "config:reload": true, "gb28181:control": true,
 	},
 	"admin": {"*": true},
