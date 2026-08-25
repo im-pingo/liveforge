@@ -120,6 +120,13 @@ func TestModuleHooksEmpty(t *testing.T) {
 	}
 }
 
+func TestModuleCloseBeforeInit(t *testing.T) {
+	m := NewModule()
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+}
+
 func TestModuleInitAndClose(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.SRT.Enabled = true

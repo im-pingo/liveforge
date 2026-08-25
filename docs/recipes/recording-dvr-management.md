@@ -58,6 +58,8 @@ curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
   "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4"
 curl -fS -H "Authorization: Bearer $VIEWER_TOKEN" -H 'Range: bytes=0-1023' \
   "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4/download" -o /tmp/liveforge-recording.part
+curl -fS -H "Authorization: Bearer $VIEWER_TOKEN" -H 'Range: bytes=0-1023' \
+  "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4/play" -o /tmp/liveforge-recording-preview.part
 curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
   "$LIVEFORGE_API/api/v1/dvr/status"
 curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
@@ -65,7 +67,9 @@ curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
 curl -fS http://127.0.0.1:8070/dvr/live/camera.m3u8 -o /tmp/liveforge-dvr.m3u8
 ```
 
-Successful metadata/status requests return 200. A complete download returns 200, a valid range returns 206, a cache validator can return 304, and an invalid range can return 416. Invalid/traversing IDs return 400, missing objects 404, active/not-ready recordings 409, storage failures 500, and absent modules 503. Authentication failures return 401; a valid token without permission returns 403; rate limiting can return 429.
+Successful metadata/status requests return 200. A complete download or inline play returns 200, a valid range returns 206, a cache validator can return 304, and an invalid range can return 416. Inline play sets a media MIME type and `Content-Disposition: inline`, so the Console can preview MP4/fMP4 natively and FLV/TS through mpegts.js. Invalid/traversing IDs return 400, missing objects 404, active/not-ready recordings 409, storage failures 500, and absent modules 503. Authentication failures return 401; a valid token without permission returns 403; rate limiting can return 429.
+
+The Storage view exposes Play for completed recordings and for DVR sessions with available segments. Recording playback is served by the authenticated management API and reuses the Console session cookie. DVR playback is an HLS URL on the separate `dvr.listen` media listener; its playlist and segment requests run the normal synchronous subscribe authorization hooks. The media listener returns non-credentialed CORS headers so a Console on another port can fetch HLS resources. A Console session cookie is not automatically shared with that listener, and the Console never stores or appends a bearer token. Configure DVR subscribe authorization accordingly when using the online browser action.
 
 ## Delete A Recording
 

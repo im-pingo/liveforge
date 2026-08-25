@@ -17,12 +17,15 @@ func (m *Module) serveDASHManifest(w http.ResponseWriter, r *http.Request, strea
 
 	mgr := m.getOrCreateDASH(streamKey, stream)
 
-	// Wait for at least 3 segments before serving MPD. FFmpeg's dashdec.c
-	// caches the SegmentTemplate @duration from the first MPD response and
-	// never updates it on refresh. With fewer than 3 segments the computed
-	// duration is wrong (dominated by short GOP-cache edge-case segments).
-	for i := 0; i < 150 && mgr.SegmentCount() < 3; i++ {
-		time.Sleep(100 * time.Millisecond)
+	// One completed keyframe-bounded segment is enough because the MPD uses an
+	// explicit SegmentTimeline. Waiting for a fixed three-segment buffer makes
+	// startup roughly three GOPs long for publishers with sparse keyframes.
+	for i := 0; i < 150 && mgr.SegmentCount() < 1; i++ {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
 	manifest := mgr.GenerateMPD()
@@ -52,7 +55,7 @@ func (m *Module) serveDASHInit(w http.ResponseWriter, r *http.Request, streamKey
 
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Write(data)
 }
 
@@ -124,7 +127,7 @@ func (m *Module) serveDASHAudioInit(w http.ResponseWriter, r *http.Request, stre
 
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Write(data)
 }
 

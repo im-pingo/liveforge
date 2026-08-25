@@ -1,8 +1,10 @@
 package httpstream
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	"strings"
 	"time"
 
@@ -42,6 +44,13 @@ func (d *DASHManager) GenerateMPD() string {
 	if avgDurMs <= 0 {
 		avgDurMs = int(d.targetDur * 1000)
 	}
+	updatePeriodSeconds := int(math.Ceil(float64(avgDurMs) / 1000.0))
+	if updatePeriodSeconds < 1 {
+		updatePeriodSeconds = 1
+	}
+	if updatePeriodSeconds > 2 {
+		updatePeriodSeconds = 2
+	}
 
 	// startNumber corresponds to the first segment in the current window.
 	startNumber := 1
@@ -54,7 +63,7 @@ func (d *DASHManager) GenerateMPD() string {
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	fmt.Fprintf(&sb, `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" minimumUpdatePeriod="PT%dS" availabilityStartTime="%s" publishTime="%s" timeShiftBufferDepth="PT%dS" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">`,
-		int(math.Ceil(float64(avgDurMs)/1000.0)),
+		updatePeriodSeconds,
 		ast.Format(time.RFC3339),
 		time.Now().UTC().Format(time.RFC3339),
 		int(math.Ceil(bufferDepth)),
@@ -68,8 +77,12 @@ func (d *DASHManager) GenerateMPD() string {
 
 	// Video AdaptationSet with SegmentTimeline.
 	sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s/vinit.mp4" media="%s/v$Number$.m4s">`,
-		startNumber, d.basePath, d.basePath)
+	videoInitURL := d.basePath + "/vinit.mp4"
+	if version := initSegmentVersion(d.videoInitSeg); version != "" {
+		videoInitURL += "?v=" + version
+	}
+	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/v$Number$.m4s">`,
+		startNumber, videoInitURL, d.basePath)
 	sb.WriteString("\n")
 	sb.WriteString("        <SegmentTimeline>\n")
 	timeMs := int64(math.Round(d.timeBase * 1000))
@@ -110,8 +123,12 @@ func (d *DASHManager) GenerateMPD() string {
 			audioStartNumber = audioSegs[0].SeqNum + 1
 		}
 		sb.WriteString(`    <AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s/audio_init.mp4" media="%s/a$Number$.m4s">`,
-			audioStartNumber, d.basePath, d.basePath)
+		audioInitURL := d.basePath + "/audio_init.mp4"
+		if version := initSegmentVersion(d.audioInitSeg); version != "" {
+			audioInitURL += "?v=" + version
+		}
+		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/a$Number$.m4s">`,
+			audioStartNumber, audioInitURL, d.basePath)
 		sb.WriteString("\n")
 		sb.WriteString("        <SegmentTimeline>\n")
 		audioTimeMs := int64(math.Round(d.timeBase * 1000))
@@ -167,6 +184,11 @@ func dashVideoCodecString(codec avframe.CodecType, seqHeader *avframe.AVFrame) s
 		return fmt.Sprintf("avc1.%02x%02x%02x",
 			seqHeader.Payload[1], seqHeader.Payload[2], seqHeader.Payload[3])
 	}
+	if seqHeader != nil && codec == avframe.CodecH265 {
+		if codecString, ok := dashHEVCCodecString("hvc1", seqHeader.Payload); ok {
+			return codecString
+		}
+	}
 	switch codec {
 	case avframe.CodecH264:
 		return "avc1.640028" // fallback: High profile, level 4.0
@@ -175,6 +197,45 @@ func dashVideoCodecString(codec avframe.CodecType, seqHeader *avframe.AVFrame) s
 	default:
 		return "avc1.640028"
 	}
+}
+
+func dashHEVCCodecString(sampleEntry string, config []byte) (string, bool) {
+	if len(config) < 13 || config[0] != 1 {
+		return "", false
+	}
+
+	profileSpace := ""
+	switch config[1] >> 6 {
+	case 1:
+		profileSpace = "A"
+	case 2:
+		profileSpace = "B"
+	case 3:
+		profileSpace = "C"
+	}
+	profile := fmt.Sprintf("%s%d", profileSpace, config[1]&0x1F)
+	compatibility := fmt.Sprintf("%X", bits.Reverse32(binary.BigEndian.Uint32(config[2:6])))
+	tier := "L"
+	if config[1]&0x20 != 0 {
+		tier = "H"
+	}
+	level := fmt.Sprintf("%s%d", tier, config[12])
+
+	var constraints uint64
+	for _, value := range config[6:12] {
+		constraints = constraints<<8 | uint64(value)
+	}
+	constraintBytes := 6
+	for constraintBytes > 1 && constraints&0xFF == 0 {
+		constraints >>= 8
+		constraintBytes--
+	}
+	var constraintString strings.Builder
+	for index := constraintBytes - 1; index >= 0; index-- {
+		fmt.Fprintf(&constraintString, ".%X", constraints>>uint(index*8)&0xFF)
+	}
+
+	return fmt.Sprintf("%s.%s.%s.%s%s", sampleEntry, profile, compatibility, level, constraintString.String()), true
 }
 
 // dashAudioCodecString returns the DASH codecs string for an audio codec.

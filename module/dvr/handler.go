@@ -10,6 +10,24 @@ import (
 	"github.com/im-pingo/liveforge/core"
 )
 
+// dvrMediaCORS permits browser consoles on a separate management port to
+// fetch HLS playlists and segments. Authentication remains enforced by the
+// synchronous subscribe hook for every media request; this does not enable
+// credentialed cross-origin cookies.
+func dvrMediaCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Range")
+		w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func strictDVRMediaRoutes(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestPath := r.URL.Path

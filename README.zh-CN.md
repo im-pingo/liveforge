@@ -116,13 +116,15 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **增量播放列表** — 支持 `_HLS_skip=YES` 减少传输量
 - **fMP4 容器** — 默认 fMP4，可选 TS 回退
 - **兼容旧播放器** — 无 LL-HLS 支持的播放器自动降级为缓冲分片模式
+- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；Hls.js 的初始清单等待一个完整分段但不重复公告其 part，后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新
 
 ### 管理与运维
 
 - **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
-- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制，分段、存储健康、下载/Range/删除管理和时移状态
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制，分段、存储健康、下载/Range/在线预览/删除管理和时移状态
+- **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
 - **限流** — IP 级令牌桶，防止连接洪泛
@@ -245,6 +247,8 @@ ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish
 **WebRTC（浏览器）：**
 打开 `http://localhost:8090/console`，点击 **"+ WebRTC Publish"**，选择摄像头/麦克风后开始推流。
 
+当浏览器和操作系统提供 H.265 WebRTC 编码器时，控制台可以推送 H.265/HEVC 视频和 Opus 音频。FMP4 预览在共享 muxer 启动时建立接近零的时间线并保留 B 帧的有符号合成偏移，晚加入的订阅从自身首个缓冲时间戳开始播放。WHEP Live 回放原子缓存 GOP 后，从与快照匹配的 ring 游标继续读取源视频，并通过独立 reader 获取转码后的目标音频。带 `audiocodec` 标签的构建是完整跨协议配置，验收步骤见 [WHIP H.265 + Opus 播放验证](docs/recipes/whip-h265-opus-playback.md)。
+
 **GB28181：**
 将 IP 摄像头的 SIP 服务器指向 `localhost:5060`，或使用内置模拟器：
 ```bash
@@ -274,13 +278,14 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 - 流列表：状态、编解码器、码率、帧率
 - GOP 缓存可视化
-- 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、WebRTC）
+- 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、HLS、DASH、WebRTC 实时模式和 WebRTC Live 模式）
 - WebRTC 推流（摄像头/麦克风 + 发送端统计）
 - 权限感知的踢流、删流和运行时配置刷新
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
-- 录制详情/下载/删除、DVR 会话/存储状态、安全状态和有界审计事件
+- 录制详情/下载/在线预览/删除、DVR 会话/存储状态及 HLS 在线预览、安全状态和有界审计事件
 
 DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
+录制预览复用已认证的管理 API 会话；DVR 预览使用带非凭据 CORS 的独立 `dvr.listen` HLS 监听器，因此仍执行订阅鉴权，控制台不会持久化或拼接 bearer token。
 
 ## 配置
 
@@ -465,7 +470,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 - [x] 音频转码（AAC、Opus、G.711、MP3）
 - [x] SIP 网关
 - [x] 权限感知的七视图管理控制台
-- [x] 录制/DVR、集群、安全和审计管理 API
+- [x] 录制/DVR、集群、安全和审计管理 API（含 Storage 在线预览）
 - [ ] Simulcast 分层选择
 
 ## 许可证

@@ -3,8 +3,12 @@ package httpstream
 import (
 	"bytes"
 	"testing"
+	"time"
 
+	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
 func TestHLSManagerGenerateM3U8(t *testing.T) {
@@ -91,7 +95,7 @@ func TestParseAudioSeqHeader(t *testing.T) {
 	// AAC-LC, 44100 Hz, stereo: first 2 bytes = 0x12 0x10
 	// objectType=2 (AAC-LC), samplingFrequencyIndex=4 (44100), channelConfiguration=2
 	payload := []byte{0x12, 0x10}
-	sr, ch := parseAudioSeqHeader(&avframe.AVFrame{Payload: payload})
+	sr, ch := parseAudioSeqHeader(&avframe.AVFrame{Codec: avframe.CodecAAC, Payload: payload})
 	if sr != 44100 {
 		t.Errorf("sample rate: got %d, want 44100", sr)
 	}
@@ -100,7 +104,7 @@ func TestParseAudioSeqHeader(t *testing.T) {
 	}
 
 	// Invalid payload
-	sr, ch = parseAudioSeqHeader(&avframe.AVFrame{Payload: []byte{0xFF}})
+	sr, ch = parseAudioSeqHeader(&avframe.AVFrame{Codec: avframe.CodecAAC, Payload: []byte{0xFF}})
 	if sr != 0 || ch != 0 {
 		t.Errorf("invalid payload: got sr=%d ch=%d, want 0,0", sr, ch)
 	}
@@ -141,4 +145,193 @@ func TestBufCopyAndReset(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Error("buffer should be reset")
 	}
+}
+
+func TestHLSManagerDropsOpusWhenAudioTranscodingIsUnavailable(t *testing.T) {
+	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
+	mgr := NewHLSManager("live/hls-opus", "/live/hls-opus", 1, 5)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	// Let Run capture its atomic GOP/cache cursor before adding live frames.
+	time.Sleep(20 * time.Millisecond)
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe,
+		20, 20, []byte{0xf8, 0xff, 0xfe},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		500, 500, []byte{0, 0, 0, 2, 0x41, 0x01},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		1000, 1000, []byte{0, 0, 0, 2, 0x65, 0x01},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		2000, 2000, []byte{0, 0, 0, 2, 0x65, 0x02},
+	))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if mgr.SegmentCount() < 2 {
+		t.Fatal("HLS manager did not finalize two keyframe-bounded segments")
+	}
+	for seqNum := range 2 {
+		segment, ok := mgr.GetSegment(seqNum)
+		if !ok {
+			t.Fatalf("HLS segment %d is missing", seqNum)
+		}
+		for offset := 0; offset+ts.PacketSize <= len(segment); offset += ts.PacketSize {
+			packet := segment[offset : offset+ts.PacketSize]
+			pid := uint16(packet[1]&0x1f)<<8 | uint16(packet[2])
+			if pid == ts.PIDAudio {
+				t.Fatalf("HLS segment %d contains an audio PID for unsupported Opus", seqNum)
+			}
+		}
+	}
+}
+
+func TestHLSManagerCachedGOPContinuesWithLiveInterframes(t *testing.T) {
+	stream := newMuxerWorkerStream(t, 0)
+	mgr := NewHLSManager("live/hls-keyframe", "/live/hls-keyframe", 1, 5)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	// Let Run capture its atomic GOP/cache cursor before adding live frames.
+	time.Sleep(20 * time.Millisecond)
+
+	for _, frame := range []*avframe.AVFrame{
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			500, 500, []byte{0, 0, 0, 2, 0x41, 0x01},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			1000, 1000, []byte{0, 0, 0, 2, 0x65, 0x01},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			1500, 1500, []byte{0, 0, 0, 2, 0x41, 0x02},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			2000, 2000, []byte{0, 0, 0, 2, 0x65, 0x02},
+		),
+	} {
+		stream.WriteFrame(frame)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	segment, ok := mgr.GetSegment(0)
+	if !ok {
+		t.Fatal("HLS segment 0 is missing")
+	}
+
+	var firstVideo *avframe.AVFrame
+	foundSnapshotLiveFrame := false
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if firstVideo == nil && frame.MediaType.IsVideo() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+			firstVideo = frame
+		}
+		if frame.MediaType.IsVideo() && frame.FrameType != avframe.FrameTypeSequenceHeader && frame.DTS == 500 {
+			foundSnapshotLiveFrame = true
+		}
+	})
+	demuxer.Feed(segment)
+	demuxer.Flush()
+	if firstVideo == nil {
+		t.Fatal("HLS live segment contains no video sample")
+	}
+	if !firstVideo.FrameType.IsKeyframe() {
+		t.Fatalf("HLS segment starts with %v, want keyframe", firstVideo.FrameType)
+	}
+	if !foundSnapshotLiveFrame {
+		t.Fatal("HLS segment 0 dropped the live interframe immediately after the cache snapshot")
+	}
+}
+
+func TestHLSManagerFirstSegmentStartsAtFirstLiveKeyframeWithoutCache(t *testing.T) {
+	stream := newVideoStreamWithoutGOPCache(t)
+	mgr := NewHLSManager("live/hls-no-cache", "/live/hls-no-cache", 6, 5)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	for _, frame := range []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 500, 500, []byte{0, 0, 0, 2, 0x41, 0x01}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 1000, 1000, []byte{0, 0, 0, 2, 0x65, 0x02}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 1500, 1500, []byte{0, 0, 0, 2, 0x41, 0x03}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 2000, 2000, []byte{0, 0, 0, 2, 0x65, 0x04}),
+	} {
+		stream.WriteFrame(frame)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	segment, ok := mgr.GetSegment(0)
+	if !ok {
+		t.Fatal("HLS first segment is missing")
+	}
+	var firstVideo *avframe.AVFrame
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if firstVideo == nil && frame.MediaType.IsVideo() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+			firstVideo = frame
+		}
+	})
+	demuxer.Feed(segment)
+	demuxer.Flush()
+	if firstVideo == nil || !firstVideo.FrameType.IsKeyframe() {
+		t.Fatal("HLS advertised a first segment that starts before the first live keyframe")
+	}
+}
+
+func newVideoStreamWithoutGOPCache(t *testing.T) *core.Stream {
+	t.Helper()
+	stream := core.NewStream("live/no-cache", config.StreamConfig{
+		GOPCache:       false,
+		RingBufferSize: 256,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&muxerWorkerPublisher{info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	return stream
 }

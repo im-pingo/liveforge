@@ -235,7 +235,7 @@ func writeVideoSampleEntry(w *bytes.Buffer, codec avframe.CodecType, seqHeader [
 		if len(seqHeader) > 0 {
 			WriteBox(&box, BoxHvcC, seqHeader)
 		}
-		WriteBox(w, BoxHev1, box.Bytes())
+		WriteBox(w, BoxHvc1, box.Bytes())
 	case avframe.CodecAV1:
 		if len(seqHeader) > 0 {
 			WriteBox(&box, BoxAv1C, seqHeader)

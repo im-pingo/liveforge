@@ -308,7 +308,9 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleServerInfo(t *testing.T) {
-	h, _ := newTestHandlers(t)
+	h, s := newTestHandlers(t)
+	s.Config().DVR.Enabled = true
+	s.Config().DVR.Listen = "127.0.0.1:8070"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/server/info", nil)
 	w := httptest.NewRecorder()
@@ -325,6 +327,9 @@ func TestHandleServerInfo(t *testing.T) {
 	}
 	if info.Version == "" {
 		t.Error("expected non-empty version")
+	}
+	if got := info.Endpoints["dvr"]; got != "127.0.0.1:8070" {
+		t.Errorf("dvr endpoint=%q", got)
 	}
 }
 

@@ -110,13 +110,13 @@ func (m *Module) close() error {
 	m.closing = true
 	listener := m.listener
 	m.mu.Unlock()
+	close(m.done)
 	var listenerErr error
 	if listener != nil {
 		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			listenerErr = err
 		}
 	}
-	close(m.done)
 
 	m.mu.Lock()
 	conns := make([]net.Conn, 0, len(m.conns))

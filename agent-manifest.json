@@ -33,6 +33,7 @@
   },
   "runtime": {
     "go": ">=1.26",
+    "startup_failure": "report the original listener or module error and roll back only modules whose initialization was attempted; uninitialized later modules are not closed",
     "default_build": {
       "cgo": false,
       "tags": [],
@@ -52,7 +53,7 @@
     {"id": "srt", "direction": ["publish", "play"], "status": "stable", "port": 6000, "url_templates": ["srt://HOST:6000?streamid=publish:STREAM_KEY", "srt://HOST:6000?streamid=subscribe:STREAM_KEY"]},
     {"id": "webrtc", "direction": ["publish", "play"], "status": "stable", "port": 8443, "entrypoints": ["POST /webrtc/whip/{stream_key}", "POST /webrtc/whep/{stream_key}"], "max_sdp_offer_bytes": 1048576, "requires": ["HTTPS or a browser-compatible secure context for browser camera and microphone access"]},
     {"id": "hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"]},
-    {"id": "ll-hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"], "requires": ["llhls.enabled=true"]},
+    {"id": "ll-hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"], "requires": ["llhls.enabled=true"], "startup_policy": "initial manifest waits for one complete segment without completed PART tags; blocking reloads retain the latest completed PART identity"},
     {"id": "dash", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mpd"]},
     {"id": "http-flv", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.flv"]},
     {"id": "fmp4", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mp4"]},
@@ -80,8 +81,9 @@
     "response_contracts": {"management": "code/message/data envelope", "gb28181": "direct JSON", "webrtc": "SDP success and plain-text errors"}
   },
   "operations": {
-    "console": {"status": "available", "views": ["Streams", "GB28181", "Config", "Cluster", "SIP Calls", "Storage", "Security"], "recent_audit": "inside Security; not a separate tab", "permission_aware_actions": true},
-    "recording": {"status": "available", "formats": ["flv", "fmp4", "mp4", "ts", "hls"], "management": ["list", "status", "detail", "range download", "delete"], "dvr_status": true, "dvr_media_authorization": "synchronous subscribe authorization hooks only; no asynchronous subscribe lifecycle emission", "docs": "docs/recipes/recording-dvr-management.md"},
+    "console": {"status": "available", "views": ["Streams", "GB28181", "Config", "Cluster", "SIP Calls", "Storage", "Security"], "recent_audit": "inside Security; not a separate tab", "permission_aware_actions": true, "preview_protocols": ["http-flv", "ws-flv", "http-ts", "fmp4", "hls", "dash", "whep-realtime", "whep-live"]},
+    "whip_h265_opus_bridge": {"status": "browser_verified", "source": {"protocol": "whip", "video": "H265", "audio": "Opus"}, "preview_protocols": ["http-flv", "ws-flv", "http-ts", "fmp4", "hls", "dash", "whep-realtime", "whep-live"], "success_criteria": ["decoded first frame", "non-zero dimensions", "advancing media clock", "no media error"], "docs": "docs/recipes/whip-h265-opus-playback.md"},
+    "recording": {"status": "available", "formats": ["flv", "fmp4", "mp4", "ts", "hls"], "management": ["list", "status", "detail", "range download", "inline range playback", "delete"], "dvr_status": true, "dvr_media_authorization": "synchronous subscribe authorization hooks only; no asynchronous subscribe lifecycle emission", "dvr_media_cors": "non-credentialed wildcard CORS for split-port HLS playlist/segment fetches", "console_playback": {"recordings": "authenticated management API session; browser-native MP4/fMP4 and mpegts.js FLV/TS", "dvr": "HLS on the separate dvr.listen media listener; Console does not persist or append bearer tokens"}, "docs": "docs/recipes/recording-dvr-management.md"},
     "sipgateway": {"status": "available", "management": ["list", "dial", "detail", "hangup"], "docs": "docs/recipes/sipgateway-management.md"},
     "cluster": {"status": "available", "protocols": ["rtmp", "srt", "rtsp", "rtp", "gb28181"], "credential_resolution": "atomic per request; api.auth.bearer_token then first named admin token", "peer_errors": "bounded and redacted", "docs": "docs/recipes/cluster-relay-operations.md"},
     "rtsp_multitrack_setup": {"status": "available", "transports": ["tcp-interleaved", "udp"], "tracks": ["audio", "video"]}
@@ -109,6 +111,7 @@
     "docs/recipes/source-build.md",
     "docs/recipes/docker-local.md",
     "docs/recipes/rtmp-to-hls.md",
+    "docs/recipes/whip-h265-opus-playback.md",
     "docs/recipes/auth-and-tls.md",
     "docs/recipes/runtime-config-sources.md",
     "docs/recipes/recording-dvr-management.md",

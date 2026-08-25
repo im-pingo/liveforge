@@ -13,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 	"github.com/pion/webrtc/v4"
 )
@@ -167,6 +168,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			slog.Error("WHIP depacketizer error", "module", "webrtc", "error", err)
 			return
 		}
+		if avCodec.IsVideo() {
+			go requestWHIPKeyframes(pc, uint32(track.SSRC()), sess.done, 2*time.Second)
+		}
 
 		readTrackLoop(track, dp, stream, pub.done, avCodec)
 	})
@@ -224,12 +228,39 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	slog.Info("WHIP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
 }
 
+func requestWHIPKeyframes(pc *webrtc.PeerConnection, mediaSSRC uint32, done <-chan struct{}, interval time.Duration) {
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	request := func() bool {
+		if err := pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC}}); err != nil {
+			return false
+		}
+		return true
+	}
+	if !request() {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			if !request() {
+				return
+			}
+		}
+	}
+}
+
 // readTrackLoop reads RTP packets from a WebRTC track, depacketizes them,
 // and writes AVFrames to the stream.
 //
-// Key invariant for H.264: SPS/PPS arrive as SequenceHeader frames and may
-// be interleaved with IDR NALs in the same Marker-delimited window. We handle
-// them as separate AVFrames so the ring buffer and GOP cache stay consistent:
+// Key invariant for H.264/H.265: parameter sets may be interleaved with IDR
+// NALs in the same Marker-delimited window. We handle them as separate
+// AVFrames so the ring buffer and GOP cache stay consistent:
 //   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
 //   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
 func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType) {
@@ -273,12 +304,31 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 			continue
 		}
 
-		frame, err := dp.Depacketize(&pkt)
+		frames, err := pkgrtp.DepacketizeFrames(dp, &pkt)
 		if err != nil {
 			continue
 		}
 
-		if frame != nil {
+		for _, frame := range frames {
+			if frame == nil {
+				continue
+			}
+			if !codec.IsVideo() {
+				dts := computeDTS(pkt.Timestamp)
+				frameType := frame.FrameType
+				if frameType == 0 {
+					frameType = avframe.FrameTypeInterframe
+				}
+				stream.WriteFrame(avframe.NewAVFrame(
+					avframe.MediaTypeAudio,
+					codec,
+					frameType,
+					dts,
+					dts,
+					frame.Payload,
+				))
+				continue
+			}
 			if frame.FrameType == avframe.FrameTypeSequenceHeader {
 				// SPS/PPS: accumulate separately. If there is already pending
 				// media data (unlikely but possible), flush it first.
@@ -289,7 +339,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 					accPayload = nil
 					accFrame = 0
 				}
-				accSeqPayload = append(accSeqPayload, frame.Payload...)
+				accSeqPayload = append(accSeqPayload[:0], frame.Payload...)
 			} else {
 				// Media frame: if we have buffered SPS/PPS, flush them now as
 				// SequenceHeader before the IDR so the ring buffer sees the

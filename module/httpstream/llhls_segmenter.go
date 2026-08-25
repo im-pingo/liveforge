@@ -6,7 +6,6 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
-	"github.com/im-pingo/liveforge/pkg/codec/aac"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
@@ -28,10 +27,11 @@ type LLHLSSegmenter struct {
 	tsMuxer    *ts.Muxer
 	partFrames []*avframe.AVFrame // fMP4 frame buffer
 
-	partBuf      bytes.Buffer
-	partStartDTS int64
-	partHasData  bool
-	partIdx      int
+	partBuf         bytes.Buffer
+	partStartDTS    int64
+	partHasData     bool
+	partIndependent bool
+	partIdx         int
 
 	segParts    []*LLHLSPart
 	segStartDTS int64
@@ -40,6 +40,8 @@ type LLHLSSegmenter struct {
 
 	hasVideo         bool // stream contains video track
 	gotFirstKeyframe bool // first video keyframe received
+	audioPlan        muxerAudioPlan
+	audioPlanSet     bool
 
 	done chan struct{}
 }
@@ -59,13 +61,22 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 	slog.Info("segmenter started", "module", "llhls", "stream", stream.Key(), "container", s.container, "partDuration", s.partDuration)
 	defer slog.Info("segmenter stopped", "module", "llhls", "stream", stream.Key())
 
-	s.initMuxer(stream)
-
 	// Process GOP cache to pre-populate the first segment so the playlist
 	// has content immediately when the first client connects (avoids
 	// cold-start stutter). Snapshot cache and cursor atomically to avoid
 	// duplicating frames written in between.
 	gopCache, startPos := stream.GOPCacheSnapshot()
+	s.audioPlan = s.selectAudioPlan(stream)
+	s.audioPlanSet = true
+	reader, release, audioPlan := muxerLiveReader(stream, startPos, s.audioPlan)
+	s.audioPlan = audioPlan
+	defer release()
+	s.initMuxer(stream)
+	go func() {
+		<-s.done
+		reader.Close()
+	}()
+
 	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
@@ -74,13 +85,14 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 		gopEndDTS = f.DTS
 		s.processFrame(f)
 	}
-	// Finalize the GOP-based segment so it appears in the playlist right away.
+	// Publish the cached frames as a part so the initial playlist is playable,
+	// but keep the segment open. The atomic snapshot cursor continues in the
+	// same GOP, so ending the segment here would either create an interframe-led
+	// segment or discard live frames until the next keyframe.
 	if s.segHasData {
 		s.flushCurrentPart(gopEndDTS)
-		s.flushCurrentSegment()
 	}
 
-	reader := stream.RingBuffer().NewReaderAt(startPos)
 	for {
 		select {
 		case <-s.done:
@@ -121,15 +133,19 @@ func (s *LLHLSSegmenter) Stop() {
 func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
+	if !s.audioPlanSet {
+		s.audioPlan = s.selectAudioPlan(stream)
+		s.audioPlanSet = true
+	}
 
 	if vsh := stream.VideoSeqHeader(); vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 		s.hasVideo = true
 	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
-		audioCodec = ash.Codec
-		audioSeqHeader = ash
+	if s.audioPlan.hasAudio() {
+		audioCodec = s.audioPlan.codec
+		audioSeqHeader = s.audioPlan.sequenceHeader
 	}
 
 	switch s.container {
@@ -137,15 +153,15 @@ func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
 		s.fmp4Muxer = fmp4.NewMuxer(videoCodec, audioCodec)
 
 		var videoWidth, videoHeight int
-		if videoSeqHeader != nil && videoCodec == avframe.CodecH264 {
-			videoWidth, videoHeight = fmp4.ParseAVCCDimensions(videoSeqHeader.Payload)
+		if videoSeqHeader != nil {
+			videoWidth, videoHeight = fmp4.ParseVideoDimensions(videoCodec, videoSeqHeader.Payload)
 		}
 		audioSampleRate := 44100
 		audioChannels := 2
 		if audioSeqHeader != nil {
-			if info, err := aac.ParseAudioSpecificConfig(audioSeqHeader.Payload); err == nil {
-				audioSampleRate = info.SampleRate
-				audioChannels = info.Channels
+			if sampleRate, channels := parseAudioSeqHeader(audioSeqHeader); sampleRate > 0 {
+				audioSampleRate = sampleRate
+				audioChannels = channels
 			}
 		}
 
@@ -166,7 +182,17 @@ func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
 	}
 }
 
+func (s *LLHLSSegmenter) selectAudioPlan(stream *core.Stream) muxerAudioPlan {
+	if s.container == "fmp4" {
+		return selectFMP4Audio(stream)
+	}
+	return selectMuxerAudio(stream, isFlvCompatibleAudio)
+}
+
 func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
+	if s.audioPlanSet && !s.audioPlan.accepts(frame) {
+		return
+	}
 	isKeyframe := frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe()
 
 	// Wait for first video keyframe before producing any segments.
@@ -189,8 +215,9 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 		s.flushCurrentSegment()
 	}
 
-	// Audio-only streams: time-based full segment split (~6s)
-	if !isKeyframe && s.segHasData && !frame.MediaType.IsVideo() {
+	// Audio-only streams: time-based full segment split (~6s). Audio frames in
+	// a video stream must never terminate a keyframe-bounded video segment.
+	if !s.hasVideo && s.segHasData && !frame.MediaType.IsVideo() {
 		segElapsed := float64(frame.DTS-s.segStartDTS) / 1000.0
 		if segElapsed >= 6.0 {
 			s.flushCurrentPart(frame.DTS)
@@ -209,6 +236,7 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 	if !s.partHasData {
 		s.partStartDTS = frame.DTS
 		s.partHasData = true
+		s.partIndependent = isKeyframe
 	}
 	if !s.segHasData {
 		s.segStartDTS = frame.DTS
@@ -264,6 +292,7 @@ func (s *LLHLSSegmenter) flushCurrentPart(endDTS int64) {
 
 	if len(data) == 0 {
 		s.partHasData = false
+		s.partIndependent = false
 		return
 	}
 
@@ -272,17 +301,16 @@ func (s *LLHLSSegmenter) flushCurrentPart(endDTS int64) {
 		dur = s.partDuration
 	}
 
-	independent := s.partIdx == 0 && s.segHasData
-
 	part := &LLHLSPart{
 		Index:       s.partIdx,
 		Duration:    dur,
-		Independent: independent,
+		Independent: s.partIndependent,
 		Data:        data,
 	}
 	s.segParts = append(s.segParts, part)
 	s.partIdx++
 	s.partHasData = false
+	s.partIndependent = false
 
 	if s.callbacks.OnPart != nil {
 		s.callbacks.OnPart(part)

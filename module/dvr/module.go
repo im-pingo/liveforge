@@ -70,7 +70,7 @@ func (m *Module) Init(s *core.Server) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /dvr/{app}/{resource...}", m.handleMedia)
 
-	m.httpSrv = &http.Server{Handler: strictDVRMediaRoutes(mux)}
+	m.httpSrv = &http.Server{Handler: dvrMediaCORS(strictDVRMediaRoutes(mux))}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel

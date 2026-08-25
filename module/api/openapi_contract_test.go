@@ -71,6 +71,9 @@ func TestOpenAPIListenerOwnership(t *testing.T) {
 			if strings.HasPrefix(path, "/webrtc/") {
 				want = "http://127.0.0.1:8443"
 			}
+			if strings.HasPrefix(path, "/dvr/") {
+				want = "http://127.0.0.1:8070"
+			}
 			if len(servers) != 1 || servers[0].resolvedURL() != want {
 				t.Errorf("%s %s resolves to servers %v, want only %s", method, path, resolvedServerURLs(servers), want)
 			}

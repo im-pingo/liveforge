@@ -116,13 +116,15 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **Delta playlist** — `_HLS_skip=YES` support to reduce playlist transfer size
 - **fMP4 container** — Default fMP4 with TS fallback option
 - **Legacy player compat** — Graceful degradation for players without LL-HLS support (buffered segment delivery)
+- **Keyframe-aligned startup** — Cached and live GOP frames remain continuous; the initial Hls.js manifest waits for one complete segment without duplicating its parts, then blocking reloads retain the latest completed part identities while consuming new low-latency parts. DASH also starts after one complete segment, uses a one-fragment live delay, and refreshes its MPD within two seconds
 
 ### Management & Operations
 
 - **Web console** — Seven permission-aware tabs with multi-protocol preview and WHIP publish: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab.
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
-- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; segmentation, storage health, download/range/delete management, and time-shift status
+- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; segmentation, storage health, download/range/inline-play/delete management, and time-shift status
+- **Startup rollback** — Listener or module initialization failures report the original error, close only modules whose initialization was attempted, and do not panic while rolling back later uninitialized modules
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
 - **Rate limiting** — Per-IP token bucket for connection flood protection
@@ -245,6 +247,8 @@ ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish
 **WebRTC (Browser):**
 Open `http://localhost:8090/console`, click **"+ WebRTC Publish"**, select camera/mic, and start streaming.
 
+The Console can publish H.265/HEVC video with Opus audio when the browser and platform expose an H.265 WebRTC encoder. Its FMP4 preview preserves signed B-frame composition offsets on a near-zero timeline established when the shared muxer starts; later subscribers seek to their first buffered timestamp. WHEP Live replays the atomic cached GOP while source video continues from the matching ring cursor, with transcoded target audio read independently. The tagged audio build is the complete cross-protocol profile; see [WHIP H.265 + Opus playback verification](docs/recipes/whip-h265-opus-playback.md).
+
 **GB28181:**
 Configure your IP camera's SIP server to point at `localhost:5060`, or use the built-in simulator:
 ```bash
@@ -274,13 +278,14 @@ The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, a
 
 - Live stream list with state, codecs, bitrate, FPS
 - GOP cache visualization
-- Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, WebRTC)
+- Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WebRTC realtime, and WebRTC Live)
 - WebRTC publish with camera/mic and outbound stats
 - Permission-aware stream kick/delete and runtime config refresh
 - Cluster relay/peer status and SIP call dial/detail/hangup
-- Recording metadata/download/delete, DVR session/storage status, security posture, and bounded audit events
+- Recording metadata/download/inline-play/delete, DVR session/storage status and online HLS preview, security posture, and bounded audit events
 
 DVR playlist and segment GETs run synchronous subscribe authorization hooks only; they do not emit asynchronous subscribe lifecycle events.
+Recording preview uses the authenticated management API session. DVR preview uses the separate `dvr.listen` HLS listener with non-credentialed CORS, so its subscribe authorization still applies; the Console does not persist or append bearer tokens.
 
 ## Configuration
 
@@ -465,7 +470,7 @@ Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [
 - [x] Audio transcoding (AAC, Opus, G.711, MP3)
 - [x] SIP gateway
 - [x] Permission-aware seven-view management console
-- [x] Recording/DVR, cluster, security, and audit management APIs
+- [x] Recording/DVR, cluster, security, and audit management APIs, including Storage online preview
 - [ ] Simulcast layer selection
 
 ## License

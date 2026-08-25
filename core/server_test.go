@@ -81,6 +81,41 @@ func (m *orderTrackModule) Init(s *Server) error      { return nil }
 func (m *orderTrackModule) Hooks() []HookRegistration { return nil }
 func (m *orderTrackModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
 
+type failingInitModule struct {
+	name  string
+	order *[]string
+}
+
+func (m *failingInitModule) Name() string              { return m.name }
+func (m *failingInitModule) Init(*Server) error        { return errors.New("init failed") }
+func (m *failingInitModule) Hooks() []HookRegistration { return nil }
+func (m *failingInitModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
+
+func TestServerShutdownAfterInitFailureClosesOnlyAttemptedModules(t *testing.T) {
+	cfg := &config.Config{}
+	s := NewServer(cfg)
+
+	var order []string
+	first := &orderTrackModule{name: "first", order: &order}
+	failing := &failingInitModule{name: "failing", order: &order}
+	neverAttempted := &mockModule{name: "never-attempted"}
+	s.RegisterModule(first)
+	s.RegisterModule(failing)
+	s.RegisterModule(neverAttempted)
+
+	if err := s.Init(); err == nil {
+		t.Fatal("expected module initialization to fail")
+	}
+	s.Shutdown()
+
+	if got := strings.Join(order, ","); got != "failing,first" {
+		t.Fatalf("close order = %q, want attempted modules only in reverse order", got)
+	}
+	if neverAttempted.inited || neverAttempted.closed {
+		t.Fatalf("unattempted module lifecycle = inited:%v closed:%v", neverAttempted.inited, neverAttempted.closed)
+	}
+}
+
 func TestServerStreamHub(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Stream.RingBufferSize = 256

@@ -331,6 +331,28 @@ paths:
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/recordings/{recordingPath}/play:
+    parameters:
+      - {$ref: '#/components/parameters/RecordingPath'}
+    get:
+      tags: [recording]
+      operationId: playRecording
+      summary: Stream a completed recording inline with HTTP range support
+      description: Returns the recording with a media MIME type and Content-Disposition inline. The endpoint accepts HTTP Range requests for browser seeking; active or not-ready recordings return 409.
+      x-liveforge-permission: recordings:read
+      responses:
+        '200': {description: Complete recording media, content: {video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
+        '206': {description: Requested byte range, content: {video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
+        '304': {description: Not modified}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '416': {description: Requested range is not satisfiable}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/dvr/status:
     get:
       tags: [dvr]
@@ -359,6 +381,41 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /dvr/{app}/{key}.m3u8:
+    servers:
+      - url: http://127.0.0.1:8070
+        description: Configured DVR media listener in the local example
+    get:
+      tags: [dvr]
+      operationId: getDVRPlaylist
+      summary: Read a DVR HLS playlist
+      description: The configured DVR media listener authorizes this request through synchronous subscribe hooks. It returns non-credentialed CORS headers for a split-port browser Console.
+      parameters:
+        - {name: app, in: path, required: true, schema: {type: string}}
+        - {name: key, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: HLS playlist, content: {application/vnd.apple.mpegurl: {schema: {type: string}}}}
+        '401': {description: Subscribe authentication required}
+        '403': {description: Subscribe authorization denied}
+        '404': {description: Session or playlist not found}
+  /dvr/{app}/{key}/{filename}:
+    servers:
+      - url: http://127.0.0.1:8070
+        description: Configured DVR media listener in the local example
+    get:
+      tags: [dvr]
+      operationId: getDVRSegment
+      summary: Read a DVR HLS segment
+      description: The configured DVR media listener authorizes this request through synchronous subscribe hooks and returns non-credentialed CORS headers for a split-port browser Console.
+      parameters:
+        - {name: app, in: path, required: true, schema: {type: string}}
+        - {name: key, in: path, required: true, schema: {type: string}}
+        - {name: filename, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: MPEG-TS segment, content: {video/mp2t: {schema: {type: string, format: binary}}}}
+        '401': {description: Subscribe authentication required}
+        '403': {description: Subscribe authorization denied}
+        '404': {description: Segment not found}
   /api/v1/gb28181/devices:
     get:
       tags: [gb28181]

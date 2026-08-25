@@ -1414,6 +1414,20 @@ function portFromListen(listen) {
   return i >= 0 ? listen.substring(i + 1) : listen;
 }
 
+function hostFromListen(listen) {
+  if (!listen) return location.hostname;
+  var value = String(listen);
+  if (value.charAt(0) === "[") {
+    var close = value.indexOf("]");
+    if (close > 0) value = value.substring(1, close);
+  } else {
+    var separator = value.lastIndexOf(":");
+    if (separator > 0) value = value.substring(0, separator);
+  }
+  if (!value || value === "0.0.0.0" || value === "::" || value === "[::]" || value === "*") return location.hostname;
+  return value;
+}
+
 /* --- WebRTC Stats Overlay --- */
 function toggleStatsOverlay() {
   statsVisible = !statsVisible;
@@ -1502,6 +1516,7 @@ function renderStatsOverlay(v, a) {
   }
 
   var aLost = (a && pa) ? a.packetsLost - pa.packetsLost : '-';
+  var aPackets = (a && pa) ? a.packetsReceived - pa.packetsReceived : '-';
   var aJit  = a ? (a.jitter * 1000).toFixed(0) + 'ms' : '-';
 
   // Color classes
@@ -1526,6 +1541,7 @@ function renderStatsOverlay(v, a) {
     '<span class="stat-item">' + L + 'PLI' + E + val(dPLI, pliCls) + '</span>' +
     '<span class="stat-item">' + L + 'NACK' + E + val(dNACK) + '</span>' +
     '<span class="stat-item">' + L + 'Jit' + E + val(jitterMs) + '</span>' +
+    '<span class="stat-item">' + L + 'A.Pkts' + E + val(aPackets) + '</span>' +
     '<span class="stat-item">' + L + 'A.Lost' + E + val(aLost) + '</span>' +
     '<span class="stat-item">' + L + 'A.Jit' + E + val(aJit) + '</span>' +
     '</div>' +
@@ -1535,6 +1551,7 @@ function renderStatsOverlay(v, a) {
     'drop=' + v.framesDropped + ' ' +
     'kf=' + v.keyFramesDecoded + ' ' +
     'lost=' + v.packetsLost + '/' + v.packetsReceived + ' ' +
+    'audio=' + (a ? a.packetsLost + '/' + a.packetsReceived : '-') + ' ' +
     'freeze=' + (v.freezeCount || 0) + ' (' + ((v.totalFreezesDuration || 0) * 1000).toFixed(0) + 'ms) ' +
     'pli=' + (v.pliCount || 0) +
     '</div>';
@@ -1615,6 +1632,93 @@ function setPlayerURL(url) {
   el.style.display = url ? "block" : "none";
 }
 
+function monitorPlayableVideo(video, generation, label, streamKey) {
+  if (currentVideoEventCleanup) {
+    try { currentVideoEventCleanup(); } catch(e) {}
+    currentVideoEventCleanup = null;
+  }
+
+  var finished = false;
+  var frameCallbackID = null;
+  var media = streamMedia[streamKey] || {};
+  var expectsVideo = normalizePlayerCodec(media.video_codec) !== "";
+  var lastMediaTime = Number(video.currentTime) || 0;
+  var lastProgressAt = Date.now();
+  var playbackConfirmed = false;
+  var playbackStalled = false;
+
+  function cleanup() {
+    if (finished) return;
+    finished = true;
+    clearTimeout(startupTimeoutID);
+    clearInterval(stallIntervalID);
+    video.removeEventListener("loadeddata", checkReady);
+    video.removeEventListener("playing", checkReady);
+    video.removeEventListener("timeupdate", checkReady);
+    if (frameCallbackID !== null && video.cancelVideoFrameCallback) {
+      try { video.cancelVideoFrameCallback(frameCallbackID); } catch(e) {}
+    }
+    if (currentVideoEventCleanup === cleanup) currentVideoEventCleanup = null;
+  }
+
+  function markPlaying() {
+    if (!isCurrentPlayer(generation)) return;
+    playbackConfirmed = true;
+    playbackStalled = false;
+    setPlayerStatus("Playing (" + label + ")", "ok");
+  }
+
+  function checkReady() {
+    if (!isCurrentPlayer(generation)) {
+      cleanup();
+      return;
+    }
+    if (video.readyState < 2 || video.paused) return;
+    if (expectsVideo && (video.videoWidth <= 0 || video.videoHeight <= 0)) return;
+
+    var mediaTime = Number(video.currentTime) || 0;
+    if (mediaTime > lastMediaTime + 0.05) {
+      lastMediaTime = mediaTime;
+      lastProgressAt = Date.now();
+      if (!playbackConfirmed || playbackStalled) markPlaying();
+    } else if (mediaTime < lastMediaTime - 0.5) {
+      lastMediaTime = mediaTime;
+      lastProgressAt = Date.now();
+    }
+  }
+
+  var startupTimeoutID = setTimeout(function() {
+    if (!isCurrentPlayer(generation)) return;
+    if (!playbackConfirmed) {
+      setPlayerStatus("No advancing media received (check codec support and keyframes)", "error");
+    }
+  }, 8000);
+
+  var stallIntervalID = setInterval(function() {
+    if (!isCurrentPlayer(generation)) {
+      cleanup();
+      return;
+    }
+    checkReady();
+    if (playbackConfirmed && !playbackStalled && !video.paused && Date.now() - lastProgressAt >= 3000) {
+      playbackStalled = true;
+      setPlayerStatus("Playback stalled (" + label + ")", "error");
+    }
+  }, 500);
+
+  currentVideoEventCleanup = cleanup;
+  video.addEventListener("loadeddata", checkReady);
+  video.addEventListener("playing", checkReady);
+  video.addEventListener("timeupdate", checkReady);
+
+  if (expectsVideo && video.requestVideoFrameCallback) {
+    frameCallbackID = video.requestVideoFrameCallback(function() {
+      checkReady();
+    });
+  }
+  checkReady();
+}
+
 function playHTTPFLV(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
@@ -1636,7 +1740,8 @@ function playHTTPFLV(streamKey) {
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (HTTP-FLV)", "ok");
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1674,7 +1779,8 @@ function playWSFLV(streamKey) {
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (WS-FLV)", "ok");
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(document.getElementById("player-video"), generation, "WS-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1711,7 +1817,8 @@ function playHTTPTS(streamKey) {
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (HTTP-TS)", "ok");
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-TS", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1725,6 +1832,32 @@ function playHTTPTS(streamKey) {
     return;
   }
   currentPlayer = player;
+}
+
+function fmp4MimeCandidates(streamKey) {
+  var media = streamMedia[streamKey] || {};
+  var videoCodec = normalizePlayerCodec(media.video_codec);
+  var audioCodec = normalizePlayerCodec(media.audio_codec);
+  var videoCodecs = {
+    h264: "avc1.42E01E",
+    avc: "avc1.42E01E",
+    avc1: "avc1.42E01E",
+    h265: "hvc1.1.6.L120.B0",
+    hevc: "hvc1.1.6.L120.B0",
+    hev1: "hvc1.1.6.L120.B0",
+    hvc1: "hvc1.1.6.L120.B0"
+  };
+  var audioCodecs = {
+    aac: "mp4a.40.2",
+    opus: "opus",
+    mp3: "mp4a.40.34"
+  };
+  var video = videoCodecs[videoCodec] || "";
+  var audio = audioCodecs[audioCodec] || "";
+  if (video && audio) return ['video/mp4; codecs="' + video + ', ' + audio + '"'];
+  if (video) return ['video/mp4; codecs="' + video + '"'];
+  if (audio) return ['audio/mp4; codecs="' + audio + '"'];
+  return ["video/mp4"];
 }
 
 function playFMP4(streamKey) {
@@ -1752,11 +1885,7 @@ function playFMP4(streamKey) {
 
   ms.addEventListener("sourceopen", function() {
     if (!isCurrentPlayer(generation) || currentMSEMediaSource !== ms) return;
-    var mimes = [
-      'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
-      'video/mp4; codecs="avc1.42E01E"',
-      'video/mp4'
-    ];
+    var mimes = fmp4MimeCandidates(streamKey);
     var mime = mimes.find(function(m) { return MediaSource.isTypeSupported(m); });
     if (!mime) {
       if (isCurrentPlayer(generation) && currentMSEMediaSource === ms) {
@@ -1776,11 +1905,28 @@ function playFMP4(streamKey) {
       }
       return;
     }
-    sb.mode = "sequence";
+    sb.mode = "segments";
     currentMSESourceBuffer = sb;
 
     var queue = [];
     var appending = false;
+    var playbackMonitorStarted = false;
+    var streamReader = null;
+    var failed = false;
+    var streamEnded = false;
+
+    function failFMP4(message) {
+      if (failed || !isCurrentPlayer(generation) || currentMSEMediaSource !== ms) return;
+      failed = true;
+      queue.length = 0;
+      if (streamReader) {
+        var reader = streamReader;
+        streamReader = null;
+        try { reader.cancel().catch(function(){}); } catch(e) {}
+      }
+      destroyCurrentPlayer();
+      setPlayerStatus(message, "error");
+    }
 
     function sourceBufferActive() {
       if (!isCurrentPlayer(generation) || currentMSEMediaSource !== ms || currentMSESourceBuffer !== sb || ms.readyState !== "open") {
@@ -1792,6 +1938,11 @@ function playFMP4(streamKey) {
       return false;
     }
 
+    function maybeEndOfStream() {
+      if (!streamEnded || appending || sb.updating || queue.length > 0 || !sourceBufferActive()) return;
+      try { ms.endOfStream(); } catch(e) {}
+    }
+
     function appendNext() {
       if (!sourceBufferActive() || appending || queue.length === 0 || sb.updating) return;
       var chunk = queue.shift();
@@ -1800,7 +1951,7 @@ function playFMP4(streamKey) {
         sb.appendBuffer(chunk);
       } catch(e) {
         appending = false;
-        if (sourceBufferActive()) setPlayerStatus("Append error: " + e.message, "error");
+        failFMP4("Append error: " + e.message);
       }
     }
 
@@ -1808,16 +1959,28 @@ function playFMP4(streamKey) {
       if (!sourceBufferActive()) return;
       appending = false;
       appendNext();
-      if (video.paused && video.readyState >= 2) {
+      maybeEndOfStream();
+      if (!playbackMonitorStarted && video.readyState >= 2) {
+        playbackMonitorStarted = true;
+        if (video.buffered.length > 0) {
+          var firstBufferedStart = video.buffered.start(0);
+          var firstBufferedEnd = video.buffered.end(0);
+          if (video.currentTime < firstBufferedStart || video.currentTime > firstBufferedEnd) {
+            video.currentTime = firstBufferedStart;
+          }
+        }
         video.play().then(function() {
           if (!isCurrentPlayer(generation)) return;
-          setPlayerStatus("Playing (FMP4)", "ok");
-        }).catch(function(){});
+          setPlayerStatus("Connected, waiting for first decoded frame...");
+          monitorPlayableVideo(video, generation, "FMP4", streamKey);
+        }).catch(function(e) {
+          if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
+        });
       }
     });
 
     sb.addEventListener("error", function() {
-      if (sourceBufferActive()) setPlayerStatus("SourceBuffer error", "error");
+      failFMP4("SourceBuffer error");
     });
 
     fetch(url, { signal: abortCtrl.signal })
@@ -1826,7 +1989,8 @@ function playFMP4(streamKey) {
         if (!resp.body) throw new Error("empty response body");
         if (!isCurrentPlayer(generation)) return null;
         setPlayerStatus("Buffering...");
-        var reader = resp.body.getReader();
+        streamReader = resp.body.getReader();
+        var reader = streamReader;
         function pump() {
           if (!isCurrentPlayer(generation)) {
             reader.cancel().catch(function(){});
@@ -1835,9 +1999,9 @@ function playFMP4(streamKey) {
           return reader.read().then(function(result) {
             if (!isCurrentPlayer(generation)) return;
             if (result.done) {
-              if (ms.readyState === "open") {
-                try { ms.endOfStream(); } catch(e) {}
-              }
+              streamReader = null;
+              streamEnded = true;
+              maybeEndOfStream();
               return;
             }
             if (result.value && result.value.byteLength > 0) queue.push(result.value);
@@ -1875,7 +2039,7 @@ function playHLS(streamKey) {
     var hls = new Hls({
       liveDurationInfinity: true,
       enableWorker: true,
-      lowLatencyMode: false
+      lowLatencyMode: true
     });
     currentHls = hls;
 
@@ -1886,7 +2050,8 @@ function playHLS(streamKey) {
       if (!isCurrentPlayer(generation) || currentHls !== hls) return;
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
-        setPlayerStatus("Playing (HLS)", "ok");
+        setPlayerStatus("Connected, waiting for first decoded frame...");
+        monitorPlayableVideo(video, generation, "HLS", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -1907,7 +2072,8 @@ function playHLS(streamKey) {
       if (!isCurrentPlayer(generation) || video.src !== url) return;
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
-        setPlayerStatus("Playing (HLS native)", "ok");
+        setPlayerStatus("Connected, waiting for first decoded frame...");
+        monitorPlayableVideo(video, generation, "HLS native", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -1944,7 +2110,7 @@ function playDASH(streamKey) {
   player.updateSettings({
     streaming: {
       delay: {
-        liveDelay: 4
+        liveDelayFragmentCount: 1
       },
       buffer: {
         fastSwitchEnabled: true
@@ -1954,9 +2120,12 @@ function playDASH(streamKey) {
 
   player.initialize(video, url, true);
 
+  var playbackMonitorStarted = false;
   player.on(dashjs.MediaPlayer.events.PLAYBACK_PLAYING, function() {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (DASH)", "ok");
+    if (!isCurrentPlayer(generation) || playbackMonitorStarted) return;
+    playbackMonitorStarted = true;
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(video, generation, "DASH", streamKey);
   });
 
   player.on(dashjs.MediaPlayer.events.ERROR, function(e) {
@@ -1986,17 +2155,24 @@ function playWHEP(streamKey, mode) {
 
   var remoteStream = new MediaStream();
   var receivedTrack = false;
-  document.getElementById("player-video").srcObject = remoteStream;
+  var playbackMonitorStarted = false;
+  var video = document.getElementById("player-video");
+  video.srcObject = remoteStream;
 
   pc.ontrack = function(event) {
     if (!isCurrentPlayer(generation)) return;
     receivedTrack = true;
     remoteStream.addTrack(event.track);
-    var video = document.getElementById("player-video");
-    if (video.paused) {
-      video.play().catch(function(){});
+    if (!playbackMonitorStarted && (event.track.kind === "video" || !normalizePlayerCodec((streamMedia[streamKey] || {}).video_codec))) {
+      playbackMonitorStarted = true;
+      video.play().then(function() {
+        if (!isCurrentPlayer(generation)) return;
+        setPlayerStatus("WebRTC connected, waiting for first decoded frame...");
+        monitorPlayableVideo(video, generation, "WebRTC/WHEP", streamKey);
+      }).catch(function(e) {
+        if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
+      });
     }
-    setPlayerStatus("Playing (WebRTC/WHEP)", "ok");
   };
 
   pc.oniceconnectionstatechange = function() {
@@ -2048,7 +2224,7 @@ function playWHEP(streamKey, mode) {
     return pc.setRemoteDescription({ type: "answer", sdp: sdp });
   }).then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus(receivedTrack ? "Playing (WebRTC/WHEP)" : "WebRTC connected, waiting for media...");
+    setPlayerStatus(receivedTrack ? "WebRTC connected, waiting for first decoded frame..." : "WebRTC connected, waiting for media...");
     startStatsOverlay(pc);
   }).catch(function(e) {
     if (isCurrentPlayer(generation)) {
@@ -2736,9 +2912,11 @@ function createDynamicActionHandlers() {
     "sip-detail": function(value) { loadSIPCall(value); },
     "sip-hangup": function(value) { hangupSIPCall(value); },
     "recording-detail": function(value) { loadRecording(value); },
+    "recording-play": function(value) { playRecording(value); },
     "recording-download": function(value) { downloadRecording(value); },
     "recording-delete": function(value) { deleteRecording(value); },
     "dvr-detail": function(value) { loadDVRSession(value); },
+    "dvr-play": function(value) { playDVR(value); },
     "gb-toggle-device": function(value) { toggleDevice(value); },
     "gb-catalog": function(value) { gbCatalog(value); },
     "gb-delete-device": function(value) { gbDeleteDevice(value); },
@@ -2899,6 +3077,10 @@ function recordingURL(recordingID) {
   return "/api/v1/recordings/" + String(recordingID || "").split("/").map(encodeURIComponent).join("/");
 }
 
+function recordingPlayURL(recordingID) {
+  return recordingURL(recordingID) + "/play";
+}
+
 function renderRecordings(items) {
   items = items || [];
   document.getElementById("recording-count").textContent = items.length;
@@ -2917,7 +3099,10 @@ function renderRecordings(items) {
     var actions = document.createElement("div");
     actions.className = "actions";
     appendActionButton(actions, "Details", "", "recording-detail", item.id);
-    if (item.state === "completed") appendActionButton(actions, "Download", "btn-play", "recording-download", item.id);
+    if (item.state === "completed") {
+      appendActionButton(actions, "Play", "btn-play", "recording-play", item.id);
+      appendActionButton(actions, "Download", "", "recording-download", item.id);
+    }
     if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "recording-delete", item.id);
     actionCell.appendChild(actions);
   });
@@ -2941,6 +3126,7 @@ function renderDVR(data) {
     appendTextCell(row, formatDate(session.oldest_segment) + " / " + formatDate(session.newest_segment));
     var actionCell = row.insertCell();
     appendActionButton(actionCell, "Details", "", "dvr-detail", session.stream_key);
+    if (Number(session.segments) > 0) appendActionButton(actionCell, "Play", "btn-play", "dvr-play", session.stream_key);
   });
 }
 
@@ -2976,6 +3162,35 @@ function loadRecording(recordingID) {
     .catch(function(err) { showManagementError("storage", err); });
 }
 
+function playRecording(recordingID) {
+  destroyCurrentPlayer();
+  statsVisible = false;
+  var btnStats = document.getElementById("btn-stats");
+  if (btnStats) btnStats.classList.remove("active");
+  document.getElementById("player-stream-key").textContent = recordingID;
+  document.getElementById("player-overlay").classList.add("active");
+  document.getElementById("proto-tabs").replaceChildren();
+  setPlayerURL(recordingPlayURL(recordingID));
+  setPlayerStatus("Loading recording...");
+  var video = document.getElementById("player-video");
+  var ext = String(recordingID).split(".").pop().toLowerCase();
+  if (ext === "mp4" || ext === "m4v") {
+    video.src = recordingPlayURL(recordingID);
+    video.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
+    return;
+  }
+  if ((ext === "flv" || ext === "ts") && typeof mpegts !== "undefined" && mpegts.isSupported()) {
+    var player = mpegts.createPlayer({ type: ext === "flv" ? "flv" : "mpegts", url: recordingPlayURL(recordingID), isLive: false });
+    player.attachMediaElement(video);
+    player.load();
+    player.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
+    currentPlayer = player;
+    return;
+  }
+  video.src = recordingPlayURL(recordingID);
+  video.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Browser cannot play this recording: " + formatErr(err), "error"); });
+}
+
 function downloadRecording(recordingID) {
   clearManagementError("storage");
   return apiFetch(recordingURL(recordingID) + "/download", { responseType: "blob" })
@@ -3005,6 +3220,48 @@ function loadDVRSession(streamKey) {
   apiFetch("/api/v1/dvr/sessions/" + String(streamKey).split("/").map(encodeURIComponent).join("/"))
     .then(function(data) { document.getElementById("dvr-detail").textContent = JSON.stringify(data, null, 2); })
     .catch(function(err) { showManagementError("storage", err); });
+}
+
+function dvrMediaURL(streamKey) {
+  var port = portFromListen(endpoints.dvr);
+  if (!port) return "";
+  var pathValue = String(streamKey || "").split("/").map(encodeURIComponent).join("/");
+  var host = hostFromListen(endpoints.dvr);
+  if (host.indexOf(":") >= 0 && host.charAt(0) !== "[") host = "[" + host + "]";
+  return location.protocol + "//" + host + ":" + port + "/dvr/" + pathValue + ".m3u8";
+}
+
+function playDVR(streamKey) {
+  var url = dvrMediaURL(streamKey);
+  if (!url) {
+    showManagementError("storage", new Error("DVR media endpoint is unavailable"));
+    return;
+  }
+  destroyCurrentPlayer();
+  statsVisible = false;
+  var btnStats = document.getElementById("btn-stats");
+  if (btnStats) btnStats.classList.remove("active");
+  document.getElementById("player-stream-key").textContent = "DVR " + streamKey;
+  document.getElementById("player-overlay").classList.add("active");
+  document.getElementById("proto-tabs").replaceChildren();
+  setPlayerURL(url);
+  setPlayerStatus("Loading DVR...");
+  var video = document.getElementById("player-video");
+  if (typeof Hls !== "undefined" && Hls.isSupported()) {
+    var hls = new Hls();
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, function() { video.play().then(function() { setPlayerStatus("Playing DVR", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); }); });
+    hls.on(Hls.Events.ERROR, function(_, data) { if (data && data.fatal) setPlayerStatus("DVR error: " + formatErr(data), "error"); });
+    currentHls = hls;
+    return;
+  }
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+    video.play().then(function() { setPlayerStatus("Playing DVR", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
+    return;
+  }
+  setPlayerStatus("HLS is not supported in this browser", "error");
 }
 
 function refreshSecurity(signal) {

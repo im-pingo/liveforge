@@ -61,15 +61,12 @@ func (m *Module) serveLLHLSPlaylist(w http.ResponseWriter, r *http.Request, stre
 		skip = true
 	}
 
-	// For non-blocking requests (legacy players like ffplay that don't support
-	// LL-HLS blocking reload), wait for at least 3 completed segments.
-	// FFmpeg's HLS demuxer uses live_start_index=-3, meaning it starts
-	// playback from n_segments-3. With fewer than 3 segments, the player
-	// buffer drains before reloads complete, causing periodic stutter.
+	// Hold the initial non-blocking request until one complete segment exists.
+	// The bundled Hls.js rejects a part-only initial manifest as levelEmptyError,
+	// but waiting for one segment still avoids the old three-GOP startup delay.
 	if targetMSN < 0 {
-		const minSegmentsForLegacy = 3
-		for i := 0; i < 300 && mgr.SegmentCount() < minSegmentsForLegacy; i++ {
-			time.Sleep(100 * time.Millisecond)
+		if !mgr.WaitForCompletedSegment(r.Context(), 10*time.Second) && r.Context().Err() != nil {
+			return
 		}
 	}
 
@@ -188,6 +185,6 @@ func (m *Module) serveLLHLSInit(w http.ResponseWriter, _ *http.Request, streamKe
 
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Write(data)
 }

@@ -164,6 +164,7 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 		`apiFetch("/api/v1/recordings"`,
 		`apiFetch("/api/v1/recordings/status"`,
 		`apiFetch(recordingURL(recordingID)`,
+		`recordingPlayURL(recordingID)`,
 		`apiFetch("/api/v1/dvr/status"`,
 		`apiFetch("/api/v1/dvr/sessions/"`,
 		`apiFetch("/api/v1/security/status"`,
@@ -330,7 +331,7 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 			renderStreams([{key:hostile,state:"publishing",publisher:"publisher",subscribers:{},stats:{}}]);
 			renderSIPCalls([{call_id:hostile,direction:"outbound",stream_key:hostile,state:"active"}]);
 			renderRecordings([{id:hostile,stream_key:hostile,state:"completed"}]);
-			renderDVR({sessions:[{stream_key:hostile,live:true}]});
+			renderDVR({sessions:[{stream_key:hostile,live:true,segments:1}]});
 			gbExpandedDevices[hostile] = true;
 			gbDeviceChannels[hostile] = [{channel_id:hostile,name:hostile,status:"ON",ptz_type:1}];
 			renderDevicesTable([{device_id:hostile,status:"online",channel_count:1}]);
@@ -354,7 +355,7 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 		if err := chromedp.Run(browserCtx, chromedp.Evaluate(dynamicExpression, &dynamic)); err != nil {
 			t.Fatalf("probe hostile management identifiers: %v", err)
 		}
-		wantActions := []string{"dvr-detail", "gb-catalog", "gb-close-session", "gb-delete-device", "gb-play", "gb-playback", "gb-preview", "gb-ptz", "gb-stop", "gb-toggle-device", "recording-delete", "recording-detail", "recording-download", "sip-detail", "sip-hangup", "stream-delete", "stream-kick", "stream-preview"}
+		wantActions := []string{"dvr-detail", "dvr-play", "gb-catalog", "gb-close-session", "gb-delete-device", "gb-play", "gb-playback", "gb-preview", "gb-ptz", "gb-stop", "gb-toggle-device", "recording-delete", "recording-detail", "recording-download", "recording-play", "sip-detail", "sip-hangup", "stream-delete", "stream-kick", "stream-preview"}
 		if strings.Join(dynamic.Actions, ",") != strings.Join(wantActions, ",") {
 			t.Fatalf("dynamic actions = %v, want %v", dynamic.Actions, wantActions)
 		}

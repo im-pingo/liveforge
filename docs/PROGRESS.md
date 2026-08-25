@@ -16,12 +16,13 @@ Release artifacts remain conditional: source builds are available from the repos
 
 ### Core And Protocols
 
-- Shared stream hub, lifecycle events, GOP/ring buffers, statistics, resource limits, graceful drain, rollback-capable module reload, and slow-consumer handling.
+- Shared stream hub, lifecycle events, GOP/ring buffers, statistics, resource limits, graceful drain, rollback-capable module reload, startup rollback limited to attempted modules, and slow-consumer handling.
 - RTMP ingest/playback and FLV bridging.
 - RTSP ingest/playback over TCP interleaving and UDP, including separate audio/video track SETUP compatibility with unique, in-range, session-eligible track validation before transport allocation.
 - Pure-Go SRT ingest/playback with MPEG-TS and optional encryption.
 - WebRTC WHIP/WHEP publish/play with a 1 MiB SDP offer limit and HTTP 413 rejection, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
-- HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback.
+- Browser-verified WHIP H.265 + Opus bridging to HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WHEP realtime, and WHEP Live; WHEP uses codec-specific HEVC parameter-set conversion, an atomic GOP/source-ring cursor transition, and an independent target-audio transcode reader.
+- HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback; LL-HLS initial manifests avoid duplicate completed PART delivery, while blocking reloads retain the latest completed PART identity across segment transitions.
 - GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and simulator coverage.
 - SIP TCP/UDP listener cancellation is treated as normal shutdown without ERROR noise; unexpected listener failures while the service context is active remain ERROR with transport metadata.
 - Optional audio transcoding for AAC, Opus, G.711, and MP3 when built with `CGO_ENABLED=1 -tags audiocodec` and FFmpeg libraries.
@@ -54,7 +55,8 @@ Release artifacts remain conditional: source builds are available from the repos
 
 - FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording.
 - Stream pattern selection, duration/size segmentation, path templates, completion callbacks, retry/failure preservation, and storage health.
-- Authenticated recording list/status/detail, HTTP range download, and admin delete operations.
+- Authenticated recording list/status/detail, HTTP range download, inline browser playback, and admin delete operations.
+- Storage Console actions preview completed recordings and DVR sessions with available segments; recording media uses the management session while DVR media remains on its separate listener without browser bearer-token persistence.
 - DVR playlist/segment serving with synchronous-only subscribe authorization and no asynchronous subscribe lifecycle emission, retention cleanup, storage/session status, and Prometheus metrics.
 - DVR media registration is valid on Go 1.26 and strictly dispatches only `GET /dvr/{app}/{key}.m3u8` and `GET /dvr/{app}/{key}/{filename}`; malformed or nested resources return 404 before playback authorization or storage lookup.
 
@@ -100,12 +102,14 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | GB28181 live/playback stop route and `gb28181:control` permission | Registered and covered in `module/gb28181` and `module/api` tests |
 | Runtime callback coalescing counter | `DroppedCallbacks` status/metrics path and manager tests |
 | Cluster credential hot rotation/no-admin failure | RTP/GB transport credential tests and cluster operations recipe |
+| WHIP H.265 + Opus eight-protocol browser playback | Codec-specific Annex-B tests, atomic WHEP Live snapshot test, and `docs/recipes/whip-h265-opus-playback.md` |
 
 ## Operations Documentation
 
 - API: `docs/api/openapi.yaml`
 - Configuration and reload annotations: `docs/config/config.schema.json`
 - Runtime sources: `docs/recipes/runtime-config-sources.md`
+- WHIP H.265 + Opus playback: `docs/recipes/whip-h265-opus-playback.md`
 - Authentication/TLS and bearer migration: `docs/recipes/auth-and-tls.md`
 - RBAC/audit: `docs/recipes/rbac-audit.md`
 - Recording/DVR: `docs/recipes/recording-dvr-management.md`

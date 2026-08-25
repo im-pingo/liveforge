@@ -125,6 +125,57 @@ func TestRecordingManagementHandlers(t *testing.T) {
 	}
 }
 
+func TestRecordingPlayHandlerServesInlineRangeableMedia(t *testing.T) {
+	provider := &recordingProviderStub{
+		items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "mp4", State: record.RecordingCompleted}},
+		content: []byte("0123456789"),
+	}
+	server := core.NewServer(newTestConfig())
+	server.RegisterModule(provider)
+	h := NewHandlers(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/recordings/live/cam.mp4/play", nil)
+	req.Header.Set("Range", "bytes=2-5")
+	req.SetPathValue("id", "live/cam.mp4")
+	w := httptest.NewRecorder()
+	h.handleRecordingPlay(w, req)
+
+	if w.Code != http.StatusPartialContent {
+		t.Fatalf("play status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("content type=%q", got)
+	}
+	if got := w.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "inline") || !strings.Contains(got, "cam.mp4") {
+		t.Fatalf("content disposition=%q", got)
+	}
+	if got := w.Header().Get("Content-Range"); got != "bytes 2-5/10" {
+		t.Fatalf("content range=%q", got)
+	}
+	if got := w.Body.String(); got != "2345" {
+		t.Fatalf("body=%q", got)
+	}
+}
+
+func TestRecordingPlayHandlerRejectsActiveRecording(t *testing.T) {
+	provider := &recordingProviderStub{
+		items:   []record.RecordingInfo{{ID: "live/cam.ts", Format: "ts", State: record.RecordingActive}},
+		content: []byte("partial"),
+	}
+	server := core.NewServer(newTestConfig())
+	server.RegisterModule(provider)
+	h := NewHandlers(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/recordings/live/cam.ts/play", nil)
+	req.SetPathValue("id", "live/cam.ts")
+	w := httptest.NewRecorder()
+	h.handleRecordingPlay(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("play active status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestRecordingHandlerMapsProviderErrors(t *testing.T) {
 	provider := &recordingProviderStub{}
 	server := core.NewServer(newTestConfig())
@@ -211,6 +262,7 @@ func TestRecordingAndDVRRoutesUseRegisteredProviders(t *testing.T) {
 		{http.MethodGet, "/api/v1/recordings/status", http.StatusOK},
 		{http.MethodGet, "/api/v1/recordings/live/cam.flv", http.StatusOK},
 		{http.MethodGet, "/api/v1/recordings/live/cam.flv/download", http.StatusOK},
+		{http.MethodGet, "/api/v1/recordings/live/cam.flv/play", http.StatusOK},
 		{http.MethodDelete, "/api/v1/recordings/live/cam.flv", http.StatusOK},
 		{http.MethodGet, "/api/v1/dvr/status", http.StatusOK},
 		{http.MethodGet, "/api/v1/dvr/sessions/live/cam", http.StatusOK},

@@ -64,6 +64,36 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 		t.Fatalf("segment status=%d body=%q", segment.status, segment.body)
 	}
 
+	for _, requestPath := range []string{"/dvr/live/camera.m3u8", "/dvr/live/camera/seg_000001.ts"} {
+		req, err := http.NewRequest(http.MethodGet, baseURL+requestPath, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", "http://127.0.0.1:18090")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s with Origin: %v", requestPath, err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("GET %s Access-Control-Allow-Origin=%q want *", requestPath, got)
+		}
+	}
+	preflight, err := http.NewRequest(http.MethodOptions, baseURL+"/dvr/live/camera.m3u8", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight.Header.Set("Origin", "http://127.0.0.1:18090")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	preflightResponse, err := client.Do(preflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResponse.Body.Close()
+	if preflightResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("OPTIONS status=%d want=%d", preflightResponse.StatusCode, http.StatusNoContent)
+	}
+
 	var authorizationCalls atomic.Int64
 	server.GetEventBus().Register(core.HookRegistration{
 		Event: core.EventSubscribe,

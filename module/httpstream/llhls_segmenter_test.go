@@ -1,10 +1,13 @@
 package httpstream
 
 import (
+	"bytes"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
@@ -191,6 +194,217 @@ func TestLLHLSSegmenter_SkipsFramesBeforeFirstKeyframe(t *testing.T) {
 	if len(parts) > 0 && !parts[0].Independent {
 		t.Error("first part should be independent (starts with keyframe)")
 	}
+}
+
+func TestLLHLSSegmenter_VideoSegmentsOnlySplitOnKeyframes(t *testing.T) {
+	stream := newMuxerWorkerStream(t, avframe.CodecAAC)
+	var initData []byte
+	var segments []*LLHLSSegment
+	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+		OnInit: func(data []byte) {
+			initData = append([]byte(nil), data...)
+		},
+		OnSegment: func(segment *LLHLSSegment) {
+			segments = append(segments, segment)
+		},
+	})
+	seg.initMuxer(stream)
+
+	for _, frame := range []*avframe.AVFrame{
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			1000, 1000, []byte{0, 0, 0, 2, 0x41, 0x02},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			5000, 5000, []byte{0, 0, 0, 2, 0x41, 0x03},
+		),
+		// This audio frame crosses the old six-second timer. A video stream
+		// must remain in the same segment until the next video keyframe.
+		avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			6010, 6010, []byte{0x21, 0x10},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			7000, 7000, []byte{0, 0, 0, 2, 0x41, 0x04},
+		),
+		avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			8300, 8300, []byte{0, 0, 0, 2, 0x65, 0x05},
+		),
+	} {
+		seg.processFrame(frame)
+	}
+
+	if len(segments) != 1 {
+		t.Fatalf("completed segments = %d, want one keyframe-bounded segment", len(segments))
+	}
+	if len(segments[0].Parts) == 0 || !segments[0].Parts[0].Independent {
+		t.Fatal("video segment does not advertise an independent first part")
+	}
+
+	demuxer, err := fmp4.NewDemuxer(initData)
+	if err != nil {
+		t.Fatalf("parse init segment: %v", err)
+	}
+	frames, err := demuxer.Parse(segments[0].Parts[0].Data)
+	if err != nil {
+		t.Fatalf("parse first part: %v", err)
+	}
+	for _, frame := range frames {
+		if frame.MediaType.IsVideo() {
+			if !frame.FrameType.IsKeyframe() {
+				t.Fatal("independent first part starts with an interframe")
+			}
+			return
+		}
+	}
+	t.Fatal("independent first part contains no video frame")
+}
+
+func TestLLHLSSegmenter_CachedGOPContinuesWithLiveInterframes(t *testing.T) {
+	stream := newMuxerWorkerStream(t, 0)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		33, 33, []byte{0, 0, 0, 2, 0x41, 0x01},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		66, 66, []byte{0, 0, 0, 2, 0x41, 0x02},
+	))
+
+	var mu sync.Mutex
+	var initData []byte
+	var segments []*LLHLSSegment
+	cachedPartReady := make(chan struct{})
+	var cachedPartOnce sync.Once
+	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+		OnInit: func(data []byte) {
+			initData = append([]byte(nil), data...)
+		},
+		OnPart: func(part *LLHLSPart) {
+			cachedPartOnce.Do(func() { close(cachedPartReady) })
+		},
+		OnSegment: func(segment *LLHLSSegment) {
+			mu.Lock()
+			segments = append(segments, segment)
+			mu.Unlock()
+		},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		seg.Run(stream)
+		close(done)
+	}()
+
+	select {
+	case <-cachedPartReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cached GOP part was not published")
+	}
+
+	// These interframes arrive after the atomic cache snapshot. They are still
+	// part of the cached keyframe's GOP and must remain in segment 0.
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		99, 99, []byte{0, 0, 0, 2, 0x41, 0x03},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		400, 400, []byte{0, 0, 0, 2, 0x65, 0x04},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		433, 433, []byte{0, 0, 0, 2, 0x41, 0x05},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		800, 800, []byte{0, 0, 0, 2, 0x65, 0x06},
+	))
+	stream.RingBuffer().Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("segmenter did not stop after source closed")
+	}
+
+	mu.Lock()
+	var firstSegment *LLHLSSegment
+	for _, segment := range segments {
+		if segment.MSN == 0 {
+			firstSegment = segment
+			break
+		}
+	}
+	mu.Unlock()
+	if firstSegment == nil || len(firstSegment.Parts) < 2 {
+		t.Fatal("segment 0 did not retain cached and live parts")
+	}
+	if !firstSegment.Parts[0].Independent {
+		t.Fatal("segment 0 does not advertise an independent first part")
+	}
+
+	demuxer, err := fmp4.NewDemuxer(initData)
+	if err != nil {
+		t.Fatalf("parse init segment: %v", err)
+	}
+	var firstVideo *avframe.AVFrame
+	foundSnapshotLiveFrame := false
+	for _, part := range firstSegment.Parts {
+		frames, err := demuxer.Parse(part.Data)
+		if err != nil {
+			t.Fatalf("parse segment 0 part %d: %v", part.Index, err)
+		}
+		for _, frame := range frames {
+			if frame.MediaType.IsVideo() && firstVideo == nil {
+				firstVideo = frame
+			}
+			if frame.MediaType.IsVideo() && frame.DTS == 99 {
+				foundSnapshotLiveFrame = true
+			}
+		}
+	}
+	if firstVideo == nil || !firstVideo.FrameType.IsKeyframe() {
+		t.Fatal("segment 0 does not actually start with a video keyframe")
+	}
+	if !foundSnapshotLiveFrame {
+		t.Fatal("segment 0 dropped the live interframe immediately after the cache snapshot")
+	}
+}
+
+func TestLLHLSFMP4SynthesizesWHIPOpusTrackConfiguration(t *testing.T) {
+	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
+	var initData []byte
+	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+		OnInit: func(data []byte) {
+			initData = append([]byte(nil), data...)
+		},
+	})
+	seg.initMuxer(stream)
+
+	if !bytes.Contains(initData, []byte("Opus")) || !bytes.Contains(initData, []byte("dOps")) {
+		t.Fatal("LL-HLS FMP4 init segment is missing Opus/dOps boxes")
+	}
+}
+
+func TestLLHLSFMP4DerivesH265TrackDimensions(t *testing.T) {
+	stream := newH265MuxerWorkerStream(t)
+	var initData []byte
+	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+		OnInit: func(data []byte) {
+			initData = append([]byte(nil), data...)
+		},
+	})
+	seg.initMuxer(stream)
+
+	assertH265SampleEntryDimensions(t, initData, 640, 480)
 }
 
 // --- test helpers ---

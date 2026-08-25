@@ -80,8 +80,14 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 
 // Close stops the SRT module.
 func (m *Module) Close() error {
-	close(m.closing)
-	m.srtSrv.Shutdown()
+	select {
+	case <-m.closing:
+	default:
+		close(m.closing)
+	}
+	if m.srtSrv != nil {
+		m.srtSrv.Shutdown()
+	}
 	m.wg.Wait()
 	slog.Info("stopped", "module", "srt")
 	return nil

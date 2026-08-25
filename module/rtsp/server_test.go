@@ -2,10 +2,14 @@ package rtsp
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +68,54 @@ func waitForRTSPConnections(t *testing.T, server *core.Server, want int) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("RTSP connection count = %d, want %d", server.ConnectionCount(), want)
+}
+
+type closeOrderingListener struct {
+	release    chan struct{}
+	returned   chan struct{}
+	closeOnce  sync.Once
+	returnOnce sync.Once
+}
+
+func newCloseOrderingListener() *closeOrderingListener {
+	return &closeOrderingListener{release: make(chan struct{}), returned: make(chan struct{})}
+}
+
+func (l *closeOrderingListener) Accept() (net.Conn, error) {
+	<-l.release
+	l.returnOnce.Do(func() { close(l.returned) })
+	return nil, net.ErrClosed
+}
+
+func (l *closeOrderingListener) Close() error {
+	l.closeOnce.Do(func() { close(l.release) })
+	<-l.returned
+	time.Sleep(20 * time.Millisecond)
+	return nil
+}
+
+func (*closeOrderingListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func TestModuleCloseDoesNotLogListenerClosureAsAcceptError(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	m := NewModule()
+	m.listener = newCloseOrderingListener()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.acceptLoop()
+	}()
+
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), "accept error") {
+		t.Fatalf("normal listener closure logged as an error:\n%s", logs.String())
+	}
 }
 
 func TestModuleCloseClosesAcceptedConnectionWaitsForHandlerAndIsIdempotent(t *testing.T) {

@@ -31,6 +31,7 @@ type Server struct {
 	eventBus      *EventBus
 	hub           *StreamHub
 	modules       []Module
+	attempted     []Module
 	modulesMu     sync.RWMutex
 	configApplyMu sync.Mutex
 	startTime     time.Time
@@ -163,6 +164,12 @@ func (s *Server) moduleSnapshot() []Module {
 	return append([]Module(nil), s.modules...)
 }
 
+func (s *Server) attemptedModuleSnapshot() []Module {
+	s.modulesMu.RLock()
+	defer s.modulesMu.RUnlock()
+	return append([]Module(nil), s.attempted...)
+}
+
 // PendingRestartChanges returns configuration paths that are active in the
 // published snapshot but cannot be applied to listeners/modules in place.
 func (s *Server) PendingRestartChanges() []string {
@@ -197,6 +204,9 @@ func (s *Server) RegisterModule(m Module) {
 // Init initializes all registered modules, registers their hooks, and starts the alive loop.
 func (s *Server) Init() error {
 	for _, m := range s.moduleSnapshot() {
+		s.modulesMu.Lock()
+		s.attempted = append(s.attempted, m)
+		s.modulesMu.Unlock()
 		if err := m.Init(s); err != nil {
 			return err
 		}
@@ -213,7 +223,7 @@ func (s *Server) Init() error {
 // Shutdown stops the alive loop and closes all modules in reverse registration order.
 func (s *Server) Shutdown() {
 	close(s.done)
-	modules := s.moduleSnapshot()
+	modules := s.attemptedModuleSnapshot()
 	for i := len(modules) - 1; i >= 0; i-- {
 		modules[i].Close() //nolint:errcheck
 	}

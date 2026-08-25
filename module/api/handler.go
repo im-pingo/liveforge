@@ -251,6 +251,9 @@ func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	if cfg.RTSP.Enabled {
 		endpoints["rtsp"] = cfg.RTSP.Listen
 	}
+	if cfg.DVR.Enabled {
+		endpoints["dvr"] = cfg.DVR.Listen
+	}
 	writeJSON(w, http.StatusOK, ServerInfo{
 		Version:   core.Version,
 		Uptime:    int64(time.Since(h.server.StartTime()).Seconds()),

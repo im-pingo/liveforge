@@ -12,6 +12,10 @@ import (
 // (typically the audio sample rate, e.g. 44100). Pass 0 to fall back to raw ms values.
 // Returns the concatenated moof+mdat bytes.
 func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTimescale uint32) []byte {
+	return buildMediaSegment(frames, sequenceNumber, audioTimescale, 0)
+}
+
+func buildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTimescale uint32, videoEndDTS int64) []byte {
 	if len(frames) == 0 {
 		return nil
 	}
@@ -34,6 +38,18 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTi
 				}
 				if len(filtered) != len(f.Payload) {
 					// Create a shallow copy with the filtered payload
+					cf := *f
+					cf.Payload = filtered
+					videoFrames = append(videoFrames, &cf)
+					continue
+				}
+			}
+			if f.Codec == avframe.CodecH265 {
+				filtered := filterH265ParameterSetNALUs(f.Payload)
+				if len(filtered) == 0 {
+					continue
+				}
+				if len(filtered) != len(f.Payload) {
 					cf := *f
 					cf.Payload = filtered
 					videoFrames = append(videoFrames, &cf)
@@ -64,12 +80,12 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTi
 
 	// Video traf
 	if len(videoFrames) > 0 {
-		writeTraf(&moof, videoTrackID, videoFrames, timescaleVideo)
+		writeTraf(&moof, videoTrackID, videoFrames, timescaleVideo, videoEndDTS)
 	}
 
 	// Audio traf — timescale must match the audio mdhd timescale (sample rate).
 	if len(audioFrames) > 0 {
-		writeTraf(&moof, audioTrackID, audioFrames, audioTimescale)
+		writeTraf(&moof, audioTrackID, audioFrames, audioTimescale, 0)
 	}
 
 	moofBytes := moof.Bytes()
@@ -101,7 +117,7 @@ func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTi
 	return buf.Bytes()
 }
 
-func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, timescale uint32) {
+func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, timescale uint32, endDTS int64) {
 	var traf bytes.Buffer
 
 	// tfhd: track ID + default flags
@@ -143,10 +159,12 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 				duration = uint32(dt)
 			}
 		} else {
-			if f.MediaType.IsVideo() {
+			if f.MediaType.IsVideo() && endDTS > f.DTS {
+				duration = uint32((endDTS - f.DTS) * int64(timescale) / 1000)
+			} else if f.MediaType.IsVideo() {
 				duration = 3000 // ~33ms at 90kHz
 			} else {
-				duration = 1024 // common for AAC
+				duration = finalAudioSampleDuration(f, timescale)
 			}
 		}
 
@@ -179,6 +197,64 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 	// Version 1 trun uses signed composition time offsets (required for B-frames).
 	WriteFullBox(&traf, BoxTrun, 1, trunFlags, trun.Bytes())
 	WriteBox(w, BoxTraf, traf.Bytes())
+}
+
+func finalAudioSampleDuration(frame *avframe.AVFrame, timescale uint32) uint32 {
+	if frame.Codec != avframe.CodecOpus {
+		return 1024 // AAC-LC and HE-AAC use 1024 samples per access unit.
+	}
+
+	samples, ok := opusPacketDurationSamples(frame.Payload)
+	if !ok {
+		samples = 960 // 20 ms at the mandatory Opus 48 kHz RTP clock.
+	}
+	if timescale == 0 {
+		durationMs := samples * 1000 / 48000
+		if durationMs == 0 {
+			return 1
+		}
+		return durationMs
+	}
+	return uint32(uint64(samples) * uint64(timescale) / 48000)
+}
+
+func opusPacketDurationSamples(payload []byte) (uint32, bool) {
+	if len(payload) == 0 {
+		return 0, false
+	}
+
+	config := payload[0] >> 3
+	var samplesPerFrame uint32
+	switch {
+	case config < 12:
+		samplesPerFrame = [...]uint32{480, 960, 1920, 2880}[config&0x03]
+	case config < 16:
+		samplesPerFrame = 480 << (config & 0x01)
+	default:
+		samplesPerFrame = 120 << (config & 0x03)
+	}
+
+	var frameCount uint32
+	switch payload[0] & 0x03 {
+	case 0:
+		frameCount = 1
+	case 1, 2:
+		frameCount = 2
+	case 3:
+		if len(payload) < 2 {
+			return 0, false
+		}
+		frameCount = uint32(payload[1] & 0x3F)
+		if frameCount == 0 {
+			return 0, false
+		}
+	}
+
+	duration := samplesPerFrame * frameCount
+	if duration == 0 || duration > 5760 {
+		return 0, false
+	}
+	return duration, true
 }
 
 // filterH264VCLNALUs strips non-VCL NAL units from an AVCC (4-byte length-prefixed)
@@ -218,6 +294,47 @@ func filterH264VCLNALUs(data []byte) []byte {
 		nalType := data[offset+4] & 0x1F
 		// Keep VCL NALUs (1=non-IDR slice, 2=slice A, 3=slice B, 4=slice C, 5=IDR)
 		if nalType >= 1 && nalType <= 5 {
+			result = append(result, data[offset:offset+4+nalLen]...)
+		}
+		offset += 4 + nalLen
+	}
+	return result
+}
+
+// filterH265ParameterSetNALUs removes VPS/SPS/PPS from length-prefixed samples.
+// hvc1 carries these parameter sets exclusively in the hvcC configuration box.
+func filterH265ParameterSetNALUs(data []byte) []byte {
+	if len(data) < 6 {
+		return data
+	}
+
+	needsFilter := false
+	for offset := 0; offset+6 <= len(data); {
+		nalLen := int(binary.BigEndian.Uint32(data[offset:]))
+		if nalLen < 2 || offset+4+nalLen > len(data) {
+			return data
+		}
+		nalType := (data[offset+4] >> 1) & 0x3F
+		if nalType >= 32 && nalType <= 34 {
+			needsFilter = true
+		}
+		offset += 4 + nalLen
+		if offset == len(data) {
+			break
+		}
+	}
+	if !needsFilter {
+		return data
+	}
+
+	result := make([]byte, 0, len(data))
+	for offset := 0; offset+6 <= len(data); {
+		nalLen := int(binary.BigEndian.Uint32(data[offset:]))
+		if nalLen < 2 || offset+4+nalLen > len(data) {
+			return data
+		}
+		nalType := (data[offset+4] >> 1) & 0x3F
+		if nalType < 32 || nalType > 34 {
 			result = append(result, data[offset:offset+4+nalLen]...)
 		}
 		offset += 4 + nalLen
