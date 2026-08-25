@@ -233,19 +233,19 @@ Expected: all commands exit 0.
 - Update evidence: `.superpowers/sdd/2026-08-24-liveforge-completion/progress.md`
 - Update evidence: `.superpowers/sdd/2026-08-24-liveforge-completion/task-4-report.md`
 
-- [ ] **Step 1: Re-run focused race suites for every completed control plane**
+- [x] **Step 1: Re-run focused race suites for every completed control plane**
 
 ```bash
 go test -race -count=1 ./config ./config/runtime ./core ./internal/localfs ./module/auth ./module/api ./module/cluster ./module/dvr ./module/gb28181 ./module/httpstream ./module/metrics ./module/notify ./module/record ./module/rtsp ./module/sip ./module/sipgateway ./module/webrtc
 ```
 
-- [ ] **Step 2: Stress high-risk security/lifecycle tests**
+- [x] **Step 2: Stress high-risk security/lifecycle tests**
 
 ```bash
 go test -race -count=20 ./module/sip ./module/sipgateway ./module/rtsp ./module/gb28181 ./module/webrtc ./module/record ./module/dvr -run 'Test.*(Digest|Replay|Lifecycle|Rollback|Close|Shutdown|TerminalMetrics|Symlink|Partial|Finalize)'
 ```
 
-- [ ] **Step 3: Run static and portability checks**
+- [x] **Step 3: Run static and portability checks**
 
 ```bash
 go vet ./config ./config/runtime ./core ./internal/localfs ./module/auth ./module/api ./module/cluster ./module/dvr ./module/gb28181 ./module/httpstream ./module/metrics ./module/notify ./module/record ./module/rtsp ./module/sip ./module/sipgateway ./module/webrtc
@@ -256,7 +256,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
 done
 ```
 
-- [ ] **Step 4: Record exact pass/fail output and loop failures**
+- [x] **Step 4: Record exact pass/fail output and loop failures**
 
 Append commands, exit status, and any repair commits/diffs to the two evidence files. Any failure creates a focused RED test and returns to Tasks 1-4 or the owning original task.
 
@@ -273,7 +273,7 @@ Append commands, exit status, and any repair commits/diffs to the two evidence f
 - Consumes: `GET/POST /api/v1/server/config`, `GET /api/v1/cluster/status`, SIP Gateway call CRUD, recording list/detail/download/delete, DVR status/detail, `GET /api/v1/security/status`, and `GET /api/v1/audit` as documented by the API router.
 - Produces: build-free configuration, cluster, calls, storage, and security views plus permission-aware operator actions.
 
-- [ ] **Step 1: Add RED console contract tests**
+- [x] **Step 1: Add RED console contract tests**
 
 Parse the embedded HTML and assert each documented endpoint appears exactly in the intended request helper; assert destructive calls use `apiFetch`, explicit HTTP methods, confirmation, and surfaced 401/403/409 errors; assert token/password/Authorization values are never assigned into HTML.
 
@@ -283,23 +283,23 @@ go test -count=1 ./module/api -run '^TestConsoleManagement'
 
 Expected: FAIL because the new views/actions are absent.
 
-- [ ] **Step 2: Add navigation and stable unframed views**
+- [x] **Step 2: Add navigation and stable unframed views**
 
 Add compact sections for Runtime Config, Cluster Relays, SIP Calls, Recordings & DVR, and Security & Audit. Reuse the existing navigation/layout, keep controls under 8px radius, and provide fixed table/toolbar dimensions so updates do not shift the page.
 
-- [ ] **Step 3: Add one authenticated request helper and typed error rendering**
+- [x] **Step 3: Add one authenticated request helper and typed error rendering**
 
 Use the existing session cookie; do not store or display bearer tokens. The helper handles JSON envelopes, 204 responses, session expiry, forbidden actions, conflict, and unavailable modules without exposing response headers or secrets.
 
-- [ ] **Step 4: Implement read views and bounded refresh**
+- [x] **Step 4: Implement read views and bounded refresh**
 
 Load only the active view, cancel stale requests with `AbortController`, render pending-restart paths and source failures, relay/call/record/DVR tables, and bounded audit entries. Poll visible operational views at a fixed interval and stop polling when hidden.
 
-- [ ] **Step 5: Implement operator actions**
+- [x] **Step 5: Implement operator actions**
 
 Add config refresh, SIP dial/hangup, and recording delete. Use icon-plus-text commands where clarity requires a label, native confirmation for destructive actions, disabled in-flight state, and server-authoritative error messages.
 
-- [ ] **Step 6: Verify console contracts and API routes**
+- [x] **Step 6: Verify console contracts and API routes**
 
 ```bash
 gofmt -w module/api/console_management_test.go module/api/console_publish_test.go
@@ -309,6 +309,177 @@ go vet ./module/api
 ```
 
 Expected: all commands exit 0.
+
+### Task 6B: Close source gaps discovered by the documentation inventory
+
+**Files:**
+- Modify: `module/gb28181/api.go`
+- Modify: `module/api/rbac.go`
+- Modify: `module/cluster/module.go`
+- Modify: `module/cluster/transport_rtp.go`
+- Modify: `module/cluster/transport_gb.go`
+- Modify: `config/runtime/manager.go`
+- Test: the owning package tests under `module/gb28181`, `module/api`, `module/cluster`, and `config/runtime`
+- Create: focused helper tests for `tools/gb28181-sim` and `tools/lf-test`
+
+**Interfaces and invariants:**
+- GB28181 live/playback stop handlers are reachable through the real `http.ServeMux` and require `gb28181:control`, matching the corresponding start actions.
+- RTP and GB28181 relay signaling resolves a node credential from the current atomic server config for every request, preferring `api.auth.bearer_token`, otherwise a named token whose role is `admin`; no credential lookup performs I/O or logs a secret.
+- A peer signaling request fails locally with a clear error when management authentication is configured but no admin-capable token exists; authenticated peers receive `Authorization: Bearer ...` and token rotation does not require a process restart.
+- Runtime callback coalescing counts each superseded pending callback in `DroppedCallbacks` while preserving delivery of the newest snapshot.
+- Typed runtime-key tests prove a hot value remains old before commit and becomes visible only after atomic publication.
+
+- [x] **Step 1: Add RED real-router tests for GB28181 stop operations and RBAC**
+
+Register the GB28181 API on a real management mux, invoke both DELETE stop paths, and prove they reach their handlers. Add permission tests proving an operator can stop live/playback through `gb28181:control` while a viewer is denied.
+
+```bash
+go test -count=1 ./module/gb28181 ./module/api -run 'Test.*(Channel.*Delete|GB28181.*Permission|ManagementRoute)'
+```
+
+Expected: FAIL because the DELETE subtree is not registered and is currently classified as `gb28181:manage`.
+
+- [x] **Step 2: Add RED authenticated relay-signaling tests, then attach rotating credentials**
+
+Use authenticated peer test servers that reject missing/wrong bearer credentials. Exercise both RTP and GB28181 outbound signaling, verify success with the selected admin credential, verify a hot credential change is observed by the next request, and verify a configured viewer/operator-only token set fails before network dispatch.
+
+```bash
+go test -count=1 ./module/cluster -run 'Test.*(RTP|GB28181).*(Auth|Credential|Token)'
+```
+
+Expected: FAIL because the current transports do not send node credentials.
+
+- [x] **Step 3: Add RED callback-coalescing accounting test**
+
+Block callback delivery, accept two newer snapshots, and assert one superseded pending transition is counted while the latest version is ultimately delivered.
+
+```bash
+go test -count=1 ./config/runtime -run '^TestManagerCoalescesNotificationsWithoutLosingLatestSnapshot$'
+```
+
+Expected: FAIL because `DroppedCallbacks` remains zero.
+
+- [x] **Step 4: Strengthen atomic-key and CLI package behavior tests**
+
+Replace the immutable-key runtime test with a deterministic `limits.max_streams` commit-boundary test. Add meaningful tests around existing parsing, formatting, channel-building, and error-classification helpers in `tools/gb28181-sim` and `tools/lf-test` so the required coverage suite has real test-bearing packages rather than empty packages.
+
+- [x] **Step 5: Run focused closure gates and record documentation impact**
+
+```bash
+gofmt -w module/gb28181 module/api module/cluster config/runtime tools/gb28181-sim tools/lf-test
+go test -race -count=1 ./module/gb28181 ./module/api ./module/cluster ./config/runtime ./tools/gb28181-sim ./tools/lf-test
+go test -race -count=20 ./module/cluster ./config/runtime -run 'Test.*(Auth|Credential|Token|Coalesces|Atomic|Key)'
+go vet ./module/gb28181 ./module/api ./module/cluster ./config/runtime ./tools/gb28181-sim ./tools/lf-test
+git diff --check
+```
+
+Expected: all commands exit 0. The Task 7 inventory and documentation work must include the reachable DELETE routes, node credential behavior and rotation rule, callback-drop semantics, and the added release verification packages.
+
+### Task 6C: Repair RTSP multi-track SETUP state handling
+
+**Files:**
+- Modify: `module/rtsp/handler.go`
+- Test: `module/rtsp/helpers_test.go` or a focused multi-track handler test
+- Test: `tools/testkit/push/pusher_test.go`
+- Test: `tools/testkit/play/player_test.go`
+
+**Root-cause evidence:** `.superpowers/sdd/2026-08-25-liveforge-completion-loop/rtsp-455-diagnosis.md`
+
+**Invariant:** The first valid SETUP transitions an announced/described session to `StateReady`; additional valid track SETUP requests preserve `StateReady` and return 200. SETUP in genuinely invalid states still returns 455, and no rejected request leaves a track installed.
+
+- [x] **Step 1: Add RED multi-track response and atomicity tests**
+
+Exercise two SETUP requests for both announce/record and describe/play flows. Assert both responses are 200, both tracks exist, the state remains Ready, and an invalid-state SETUP returns 455 without changing the track set.
+
+```bash
+go test -count=1 ./module/rtsp -run 'Test.*MultiTrack.*Setup'
+```
+
+Expected: FAIL because the second valid SETUP performs an illegal `Ready -> Ready` transition and because mutation currently precedes validation.
+
+- [x] **Step 2: Separate per-track setup from the one-time Ready transition**
+
+Validate that SETUP is permitted in announced, described, or ready states before installing the track. Transition only announced/described sessions to Ready; keep Ready unchanged for additional tracks. Preserve 455 for every other state and do not mutate rejected sessions.
+
+- [x] **Step 3: Verify handler, package, and end-to-end flows**
+
+```bash
+gofmt -w module/rtsp/handler.go module/rtsp/*_test.go
+go test -race -count=20 ./module/rtsp -run 'Test.*(MultiTrack.*Setup|Setup)'
+go test -count=5 ./tools/testkit/push -run '^TestRTSPPush$'
+go test -count=5 ./tools/testkit/play -run '^TestRTSPPlay$'
+go test -race -count=1 ./module/rtsp ./tools/testkit/push ./tools/testkit/play
+go vet ./module/rtsp ./tools/testkit/push ./tools/testkit/play
+git diff --check
+```
+
+Expected: all commands exit 0. Record the regression and its user-visible multi-track compatibility impact in `docs/PROGRESS.md` during Task 7.
+
+### Task 6D: Make DVR media routes valid on Go 1.26
+
+**Files:**
+- Modify: `module/dvr/module.go`
+- Modify: `module/dvr/handler.go`
+- Test: focused real-mux and module-init tests under `module/dvr`
+- Modify: `docs/PROGRESS.md`
+
+**Root-cause evidence:** the authenticated Task 8 smoke start panics while registering `GET /dvr/{app}/{key}.m3u8`; Go 1.26 requires a wildcard segment to end with `}` and does not permit a suffix after `{key}`.
+
+**Invariant:** The documented media URLs remain `GET /dvr/{app}/{key}.m3u8` and `GET /dvr/{app}/{key}/{filename}`. Registration must use valid Go 1.26 ServeMux syntax, dispatch must preserve exact app/key/filename values, malformed or nested resources return 404, and module startup/shutdown is bounded without panic.
+
+- [x] **Step 1: Add RED real-registration and dispatch tests**
+
+Use `127.0.0.1:0` and a real `core.Server.Init` with DVR enabled to prove module registration currently panics. Add real mux requests for playlist, segment, malformed suffix, missing key, and nested filename traversal.
+
+- [x] **Step 2: Register one legal terminal wildcard and dispatch strictly**
+
+Register a legal tail wildcard under `/dvr/{app}/`, parse only the two existing URL shapes, populate handler path values without string-concatenating filesystem paths, and return 404 before authorization/storage access for malformed resources.
+
+- [x] **Step 3: Verify DVR and smoke startup gates**
+
+```bash
+gofmt -w module/dvr
+go test -race -count=20 ./module/dvr -run 'Test.*(Route|Init|Playlist|Segment)'
+go test -race -count=1 ./module/dvr ./module/api
+go vet ./module/dvr ./module/api
+tools/check-agent-docs_test.sh
+git diff --check
+```
+
+Expected: all commands exit 0 and the Task 8 loopback smoke server starts with DVR enabled.
+
+### Task 6E: Classify normal SIP listener shutdown without ERROR noise
+
+**Files:**
+- Modify: `module/sip/dispatch.go`
+- Test: focused real-listener shutdown/log tests under `module/sip`
+- Modify: `docs/PROGRESS.md`
+
+**Root-cause evidence:** Task 8 completed SIGTERM in 0.210 seconds with exit 0 and all listeners/PIDs removed, but the SIP TCP `ListenAndServe` goroutine unconditionally logged its cancellation-driven `accept ... use of closed network connection` return at ERROR. The same line appeared in the Task 6D smoke and the fresh Task 8 smoke.
+
+**Invariant:** A normal context-cancelled SIP TCP or UDP listener shutdown is bounded and emits no ERROR. A non-nil listener failure while its service context is still active remains an ERROR with transport metadata. Shutdown classification must not hide an unexpected live-listener failure.
+
+- [x] **Step 1: Add a RED real-listener shutdown log test**
+
+Start a real SIP service on a reserved loopback address, wait until the configured TCP listener accepts connections, cancel it through `service.close`, and capture structured slog output. Require bounded return and zero ERROR records for the cancellation-driven listener result. Add a focused classifier/logging case proving an unexpected error with an active context remains ERROR.
+
+- [x] **Step 2: Apply the minimal context-aware listener result classification**
+
+Classify the `ListenAndServe` return at the goroutine boundary. Suppress only a listener-stop error associated with the service context already being cancelled; continue to log any non-nil return while the context is active. Do not use message-string matching, do not change SIP request handling, and do not weaken listener startup failures.
+
+- [x] **Step 3: Verify SIP dependents and the full smoke shutdown**
+
+```bash
+gofmt -w module/sip
+go test -race -count=20 ./module/sip -run 'Test.*Listener.*(Shutdown|Stop)'
+go test -race -count=1 ./module/sip ./module/sipgateway ./module/gb28181
+go vet ./module/sip ./module/sipgateway ./module/gb28181
+tools/check-agent-docs_test.sh
+CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh
+git diff --check
+```
+
+Expected: all commands exit 0. The authenticated Task 8 smoke then receives SIGHUP, exits 0 under SIGTERM within the drain bound, removes TCP/UDP listeners and PID, and contains no ERROR/panic/fatal or secret value in its complete log.
 
 ### Task 7: Synchronize release, migration, API, config, and operations documentation
 
@@ -327,7 +498,7 @@ Expected: all commands exit 0.
 - Create: `docs/recipes/rbac-audit.md`
 - Create: `docs/recipes/release-verification.md`
 
-- [ ] **Step 1: Generate a source-of-truth inventory before editing**
+- [x] **Step 1: Generate a source-of-truth inventory before editing**
 
 ```bash
 rg -n 'HandleFunc|Handle\(' module/api module/gb28181 module/webrtc --glob '*.go'
@@ -337,19 +508,19 @@ rg -n 'yaml:"' config --glob '*.go'
 
 Map every endpoint, permission, metric, config field, failure state, and restart-required path to one documentation owner.
 
-- [ ] **Step 2: Complete OpenAPI and JSON Schema**
+- [x] **Step 2: Complete OpenAPI and JSON Schema**
 
 OpenAPI documents runtime config/status refresh, cluster status, SIP call control, recording management/download, DVR status/detail, security/audit responses, authentication, permissions, and error codes. JSON Schema documents runtime sources, RBAC bindings, audit settings, recording/DVR/reload fields, and restart-required/deferred annotations.
 
-- [ ] **Step 3: Write runnable operations recipes**
+- [x] **Step 3: Write runnable operations recipes**
 
 Each recipe contains prerequisites, safe local examples, authenticated requests, expected status codes, metrics/diagnostics, rollback, and failure recovery. Public exposure warnings must state that the sample config disables TLS/auth and uses `admin/admin`.
 
-- [ ] **Step 4: Synchronize user and Agent entrypoints**
+- [x] **Step 4: Synchronize user and Agent entrypoints**
 
 Update both READMEs, both `llms` files, the manifest, and `docs/PROGRESS.md`. Remove stale planned claims only where source plus tests exist. Retain conditional release/image availability, optional FFmpeg support, and explicit Simulcast deferral.
 
-- [ ] **Step 5: Verify route/config/document parity**
+- [x] **Step 5: Verify route/config/document parity**
 
 ```bash
 tools/check-agent-docs_test.sh
@@ -367,7 +538,7 @@ Expected: all commands exit 0 and no implemented public route/config key is undo
 - Update evidence: `.superpowers/sdd/2026-08-24-liveforge-completion/progress.md`
 - Update: this plan's checkboxes only after fresh evidence exists
 
-- [ ] **Step 1: Format and inspect the complete branch delta**
+- [x] **Step 1: Format and inspect the complete branch delta**
 
 ```bash
 gofmt -w $(git diff --name-only --diff-filter=ACMRTUXB | rg '\.go$')
@@ -375,7 +546,7 @@ git diff --check
 git status --short
 ```
 
-- [ ] **Step 2: Run the complete untagged verification**
+- [x] **Step 2: Run the complete untagged verification**
 
 ```bash
 go test -count=1 ./...
@@ -385,7 +556,7 @@ go build ./cmd/liveforge
 go build ./tools/lf-test
 ```
 
-- [ ] **Step 3: Run the required FFmpeg-tagged baseline**
+- [x] **Step 3: Run the required FFmpeg-tagged baseline**
 
 ```bash
 CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
@@ -394,26 +565,68 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 
 Expected: both commands exit 0 with Go 1.26 and the detected FFmpeg development libraries.
 
-- [ ] **Step 4: Run both documentation gates**
+- [x] **Step 4: Run both documentation gates**
 
 ```bash
 tools/check-agent-docs_test.sh
 CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh
 ```
 
-- [ ] **Step 5: Run an authenticated local smoke test**
+- [x] **Step 5: Run an authenticated local runtime smoke test**
 
-Build a temporary configuration derived from `configs/liveforge.yaml` with loopback-only ephemeral listener ports, TLS disabled for local testing, non-default console credentials, API bearer/RBAC enabled, and temporary recording/DVR directories. Start the server, wait for public health, then verify authenticated config/cluster/SIP/record/DVR/security/audit endpoints and denied unauthenticated mutations. Stop with SIGTERM and require a clean bounded exit.
+Build an ignored smoke binary and an ignored temporary configuration derived from `configs/liveforge.yaml`. Bind every enabled listener to a dedicated loopback-only test port, disable TLS only for this local test, use non-default console credentials, enable API bearer/RBAC with viewer/operator/admin principals, and place recording/DVR data under the ignored smoke workspace. Do not print or commit credentials.
 
-- [ ] **Step 6: Audit the completion contract line by line**
+Start the real `cmd/liveforge` binary and require all of the following:
 
-Re-read `AGENTS.md`, both completion plans, `docs/PROGRESS.md`, all task reports, `git diff`, and verification logs. For each non-Simulcast feature require source, a passing behavior test, synchronized docs, and a runnable verification path.
+- Public `GET /api/v1/server/health` reaches 200 without credentials.
+- A protected management read without credentials reaches 401.
+- The viewer can read config, cluster, SIP, recordings, DVR, security, audit, and GB28181 status but cannot mutate them.
+- The operator can schedule config refresh and perform documented operator actions, while admin-only deletion remains denied.
+- The admin can reach every documented management action used by the console.
+- Cluster, SIP Gateway, recording, DVR, security, audit, and GB28181 endpoints return their documented envelopes/status shapes; audit contains the exercised authenticated operations.
+- `SIGHUP` schedules an asynchronous refresh while the process remains responsive and configuration reads do not perform source I/O.
+- `SIGTERM` exits cleanly within the configured drain bound with no panic, leaked listener, or unfinalized smoke process.
 
-- [ ] **Step 7: Loop until no failure or unsupported claim remains**
+Save command/status evidence under this plan's ignored SDD workspace. A failed endpoint or lifecycle check returns to its owning task and restarts Task 8 at Step 1.
 
-For every failure: capture the exact command/output, add or identify a focused RED test, apply the minimal repair, rerun the focused gate, then restart Task 8 from Step 1. Do not skip a failing package and do not narrow the final suite.
+- [x] **Step 6: Run embedded-console browser acceptance**
 
-- [ ] **Step 8: Commit only the verified completion delta**
+Use the in-app Browser against the authenticated smoke server. Exercise login and all seven tabs: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. The Security tab includes the Recent Audit surface. Require:
+
+- Viewer/operator/admin visibility and action states agree with server RBAC; 401, 403, 409, and unavailable-module errors surface without exposing tokens, passwords, headers, or raw secret-bearing bodies.
+- Hostile dynamic stream/call/record identifiers render as text and cannot create markup or executable attributes.
+- ArrowLeft/ArrowRight/Home/End tab navigation, focus indication, modal focus containment, Escape dismissal, and focus restoration work from the keyboard.
+- Only the visible page polls; switching tabs or hiding the document aborts/stops stale polling.
+- Desktop and mobile screenshots show no incoherent overlap, clipped control text, nested-card layout, or horizontal body overflow.
+- Browser console has no uncaught exception, failed asset load, or repeated unauthorized request loop.
+
+Record the tested viewport sizes, screenshots, browser-console result, network/auth observations, and any repaired defect in the ignored SDD evidence workspace.
+
+- [x] **Step 7: Audit the completion contract line by line**
+
+Re-read `AGENTS.md`, `agent-manifest.json`, `llms.txt`, `llms-full.txt`, both completion plans, the configuration-loader spec, `docs/PROGRESS.md`, all task reports/reviews, the complete branch diff, and fresh verification logs. For every non-Simulcast feature require all four columns below; a missing column is a blocker:
+
+| Feature | Source implementation | Passing behavior/race test | Synchronized user/Agent docs | Runnable verification path |
+| --- | --- | --- | --- | --- |
+| Runtime configuration sources and atomic reads | required | required | required | required |
+| Protocol lifecycle/security and RTSP multi-track | required | required | required | required |
+| Cluster relay/status/authentication | required | required | required | required |
+| SIP Gateway control plane | required | required | required | required |
+| Recording and DVR management/media serving | required | required | required | required |
+| RBAC, audit, and management console | required | required | required | required |
+| Build/release/install claims | required or explicitly unavailable | required | required | required |
+
+Confirm Simulcast layer selection is the only explicit deferral everywhere and remains configuration-only.
+
+- [x] **Step 8: Run an independent whole-branch review**
+
+Generate one review package from the branch merge-base through the verified head. A fresh reviewer checks the complete non-Simulcast acceptance contract, security boundaries, concurrency/lifecycle behavior, test quality, documentation parity, and the ledger's rulings/deferred minors. Critical or Important findings get exactly one consolidated fix dispatch and one scoped re-review; residual load-bearing findings block delivery.
+
+- [x] **Step 9: Loop until no failure or unsupported claim remains**
+
+For every test, smoke, browser, audit, or review failure: capture the exact command/output, add or identify a focused RED test, apply the minimal repair in the owning module, rerun its focused gate and independent scoped review, then restart Task 8 from Step 1. Do not skip a failing package, narrow a final suite, waive a browser defect, or convert an unsupported claim into completion.
+
+- [x] **Step 10: Commit only the verified completion delta**
 
 ```bash
 git add -A
@@ -430,3 +643,4 @@ The commit must exclude `coverage.out`, binaries, recordings, temporary configur
 - [x] Method names and event identity fields match the current Go types.
 - [x] Every implementation task contains a RED command, a minimal implementation boundary, and a GREEN/race gate.
 - [x] Documentation and smoke-test work is part of acceptance rather than follow-up work.
+- [x] Browser QA, role-matrix smoke tests, SIGHUP/SIGTERM behavior, whole-branch review, and cleanup are explicit terminal gates.
