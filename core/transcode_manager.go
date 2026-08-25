@@ -283,18 +283,22 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 	}
 
 	reader := tm.stream.RingBuffer().NewReaderAt(sourceStart)
-
-	for {
+	// RingBuffer.Signal is a single legacy notification channel shared by all
+	// readers. The transcoder must not consume it, or a live playback reader
+	// can miss wakeups and emit video in bursts. RingReader.Read blocks on the
+	// ring condition variable instead; close the reader when this track is
+	// cancelled so the blocking read remains interruptible.
+	stopReader := make(chan struct{})
+	go func() {
 		select {
 		case <-ctx.Done():
-			if resampler != nil {
-				resampler.Close()
-			}
-			track.ringBuffer.Close()
-			return
-		default:
+			reader.Close()
+		case <-stopReader:
 		}
+	}()
+	defer close(stopReader)
 
+	for {
 		// Inline processing: handle each frame as it arrives. Video passes
 		// through immediately; audio encodes inline. This limits the maximum
 		// video delivery delay to a single audio encode operation (~0.5ms)
@@ -302,42 +306,30 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 		// N × encode_time. Chrome's jitter estimator accumulates delivery
 		// irregularities via EWMA, so even small periodic delays from batch
 		// encoding compound over minutes into large jitter buffer growth.
-		drained := false
-		for {
-			frame, ok := reader.TryRead()
-			if !ok {
-				break
-			}
-			drained = true
-
-			if frame.MediaType.IsVideo() {
-				if audioOnly {
-					continue
-				}
-				// Legacy reader: pass video through without encoding.
-				track.ringBuffer.Write(frame)
-				continue
-			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				// Skip source audio sequence headers.
-			} else {
-				encodeAudio(frame)
-			}
-		}
-
-		if drained {
-			// More frames may have arrived during encoding; loop back.
-			continue
-		}
-
-		// No frames available — wait for signal.
-		select {
-		case <-ctx.Done():
+		frame, ok := reader.Read()
+		if !ok {
 			if resampler != nil {
 				resampler.Close()
 			}
 			track.ringBuffer.Close()
 			return
-		case <-tm.stream.RingBuffer().Signal():
+		}
+		for {
+			if frame.MediaType.IsVideo() {
+				if !audioOnly {
+					// Legacy reader: pass video through without encoding.
+					track.ringBuffer.Write(frame)
+				}
+			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
+				// Skip source audio sequence headers.
+			} else {
+				encodeAudio(frame)
+			}
+
+			frame, ok = reader.TryRead()
+			if !ok {
+				break
+			}
 		}
 	}
 }
