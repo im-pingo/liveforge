@@ -62,6 +62,7 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
 	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
 	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 
 	muxer := flv.NewMuxer()
 	var buf bytes.Buffer
@@ -110,6 +111,9 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		if !audioPlan.accepts(frame) {
 			continue
 		}
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
+			continue
+		}
 
 		if err := muxer.WriteFrame(&buf, frame); err == nil && buf.Len() > 0 {
 			inst.Buffer.Write(bufCopyAndReset(&buf))
@@ -126,6 +130,7 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
 	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
 	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 
 	// Determine codecs from sequence headers
 	var videoCodec, audioCodec avframe.CodecType
@@ -171,6 +176,9 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader || !audioPlan.accepts(frame) {
 			continue
 		}
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
+			continue
+		}
 
 		if data := muxer.WriteFrame(frame); len(data) > 0 {
 			inst.Buffer.Write(data)
@@ -186,6 +194,7 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	audioPlan := selectFMP4Audio(stream)
 	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
 	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
@@ -300,6 +309,9 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 			continue
 		}
 		if !audioPlan.accepts(frame) {
+			continue
+		}
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
 			continue
 		}
 
@@ -454,7 +466,11 @@ func selectMuxerAudio(stream *core.Stream, compatible func(avframe.CodecType) bo
 func muxerLiveReader(stream *core.Stream, startPos int64, plan muxerAudioPlan) (*util.RingReader[*avframe.AVFrame], func(), muxerAudioPlan) {
 	if plan.mode == muxerAudioTranscode {
 		if tm := stream.TranscodeManager(); tm != nil {
-			reader, release, err := tm.GetOrCreateReader(avframe.CodecAAC)
+			// The HTTP muxers already replay cached video separately. The legacy
+			// transcode track is intentionally started at the cached GOP source
+			// cursor so it contributes both target audio history and live video;
+			// callers filter the cached video portion by its video DTS watermark.
+			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, stream.GOPCacheSourceStart())
 			if err == nil {
 				return reader, release, plan
 			}
@@ -463,6 +479,27 @@ func muxerLiveReader(stream *core.Stream, startPos int64, plan muxerAudioPlan) (
 		plan = muxerAudioPlan{}
 	}
 	return stream.RingBuffer().NewReaderAt(startPos), func() {}, plan
+}
+
+func cachedVideoEndDTS(frames []*avframe.AVFrame) (int64, bool) {
+	var end int64
+	found := false
+	for _, frame := range frames {
+		if frame == nil || !frame.MediaType.IsVideo() || frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		if !found || frame.DTS > end {
+			end = frame.DTS
+			found = true
+		}
+	}
+	return end, found
+}
+
+func isCachedTranscodeVideo(frame *avframe.AVFrame, plan muxerAudioPlan, cachedEndDTS int64, hasCachedVideo bool) bool {
+	return hasCachedVideo && plan.mode == muxerAudioTranscode && frame != nil &&
+		frame.MediaType.IsVideo() && frame.FrameType != avframe.FrameTypeSequenceHeader &&
+		frame.DTS <= cachedEndDTS
 }
 
 // aacSeqHeaderFrame returns a synthetic AAC sequence header AVFrame for use

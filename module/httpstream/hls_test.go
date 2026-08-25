@@ -273,6 +273,63 @@ func TestHLSManagerCachedGOPContinuesWithLiveInterframes(t *testing.T) {
 	}
 }
 
+func TestHLSManagerDoesNotUseAudioDTSAsLiveVideoWatermark(t *testing.T) {
+	stream := newMuxerWorkerStream(t, avframe.CodecAAC)
+	// Make the last cached frame audio several seconds ahead of the cached
+	// video. A cross-track DTS watermark would incorrectly discard the live
+	// video frame at 100ms even though the atomic snapshot cursor proves it is
+	// not part of the cache.
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+		4000, 4000, []byte{0x01, 0x02, 0x03},
+	))
+
+	mgr := NewHLSManager("live/hls-cross-track-dts", "/live/hls-cross-track-dts", 1, 5)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	// Give Run time to capture the cache and cursor, then append frames that
+	// must be read from the live ring.
+	time.Sleep(20 * time.Millisecond)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		100, 100, []byte{0, 0, 0, 2, 0x41, 0x7a},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		5000, 5000, []byte{0, 0, 0, 2, 0x65, 0x7b},
+	))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	segment, ok := mgr.GetSegment(0)
+	if !ok {
+		t.Fatal("HLS segment 0 is missing")
+	}
+	foundLiveInterframe := false
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.MediaType.IsVideo() && frame.FrameType == avframe.FrameTypeInterframe &&
+			bytes.Contains(frame.Payload, []byte{0x41, 0x7a}) {
+			foundLiveInterframe = true
+		}
+	})
+	demuxer.Feed(segment)
+	demuxer.Flush()
+	if !foundLiveInterframe {
+		t.Fatal("HLS dropped the live video frame because cached audio had a later DTS")
+	}
+}
+
 func TestHLSManagerFirstSegmentStartsAtFirstLiveKeyframeWithoutCache(t *testing.T) {
 	stream := newVideoStreamWithoutGOPCache(t)
 	mgr := NewHLSManager("live/hls-no-cache", "/live/hls-no-cache", 6, 5)

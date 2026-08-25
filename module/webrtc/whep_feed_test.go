@@ -69,7 +69,7 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 	)
 	stream.WriteFrame(betweenSnapshotAndReader)
 
-	readers := newWHEPFeedReaders(stream, startPos, true, avframe.CodecOpus)
+	readers := newWHEPFeedReaders(stream, startPos, startPos, true, avframe.CodecOpus)
 	defer readers.Close()
 	if got, ok := readers.source.TryRead(); !ok || got != betweenSnapshotAndReader {
 		t.Fatalf("source reader first frame = (%v, %v), want frame written after snapshot", got, ok)

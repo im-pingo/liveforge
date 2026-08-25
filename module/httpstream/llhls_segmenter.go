@@ -71,18 +71,17 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 	reader, release, audioPlan := muxerLiveReader(stream, startPos, s.audioPlan)
 	s.audioPlan = audioPlan
 	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 	s.initMuxer(stream)
 	go func() {
 		<-s.done
 		reader.Close()
 	}()
 
-	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
-		gopEndDTS = f.DTS
 		s.processFrame(f)
 	}
 	// Publish the cached frames as a part so the initial playlist is playable,
@@ -90,7 +89,7 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 	// same GOP, so ending the segment here would either create an interframe-led
 	// segment or discard live frames until the next keyframe.
 	if s.segHasData {
-		s.flushCurrentPart(gopEndDTS)
+		s.flushCurrentPart(s.partStartDTS)
 	}
 
 	for {
@@ -111,12 +110,9 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
-		// Skip frames already included in the GOP cache segment to avoid
-		// DTS overlap between the first two segments.
-		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
+		if isCachedTranscodeVideo(frame, s.audioPlan, cachedVideoEndDTS, hasCachedVideo) {
 			continue
 		}
-
 		s.processFrame(frame)
 	}
 }

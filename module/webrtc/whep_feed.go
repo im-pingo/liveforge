@@ -195,7 +195,6 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		if !whepAudioFrameAllowed(frame, targetAudioCodec) {
 			return
 		}
-
 		payload := frame.Payload
 
 		var duration time.Duration
@@ -230,7 +229,11 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 
 	// Source video always comes from the atomic snapshot cursor. A separate
 	// transcode reader contributes target-codec audio only.
-	readers := newWHEPFeedReaders(stream, startPos, needsTranscode, targetAudioCodec)
+	transcodeStart := startPos
+	if mode == "live" && needsTranscode {
+		transcodeStart = stream.GOPCacheSourceStart()
+	}
+	readers := newWHEPFeedReaders(stream, startPos, transcodeStart, needsTranscode, targetAudioCodec)
 	defer readers.Close()
 
 	// Live mode: send the cached GOP so the subscriber gets an immediate
@@ -376,11 +379,11 @@ type whepFeedReaders struct {
 	release     func()
 }
 
-func newWHEPFeedReaders(stream *core.Stream, startPos int64, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
+func newWHEPFeedReaders(stream *core.Stream, startPos, transcodeStart int64, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
 	readers := &whepFeedReaders{source: stream.RingBuffer().NewReaderAt(startPos)}
 	if needsTranscode {
 		if tm := stream.TranscodeManager(); tm != nil {
-			reader, release, err := tm.GetOrCreateReader(targetAudioCodec)
+			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, transcodeStart)
 			if err != nil {
 				slog.Warn("whep: audio transcode failed, video only", "error", err)
 			} else {

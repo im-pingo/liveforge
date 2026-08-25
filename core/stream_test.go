@@ -195,6 +195,25 @@ func TestStreamMultiGOPCache(t *testing.T) {
 	}
 }
 
+func TestStreamGOPCacheSourceStartTracksOldestCachedGOP(t *testing.T) {
+	s := NewStream("live/gop-source-start", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	if err := s.SetPublisher(&testPublisher{id: "pub", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}); err != nil {
+		t.Fatal(err)
+	}
+	s.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01},
+	))
+	firstKeyframePos := s.RingBuffer().WriteCursor()
+	s.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65},
+	))
+	if got := s.GOPCacheSourceStart(); got != firstKeyframePos {
+		t.Fatalf("GOP source start = %d, want %d", got, firstKeyframePos)
+	}
+}
+
 func TestStreamAudioCacheMs(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

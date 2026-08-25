@@ -134,6 +134,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	audioPlan := selectFMP4Audio(stream)
 	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
 	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 	go func() {
 		<-d.done
 		reader.Close()
@@ -296,7 +297,6 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	}
 
 	// Process GOP cache using the same audio policy as the live reader.
-	var gopEndDTS int64
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -314,7 +314,6 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			segStartDTS = f.DTS
 			hasData = true
 		}
-		gopEndDTS = f.DTS
 		if f.MediaType.IsVideo() {
 			currentVideoFrames = append(currentVideoFrames, f)
 		} else if f.MediaType.IsAudio() {
@@ -342,7 +341,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		if !audioPlan.accepts(frame) {
 			continue
 		}
-		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
 			continue
 		}
 		if !gotFirstKeyframe {

@@ -64,6 +64,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
 	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
 	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 	go func() {
 		<-h.done
 		reader.Close()
@@ -116,8 +117,11 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		buf.Reset()
 	}
 
-	// Process GOP cache into first segment.
-	var gopEndDTS int64
+	// Process GOP cache into first segment. GOPCacheSnapshot captured the ring
+	// cursor atomically, so the live reader starts after every cached frame.
+	// Do not use a cross-track DTS watermark here: audio and video can have
+	// different timestamp domains and a late audio frame must not hide a live
+	// video frame.
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -135,7 +139,6 @@ func (h *HLSManager) Run(stream *core.Stream) {
 			segStartDTS = f.DTS
 			hasData = true
 		}
-		gopEndDTS = f.DTS
 		if data := muxer.WriteFrame(f); len(data) > 0 {
 			buf.Write(data)
 		}
@@ -160,9 +163,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		if !audioPlan.accepts(frame) {
 			continue
 		}
-		// Skip frames already included in the GOP cache segment to avoid
-		// DTS overlap between the first two segments.
-		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
 			continue
 		}
 		if !gotFirstKeyframe {

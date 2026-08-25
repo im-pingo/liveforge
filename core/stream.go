@@ -92,6 +92,7 @@ type Stream struct {
 	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
 	muxerManager *MuxerManager
 	gopCache     [][]*avframe.AVFrame
+	gopStarts    []int64
 	audioCache   []*avframe.AVFrame
 	subscribers  map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 
@@ -145,8 +146,10 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 	s.limits = limits
 	if !cfg.GOPCache || cfg.GOPCacheNum <= 0 {
 		s.gopCache = nil
+		s.gopStarts = nil
 	} else if len(s.gopCache) > cfg.GOPCacheNum {
 		s.gopCache = append([][]*avframe.AVFrame(nil), s.gopCache[len(s.gopCache)-cfg.GOPCacheNum:]...)
+		s.gopStarts = append([]int64(nil), s.gopStarts[len(s.gopStarts)-cfg.GOPCacheNum:]...)
 	}
 	if cfg.AudioCacheMs <= 0 {
 		s.audioCache = nil
@@ -344,9 +347,12 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 		if frame.MediaType.IsVideo() {
 			if frame.FrameType.IsKeyframe() {
 				// Start new GOP
+				gopStart := s.ringBuffer.WriteCursor()
 				s.gopCache = append(s.gopCache, []*avframe.AVFrame{frame})
+				s.gopStarts = append(s.gopStarts, gopStart)
 				if len(s.gopCache) > s.config.GOPCacheNum {
 					s.gopCache = s.gopCache[len(s.gopCache)-s.config.GOPCacheNum:]
+					s.gopStarts = s.gopStarts[len(s.gopStarts)-s.config.GOPCacheNum:]
 				}
 			} else if frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
 				s.gopCache[len(s.gopCache)-1] = append(s.gopCache[len(s.gopCache)-1], frame)
@@ -463,6 +469,19 @@ func (s *Stream) GOPCacheSnapshot() ([]*avframe.AVFrame, int64) {
 		result = append(result, gop...)
 	}
 	return result, s.ringBuffer.WriteCursor()
+}
+
+// GOPCacheSourceStart returns the ring-buffer position of the oldest cached
+// GOP. A snapshot subscriber that needs to transform cached media can start
+// its source reader here, while the normal live reader still starts at the
+// atomic cursor returned by GOPCacheSnapshot.
+func (s *Stream) GOPCacheSourceStart() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.gopStarts) == 0 {
+		return s.ringBuffer.WriteCursor()
+	}
+	return s.gopStarts[0]
 }
 
 // AudioCache returns a copy of the current audio cache.

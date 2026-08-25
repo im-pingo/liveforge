@@ -137,13 +137,14 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Set up the live reader. When transcoding, use TranscodeManager's reader
-	// which provides video passthrough and transcoded audio in AAC.
+	// Set up the live reader. The legacy transcode reader provides source video
+	// passthrough together with target audio for RTMP subscribers; it starts at
+	// the post-snapshot cursor so cached video is not replayed twice.
 	var reader *util.RingReader[*avframe.AVFrame]
 	if needsTranscode {
 		if tm := s.stream.TranscodeManager(); tm != nil {
 			var err error
-			reader, transcodeRelease, err = tm.GetOrCreateReader(avframe.CodecAAC)
+			reader, transcodeRelease, err = tm.GetOrCreateReaderAt(avframe.CodecAAC, startPos)
 			if err != nil {
 				s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
 				return

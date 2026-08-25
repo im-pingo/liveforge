@@ -103,6 +103,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		publisherSet  bool
 		pubMu         sync.Mutex
 	)
+	mediaClock := newWHIPMediaClock()
 	sess.setCleanup(func() {
 		pubMu.Lock()
 		wasPublisher := publisherSet
@@ -172,7 +173,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			go requestWHIPKeyframes(pc, uint32(track.SSRC()), sess.done, 2*time.Second)
 		}
 
-		readTrackLoop(track, dp, stream, pub.done, avCodec)
+		readTrackLoop(track, dp, stream, pub.done, avCodec, mediaClock)
 	})
 
 	// Cleanup on ICE disconnect.
@@ -263,14 +264,12 @@ func requestWHIPKeyframes(pc *webrtc.PeerConnection, mediaSSRC uint32, done <-ch
 // AVFrames so the ring buffer and GOP cache stay consistent:
 //   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
 //   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
-func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType) {
+func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType, mediaClock *whipMediaClock) {
 	var (
 		accPayload    []byte
 		accFrame      avframe.FrameType
 		accMedia      avframe.MediaType
 		accSeqPayload []byte // accumulated SPS/PPS to write as SequenceHeader
-		tsBase        uint32
-		tsBaseSet     bool
 	)
 
 	if codec.IsVideo() {
@@ -279,16 +278,12 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 		accMedia = avframe.MediaTypeAudio
 	}
 
-	computeDTS := func(ts uint32) int64 {
-		if !tsBaseSet {
-			tsBase = ts
-			tsBaseSet = true
-		}
-		clockRate := int64(90000)
-		if codec.IsAudio() {
-			clockRate = int64(track.Codec().ClockRate)
-		}
-		return int64(ts-tsBase) * 1000 / clockRate
+	clockRate := int64(90000)
+	if codec.IsAudio() {
+		clockRate = int64(track.Codec().ClockRate)
+	}
+	if mediaClock == nil {
+		mediaClock = newWHIPMediaClock()
 	}
 
 	buf := make([]byte, 1500)
@@ -297,6 +292,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 		if readErr != nil {
 			return
 		}
+		packetArrival := time.Now()
 
 		// Parse raw bytes into pion/rtp/v2 Packet (our depacketizers' expected type).
 		var pkt pionrtp.Packet
@@ -314,7 +310,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 				continue
 			}
 			if !codec.IsVideo() {
-				dts := computeDTS(pkt.Timestamp)
+				dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 				frameType := frame.FrameType
 				if frameType == 0 {
 					frameType = avframe.FrameTypeInterframe
@@ -333,7 +329,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 				// SPS/PPS: accumulate separately. If there is already pending
 				// media data (unlikely but possible), flush it first.
 				if len(accPayload) > 0 {
-					dts := computeDTS(pkt.Timestamp)
+					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 					avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
 					stream.WriteFrame(avF)
 					accPayload = nil
@@ -345,7 +341,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 				// SequenceHeader before the IDR so the ring buffer sees the
 				// parameter sets first.
 				if len(accSeqPayload) > 0 {
-					dts := computeDTS(pkt.Timestamp)
+					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 					seqF := avframe.NewAVFrame(accMedia, codec, avframe.FrameTypeSequenceHeader, dts, dts, accSeqPayload)
 					stream.WriteFrame(seqF)
 					accSeqPayload = nil
@@ -361,7 +357,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 
 		// Flush accumulated media payload on the Marker bit (end of access unit).
 		if pkt.Marker && len(accPayload) > 0 {
-			dts := computeDTS(pkt.Timestamp)
+			dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 			avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
 			stream.WriteFrame(avF)
 			accPayload = nil
