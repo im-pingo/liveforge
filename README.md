@@ -31,7 +31,7 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 | 📡 | **GB28181 video surveillance** | Full SIP signaling stack, device registration, live invite, playback, PTZ control, alarm handling — plus a built-in device simulator for testing |
 | 🌐 | **Multi-protocol cluster** | Origin-edge cascading via RTMP / SRT / RTSP / RTP / GB28181 with HTTP scheduler callback for dynamic topology |
 | ⚡ | **LL-HLS** | Low-Latency HLS with fMP4 partial segments, blocking playlist reload (`_HLS_msn`/`_HLS_part`), and delta playlist updates |
-| 🖥️ | **Web console** | Permission-aware streams, config, cluster, SIP, storage, security, and audit operations plus browser preview/publish |
+| 🖥️ | **Web console** | Permission-aware tabs for Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security; Recent Audit is inside Security; includes browser preview/publish |
 | 🛡️ | **Production-ready** | Slow consumer protection (EWMA frame dropping), GCC congestion control, per-IP rate limiting, Prometheus metrics |
 
 ## Features

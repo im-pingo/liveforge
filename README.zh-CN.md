@@ -31,7 +31,7 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 | 📡 | **GB28181 视频监控** | 完整 SIP 信令栈，设备注册、实时拉流、录像回放、云台控制、报警处理 —— 附带内置设备模拟器 |
 | 🌐 | **多协议集群** | 支持 RTMP / SRT / RTSP / RTP / GB28181 的 Origin-Edge 级联，支持 HTTP 调度回调动态拓扑 |
 | ⚡ | **LL-HLS 低延迟** | fMP4 部分分片、阻塞式播放列表刷新（`_HLS_msn`/`_HLS_part`）、增量播放列表 |
-| 🖥️ | **Web 控制台** | 权限感知的流、配置、集群、SIP、存储、安全和审计运维视图，以及浏览器预览/推流 |
+| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；支持浏览器预览/推流 |
 | 🛡️ | **生产级可靠性** | 慢消费者保护（EWMA 丢帧）、GCC 拥塞控制、IP 级限流、Prometheus 监控 |
 
 ## 特性
