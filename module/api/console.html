@@ -1306,8 +1306,38 @@ function formatUptime(sec) {
 /* --- Confirm modal --- */
 var pendingAction = null;
 var modalReturnFocus = null;
+var modalReturnFocusIdentity = null;
+function captureModalFocusIdentity(element) {
+  if (!element || !element.getAttribute) return null;
+  return {
+    id: element.id || "",
+    action: element.getAttribute("data-action"),
+    actionID: element.getAttribute("data-action-id")
+  };
+}
+function resolveModalReturnFocus(element, identity) {
+  if (element && element.isConnected) return element;
+  if (identity && identity.id) {
+    var identified = document.getElementById(identity.id);
+    if (identified) return identified;
+  }
+  if (identity && identity.action !== null && identity.actionID !== null) {
+    var actions = document.querySelectorAll("[data-action][data-action-id]");
+    for (var i = 0; i < actions.length; i++) {
+      if (actions[i].getAttribute("data-action") === identity.action && actions[i].getAttribute("data-action-id") === identity.actionID) {
+        return actions[i];
+      }
+    }
+  }
+  var tabs = document.querySelectorAll(".nav-tab");
+  for (var j = 0; j < tabs.length; j++) {
+    if (!tabs[j].hidden && tabs[j].getAttribute("aria-selected") === "true") return tabs[j];
+  }
+  return null;
+}
 function showModal(title, msg, onConfirm) {
   modalReturnFocus = document.activeElement;
+  modalReturnFocusIdentity = captureModalFocusIdentity(modalReturnFocus);
   document.getElementById("modal-title").textContent = title;
   document.getElementById("modal-msg").textContent = msg;
   document.getElementById("modal").classList.add("active");
@@ -1318,9 +1348,10 @@ function showModal(title, msg, onConfirm) {
 function closeModal() {
   document.getElementById("modal").classList.remove("active");
   pendingAction = null;
-  var returnFocus = modalReturnFocus;
+  var returnFocus = resolveModalReturnFocus(modalReturnFocus, modalReturnFocusIdentity);
   modalReturnFocus = null;
-  if (returnFocus && returnFocus.isConnected) returnFocus.focus();
+  modalReturnFocusIdentity = null;
+  if (returnFocus) returnFocus.focus();
 }
 document.getElementById("modal-cancel").addEventListener("click", closeModal);
 document.getElementById("modal-confirm").addEventListener("click", function() {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 	"golang.org/x/net/html"
 )
 
@@ -257,6 +258,23 @@ type consoleInteractionProbe struct {
 	SettledOpen         bool   `json:"settledOpen"`
 }
 
+type consoleRerenderedActionFocusProbe struct {
+	ModalInitiallyOpen bool   `json:"modalInitiallyOpen"`
+	TriggerReplaced    bool   `json:"triggerReplaced"`
+	EscapeClosed       bool   `json:"escapeClosed"`
+	FocusedReplacement bool   `json:"focusedReplacement"`
+	FocusedTag         string `json:"focusedTag"`
+	FocusedAction      string `json:"focusedAction"`
+	FocusedActionID    string `json:"focusedActionId"`
+}
+
+type consoleRemovedActionFocusProbe struct {
+	ModalInitiallyOpen bool   `json:"modalInitiallyOpen"`
+	TriggerRemoved     bool   `json:"triggerRemoved"`
+	EscapeClosed       bool   `json:"escapeClosed"`
+	FocusedID          string `json:"focusedId"`
+}
+
 func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 	t.Helper()
 	if testing.Short() {
@@ -419,6 +437,95 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 		}
 		if !interaction.PendingDisabled || !interaction.PendingOpen || interaction.SettledDisabled || interaction.SettledOpen {
 			t.Errorf("deferred destructive behavior = %#v", interaction)
+		}
+	})
+}
+
+func TestConsoleManagementModalRestoresFocusAfterRecordingRerender(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		const recordingID = `archive/focus"race\\clip.mp4`
+		recordingJSON, err := json.Marshal(recordingID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var probe consoleRerenderedActionFocusProbe
+		setupExpression := fmt.Sprintf(`(function() {
+			var recording = {id:%s,stream_key:"live/focus",state:"completed"};
+			managementRole = "admin";
+			switchTab("storage");
+			stopActiveViewPolling();
+			renderRecordings([recording]);
+			var original = Array.from(document.querySelectorAll("[data-action]"))
+				.find(function(node) { return node.dataset.action === "recording-delete" && node.dataset.actionId === recording.id; });
+			original.focus();
+			original.click();
+			var modalInitiallyOpen = document.getElementById("modal").classList.contains("active") &&
+				document.activeElement === document.getElementById("modal-confirm");
+			renderRecordings([recording]);
+			var replacement = Array.from(document.querySelectorAll("[data-action]"))
+				.find(function(node) { return node.dataset.action === "recording-delete" && node.dataset.actionId === recording.id; });
+			window.__modalFocusRace = {
+				modalInitiallyOpen: modalInitiallyOpen,
+				triggerReplaced: replacement !== original,
+				replacement: replacement
+			};
+		})()`, recordingJSON)
+		resultExpression := `({
+			modalInitiallyOpen: window.__modalFocusRace.modalInitiallyOpen,
+			triggerReplaced: window.__modalFocusRace.triggerReplaced,
+				escapeClosed: !document.getElementById("modal").classList.contains("active"),
+				focusedReplacement: document.activeElement === window.__modalFocusRace.replacement,
+				focusedTag: document.activeElement.tagName,
+				focusedAction: document.activeElement.dataset.action || "",
+				focusedActionId: document.activeElement.dataset.actionId || ""
+			})`
+		if err := chromedp.Run(browserCtx,
+			chromedp.Evaluate(setupExpression, nil),
+			chromedp.KeyEvent(kb.Escape),
+			chromedp.Evaluate(resultExpression, &probe),
+		); err != nil {
+			t.Fatalf("probe modal focus after recording refresh: %v", err)
+		}
+		if !probe.ModalInitiallyOpen || !probe.TriggerReplaced || !probe.EscapeClosed || !probe.FocusedReplacement || probe.FocusedAction != "recording-delete" || probe.FocusedActionID != recordingID {
+			t.Fatalf("modal focus after recording refresh = %#v, want focus on equivalent replacement recording-delete action %q", probe, recordingID)
+		}
+	})
+}
+
+func TestConsoleManagementModalFallsBackToSelectedTabWhenActionDisappears(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe consoleRemovedActionFocusProbe
+		setupExpression := `(function() {
+			managementRole = "admin";
+			switchTab("storage");
+			stopActiveViewPolling();
+			renderRecordings([{id:"archive/removed.mp4",stream_key:"live/focus",state:"completed"}]);
+			var original = Array.from(document.querySelectorAll("[data-action]"))
+				.find(function(node) { return node.dataset.action === "recording-delete" && node.dataset.actionId === "archive/removed.mp4"; });
+			original.focus();
+			original.click();
+			window.__removedModalFocusRace = {
+				modalInitiallyOpen: document.getElementById("modal").classList.contains("active") &&
+					document.activeElement === document.getElementById("modal-confirm"),
+				original: original
+			};
+			renderRecordings([]);
+		})()`
+		resultExpression := `({
+			modalInitiallyOpen: window.__removedModalFocusRace.modalInitiallyOpen,
+			triggerRemoved: !window.__removedModalFocusRace.original.isConnected,
+			escapeClosed: !document.getElementById("modal").classList.contains("active"),
+			focusedId: document.activeElement.id
+		})`
+		if err := chromedp.Run(browserCtx,
+			chromedp.Evaluate(setupExpression, nil),
+			chromedp.KeyEvent(kb.Escape),
+			chromedp.Evaluate(resultExpression, &probe),
+		); err != nil {
+			t.Fatalf("probe modal fallback after recording removal: %v", err)
+		}
+		if !probe.ModalInitiallyOpen || !probe.TriggerRemoved || !probe.EscapeClosed || probe.FocusedID != "tab-storage" {
+			t.Fatalf("modal focus after recording removal = %#v, want selected Storage tab fallback", probe)
 		}
 	})
 }
