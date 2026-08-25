@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,20 +20,30 @@ import (
 
 // Module implements core.Module for RTSP.
 type Module struct {
-	server   *core.Server
-	listener net.Listener
-	handler  *Handler
-	ports    *portalloc.PortAllocator
-	sessions map[string]*RTSPSession
-	mu          sync.Mutex
-	done        chan struct{}
+	server    *core.Server
+	listener  net.Listener
+	handler   *Handler
+	ports     *portalloc.PortAllocator
+	sessions  map[string]*RTSPSession
+	conns     map[net.Conn]struct{}
+	mu        sync.Mutex
+	done      chan struct{}
+	wg        sync.WaitGroup
+	closing   bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
 }
+
+var errRTSPDrainTimeout = errors.New("rtsp: drain timeout")
 
 // NewModule creates a new RTSP module.
 func NewModule() *Module {
 	return &Module{
-		sessions: make(map[string]*RTSPSession),
-		done:     make(chan struct{}),
+		sessions:  make(map[string]*RTSPSession),
+		conns:     make(map[net.Conn]struct{}),
+		done:      make(chan struct{}),
+		closeDone: make(chan struct{}),
 	}
 }
 
@@ -63,8 +74,15 @@ func (m *Module) Init(s *core.Server) error {
 	}
 	m.listener = ln
 
-	go m.acceptLoop()
-	go m.sessionReaper()
+	m.wg.Add(2)
+	go func() {
+		defer m.wg.Done()
+		m.acceptLoop()
+	}()
+	go func() {
+		defer m.wg.Done()
+		m.sessionReaper()
+	}()
 
 	proto := "rtsp"
 	if s.Config().TLS.Configured() && (cfg.TLS == nil || *cfg.TLS) {
@@ -77,11 +95,63 @@ func (m *Module) Init(s *core.Server) error {
 func (m *Module) Hooks() []core.HookRegistration { return nil }
 
 func (m *Module) Close() error {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.close()
+		close(m.closeDone)
+	})
+	<-m.closeDone
+	return m.closeErr
+}
+
+func (m *Module) close() error {
+	// Set the admission gate before closing the listener. An Accept that won
+	// the race with listener.Close observes closing under m.mu and is rejected.
+	m.mu.Lock()
+	m.closing = true
+	listener := m.listener
+	m.mu.Unlock()
 	close(m.done)
-	if m.listener != nil {
-		return m.listener.Close()
+	var listenerErr error
+	if listener != nil {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			listenerErr = err
+		}
 	}
-	return nil
+
+	m.mu.Lock()
+	conns := make([]net.Conn, 0, len(m.conns))
+	for conn := range m.conns {
+		conns = append(conns, conn)
+	}
+	sessions := make([]*RTSPSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	for _, session := range sessions {
+		m.cleanupSession(session)
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(waitDone)
+	}()
+	timeout := 10 * time.Second
+	if m.server != nil && m.server.Config().Server.DrainTimeout > 0 {
+		timeout = m.server.Config().Server.DrainTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-waitDone:
+		return listenerErr
+	case <-timer.C:
+		return errors.Join(listenerErr, errRTSPDrainTimeout)
+	}
 }
 
 // sessionReaper periodically checks for expired sessions and cleans them up.
@@ -93,16 +163,16 @@ func (m *Module) sessionReaper() {
 		case <-ticker.C:
 			m.mu.Lock()
 			var expired []*RTSPSession
-			for id, s := range m.sessions {
+			for _, s := range m.sessions {
 				if s.IsExpired() {
 					expired = append(expired, s)
-					delete(m.sessions, id)
 				}
 			}
 			m.mu.Unlock()
 			for _, s := range expired {
-				slog.Debug("reaping expired session", "module", "rtsp", "session", s.ID, "stream", s.StreamKey)
-				s.Close()
+				snapshot := s.Snapshot()
+				slog.Debug("reaping expired session", "module", "rtsp", "session", snapshot.ID, "stream", snapshot.StreamKey)
+				m.cleanupSession(s)
 			}
 		case <-m.done:
 			return
@@ -122,48 +192,49 @@ func (m *Module) acceptLoop() {
 				continue
 			}
 		}
+		m.mu.Lock()
+		if m.closing {
+			m.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		if !m.server.AcquireConn() {
+			m.mu.Unlock()
 			slog.Warn("max connections reached", "module", "rtsp", "remote", conn.RemoteAddr())
 			conn.Close()
 			continue
 		}
+		m.conns[conn] = struct{}{}
+		m.wg.Add(1)
+		m.mu.Unlock()
 		go m.handleConn(conn)
 	}
 }
 
 func (m *Module) handleConn(conn net.Conn) {
-	defer conn.Close()
-	defer m.server.ReleaseConn()
+	defer func() {
+		_ = conn.Close()
+		m.mu.Lock()
+		delete(m.conns, conn)
+		m.mu.Unlock()
+		m.server.ReleaseConn()
+		m.wg.Done()
+	}()
 	reader := bufio.NewReader(conn)
 	var session *RTSPSession
 
 	defer func() {
 		if session != nil {
-			// Emit stop events before cleanup.
-			if session.Publisher != nil {
-				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:  session.StreamKey,
-					Protocol:   "rtsp",
-					RemoteAddr: conn.RemoteAddr().String(),
-				})
-			}
-			if session.Subscriber != nil {
-				m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
-					StreamKey:  session.StreamKey,
-					Protocol:   "rtsp",
-					RemoteAddr: conn.RemoteAddr().String(),
-				})
-			}
-			session.Close()
-			m.mu.Lock()
-			delete(m.sessions, session.ID)
-			m.mu.Unlock()
+			m.cleanupSession(session)
 		}
 	}()
 
 	for {
+		if m.isClosing() {
+			return
+		}
 		// Check if interleaved data ($ prefix) when in Recording state
-		if session != nil && session.State == StateRecording {
+		if session != nil && session.GetState() == StateRecording {
 			b, err := reader.Peek(1)
 			if err != nil {
 				return
@@ -173,22 +244,16 @@ func (m *Module) handleConn(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				// Odd channels carry RTCP — skip for now.
-				if ch%2 != 0 {
-					continue
-				}
-				if session.Publisher != nil {
-					pkt := &pionrtp.Packet{}
-					if err := pkt.Unmarshal(data); err == nil {
-						session.Publisher.FeedRTP(pkt)
-					}
-				}
+				m.processInterleaved(session, ch, data)
 				continue
 			}
 		}
 
 		req, err := ReadRequest(reader)
 		if err != nil {
+			return
+		}
+		if m.isClosing() {
 			return
 		}
 		slog.Debug("request", "module", "rtsp", "method", req.Method, "url", req.URL)
@@ -198,11 +263,21 @@ func (m *Module) handleConn(conn net.Conn) {
 			sessionID := generateSessionID()
 			streamKey := extractStreamKey(req.URL)
 			session = NewRTSPSession(sessionID, streamKey)
+			session.SetRemoteAddr(conn.RemoteAddr().String())
 			m.mu.Lock()
+			if m.closing {
+				m.mu.Unlock()
+				session.Close()
+				return
+			}
 			m.sessions[sessionID] = session
 			m.mu.Unlock()
 		}
 		if session != nil {
+			if !session.CanHandleRequest() {
+				_ = WriteResponse(conn, newResponse(454, "Session Not Found", req))
+				return
+			}
 			session.Touch()
 		}
 
@@ -229,21 +304,22 @@ func (m *Module) handleConn(conn net.Conn) {
 			resp = m.handler.HandleAnnounce(req, session, conn.RemoteAddr().String())
 		case "RECORD":
 			resp = m.handler.HandleRecord(req, session)
-			if resp.StatusCode == 200 && session != nil && session.Publisher != nil {
+			snapshot := session.Snapshot()
+			if resp.StatusCode == 200 && snapshot.Publisher != nil {
 				// Start RTCP RR loop for TCP interleaved publisher.
 				var rtcpCh uint8 = 1
-				for _, t := range session.Tracks {
+				for _, t := range snapshot.Tracks {
 					if t.Codec.IsVideo() && t.Transport.IsTCP {
 						rtcpCh = uint8(t.Transport.Interleaved[1])
 						break
 					}
 				}
-				session.Publisher.SetRTCPWriter(conn, rtcpCh)
+				snapshot.Publisher.SetRTCPWriter(conn, rtcpCh)
 
 				// Start UDP read loops for tracks using UDP transport.
-				for _, t := range session.Tracks {
+				for _, t := range snapshot.Tracks {
 					if t.UDP != nil {
-						go m.udpPublishLoop(t.UDP, session)
+						m.startWorker(func() { m.udpPublishLoop(t.UDP, session) })
 					}
 				}
 			}
@@ -252,11 +328,7 @@ func (m *Module) handleConn(conn net.Conn) {
 			if err := WriteResponse(conn, resp); err != nil {
 				return
 			}
-			session.Close()
-			m.mu.Lock()
-			delete(m.sessions, session.ID)
-			m.mu.Unlock()
-			session = nil
+			m.cleanupSession(session)
 			return
 		case "GET_PARAMETER":
 			resp = m.handler.HandleGetParameter(req)
@@ -270,9 +342,37 @@ func (m *Module) handleConn(conn net.Conn) {
 	}
 }
 
+func (m *Module) isClosing() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closing
+}
+
+func (m *Module) connectionCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.conns)
+}
+
+func (m *Module) startWorker(run func()) bool {
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return false
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.wg.Done()
+		run()
+	}()
+	return true
+}
+
 // runSubscriberLoop creates a subscriber and feeds frames from the stream to the RTSP client.
 func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
-	if session.Stream == nil || session.MediaInfo == nil {
+	snapshot := session.Snapshot()
+	if snapshot.Closed || snapshot.Stream == nil || snapshot.MediaInfo == nil {
 		return
 	}
 
@@ -280,7 +380,7 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	var videoChannel, audioChannel uint8
 	var videoUDP, audioUDP *UDPTransport
 	var videoMcast, audioMcast *MulticastTransport
-	for _, t := range session.Tracks {
+	for _, t := range snapshot.Tracks {
 		if t.Codec.IsVideo() {
 			if t.Transport.IsTCP {
 				videoChannel = uint8(t.Transport.Interleaved[0])
@@ -301,26 +401,43 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		}
 	}
 
-	sub, err := NewRTSPSubscriber(session.ID, session.MediaInfo, conn, videoChannel, audioChannel)
+	sub, err := NewRTSPSubscriber(snapshot.ID, snapshot.MediaInfo, conn, videoChannel, audioChannel)
 	if err != nil {
-		slog.Error("failed to create subscriber", "module", "rtsp", "session", session.ID, "error", err)
+		slog.Error("failed to create subscriber", "module", "rtsp", "session", snapshot.ID, "error", err)
 		return
 	}
 	sub.videoUDP = videoUDP
 	sub.audioUDP = audioUDP
 	sub.videoMulticast = videoMcast
 	sub.audioMulticast = audioMcast
-	session.Subscriber = sub
-	if err := session.Stream.AddSubscriber("rtsp"); err != nil {
-		slog.Warn("subscriber limit reached", "module", "rtsp", "session", session.ID, "error", err)
+	if err := snapshot.Stream.AddSubscriber("rtsp"); err != nil {
+		slog.Warn("subscriber limit reached", "module", "rtsp", "session", snapshot.ID, "error", err)
+		sub.Close()
+		return
+	}
+	if !session.SetSubscriber(sub) {
+		snapshot.Stream.RemoveSubscriber("rtsp")
+		sub.Close()
+		return
+	}
+	if !session.startSubscribeLifecycle(func() {
+		m.server.GetEventBus().EmitAsync(core.EventSubscribe, &core.EventContext{
+			StreamKey:    snapshot.StreamKey,
+			SubscriberID: snapshot.ID,
+			Protocol:     "rtsp",
+			RemoteAddr:   snapshot.RemoteAddr,
+		})
+	}) {
+		session.ClearSubscriber(sub)
+		snapshot.Stream.RemoveSubscriber("rtsp")
 		sub.Close()
 		return
 	}
 
 	defer func() {
 		sub.Close()
-		session.Stream.RemoveSubscriber("rtsp")
-		session.Subscriber = nil
+		snapshot.Stream.RemoveSubscriber("rtsp")
+		session.ClearSubscriber(sub)
 	}()
 
 	// Note: SPS/PPS are delivered via SDP sprop-parameter-sets.
@@ -329,7 +446,7 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 
 	// Send GOP cache for instant playback (atomic snapshot with cursor).
 	// Skip SequenceHeader frames — SPS/PPS is delivered via SDP sprop-parameter-sets.
-	gopCache, startPos := session.Stream.GOPCacheSnapshot()
+	gopCache, startPos := snapshot.Stream.GOPCacheSnapshot()
 	for _, frame := range gopCache {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -340,8 +457,8 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	}
 
 	// Start reading right after the snapshot position to avoid duplicating GOP frames.
-	ringReader := session.Stream.RingBuffer().NewReaderAt(startPos)
-	filter := core.NewSlowConsumerFilter(ringReader, session.Stream.Config().SlowConsumer, m.server.Config().RTSP.SkipTracker)
+	ringReader := snapshot.Stream.RingBuffer().NewReaderAt(startPos)
+	filter := core.NewSlowConsumerFilter(ringReader, snapshot.Stream.Config().SlowConsumer, m.server.Config().RTSP.SkipTracker)
 	for {
 		frame, ok := filter.NextFrame()
 		if !ok {
@@ -377,19 +494,68 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 		if err != nil {
 			return
 		}
-		if session.Publisher != nil {
+		session.Touch()
+		publisher := session.Snapshot().Publisher
+		if publisher != nil {
 			pkt := &pionrtp.Packet{}
 			if err := pkt.Unmarshal(buf[:n]); err == nil {
-				session.Publisher.FeedRTP(pkt)
+				publisher.FeedRTP(pkt)
 			}
 		}
 	}
 }
 
+func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []byte) {
+	if session == nil {
+		return
+	}
+	session.Touch()
+	publisher := session.Snapshot().Publisher
+	if channel%2 != 0 || publisher == nil {
+		return
+	}
+	pkt := &pionrtp.Packet{}
+	if err := pkt.Unmarshal(data); err == nil {
+		publisher.FeedRTP(pkt)
+	}
+}
+
+func (m *Module) cleanupSession(session *RTSPSession) bool {
+	if session == nil {
+		return false
+	}
+	snapshot, closed := session.closeSnapshot()
+	if !closed {
+		return false
+	}
+	m.mu.Lock()
+	if m.sessions[snapshot.ID] == session {
+		delete(m.sessions, snapshot.ID)
+	}
+	m.mu.Unlock()
+	if snapshot.Published && snapshot.Publisher != nil {
+		m.server.GetEventBus().EmitAsync(core.EventPublishStop, &core.EventContext{
+			StreamKey:   snapshot.StreamKey,
+			PublisherID: snapshot.Publisher.ID(),
+			Protocol:    "rtsp",
+			RemoteAddr:  snapshot.RemoteAddr,
+		})
+	}
+	if snapshot.Subscribed {
+		m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &core.EventContext{
+			StreamKey:    snapshot.StreamKey,
+			SubscriberID: snapshot.ID,
+			Protocol:     "rtsp",
+			RemoteAddr:   snapshot.RemoteAddr,
+		})
+	}
+	return true
+}
+
 // interleavedChannelToMediaType maps an interleaved channel to a media type
 // based on the session's track setup.
 func interleavedChannelToMediaType(session *RTSPSession, channel uint8) avframe.MediaType {
-	for _, t := range session.Tracks {
+	for _, t := range session.Snapshot().Tracks {
 		if t.Transport.IsTCP && uint8(t.Transport.Interleaved[0]) == channel {
 			if t.Codec.IsVideo() {
 				return avframe.MediaTypeVideo

@@ -320,7 +320,8 @@ func TestParseSeqNum(t *testing.T) {
 		{"seg_000042.ts", 42},
 		{"seg_001234.ts", 1234},
 		{"bad_name.ts", -1},
-		{"seg_.ts", 0},
+		{"seg_.ts", -1},
+		{"seg_42.ts", -1},
 		{"seg_abc.ts", -1},
 	}
 

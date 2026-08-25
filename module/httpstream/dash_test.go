@@ -1,18 +1,22 @@
 package httpstream
 
 import (
+	"bytes"
+	"encoding/xml"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 )
 
 func TestDASHVideoCodecString(t *testing.T) {
 	tests := []struct {
-		name   string
-		codec  avframe.CodecType
-		seq    *avframe.AVFrame
-		want   string
+		name  string
+		codec avframe.CodecType
+		seq   *avframe.AVFrame
+		want  string
 	}{
 		{"h264 with header", avframe.CodecH264, &avframe.AVFrame{Payload: []byte{0x01, 0x64, 0x00, 0x28}}, "avc1.640028"},
 		{"h264 fallback", avframe.CodecH264, nil, "avc1.640028"},
@@ -188,4 +192,190 @@ func TestDASHManagerEmptyInitSegment(t *testing.T) {
 	if ok {
 		t.Error("empty manager should not have audio init segment")
 	}
+}
+
+func TestDASHManagerSynthesizesWHIPOpusTrackConfiguration(t *testing.T) {
+	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
+	mgr := NewDASHManager("live/dash-opus", "/live/dash-opus", 1, 5)
+	mgr.InitFromStream(stream)
+
+	initData, ok := mgr.GetAudioInitSegment()
+	if !ok {
+		t.Fatal("DASH manager did not create an Opus audio init segment")
+	}
+	if !bytes.Contains(initData, []byte("Opus")) || !bytes.Contains(initData, []byte("dOps")) {
+		t.Fatal("DASH Opus init segment is missing Opus/dOps boxes")
+	}
+	mgr.mu.RLock()
+	hasAudio, audioCodec, sampleRate := mgr.hasAudio, mgr.audioCodec, mgr.audioSampleRate
+	mgr.mu.RUnlock()
+	if !hasAudio || audioCodec != "opus" || sampleRate != 48000 {
+		t.Fatalf("DASH Opus metadata = hasAudio:%v codec:%q sampleRate:%d", hasAudio, audioCodec, sampleRate)
+	}
+}
+
+func TestDASHManagerDerivesH265TrackDimensions(t *testing.T) {
+	stream := newH265MuxerWorkerStream(t)
+	mgr := NewDASHManager("live/dash-h265", "/live/dash-h265", 1, 5)
+	mgr.InitFromStream(stream)
+
+	initData, ok := mgr.GetInitSegment()
+	if !ok {
+		t.Fatal("DASH manager did not create an H.265 video init segment")
+	}
+	assertH265SampleEntryDimensions(t, initData, 640, 480)
+
+	mgr.mu.RLock()
+	width, height := mgr.videoWidth, mgr.videoHeight
+	mgr.mu.RUnlock()
+	if width != 640 || height != 480 {
+		t.Fatalf("DASH H.265 representation dimensions = %dx%d, want 640x480", width, height)
+	}
+}
+
+func TestDASHManagerH265CodecMatchesInitSegment(t *testing.T) {
+	stream := newH265MuxerWorkerStream(t)
+	mgr := NewDASHManager("live/dash-h265-codec", "/live/dash-h265-codec", 1, 5)
+	mgr.InitFromStream(stream)
+
+	initData, ok := mgr.GetInitSegment()
+	if !ok {
+		t.Fatal("DASH manager did not create an H.265 video init segment")
+	}
+	if !bytes.Contains(initData, []byte("hvc1")) || bytes.Contains(initData, []byte("hev1")) {
+		t.Fatal("DASH H.265 init segment sample entry is not hvc1")
+	}
+
+	mgr.mu.RLock()
+	codec := mgr.videoCodecStr
+	mgr.mu.RUnlock()
+	if codec != "hvc1.1.6.L90.B0" {
+		t.Fatalf("DASH H.265 codec string = %q, want %q", codec, "hvc1.1.6.L90.B0")
+	}
+	if mpd := mgr.GenerateMPD(); !strings.Contains(mpd, `codecs="hvc1.1.6.L90.B0"`) {
+		t.Fatalf("DASH MPD codec does not match the hvc1 init segment: %s", mpd)
+	}
+}
+
+func TestDASHManagerVersionsInitSegmentURLs(t *testing.T) {
+	mgr := NewDASHManager("live/versioned", "/live/versioned", 1, 5)
+	mgr.mu.Lock()
+	mgr.videoInitSeg = []byte("video configuration")
+	mgr.audioInitSeg = []byte("audio configuration")
+	mgr.videoCodecStr = "hvc1.1.6.L90.B0"
+	mgr.videoWidth = 640
+	mgr.videoHeight = 480
+	mgr.hasAudio = true
+	mgr.audioCodec = "opus"
+	mgr.audioSampleRate = 48000
+	mgr.audioSegments = []*DASHSegment{{SeqNum: 0, Duration: 1, Data: []byte("audio segment")}}
+	mgr.mu.Unlock()
+
+	mpd := mgr.GenerateMPD()
+	if !strings.Contains(mpd, `vinit.mp4?v=`) {
+		t.Fatal("DASH MPD video init URL is not versioned")
+	}
+	if !strings.Contains(mpd, `audio_init.mp4?v=`) {
+		t.Fatal("DASH MPD audio init URL is not versioned")
+	}
+}
+
+func TestDASHManagerLongGOPManifestRefreshesPromptlyAndKeepsTimeline(t *testing.T) {
+	mgr := NewDASHManager("live/long-gop", "/live/long-gop", 6, 5)
+	mgr.mu.Lock()
+	mgr.videoSegments = []*DASHSegment{
+		{SeqNum: 0, Duration: 8.3, Data: []byte("segment")},
+	}
+	mgr.mu.Unlock()
+
+	var manifest struct {
+		MinimumUpdatePeriod string `xml:"minimumUpdatePeriod,attr"`
+		Period              struct {
+			AdaptationSets []struct {
+				ContentType     string `xml:"contentType,attr"`
+				SegmentTemplate struct {
+					Timeline struct {
+						Segments []struct {
+							Duration int64 `xml:"d,attr"`
+						} `xml:"S"`
+					} `xml:"SegmentTimeline"`
+				} `xml:"SegmentTemplate"`
+			} `xml:"AdaptationSet"`
+		} `xml:"Period"`
+	}
+	if err := xml.Unmarshal([]byte(mgr.GenerateMPD()), &manifest); err != nil {
+		t.Fatalf("parse MPD: %v", err)
+	}
+	if manifest.MinimumUpdatePeriod != "PT2S" {
+		t.Fatalf("minimumUpdatePeriod = %q, want PT2S for timely long-GOP discovery", manifest.MinimumUpdatePeriod)
+	}
+	if len(manifest.Period.AdaptationSets) == 0 ||
+		len(manifest.Period.AdaptationSets[0].SegmentTemplate.Timeline.Segments) != 1 {
+		t.Fatal("video SegmentTimeline does not contain the available segment")
+	}
+	if got := manifest.Period.AdaptationSets[0].SegmentTemplate.Timeline.Segments[0].Duration; got != 8300 {
+		t.Fatalf("SegmentTimeline duration = %d, want 8300ms", got)
+	}
+}
+
+func TestDASHManagerFirstSegmentStartsAtFirstLiveKeyframeWithoutCache(t *testing.T) {
+	stream := newVideoStreamWithoutGOPCache(t)
+	mgr := NewDASHManager("live/dash-no-cache", "/live/dash-no-cache", 6, 5)
+	mgr.InitFromStream(stream)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	for _, frame := range []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 500, 500, []byte{0, 0, 0, 2, 0x41, 0x01}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 1000, 1000, []byte{0, 0, 0, 2, 0x65, 0x02}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 5000, 5000, []byte{0, 0, 0, 2, 0x41, 0x03}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 9300, 9300, []byte{0, 0, 0, 2, 0x65, 0x04}),
+	} {
+		stream.WriteFrame(frame)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	segment, ok := mgr.GetSegment(0)
+	if !ok {
+		t.Fatal("DASH first segment is missing")
+	}
+	mgr.mu.RLock()
+	duration := mgr.videoSegments[0].Duration
+	mgr.mu.RUnlock()
+	if duration != 8.3 {
+		t.Fatalf("DASH first segment duration = %.3f, want keyframe-bounded 8.3s", duration)
+	}
+	initData, ok := mgr.GetInitSegment()
+	if !ok {
+		t.Fatal("DASH video init segment is missing")
+	}
+	demuxer, err := fmp4.NewDemuxer(initData)
+	if err != nil {
+		t.Fatalf("parse DASH init segment: %v", err)
+	}
+	frames, err := demuxer.Parse(segment)
+	if err != nil {
+		t.Fatalf("parse DASH first segment: %v", err)
+	}
+	for _, frame := range frames {
+		if frame.MediaType.IsVideo() {
+			if !frame.FrameType.IsKeyframe() {
+				t.Fatal("DASH advertised a first segment that starts before the first live keyframe")
+			}
+			return
+		}
+	}
+	t.Fatal("DASH first segment contains no video frame")
 }

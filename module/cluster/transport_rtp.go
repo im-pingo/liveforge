@@ -42,9 +42,64 @@ func parsePortRange(portRange string) (*portalloc.PortAllocator, error) {
 
 // RTPTransport implements RelayTransport for direct RTP relay with SDP-over-HTTP signaling.
 type RTPTransport struct {
-	cfg   config.ClusterRTPConfig
-	ports *portalloc.PortAllocator
-	hub   *core.StreamHub
+	cfg     config.ClusterRTPConfig
+	ports   *portalloc.PortAllocator
+	hub     *core.StreamHub
+	server  *core.Server
+	metrics *RelayMetrics
+}
+
+type sequenceLossTracker struct {
+	initialized bool
+	highest     uint16
+	expected    uint64
+	received    uint64
+	recent      uint64
+}
+
+func newSequenceLossTracker() *sequenceLossTracker {
+	return &sequenceLossTracker{}
+}
+
+func (t *sequenceLossTracker) Observe(sequence uint16) {
+	if !t.initialized {
+		t.initialized = true
+		t.highest = sequence
+		t.expected = 1
+		t.received = 1
+		t.recent = 1
+		return
+	}
+
+	advance := int16(sequence - t.highest)
+	if advance > 0 {
+		t.expected += uint64(advance)
+		t.highest = sequence
+		if advance >= 64 {
+			t.recent = 1
+		} else {
+			t.recent = (t.recent << uint(advance)) | 1
+		}
+		t.received++
+		return
+	}
+
+	offset := -int(advance)
+	if offset >= 64 {
+		return
+	}
+	mask := uint64(1) << uint(offset)
+	if t.recent&mask == 0 {
+		t.recent |= mask
+		t.received++
+	}
+}
+
+func (t *sequenceLossTracker) Ratio() float64 {
+	if t.expected == 0 || t.received >= t.expected {
+		return 0
+	}
+	return float64(t.expected-t.received) / float64(t.expected)
 }
 
 // NewRTPTransport creates a new RTP relay transport.
@@ -70,9 +125,10 @@ func NewRTPTransport(cfg config.ClusterRTPConfig, s *core.Server) *RTPTransport 
 	}
 
 	t := &RTPTransport{
-		cfg:   cfg,
-		ports: ports,
-		hub:   s.StreamHub(),
+		cfg:    cfg,
+		ports:  ports,
+		hub:    s.StreamHub(),
+		server: s,
 	}
 
 	// Register signaling handlers.
@@ -108,7 +164,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	// POST SDP offer to signaling endpoint.
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s", host, t.cfg.SignalingPath, url.QueryEscape(streamKey))
-	answerBody, err := postSDP(ctx, sigURL, offerSDP)
+	answerBody, err := t.postSDP(ctx, sigURL, offerSDP)
 	if err != nil {
 		return fmt.Errorf("signaling POST to %s: %w", sigURL, err)
 	}
@@ -151,6 +207,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	slog.Info("rtp relay push connected", "module", "cluster",
 		"target", targetURL, "remote", remoteAddr, "local_port", localPort)
+	markRelayConnected(ctx)
 
 	// Build packetizers and sessions per codec.
 	var videoSession, audioSession *pkgrtp.Session
@@ -244,12 +301,14 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 			if err != nil {
 				continue
 			}
-			if _, err := udpConn.Write(raw); err != nil {
+			n, err := udpConn.Write(raw)
+			if err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
 				return fmt.Errorf("udp write: %w", err)
 			}
+			recordRelayBytes(ctx, int64(n))
 		}
 	}
 }
@@ -305,7 +364,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 
 	// POST SDP offer to signaling endpoint.
 	sigURL := fmt.Sprintf("http://%s%s/pull?stream=%s", host, t.cfg.SignalingPath, url.QueryEscape(streamKey))
-	answerBody, err := postSDP(ctx, sigURL, offerSDP)
+	answerBody, err := t.postSDP(ctx, sigURL, offerSDP)
 	if err != nil {
 		return fmt.Errorf("signaling POST to %s: %w", sigURL, err)
 	}
@@ -340,6 +399,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 
 	slog.Info("rtp relay pull listening", "module", "cluster",
 		"source", sourceURL, "local_port", localPort)
+	markRelayConnected(ctx)
 
 	pub := &originPublisher{
 		id:   fmt.Sprintf("rtp-pull-%s", stream.Key()),
@@ -348,7 +408,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -365,6 +425,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	var senderSSRC uint32
 	localSSRC := uint32(0x12345678) // arbitrary SSRC for receiver
 	var highestSeq uint32
+	lossTracker := newSequenceLossTracker()
 
 	// RTCP RR goroutine — sends Receiver Reports to remote sender.
 	go func() {
@@ -438,6 +499,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 				continue // Skip RTCP packets.
 			}
 		}
+		recordRelayBytes(ctx, int64(n))
 
 		var pkt pionrtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
@@ -447,10 +509,11 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		// Track sender SSRC and highest sequence number.
 		mu.Lock()
 		senderSSRC = pkt.SSRC
-		if uint32(pkt.SequenceNumber) > highestSeq {
-			highestSeq = uint32(pkt.SequenceNumber)
-		}
+		lossTracker.Observe(pkt.SequenceNumber)
+		highestSeq = uint32(lossTracker.highest)
+		lossRatio := lossTracker.Ratio()
 		mu.Unlock()
+		t.metrics.RecordPacketLoss(stream.Key(), "origin", lossRatio)
 
 		dp, ok := depacketizers[pkt.PayloadType]
 		if !ok {
@@ -622,7 +685,7 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 			"stream", streamKey, "error", err)
 		return
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -635,6 +698,7 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 
 	var senderAddr *net.UDPAddr
 	localSSRC := uint32(0x87654321)
+	lossTracker := newSequenceLossTracker()
 
 	buf := make([]byte, 2048)
 	for {
@@ -670,6 +734,8 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
 		}
+		lossTracker.Observe(pkt.SequenceNumber)
+		t.metrics.RecordPacketLoss(streamKey, "origin", lossTracker.Ratio())
 
 		dp, ok := depacketizers[pkt.PayloadType]
 		if !ok {
@@ -821,13 +887,16 @@ func parseRTPURL(rawURL string) (host, streamKey string, err error) {
 	return host, streamKey, nil
 }
 
-// postSDP posts SDP data to a URL and returns the response body.
-func postSDP(ctx context.Context, sigURL string, sdpData []byte) ([]byte, error) {
+// postSDP posts SDP data to a peer using the current management credential.
+func (t *RTPTransport) postSDP(ctx context.Context, sigURL string, sdpData []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sigURL, bytes.NewReader(sdpData))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/sdp")
+	if err := authorizePeerRequest(req, t.server); err != nil {
+		return nil, fmt.Errorf("authorize peer signaling: %w", err)
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -836,18 +905,15 @@ func postSDP(ctx context.Context, sigURL string, sdpData []byte) ([]byte, error)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
 	if resp.StatusCode == http.StatusNotAcceptable {
+		discardPeerSignalingResponse(resp.Body)
 		return nil, ErrCodecMismatch
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("signaling error: HTTP %d: %s", resp.StatusCode, string(body))
+		discardPeerSignalingResponse(resp.Body)
+		return nil, peerSignalingStatusError(resp.StatusCode)
 	}
-	return body, nil
+	return readPeerSignalingResponse(resp.Body)
 }
 
 // extractRemoteAddr extracts the UDP address from an SDP session description.

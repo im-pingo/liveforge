@@ -54,6 +54,51 @@ func TestTranscodeManagerCreateTrack(t *testing.T) {
 	}
 }
 
+func TestTranscodeManagerReaderAtPreservesSnapshotStart(t *testing.T) {
+	s := newTranscodeTestStream(avframe.CodecG711U)
+	tm := s.TranscodeManager()
+	start := s.RingBuffer().WriteCursor()
+	reader, release, err := tm.GetOrCreateReaderAt(avframe.CodecG711A, start)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer release()
+	if reader == nil {
+		t.Fatal("expected non-nil reader")
+	}
+
+	tm.mu.Lock()
+	track := tm.tracks[avframe.CodecG711A]
+	got := track.sourceStart
+	tm.mu.Unlock()
+	if got != start {
+		t.Fatalf("transcode source start = %d, want %d", got, start)
+	}
+}
+
+func TestTranscodeManagerAudioReaderUsesSeparateTrack(t *testing.T) {
+	s := newTranscodeTestStream(avframe.CodecG711U)
+	tm := s.TranscodeManager()
+	reader, release, err := tm.GetOrCreateAudioReaderAt(avframe.CodecG711A, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer release()
+	if reader == nil {
+		t.Fatal("expected non-nil reader")
+	}
+	tm.mu.Lock()
+	_, legacy := tm.tracks[avframe.CodecG711A]
+	_, audioOnly := tm.audioTracks[avframe.CodecG711A]
+	tm.mu.Unlock()
+	if legacy {
+		t.Fatal("audio-only reader unexpectedly created a legacy track")
+	}
+	if !audioOnly {
+		t.Fatal("audio-only reader did not create an audio track")
+	}
+}
+
 // TestTranscodeManagerSharing verifies two subscribers share one track.
 func TestTranscodeManagerSharing(t *testing.T) {
 	s := newTranscodeTestStream(avframe.CodecG711U)

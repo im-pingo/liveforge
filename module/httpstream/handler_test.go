@@ -532,30 +532,130 @@ func TestHandlerDASHManifestWithStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pre-create DASH manager and inject segments so the handler doesn't block
+	// A single completed keyframe-bounded segment is sufficient to start DASH.
 	dashMgr := m.getOrCreateDASH("live/dashtest", stream)
 	dashMgr.mu.Lock()
-	for i := range 3 {
-		dashMgr.videoSegments = append(dashMgr.videoSegments, &DASHSegment{SeqNum: i, Duration: 2.0, Data: []byte("seg")})
-	}
-	dashMgr.nextSeqNum = 3
+	dashMgr.videoSegments = append(dashMgr.videoSegments, &DASHSegment{SeqNum: 0, Duration: 8.3, Data: []byte("seg")})
+	dashMgr.nextSeqNum = 1
 	dashMgr.videoCodecStr = "avc1.640028"
 	dashMgr.mu.Unlock()
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(addr + "/live/dashtest.mpd")
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(addr + "/live/dashtest.mpd")
+		if err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		resultCh <- result{status: resp.StatusCode, body: string(body), err: readErr}
+	}()
+
+	var got result
+	releasedWithOneSegment := true
+	select {
+	case got = <-resultCh:
+	case <-time.After(300 * time.Millisecond):
+		releasedWithOneSegment = false
+		// Unblock the old three-segment behavior so the regression fails fast.
+		dashMgr.mu.Lock()
+		dashMgr.videoSegments = append(dashMgr.videoSegments,
+			&DASHSegment{SeqNum: 1, Duration: 8.3, Data: []byte("seg")},
+			&DASHSegment{SeqNum: 2, Duration: 8.3, Data: []byte("seg")},
+		)
+		dashMgr.nextSeqNum = 3
+		dashMgr.mu.Unlock()
+		got = <-resultCh
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if !releasedWithOneSegment {
+		t.Fatal("DASH manifest waited for more than the first completed segment")
+	}
+	if got.status != http.StatusOK || !strings.Contains(got.body, "MPD") {
+		t.Fatalf("manifest response = status %d body %q", got.status, got.body)
+	}
+}
+
+func TestHandlerLLHLSInitialPlaylistWaitsForCompletedSegment(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	srv.Config().HTTP.LLHLS.Enabled = true
+	srv.Config().HTTP.LLHLS.Container = "fmp4"
+
+	stream, err := srv.StreamHub().GetOrCreate("live/llhls-part")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewLLHLSManager("live/llhls-part", "/live/llhls-part", 0.2, 5, "fmp4")
+	m.llhlsMu.Lock()
+	m.llhlsManagers["live/llhls-part"] = mgr
+	m.llhlsMu.Unlock()
 
-	// DASH manifest should be available (may be empty but 200)
-	if resp.StatusCode == http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		content := string(body)
-		if !strings.Contains(content, "MPD") {
-			t.Error("manifest should contain MPD")
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(addr + "/live/llhls-part.m3u8")
+		if err != nil {
+			resultCh <- result{err: err}
+			return
 		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		resultCh <- result{status: resp.StatusCode, body: string(body), err: readErr}
+	}()
+
+	select {
+	case got := <-resultCh:
+		t.Fatalf("empty initial playlist returned immediately: status %d body %q error %v", got.status, got.body, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	part := &LLHLSPart{
+		Index:       0,
+		Duration:    0.2,
+		Independent: true,
+		Data:        []byte("part"),
+	}
+	mgr.segmenter.callbacks.OnPart(part)
+
+	select {
+	case got := <-resultCh:
+		t.Fatalf("part-only initial playlist returned to Hls.js: status %d body %q error %v", got.status, got.body, got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	mgr.segmenter.callbacks.OnSegment(&LLHLSSegment{
+		MSN: 0, Duration: 8.3, Parts: []*LLHLSPart{part},
+	})
+
+	var got result
+	select {
+	case got = <-resultCh:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("initial LL-HLS playlist waited for more than one completed segment")
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.status != http.StatusOK || !strings.Contains(got.body, "#EXTINF:") {
+		t.Fatalf("playlist response = status %d body %q", got.status, got.body)
+	}
+	if strings.Contains(got.body, "/live/llhls-part/0.0.m4s") {
+		t.Fatalf("initial playlist advertised completed segment parts alongside the full segment: %q", got.body)
 	}
 }
 
@@ -677,6 +777,9 @@ func TestHandlerDASHInitAndSegmentServing(t *testing.T) {
 	if string(body) != "video-init" {
 		t.Errorf("vinit: got %q", body)
 	}
+	if cacheControl := resp.Header.Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Errorf("vinit: Cache-Control = %q, want no-store", cacheControl)
+	}
 
 	// Audio init segment
 	resp, err = client.Get(addr + "/live/dashseg/audio_init.mp4")
@@ -690,6 +793,9 @@ func TestHandlerDASHInitAndSegmentServing(t *testing.T) {
 	}
 	if string(body) != "audio-init" {
 		t.Errorf("audio_init: got %q", body)
+	}
+	if cacheControl := resp.Header.Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Errorf("audio_init: Cache-Control = %q, want no-store", cacheControl)
 	}
 
 	// Video segment (1-based in URL, 0-based internal)
@@ -732,6 +838,35 @@ func TestHandlerDASHInitAndSegmentServing(t *testing.T) {
 	}
 	if string(body) != "video-init" {
 		t.Errorf("init.mp4: got %q", body)
+	}
+	if cacheControl := resp.Header.Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Errorf("init.mp4: Cache-Control = %q, want no-store", cacheControl)
+	}
+}
+
+func TestHandlerLLHLSInitIsNotCachedAcrossPublishers(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	srv.Config().HTTP.LLHLS.Enabled = true
+	srv.Config().HTTP.LLHLS.Container = "fmp4"
+
+	mgr := NewLLHLSManager("live/llhls-init", "/live/llhls-init", 0.2, 5, "fmp4")
+	mgr.mu.Lock()
+	mgr.initSegment = []byte("llhls-init")
+	mgr.mu.Unlock()
+	m.llhlsMu.Lock()
+	m.llhlsManagers["live/llhls-init"] = mgr
+	m.llhlsMu.Unlock()
+
+	resp, err := http.Get(addr + "/live/llhls-init/init.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if cacheControl := resp.Header.Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("Cache-Control = %q, want no-store", cacheControl)
 	}
 }
 
@@ -808,6 +943,6 @@ type mediaPublisher struct {
 	info *avframe.MediaInfo
 }
 
-func (p *mediaPublisher) ID() string                   { return "test-media-pub" }
+func (p *mediaPublisher) ID() string                    { return "test-media-pub" }
 func (p *mediaPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *mediaPublisher) Close() error                  { return nil }

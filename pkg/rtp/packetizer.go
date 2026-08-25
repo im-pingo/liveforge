@@ -20,6 +20,25 @@ type Depacketizer interface {
 	Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, error)
 }
 
+// MultiFrameDepacketizer is implemented by codecs where one RTP packet can
+// contain codec configuration and media that must be emitted separately.
+type MultiFrameDepacketizer interface {
+	DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AVFrame, error)
+}
+
+// DepacketizeFrames returns every frame represented by a packet while keeping
+// single-frame depacketizers compatible with the original interface.
+func DepacketizeFrames(depacketizer Depacketizer, pkt *pionrtp.Packet) ([]*avframe.AVFrame, error) {
+	if multi, ok := depacketizer.(MultiFrameDepacketizer); ok {
+		return multi.DepacketizeFrames(pkt)
+	}
+	frame, err := depacketizer.Depacketize(pkt)
+	if err != nil || frame == nil {
+		return nil, err
+	}
+	return []*avframe.AVFrame{frame}, nil
+}
+
 // NewPacketizer creates a Packetizer for the given codec.
 func NewPacketizer(codec avframe.CodecType) (Packetizer, error) {
 	switch codec {
@@ -87,4 +106,3 @@ func NewDepacketizer(codec avframe.CodecType) (Depacketizer, error) {
 		return nil, fmt.Errorf("unsupported codec for depacketizer: %v", codec)
 	}
 }
-

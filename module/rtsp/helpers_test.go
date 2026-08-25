@@ -31,8 +31,8 @@ func TestToNTP(t *testing.T) {
 
 func TestPionPayloaderForCodec(t *testing.T) {
 	tests := []struct {
-		codec    avframe.CodecType
-		wantNil  bool
+		codec   avframe.CodecType
+		wantNil bool
 	}{
 		{avframe.CodecH264, false},
 		{avframe.CodecVP8, false},
@@ -229,6 +229,7 @@ func TestHandleSetupNoPortManager(t *testing.T) {
 	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")
 	session.Transition(StateDescribed)
+	session.MediaInfo = &avframe.MediaInfo{VideoCodec: avframe.CodecH264}
 	req := &Request{Method: "SETUP", URL: "rtsp://host/live/test/trackID=0", Headers: make(map[string][]string)}
 	req.Headers.Set("CSeq", "3")
 	req.Headers.Set("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")

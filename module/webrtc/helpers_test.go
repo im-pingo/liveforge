@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,24 @@ import (
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
+
+type authorizationTestPublisher struct {
+	id   string
+	info *avframe.MediaInfo
+}
+
+func (p *authorizationTestPublisher) ID() string                    { return p.id }
+func (p *authorizationTestPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
+func (p *authorizationTestPublisher) Close() error                  { return nil }
+
+func sessionCount(m *Module) int {
+	count := 0
+	m.sessions.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
+}
 
 func TestModuleHooks(t *testing.T) {
 	m := NewModule()
@@ -179,6 +198,94 @@ func TestWHIPMissingStreamKey(t *testing.T) {
 	}
 }
 
+func TestWHIPRejectsAuthorizationBeforeMutationAndMapsBearer(t *testing.T) {
+	m, s := newTestModule(t)
+
+	var authorized *core.EventContext
+	s.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventPublish,
+		Mode:  core.HookSync,
+		Handler: func(ctx *core.EventContext) error {
+			authorized = ctx
+			return errors.New("rejected")
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whip/live/rejected", strings.NewReader("not read"))
+	req.Header.Set("Content-Type", "application/sdp")
+	req.Header.Set("Authorization", "Bearer publish-token")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	if got := rr.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Fatalf("WWW-Authenticate = %q, want Bearer", got)
+	}
+	if authorized == nil || authorized.Params["token"] != "publish-token" {
+		t.Fatalf("authorization context = %#v, want bearer token", authorized)
+	}
+	if _, ok := s.StreamHub().Find("live/rejected"); ok {
+		t.Fatal("authorization rejection created a stream")
+	}
+	if got := sessionCount(m); got != 0 {
+		t.Fatalf("stored sessions = %d, want 0", got)
+	}
+	if got := s.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d, want 0", got)
+	}
+}
+
+func TestWHEPRejectsAuthorizationBeforeSubscriberMutationAndMapsQuery(t *testing.T) {
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id:   "source",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var authorized *core.EventContext
+	s.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventSubscribe,
+		Mode:  core.HookSync,
+		Handler: func(ctx *core.EventContext) error {
+			authorized = ctx
+			return errors.New("rejected")
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/rejected?token=query-token", strings.NewReader("not read"))
+	req.Header.Set("Content-Type", "application/sdp")
+	req.Header.Set("Authorization", "Bearer bearer-token")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	if got := rr.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Fatalf("WWW-Authenticate = %q, want Bearer", got)
+	}
+	if authorized == nil || authorized.Params["token"] != "query-token" {
+		t.Fatalf("authorization context = %#v, want query token precedence", authorized)
+	}
+	if got := stream.Subscribers()["webrtc"]; got != 0 {
+		t.Fatalf("webrtc subscribers = %d, want 0", got)
+	}
+	if got := sessionCount(m); got != 0 {
+		t.Fatalf("stored sessions = %d, want 0", got)
+	}
+	if got := s.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d, want 0", got)
+	}
+}
+
 func TestWHEPBadContentType(t *testing.T) {
 	m, _ := newTestModule(t)
 
@@ -202,6 +309,49 @@ func TestWHIPBadSDP(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for bad SDP, got %d", rr.Code)
+	}
+}
+
+func TestWHIPAndWHEPSDPOfferBodyLimit(t *testing.T) {
+	const limit = 1 << 20
+	tests := []struct {
+		name       string
+		path       string
+		size       int
+		wantStatus int
+		streamKey  string
+	}{
+		{name: "whip-exact-limit", path: "/webrtc/whip/live/exact", size: limit, wantStatus: http.StatusBadRequest, streamKey: "live/exact"},
+		{name: "whip-over-limit", path: "/webrtc/whip/live/oversized", size: limit + 1, wantStatus: http.StatusRequestEntityTooLarge, streamKey: "live/oversized"},
+		{name: "whep-exact-limit", path: "/webrtc/whep/live/missing-exact", size: limit, wantStatus: http.StatusNotFound},
+		{name: "whep-over-limit", path: "/webrtc/whep/live/missing-oversized", size: limit + 1, wantStatus: http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, server := newTestModule(t)
+			body := bytes.Repeat([]byte("x"), tt.size)
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/sdp")
+			rr := httptest.NewRecorder()
+			m.httpSrv.Handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if got := server.ConnectionCount(); got != 0 {
+				t.Fatalf("connection count = %d, want 0", got)
+			}
+			if got := sessionCount(m); got != 0 {
+				t.Fatalf("stored sessions = %d, want 0", got)
+			}
+			if strings.Contains(tt.name, "over-limit") {
+				if tt.streamKey != "" {
+					if _, ok := server.StreamHub().Find(tt.streamKey); ok {
+						t.Fatal("oversized offer created stream state")
+					}
+				}
+			}
+		})
 	}
 }
 

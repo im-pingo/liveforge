@@ -1,10 +1,67 @@
 package cluster
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+const maxPeerSignalingResponseBytes int64 = 64 << 10
+
+var (
+	errPeerAdminCredentialUnavailable = errors.New("management authentication is configured but no admin credential is available")
+	errPeerSignalingResponseTooLarge  = errors.New("peer signaling response too large")
+)
+
+func authorizePeerRequest(req *http.Request, server *core.Server) error {
+	if server == nil {
+		return nil
+	}
+	auth := server.Config().API.Auth
+	if auth.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
+		return nil
+	}
+	if len(auth.Tokens) == 0 {
+		return nil
+	}
+	for _, token := range auth.Tokens {
+		if strings.EqualFold(strings.TrimSpace(token.Role), "admin") && token.Token != "" {
+			req.Header.Set("Authorization", "Bearer "+token.Token)
+			return nil
+		}
+	}
+	return errPeerAdminCredentialUnavailable
+}
+
+func readPeerSignalingResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxPeerSignalingResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read peer signaling response: %w", err)
+	}
+	if int64(len(data)) > maxPeerSignalingResponseBytes {
+		return nil, errPeerSignalingResponseTooLarge
+	}
+	return data, nil
+}
+
+func discardPeerSignalingResponse(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxPeerSignalingResponseBytes+1))
+}
+
+func peerSignalingStatusError(statusCode int) error {
+	if statusText := http.StatusText(statusCode); statusText != "" {
+		return fmt.Errorf("peer signaling rejected: HTTP %d %s", statusCode, statusText)
+	}
+	return fmt.Errorf("peer signaling rejected: HTTP %d", statusCode)
+}
 
 // Module implements core.Module for cluster forwarding and origin pull.
 type Module struct {
@@ -13,6 +70,8 @@ type Module struct {
 	health    *HealthTracker
 	relayPool *RelayPool
 	registry  *TransportRegistry
+	metrics   *RelayMetrics
+	close     sync.Once
 }
 
 // NewModule creates a new cluster module.
@@ -33,7 +92,10 @@ func (m *Module) Init(s *core.Server) error {
 	m.registry.Register(NewRTMPTransport())
 	m.registry.Register(NewSRTTransport(cfg.SRT))
 	m.registry.Register(NewRTSPTransport(cfg.RTSP))
-	m.registry.Register(NewRTPTransport(cfg.RTP, s))
+	m.metrics = newRelayMetrics()
+	rtpTransport := NewRTPTransport(cfg.RTP, s)
+	rtpTransport.metrics = m.metrics
+	m.registry.Register(rtpTransport)
 	m.registry.Register(NewGBTransport(cfg.GB28181, s))
 
 	if cfg.HealthCheck.Enabled {
@@ -64,6 +126,7 @@ func (m *Module) Init(s *core.Server) error {
 			m.relayPool,
 			cfg.Forward.RetryMax,
 			cfg.Forward.RetryInterval,
+			m.metrics,
 		)
 		slog.Info("cluster forward enabled", "module", "cluster",
 			"static_targets", len(cfg.Forward.Targets),
@@ -86,6 +149,7 @@ func (m *Module) Init(s *core.Server) error {
 			cfg.Origin.RetryMax,
 			cfg.Origin.RetryDelay,
 			cfg.Origin.IdleTimeout,
+			m.metrics,
 		)
 		slog.Info("cluster origin pull enabled", "module", "cluster",
 			"static_servers", len(cfg.Origin.Servers),
@@ -107,21 +171,53 @@ func (m *Module) Hooks() []core.HookRegistration {
 	return hooks
 }
 
-// Close shuts down both forward and origin managers.
-func (m *Module) Close() error {
+// OnReload updates scheduling, retry, idle, and health policies for new relay
+// attempts. Transport settings, port ranges, pool capacity, and module
+// enablement remain restart-required. Peer management credentials are resolved
+// from the server config for each signaling request and rotate independently.
+func (m *Module) OnReload(s *core.Server) error {
+	cfg := s.Config().Cluster
+	if m.health != nil {
+		m.health.UpdateConfig(cfg.HealthCheck)
+	}
 	if m.forward != nil {
-		m.forward.Close()
+		m.forward.UpdatePolicy(cfg.Forward, m.health)
 	}
 	if m.origin != nil {
-		m.origin.Close()
-	}
-	if m.health != nil {
-		m.health.Close()
-	}
-	if m.registry != nil {
-		m.registry.Close()
+		m.origin.UpdatePolicy(cfg.Origin, m.health)
 	}
 	return nil
+}
+
+// Close shuts down both forward and origin managers.
+func (m *Module) Close() error {
+	m.close.Do(func() {
+		if m.forward != nil {
+			m.forward.Close()
+		}
+		if m.origin != nil {
+			m.origin.Close()
+		}
+		if m.health != nil {
+			m.health.Close()
+		}
+		if m.registry != nil {
+			m.registry.Close()
+		}
+	})
+	return nil
+}
+
+// RelayMetrics returns the module's relay collector, if initialized.
+func (m *Module) RelayMetrics() *RelayMetrics { return m.metrics }
+
+// PrometheusCollectors exposes cluster collectors to the metrics module
+// without registering them globally.
+func (m *Module) PrometheusCollectors() []prometheus.Collector {
+	if m.metrics == nil {
+		return nil
+	}
+	return []prometheus.Collector{m.metrics}
 }
 
 // ForwardManager returns the forward manager, if enabled.

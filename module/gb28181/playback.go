@@ -9,26 +9,31 @@ import (
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
-	"github.com/im-pingo/liveforge/pkg/avframe"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // playbackClient handles video recording playback sessions.
 type playbackClient struct {
 	sipService sipmod.SIPService
 	handler    *handler
+	sendInvite inviteSender
 }
 
 // playback starts a recording playback session from a device.
-func (pc *playbackClient) playback(ctx context.Context, device *Device, channelID string, startTime, endTime time.Time) (*MediaSession, error) {
+func (pc *playbackClient) playback(ctx context.Context, device *Device, channelID string, startTime, endTime time.Time, params map[string]string) (*MediaSession, error) {
+	streamKey := fmt.Sprintf("%s/%s/playback", pc.handler.prefix, channelID)
+	publishCtx := outboundPublishContext(device, streamKey, params)
+	if err := authorizePublish(pc.handler.bus, publishCtx); err != nil {
+		return nil, err
+	}
+
 	rtpPort, _, err := pc.handler.ports.AllocatePair()
 	if err != nil {
 		return nil, fmt.Errorf("allocate port pair: %w", err)
 	}
 
 	localIP := getLocalIP()
-	streamKey := fmt.Sprintf("%s/%s/playback", pc.handler.prefix, channelID)
-
 	// Build SDP offer with time range for playback
 	sdpOffer := fmt.Sprintf(
 		"v=0\r\no=- 0 0 IN IP4 %s\r\ns=Playback\r\nu=%s:0\r\nc=IN IP4 %s\r\nt=%d %d\r\nm=video %d RTP/AVP 96\r\na=recvonly\r\na=rtpmap:96 PS/90000\r\n",
@@ -55,14 +60,27 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	req.AppendHeader(sip.NewHeader("Subject", fmt.Sprintf("%s:0,%s:0", channelID, serverID)))
 	req.SetBody([]byte(sdpOffer))
 
-	// Create stream and publisher
-	stream, _ := pc.handler.hub.GetOrCreate(streamKey)
+	_, streamExisted := pc.handler.hub.Find(streamKey)
+	stream, err := pc.handler.hub.GetOrCreate(streamKey)
+	if err != nil {
+		pc.handler.ports.Free(rtpPort, rtpPort+1)
+		return nil, fmt.Errorf("create playback stream: %w", err)
+	}
 	pub := NewPublisher(
-		fmt.Sprintf("gb28181-playback-%s", channelID),
+		newPublisherID("playback", channelID),
 		func(frame *avframe.AVFrame) {
 			stream.WriteFrame(frame)
 		},
 	)
+	receiver, err := newRTPReceiver(rtpPort, pub)
+	if err != nil {
+		_ = pub.Close()
+		pc.handler.ports.Free(rtpPort, rtpPort+1)
+		if !streamExisted {
+			pc.handler.hub.Remove(streamKey)
+		}
+		return nil, fmt.Errorf("create playback RTP receiver: %w", err)
+	}
 
 	session := &MediaSession{
 		DeviceID:  device.DeviceID,
@@ -73,39 +91,41 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		Transport: device.Transport,
 		State:     SessionStateInviting,
 		Publisher: pub,
+		Receiver:  receiver,
 		Stream:    stream,
+		Playback:  true,
 	}
 
 	// Send INVITE
-	invTx, err := pc.sipService.SendInvite(ctx, req)
+	invTx, err := sendInvite(ctx, pc.sipService, pc.sendInvite, req)
 	if err != nil {
-		pc.handler.ports.Free(rtpPort, rtpPort+1)
+		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send playback INVITE: %w", err)
 	}
+	defer invTx.Close()
 
 	select {
 	case <-invTx.Done():
 	case <-time.After(10 * time.Second):
-		pc.handler.ports.Free(rtpPort, rtpPort+1)
-		invTx.Close()
+		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("playback INVITE timeout")
 	}
 
 	resp := invTx.Response()
 	if resp == nil {
-		pc.handler.ports.Free(rtpPort, rtpPort+1)
-		invTx.Close()
+		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("playback INVITE: no response")
 	}
 
 	if resp.StatusCode != 200 {
-		pc.handler.ports.Free(rtpPort, rtpPort+1)
-		invTx.Close()
+		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("playback INVITE rejected: %d %s", resp.StatusCode, resp.Reason)
 	}
 
 	if err := invTx.SendACK(ctx); err != nil {
-		slog.Warn("failed to send ACK for playback", "module", "gb28181", "error", err)
+		pc.handler.rollbackSession(session, !streamExisted)
+		terminateAcceptedDialog(invTx)
+		return nil, fmt.Errorf("send playback ACK: %w", err)
 	}
 
 	// Parse remote info from SDP answer
@@ -119,27 +139,23 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		session.ID = callID.Value()
 	}
 
+	if err := stream.SetPublisher(pub); err != nil {
+		terminateAcceptedDialog(invTx)
+		pc.handler.rollbackSession(session, !streamExisted)
+		return nil, fmt.Errorf("set playback publisher: %w", err)
+	}
 	session.SetState(SessionStateStreaming)
 	pc.handler.sessions.Add(session)
-
-	// Start RTP receiver
-	receiver, err := NewRTPReceiver(rtpPort, pub)
-	if err != nil {
-		pc.handler.ports.Free(rtpPort, rtpPort+1)
-		return nil, fmt.Errorf("create playback RTP receiver: %w", err)
-	}
 	go receiver.Run()
 
-	// Emit publish event
-	pc.handler.bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "gb28181",
-		RemoteAddr: device.RemoteAddr,
-		Extra: map[string]any{
-			"gb28181_device_id":  device.DeviceID,
-			"gb28181_channel_id": channelID,
-			"gb28181_playback":   true,
-		},
+	publishCtx.PublisherID = pub.ID()
+	publishCtx.Extra = map[string]any{
+		"gb28181_device_id":  device.DeviceID,
+		"gb28181_channel_id": channelID,
+		"gb28181_playback":   true,
+	}
+	session.startPublishLifecycle(func() {
+		pc.handler.bus.EmitAsync(core.EventPublish, publishCtx)
 	})
 
 	slog.Info("playback started", "module", "gb28181",

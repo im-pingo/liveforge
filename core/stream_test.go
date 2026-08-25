@@ -54,6 +54,25 @@ func TestStreamStateTransitions(t *testing.T) {
 	}
 }
 
+func TestRemovePublisherIfKeepsReplacement(t *testing.T) {
+	s := NewStream("live/reorder", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	oldPublisher := &testPublisher{id: "old"}
+	if err := s.SetPublisher(oldPublisher); err != nil {
+		t.Fatal(err)
+	}
+	s.RemovePublisher()
+	newPublisher := &testPublisher{id: "new"}
+	if err := s.SetPublisher(newPublisher); err != nil {
+		t.Fatal(err)
+	}
+	if s.RemovePublisherIf(oldPublisher) {
+		t.Fatal("stale publisher removed the replacement")
+	}
+	if s.Publisher() != newPublisher {
+		t.Fatal("replacement publisher was detached")
+	}
+}
+
 func TestStreamRejectDuplicatePublisher(t *testing.T) {
 	bus := NewEventBus()
 	s := NewStream("live/test", newTestStreamConfig(), config.LimitsConfig{}, bus)
@@ -173,6 +192,25 @@ func TestStreamMultiGOPCache(t *testing.T) {
 	}
 	if s.GOPCacheLen() != 9 {
 		t.Errorf("expected GOPCacheLen=9, got %d", s.GOPCacheLen())
+	}
+}
+
+func TestStreamGOPCacheSourceStartTracksOldestCachedGOP(t *testing.T) {
+	s := NewStream("live/gop-source-start", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	if err := s.SetPublisher(&testPublisher{id: "pub", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}); err != nil {
+		t.Fatal(err)
+	}
+	s.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01},
+	))
+	firstKeyframePos := s.RingBuffer().WriteCursor()
+	s.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65},
+	))
+	if got := s.GOPCacheSourceStart(); got != firstKeyframePos {
+		t.Fatalf("GOP source start = %d, want %d", got, firstKeyframePos)
 	}
 }
 

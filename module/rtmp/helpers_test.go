@@ -3,6 +3,7 @@ package rtmp
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,12 +285,19 @@ func TestParseAudioPayload(t *testing.T) {
 }
 
 func TestPublisherIDAndMediaInfo(t *testing.T) {
-	conn, _ := net.Pipe()
+	conn, peer := net.Pipe()
 	defer conn.Close()
+	defer peer.Close()
 
 	pub := NewPublisher("live/test", conn)
-	if pub.ID() != "rtmp-pub-live/test" {
+	if !strings.HasPrefix(pub.ID(), "rtmp-pub-live/test-") {
 		t.Errorf("ID = %q", pub.ID())
+	}
+	otherConn, otherPeer := net.Pipe()
+	defer otherConn.Close()
+	defer otherPeer.Close()
+	if other := NewPublisher("live/test", otherConn); other.ID() == pub.ID() {
+		t.Fatalf("publisher IDs reused across connections: %q", pub.ID())
 	}
 	if pub.MediaInfo() == nil {
 		t.Error("expected non-nil MediaInfo")
@@ -322,7 +330,7 @@ func TestSubscriberIDAndOptions(t *testing.T) {
 	cw := NewChunkWriter(conn, DefaultChunkSize)
 	sub := NewSubscriber("live/test", conn, cw, stream, nil)
 
-	if sub.ID() != "rtmp-sub-live/test" {
+	if !strings.HasPrefix(sub.ID(), "rtmp-sub-live/test-") {
 		t.Errorf("ID = %q", sub.ID())
 	}
 	if sub.Options().StartMode != core.StartModeGOP {

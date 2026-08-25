@@ -2,14 +2,85 @@ package dvr
 
 import (
 	"net/http"
+	"net/url"
 	"path"
+	"strconv"
 	"strings"
+
+	"github.com/im-pingo/liveforge/core"
 )
+
+// dvrMediaCORS permits browser consoles on a separate management port to
+// fetch HLS playlists and segments. Authentication remains enforced by the
+// synchronous subscribe hook for every media request; this does not enable
+// credentialed cross-origin cookies.
+func dvrMediaCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Range")
+		w.Header().Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func strictDVRMediaRoutes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath := r.URL.Path
+		if requestPath != "/dvr" && !strings.HasPrefix(requestPath, "/dvr/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		remainder := strings.TrimPrefix(requestPath, "/dvr/")
+		app, resource, hasResource := strings.Cut(remainder, "/")
+		if requestPath == "/dvr" || path.Clean(requestPath) != requestPath || !hasResource || app == "" || resource == "" {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (m *Module) handleMedia(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("app")
+	resource := r.PathValue("resource")
+	if !validMediaPathPart(app) {
+		http.NotFound(w, r)
+		return
+	}
+
+	if key, ok := strings.CutSuffix(resource, ".m3u8"); ok && validMediaPathPart(key) {
+		r.SetPathValue("key", key)
+		m.handlePlaylist(w, r)
+		return
+	}
+
+	key, filename, ok := strings.Cut(resource, "/")
+	if !ok || !validMediaPathPart(key) || strings.Contains(filename, "/") || parseSeqNum(filename) < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	r.SetPathValue("key", key)
+	r.SetPathValue("filename", filename)
+	m.handleSegment(w, r)
+}
+
+func validMediaPathPart(value string) bool {
+	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, "/\\")
+}
 
 func (m *Module) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("app")
 	key := r.PathValue("key")
 	streamKey := app + "/" + key
+	if !m.authorizePlayback(w, r, streamKey) {
+		return
+	}
 
 	m.mu.Lock()
 	session := m.sessions[streamKey]
@@ -20,7 +91,11 @@ func (m *Module) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	playlist := GeneratePlaylist(session.Index(), streamKey, session.IsLive())
+	query := url.Values{}
+	if token := r.URL.Query().Get("token"); token != "" {
+		query.Set("token", token)
+	}
+	playlist := GeneratePlaylistWithQuery(session.Index(), streamKey, session.IsLive(), query.Encode())
 	if playlist == "" {
 		http.NotFound(w, r)
 		return
@@ -36,6 +111,9 @@ func (m *Module) handleSegment(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	filename := r.PathValue("filename")
 	streamKey := app + "/" + key
+	if !m.authorizePlayback(w, r, streamKey) {
+		return
+	}
 
 	m.mu.Lock()
 	session := m.sessions[streamKey]
@@ -57,24 +135,64 @@ func (m *Module) handleSegment(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	file, info, err := session.openIndexedSegment(seg)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
 
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	http.ServeFile(w, r, seg.DiskPath)
+	http.ServeContent(w, r, seg.Filename, info.ModTime(), file)
+}
+
+func (m *Module) authorizePlayback(w http.ResponseWriter, r *http.Request, streamKey string) bool {
+	params := make(map[string]string, len(r.URL.Query()))
+	for key, values := range r.URL.Query() {
+		if len(values) > 0 {
+			params[key] = values[0]
+		}
+	}
+	if params["token"] == "" {
+		if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, "Bearer ") {
+			params["token"] = strings.TrimPrefix(authorization, "Bearer ")
+		}
+	}
+	err := m.server.GetEventBus().EmitSync(core.EventSubscribe, &core.EventContext{
+		StreamKey:  streamKey,
+		Protocol:   "dvr",
+		RemoteAddr: r.RemoteAddr,
+		Params:     params,
+	})
+	if err == nil {
+		return true
+	}
+	if params["token"] == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	http.Error(w, "forbidden", http.StatusForbidden)
+	return false
 }
 
 func parseSeqNum(filename string) int {
 	// Expected format: seg_000042.ts
-	name := strings.TrimSuffix(filename, ".ts")
-	if !strings.HasPrefix(name, "seg_") {
+	if !strings.HasPrefix(filename, "seg_") || !strings.HasSuffix(filename, ".ts") {
 		return -1
 	}
-	numStr := name[4:]
-	n := 0
+	numStr := filename[4 : len(filename)-3]
+	if len(numStr) < 6 || (len(numStr) > 6 && numStr[0] == '0') {
+		return -1
+	}
 	for _, c := range numStr {
 		if c < '0' || c > '9' {
 			return -1
 		}
-		n = n*10 + int(c-'0')
+	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return -1
 	}
 	return n
 }

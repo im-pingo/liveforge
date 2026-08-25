@@ -33,6 +33,8 @@ func (t *RTMPTransport) Push(ctx context.Context, targetURL string, stream *core
 		return err
 	}
 	defer rc.conn.Close()
+	stopCancelWatch := closeOnContextDone(ctx, rc.conn)
+	defer stopCancelWatch()
 
 	if err := rc.setChunkSize(defaultChunkSize); err != nil {
 		return fmt.Errorf("set chunk size: %w", err)
@@ -62,16 +64,19 @@ func (t *RTMPTransport) Push(ctx context.Context, targetURL string, stream *core
 	}
 
 	slog.Info("rtmp relay push connected", "module", "cluster", "target", targetURL)
+	markRelayConnected(ctx)
 
 	if vsh := stream.VideoSeqHeader(); vsh != nil {
 		if err := rc.sendMediaFrame(vsh); err != nil {
 			return fmt.Errorf("video seq header: %w", err)
 		}
+		recordRelayBytes(ctx, int64(len(vsh.Payload)))
 	}
 	if ash := stream.AudioSeqHeader(); ash != nil {
 		if err := rc.sendMediaFrame(ash); err != nil {
 			return fmt.Errorf("audio seq header: %w", err)
 		}
+		recordRelayBytes(ctx, int64(len(ash.Payload)))
 	}
 
 	reader := stream.RingBuffer().NewReader()
@@ -98,6 +103,7 @@ func (t *RTMPTransport) Push(ctx context.Context, targetURL string, stream *core
 		if err := rc.sendMediaFrame(frame); err != nil {
 			return fmt.Errorf("send frame: %w", err)
 		}
+		recordRelayBytes(ctx, int64(len(frame.Payload)))
 	}
 }
 
@@ -112,6 +118,8 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 		return err
 	}
 	defer rc.conn.Close()
+	stopCancelWatch := closeOnContextDone(ctx, rc.conn)
+	defer stopCancelWatch()
 
 	if err := rc.sendConnect(app); err != nil {
 		return fmt.Errorf("connect: %w", err)
@@ -137,6 +145,7 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 	}
 
 	slog.Info("rtmp relay pull connected", "module", "cluster", "source", sourceURL)
+	markRelayConnected(ctx)
 
 	pub := &originPublisher{
 		id:   fmt.Sprintf("rtmp-pull-%s", stream.Key()),
@@ -145,7 +154,7 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	for {
 		select {
@@ -166,6 +175,7 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 				rc.cr.SetChunkSize(size)
 			}
 		case rtmp.MsgVideo:
+			recordRelayBytes(ctx, int64(len(msg.Payload)))
 			frame := parseVideoPayload(msg.Payload, int64(msg.Timestamp))
 			if frame != nil {
 				if pub.info.VideoCodec == 0 {
@@ -174,6 +184,7 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 				stream.WriteFrame(frame)
 			}
 		case rtmp.MsgAudio:
+			recordRelayBytes(ctx, int64(len(msg.Payload)))
 			frame := parseAudioPayload(msg.Payload, int64(msg.Timestamp))
 			if frame != nil {
 				if pub.info.AudioCodec == 0 {

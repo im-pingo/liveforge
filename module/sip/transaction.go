@@ -11,13 +11,15 @@ import (
 // InviteTransaction wraps a SIP client INVITE transaction providing
 // simplified access to the INVITE/ACK/BYE lifecycle.
 type InviteTransaction struct {
-	mu       sync.Mutex
-	clientTx sip.ClientTransaction
-	response *sip.Response
-	client   *sipClient
-	request  *sip.Request
-	done     chan struct{}
-	closed   bool
+	mu             sync.Mutex
+	clientTx       sip.ClientTransaction
+	response       *sip.Response
+	client         *sipClient
+	request        *sip.Request
+	done           chan struct{}
+	closeRequested chan struct{}
+	closeOnce      sync.Once
+	finishOnce     sync.Once
 }
 
 // Response returns the final response (200 OK) received for the INVITE.
@@ -38,7 +40,8 @@ func (t *InviteTransaction) SendACK(ctx context.Context) error {
 	}
 
 	ack := buildACK(t.request, resp)
-	return t.client.writeRequest(ctx, ack)
+	ack.SetTransport(t.request.Transport())
+	return t.client.writeACK(ctx, ack)
 }
 
 // SendBYE sends a BYE to terminate the dialog.
@@ -62,15 +65,21 @@ func (t *InviteTransaction) Done() <-chan struct{} {
 
 // Close terminates the transaction.
 func (t *InviteTransaction) Close() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !t.closed {
-		t.closed = true
-		close(t.done)
+	if t.closeRequested == nil {
+		t.finish()
+		return
+	}
+	t.closeOnce.Do(func() { close(t.closeRequested) })
+	<-t.done
+}
+
+func (t *InviteTransaction) finish() {
+	t.finishOnce.Do(func() {
 		if t.clientTx != nil {
 			t.clientTx.Terminate()
 		}
-	}
+		close(t.done)
+	})
 }
 
 // buildACK creates an ACK request for a 2xx response.

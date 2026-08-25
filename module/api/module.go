@@ -13,16 +13,22 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/ratelimit"
 )
 
 // Module implements the management API as a standalone HTTP server.
 type Module struct {
-	listener net.Listener
-	httpSrv  *http.Server
-	limiter  *ratelimit.Limiter
-	wg       sync.WaitGroup
+	listener  net.Listener
+	httpSrv   *http.Server
+	server    *core.Server
+	limiter   *ratelimit.Limiter
+	limiterMu sync.RWMutex
+	rateCfg   config.RateLimitConfig
+	audit     *AuditStore
+	security  SecurityCounters
+	wg        sync.WaitGroup
 }
 
 // NewModule creates a new API module.
@@ -36,6 +42,8 @@ func (m *Module) Name() string { return "api" }
 // Init initializes the standalone API HTTP server.
 func (m *Module) Init(s *core.Server) error {
 	cfg := s.Config()
+	m.server = s
+	m.audit = NewAuditStore(cfg.API.Audit.MaxEntries)
 
 	ln, err := s.MakeListenerAutoTLS(cfg.API.Listen, cfg.API.TLS)
 	if err != nil {
@@ -44,14 +52,25 @@ func (m *Module) Init(s *core.Server) error {
 	m.listener = ln
 
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, s)
+	registerRoutes(mux, s, m.audit)
 
-	var handler http.Handler = buildAuthHandler(mux, cfg.API)
+	var handler http.Handler = buildSecurityHandler(mux, s, m.audit, &m.security)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
 		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
-		handler = m.limiter.Wrap(handler)
 	}
-	m.httpSrv = &http.Server{Handler: handler}
+	m.rateCfg = cfg.Limits.RateLimit
+	m.httpSrv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.limiterMu.RLock()
+		limiter := m.limiter
+		m.limiterMu.RUnlock()
+		if limiter != nil && !limiter.AllowRequest(r) {
+			m.security.rateLimitDenials.Add(1)
+			m.auditRateLimitDenial(r)
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.API.TLS == nil || *cfg.API.TLS) {
@@ -70,6 +89,86 @@ func (m *Module) Init(s *core.Server) error {
 	return nil
 }
 
+func (m *Module) auditRateLimitDenial(r *http.Request) {
+	permission := permissionForRequest(r)
+	if m.audit == nil || !isAuditedOperation(permission) {
+		return
+	}
+	p, ok := resolvePrincipal(r, m.server.Config().API)
+	if !ok {
+		p = principal{Name: "unknown"}
+	}
+	m.audit.Record(AuditEntry{
+		RequestID:  newRequestID(),
+		Principal:  p.Name,
+		Role:       p.Role,
+		Action:     permission,
+		Resource:   r.URL.Path,
+		Result:     "failed",
+		RemoteAddr: r.RemoteAddr,
+	})
+}
+
+// SecurityMetrics returns bounded-label management security counters.
+func (m *Module) SecurityMetrics() SecurityMetricsSnapshot {
+	snapshot := m.security.Snapshot()
+	if m.audit != nil {
+		snapshot.AuditEvents = m.audit.Total()
+	}
+	return snapshot
+}
+
+// SecurityMetricValues exposes a fixed key set to the metrics module without
+// coupling it to API implementation types.
+func (m *Module) SecurityMetricValues() map[string]float64 {
+	snapshot := m.SecurityMetrics()
+	return map[string]float64{
+		"authentication_failures": float64(snapshot.AuthenticationFailures),
+		"authorization_failures":  float64(snapshot.AuthorizationFailures),
+		"rate_limit_denials":      float64(snapshot.RateLimitDenials),
+		"audit_events":            float64(snapshot.AuditEvents),
+	}
+}
+
+// OnReload updates API authentication through the server snapshot read path
+// and replaces the per-IP rate limiter for subsequent requests.
+func (m *Module) OnReload(s *core.Server) error {
+	rl := s.Config().Limits.RateLimit
+	m.limiterMu.Lock()
+	previous := m.rateCfg
+	m.rateCfg = rl
+	m.limiterMu.Unlock()
+	if previous != rl {
+		var next *ratelimit.Limiter
+		if rl.Enabled && rl.Rate > 0 {
+			next = ratelimit.New(rl.Rate, rl.Burst)
+		}
+		m.limiterMu.Lock()
+		old := m.limiter
+		m.limiter = next
+		m.limiterMu.Unlock()
+		if old != nil {
+			old.Close()
+		}
+	}
+	return nil
+}
+
+// OnConfigApplied records success only after the server has committed the
+// candidate and every reloadable module has accepted it.
+func (m *Module) OnConfigApplied(snapshot *configruntime.ConfigSnapshot) {
+	if m.audit == nil || snapshot == nil {
+		return
+	}
+	m.audit.Record(AuditEntry{
+		Principal: "config-source:" + snapshot.Source,
+		Role:      "system",
+		Action:    "config:apply",
+		Resource:  snapshot.Version.Value,
+		Result:    "success",
+	})
+}
+
 // Hooks returns the module's event hooks (none for the API module).
 func (m *Module) Hooks() []core.HookRegistration { return nil }
 
@@ -78,8 +177,12 @@ func (m *Module) Close() error {
 	if m.httpSrv != nil {
 		m.httpSrv.Close()
 	}
-	if m.limiter != nil {
-		m.limiter.Close()
+	m.limiterMu.Lock()
+	limiter := m.limiter
+	m.limiter = nil
+	m.limiterMu.Unlock()
+	if limiter != nil {
+		limiter.Close()
 	}
 	m.wg.Wait()
 	slog.Info("stopped", "module", "api")
@@ -102,7 +205,7 @@ func buildAuthHandler(mux *http.ServeMux, cfg config.APIConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Login endpoint — always accessible
 		if r.URL.Path == "/console/login" {
-			handleLogin(w, r, cfg.Console)
+			handleLogin(w, r, cfg.Console, false)
 			return
 		}
 
@@ -183,7 +286,7 @@ func validateSession(r *http.Request, cfg config.ConsoleConfig) bool {
 }
 
 // handleLogin serves the login page (GET) or processes login (POST).
-func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig) {
+func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, secure bool) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(loginHTML)
@@ -199,7 +302,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfi
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 
-	if username != cfg.Username || password != cfg.Password {
+	if !secureEqual(username, cfg.Username) || !secureEqual(password, cfg.Password) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(loginFailHTML)
@@ -212,6 +315,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfi
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400, // 24h
 	})

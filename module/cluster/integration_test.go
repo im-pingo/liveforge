@@ -10,6 +10,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // mockRTMPServer creates a TCP listener that performs a minimal RTMP handshake
@@ -157,7 +158,8 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 		Payload:   []byte{0x12, 0x10},
 	})
 
-	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), nil, nil, 1, time.Second)
+	metrics := newRelayMetrics()
+	ft := NewForwardTarget("live/fwdtest", "rtmp://"+addr+"/live/fwdtest", stream, NewRTMPTransport(), nil, nil, 1, time.Second, metrics)
 
 	done := make(chan struct{})
 	go func() {
@@ -177,6 +179,12 @@ func TestForwardToMockRTMPServer(t *testing.T) {
 			Payload:   []byte{0x65, 0x88, 0x00, 0x01},
 		})
 		time.Sleep(33 * time.Millisecond)
+	}
+	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("forward", "rtmp")); got <= 0 {
+		t.Fatalf("live forward RTMP bytes = %v, want > 0", got)
+	}
+	if got := testutil.CollectAndCount(metrics.latency); got != 1 {
+		t.Fatalf("live forward RTMP connection latency series = %d, want 1", got)
 	}
 
 	ft.Close()
@@ -211,7 +219,8 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/pulltest")
 
-	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), nil, nil, 1, 2*time.Second, 5*time.Second)
+	metrics := newRelayMetrics()
+	op := NewOriginPull("live/pulltest", []string{"rtmp://" + addr + "/live"}, stream, newTestRegistry(), nil, nil, 1, 2*time.Second, 5*time.Second, metrics)
 
 	done := make(chan struct{})
 	go func() {
@@ -221,6 +230,12 @@ func TestOriginPullFromMockServer(t *testing.T) {
 
 	// Wait for some frames to be received
 	time.Sleep(500 * time.Millisecond)
+	if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues("origin", "rtmp")); got <= 0 {
+		t.Fatalf("live origin RTMP bytes = %v, want > 0", got)
+	}
+	if got := testutil.CollectAndCount(metrics.latency); got != 1 {
+		t.Fatalf("live origin RTMP connection latency series = %d, want 1", got)
+	}
 	op.Close()
 
 	select {
@@ -410,13 +425,6 @@ func handleMockOriginServer(conn net.Conn) {
 						time.Sleep(33 * time.Millisecond)
 					}
 
-					// Send unpublish notification
-					unpub, _ := rtmp.AMF0Encode("onStatus", float64(0), nil,
-						map[string]any{"code": "NetStream.Play.UnpublishNotify"},
-					)
-					cw.WriteMessage(5, &rtmp.Message{
-						TypeID: rtmp.MsgAMF0Command, Length: uint32(len(unpub)), StreamID: 1, Payload: unpub,
-					})
 				}()
 			}
 		}

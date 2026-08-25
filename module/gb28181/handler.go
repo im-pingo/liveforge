@@ -9,6 +9,7 @@ import (
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
+	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
@@ -21,13 +22,7 @@ type handler struct {
 	bus      *core.EventBus
 	ports    *portalloc.PortAllocator
 	prefix   string
-	auth     *digestAuthConfig
-}
-
-type digestAuthConfig struct {
-	enabled  bool
-	realm    string
-	password string
+	auth     *sipmod.DigestAuth
 }
 
 func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
@@ -36,6 +31,21 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 		resp := sip.NewResponseFromRequest(req, 400, "Bad Request", nil)
 		tx.Respond(resp)
 		return
+	}
+	if h.auth != nil {
+		switch h.auth.Verify(req, from.Address.User) {
+		case sipmod.DigestValid:
+		case sipmod.DigestStale:
+			_ = tx.Respond(h.auth.Challenge(req, true))
+			return
+		default:
+			if req.GetHeader("Authorization") == nil {
+				_ = tx.Respond(h.auth.Challenge(req))
+			} else {
+				_ = tx.Respond(sip.NewResponseFromRequest(req, 403, "Forbidden", nil))
+			}
+			return
+		}
 	}
 
 	deviceID := from.Address.User
@@ -88,6 +98,13 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	remotePort := parseSDPPort(string(body))
 	remoteIP := extractIP(req.Source())
+	streamKey := fmt.Sprintf("%s/%s", h.prefix, channelID)
+	publishCtx := sipPublishContext(req, streamKey, "")
+	if err := h.bus.EmitSync(core.EventPublish, publishCtx); err != nil {
+		resp := sip.NewResponseFromRequest(req, 403, "Forbidden", nil)
+		tx.Respond(resp)
+		return
+	}
 
 	// Allocate local RTP port pair
 	rtpPort, _, err := h.ports.AllocatePair()
@@ -98,25 +115,37 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	streamKey := fmt.Sprintf("%s/%s", h.prefix, channelID)
-
-	// Create or get stream
-	stream, _ := h.hub.GetOrCreate(streamKey)
+	// Create or get stream.
+	_, streamExisted := h.hub.Find(streamKey)
+	stream, err := h.hub.GetOrCreate(streamKey)
+	if err != nil {
+		h.ports.Free(rtpPort, rtpPort+1)
+		resp := sip.NewResponseFromRequest(req, 500, "Internal Server Error", nil)
+		tx.Respond(resp)
+		return
+	}
 
 	// Create publisher
 	pub := NewPublisher(
-		fmt.Sprintf("gb28181-%s", channelID),
+		newPublisherID("live", channelID),
 		func(frame *avframe.AVFrame) {
 			stream.WriteFrame(frame)
 		},
 	)
 
-	// Set publisher on stream so subscribers can connect
-	if err := stream.SetPublisher(pub); err != nil {
-		slog.Warn("set publisher failed", "module", "gb28181", "error", err)
+	receiver, err := newRTPReceiver(rtpPort, pub)
+	if err != nil {
+		slog.Error("rtp receiver creation failed", "module", "gb28181", "error", err)
+		_ = pub.Close()
+		h.ports.Free(rtpPort, rtpPort+1)
+		if !streamExisted {
+			h.hub.Remove(streamKey)
+		}
+		resp := sip.NewResponseFromRequest(req, 500, "Internal Server Error", nil)
+		tx.Respond(resp)
+		return
 	}
 
-	// Create media session
 	session := &MediaSession{
 		ID:         getCallID(req),
 		DeviceID:   deviceID,
@@ -128,19 +157,22 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		Transport:  "udp",
 		State:      SessionStateStreaming,
 		Publisher:  pub,
+		Receiver:   receiver,
 		Stream:     stream,
 	}
-	h.sessions.Add(session)
 
-	// Create RTP receiver
-	receiver, err := NewRTPReceiver(rtpPort, pub)
-	if err != nil {
-		slog.Error("rtp receiver creation failed", "module", "gb28181", "error", err)
+	if err := stream.SetPublisher(pub); err != nil {
+		slog.Warn("set publisher failed", "module", "gb28181", "error", err)
+		session.Close()
 		h.ports.Free(rtpPort, rtpPort+1)
+		if !streamExisted {
+			h.hub.Remove(streamKey)
+		}
 		resp := sip.NewResponseFromRequest(req, 500, "Internal Server Error", nil)
 		tx.Respond(resp)
 		return
 	}
+	h.sessions.Add(session)
 	go receiver.Run()
 
 	// Build SDP answer
@@ -152,17 +184,21 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", []byte(sdpAnswer))
 	resp.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
-	tx.Respond(resp)
+	if err := tx.Respond(resp); err != nil {
+		slog.Warn("failed to send INVITE final response", "module", "gb28181", "error", err)
+		h.rollbackSession(session, !streamExisted)
+		return
+	}
 
-	// Emit publish event
-	h.bus.Emit(core.EventPublish, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "gb28181",
-		RemoteAddr: req.Source(),
-		Extra: map[string]any{
-			"gb28181_device_id":  deviceID,
-			"gb28181_channel_id": channelID,
-		},
+	// Marking and enqueueing are one session-owned transition so teardown
+	// cannot overtake a publish start that has not reached the EventBus yet.
+	publishCtx.PublisherID = pub.ID()
+	publishCtx.Extra = map[string]any{
+		"gb28181_device_id":  deviceID,
+		"gb28181_channel_id": channelID,
+	}
+	session.startPublishLifecycle(func() {
+		h.bus.EmitAsync(core.EventPublish, publishCtx)
 	})
 
 	slog.Info("invite accepted", "module", "gb28181",
@@ -174,31 +210,79 @@ func (h *handler) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 	callID := getCallID(req)
 	session := h.sessions.Get(callID)
 	if session != nil {
-		session.Close()
-		h.sessions.Remove(callID)
-
-		if session.Stream != nil {
-			session.Stream.RemovePublisher()
-		}
-
-		h.ports.Free(session.LocalPort, session.LocalPort+1)
-
-		h.bus.Emit(core.EventPublishStop, &core.EventContext{
-			StreamKey:  session.StreamKey,
-			Protocol:   "gb28181",
-			RemoteAddr: req.Source(),
-			Extra: map[string]any{
-				"gb28181_device_id":  session.DeviceID,
-				"gb28181_channel_id": session.ChannelID,
-			},
-		})
+		snapshot := session.Snapshot()
+		h.closeSession(session, req.Source())
 
 		slog.Info("session closed by BYE", "module", "gb28181",
-			"session", callID, "stream", session.StreamKey)
+			"session", callID, "stream", snapshot.StreamKey)
 	}
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", nil)
 	tx.Respond(resp)
+}
+
+func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
+	if session == nil {
+		return false
+	}
+	snapshot, closed := session.closeSnapshot()
+	if !closed {
+		return false
+	}
+	if snapshot.LocalPort > 0 && h.ports != nil {
+		h.ports.Free(snapshot.LocalPort, snapshot.LocalPort+1)
+	}
+	if snapshot.Stream != nil && snapshot.Publisher != nil {
+		snapshot.Stream.RemovePublisherIf(snapshot.Publisher)
+	}
+	if snapshot.ID != "" && h.sessions != nil {
+		h.sessions.RemoveIf(snapshot.ID, session)
+	}
+	if snapshot.Published {
+		if remoteAddr == "" && snapshot.RemoteAddr != nil {
+			remoteAddr = snapshot.RemoteAddr.String()
+		}
+		h.bus.EmitAsync(core.EventPublishStop, &core.EventContext{
+			StreamKey:   snapshot.StreamKey,
+			PublisherID: snapshot.PublisherID,
+			Protocol:    "gb28181",
+			RemoteAddr:  remoteAddr,
+			Extra: map[string]any{
+				"gb28181_device_id":  snapshot.DeviceID,
+				"gb28181_channel_id": snapshot.ChannelID,
+				"gb28181_playback":   snapshot.Playback,
+			},
+		})
+	}
+	return true
+}
+
+func (h *handler) rollbackSession(session *MediaSession, removeStream bool) {
+	snapshot := session.Snapshot()
+	if !h.closeSession(session, "") {
+		return
+	}
+	if removeStream && snapshot.Stream != nil && snapshot.Stream.Publisher() == nil {
+		h.hub.Remove(snapshot.StreamKey)
+	}
+}
+
+func (h *handler) closeSessionsByDevice(deviceID string) {
+	for _, session := range h.sessions.All() {
+		if session.Snapshot().DeviceID == deviceID {
+			h.closeSession(session, "")
+		}
+	}
+}
+
+func (h *handler) closeSessionsByChannel(channelID string) int {
+	closed := 0
+	for _, session := range h.sessions.GetByChannel(channelID) {
+		if h.closeSession(session, "") {
+			closed++
+		}
+	}
+	return closed
 }
 
 func (h *handler) handleMessage(req *sip.Request, tx sip.ServerTransaction) {

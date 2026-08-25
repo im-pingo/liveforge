@@ -24,7 +24,7 @@ type HLSSegment struct {
 type HLSManager struct {
 	mu          sync.RWMutex
 	segments    []*HLSSegment
-	seqBase     int     // sequence number of first segment in window
+	seqBase     int // sequence number of first segment in window
 	nextSeqNum  int
 	targetDur   float64 // target segment duration in seconds
 	maxSegments int     // max segments in sliding window
@@ -58,6 +58,18 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "hls", "stream", h.streamKey)
 	defer slog.Info("manager stopped", "module", "hls", "stream", h.streamKey)
 
+	// Snapshot cache and open the live source before declaring the TS tracks so
+	// the PMT and the frames always use the same audio decision.
+	gopCache, startPos := stream.GOPCacheSnapshot()
+	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
+	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
+	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
+	go func() {
+		<-h.done
+		reader.Close()
+	}()
+
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqData, audioSeqData []byte
 
@@ -65,15 +77,18 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		videoCodec = vsh.Codec
 		videoSeqData = vsh.Payload
 	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
-		audioCodec = ash.Codec
-		audioSeqData = ash.Payload
+	if audioPlan.hasAudio() {
+		audioCodec = audioPlan.codec
+		if audioPlan.sequenceHeader != nil {
+			audioSeqData = audioPlan.sequenceHeader.Payload
+		}
 	}
 
 	muxer := ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
 	var buf bytes.Buffer
 	var segStartDTS int64
 	hasData := false
+	gotFirstKeyframe := !videoCodec.IsVideo()
 
 	// Helper: finalize current segment
 	finalize := func(endDTS int64) {
@@ -102,30 +117,33 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		buf.Reset()
 	}
 
-	// Process GOP cache into first segment (atomic snapshot with cursor)
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	var gopEndDTS int64
+	// Process GOP cache into first segment. GOPCacheSnapshot captured the ring
+	// cursor atomically, so the live reader starts after every cached frame.
+	// Do not use a cross-track DTS watermark here: audio and video can have
+	// different timestamp domains and a late audio frame must not hide a live
+	// video frame.
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
+		}
+		if !audioPlan.accepts(f) {
+			continue
+		}
+		if !gotFirstKeyframe {
+			if !f.MediaType.IsVideo() || !f.FrameType.IsKeyframe() {
+				continue
+			}
+			gotFirstKeyframe = true
 		}
 		if !hasData {
 			segStartDTS = f.DTS
 			hasData = true
 		}
-		gopEndDTS = f.DTS
 		if data := muxer.WriteFrame(f); len(data) > 0 {
 			buf.Write(data)
 		}
 	}
-	// Finalize GOP cache immediately so first segment is available for instant playback.
-	if buf.Len() > 0 {
-		finalize(gopEndDTS)
-		hasData = false // force segStartDTS re-init for next segment
-	}
-
-	// Read live frames
-	reader := stream.RingBuffer().NewReaderAt(startPos)
+	// Read live frames.
 	for {
 		select {
 		case <-h.done:
@@ -142,12 +160,18 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
-		// Skip frames already included in the GOP cache segment to avoid
-		// DTS overlap between the first two segments.
-		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
+		if !audioPlan.accepts(frame) {
 			continue
 		}
-
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
+			continue
+		}
+		if !gotFirstKeyframe {
+			if !frame.MediaType.IsVideo() || !frame.FrameType.IsKeyframe() {
+				continue
+			}
+			gotFirstKeyframe = true
+		}
 		// Split on video keyframes (but not the very first frame)
 		if frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && hasData && buf.Len() > 0 {
 			finalize(frame.DTS)

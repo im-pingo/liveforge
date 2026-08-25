@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,9 +24,10 @@ import (
 // Uses SDP-over-HTTP signaling similar to RTPTransport, but encapsulates
 // frames in MPEG-PS format within RTP packets.
 type GBTransport struct {
-	cfg   config.ClusterGBConfig
-	ports *portalloc.PortAllocator
-	hub   *core.StreamHub
+	cfg    config.ClusterGBConfig
+	ports  *portalloc.PortAllocator
+	hub    *core.StreamHub
+	server *core.Server
 }
 
 // NewGBTransport creates a new GB28181 relay transport.
@@ -53,9 +53,10 @@ func NewGBTransport(cfg config.ClusterGBConfig, s *core.Server) *GBTransport {
 	}
 
 	t := &GBTransport{
-		cfg:   cfg,
-		ports: ports,
-		hub:   s.StreamHub(),
+		cfg:    cfg,
+		ports:  ports,
+		hub:    s.StreamHub(),
+		server: s,
 	}
 
 	// Register signaling handlers.
@@ -89,19 +90,12 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s&port=%d",
 		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
 
-	resp, err := http.Post(sigURL, "text/plain", nil) //nolint:gosec
+	body, err := t.postSignal(ctx, sigURL)
 	if err != nil {
 		return fmt.Errorf("signaling request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("signaling rejected: %d %s", resp.StatusCode, string(body))
-	}
 
 	// Read remote port from response
-	body, _ := io.ReadAll(resp.Body)
 	remotePort, _ := strconv.Atoi(string(bytes.TrimSpace(body)))
 	if remotePort == 0 {
 		return fmt.Errorf("invalid remote port from signaling")
@@ -117,8 +111,11 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 		return fmt.Errorf("dial UDP: %w", err)
 	}
 	defer conn.Close()
+	stopCancelWatch := closeOnContextDone(ctx, conn)
+	defer stopCancelWatch()
 
 	slog.Info("gb relay push connected", "module", "cluster", "target", targetURL, "remote_port", remotePort)
+	markRelayConnected(ctx)
 
 	muxer := ps.NewMuxer()
 	var seq uint16
@@ -127,7 +124,7 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 
 	// Send sequence headers first
 	if vsh := stream.VideoSeqHeader(); vsh != nil {
-		if err := t.sendPSFrame(conn, muxer, vsh, &seq, &ts, ssrc); err != nil {
+		if err := t.sendPSFrameObserved(ctx, conn, muxer, vsh, &seq, &ts, ssrc); err != nil {
 			return fmt.Errorf("send video seq header: %w", err)
 		}
 	}
@@ -153,13 +150,17 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 			continue
 		}
 
-		if err := t.sendPSFrame(conn, muxer, frame, &seq, &ts, ssrc); err != nil {
+		if err := t.sendPSFrameObserved(ctx, conn, muxer, frame, &seq, &ts, ssrc); err != nil {
 			return fmt.Errorf("send frame: %w", err)
 		}
 	}
 }
 
 func (t *GBTransport) sendPSFrame(conn *net.UDPConn, muxer *ps.Muxer, frame *avframe.AVFrame, seq *uint16, ts *uint32, ssrc uint32) error {
+	return t.sendPSFrameObserved(context.Background(), conn, muxer, frame, seq, ts, ssrc)
+}
+
+func (t *GBTransport) sendPSFrameObserved(ctx context.Context, conn *net.UDPConn, muxer *ps.Muxer, frame *avframe.AVFrame, seq *uint16, ts *uint32, ssrc uint32) error {
 	psData, err := muxer.Pack(frame)
 	if err != nil {
 		return err
@@ -190,9 +191,11 @@ func (t *GBTransport) sendPSFrame(conn *net.UDPConn, muxer *ps.Muxer, frame *avf
 		if err != nil {
 			return fmt.Errorf("marshal RTP: %w", err)
 		}
-		if _, err := conn.Write(data); err != nil {
+		n, err := conn.Write(data)
+		if err != nil {
 			return fmt.Errorf("write RTP: %w", err)
 		}
+		recordRelayBytes(ctx, int64(n))
 	}
 
 	// Advance timestamp (90kHz clock, 40ms per frame at 25fps)
@@ -218,15 +221,8 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 	sigURL := fmt.Sprintf("http://%s%s/pull?stream=%s&port=%d",
 		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
 
-	resp, err := http.Post(sigURL, "text/plain", nil) //nolint:gosec
-	if err != nil {
+	if _, err := t.postSignal(ctx, sigURL); err != nil {
 		return fmt.Errorf("signaling request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("signaling rejected: %d %s", resp.StatusCode, string(body))
 	}
 
 	slog.Info("gb relay pull started", "module", "cluster", "source", sourceURL, "local_port", rtpPort)
@@ -238,6 +234,9 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 		return fmt.Errorf("listen UDP: %w", err)
 	}
 	defer conn.Close()
+	stopCancelWatch := closeOnContextDone(ctx, conn)
+	defer stopCancelWatch()
+	markRelayConnected(ctx)
 
 	pub := &originPublisher{
 		id:   fmt.Sprintf("gb-pull-%s", stream.Key()),
@@ -246,7 +245,7 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte
@@ -271,6 +270,7 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 		if n < 12 {
 			continue
 		}
+		recordRelayBytes(ctx, int64(n))
 
 		var pkt pionrtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
@@ -296,6 +296,27 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 			psBuf = psBuf[:0]
 		}
 	}
+}
+
+func (t *GBTransport) postSignal(ctx context.Context, sigURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sigURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	if err := authorizePeerRequest(req, t.server); err != nil {
+		return nil, fmt.Errorf("authorize peer signaling: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		discardPeerSignalingResponse(resp.Body)
+		return nil, peerSignalingStatusError(resp.StatusCode)
+	}
+	return readPeerSignalingResponse(resp.Body)
 }
 
 func (t *GBTransport) Close() error { return nil }
@@ -369,7 +390,7 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 		slog.Error("gb push set publisher failed", "module", "cluster", "error", err)
 		return
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte

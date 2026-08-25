@@ -13,6 +13,15 @@ type Collector struct {
 	streamCount     *prometheus.Desc
 	connectionCount *prometheus.Desc
 	uptimeSeconds   *prometheus.Desc
+	configFailures  *prometheus.Desc
+	configPending   *prometheus.Desc
+	configCallbacks *prometheus.Desc
+	configDropped   *prometheus.Desc
+	configChanges   *prometheus.Desc
+	apiAuthFailures *prometheus.Desc
+	apiRBACFailures *prometheus.Desc
+	apiRateDenials  *prometheus.Desc
+	apiAuditEvents  *prometheus.Desc
 
 	// Per-stream gauges (labels: stream_key)
 	streamBytesIn     *prometheus.Desc
@@ -45,6 +54,42 @@ func NewCollector(s *core.Server) *Collector {
 			prometheus.BuildFQName(ns, "server", "uptime_seconds"),
 			"Server uptime in seconds.",
 			nil, nil,
+		),
+		configFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "config", "consecutive_failures"),
+			"Consecutive runtime configuration refresh failures.", nil, nil,
+		),
+		configPending: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "config", "pending_restart"),
+			"Number of configuration paths waiting for a process restart.", nil, nil,
+		),
+		configCallbacks: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "config", "callback_failures"),
+			"Total runtime configuration callback failures.", nil, nil,
+		),
+		configDropped: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "config", "callbacks_dropped"),
+			"Total runtime configuration callbacks dropped because the callback queue was full.", nil, nil,
+		),
+		configChanges: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "config", "changes_total"),
+			"Total runtime configuration changes by terminal result.", []string{"result"}, nil,
+		),
+		apiAuthFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "api", "authentication_failures_total"),
+			"Total management API authentication failures.", nil, nil,
+		),
+		apiRBACFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "api", "authorization_failures_total"),
+			"Total management API authorization failures.", nil, nil,
+		),
+		apiRateDenials: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "api", "rate_limit_denials_total"),
+			"Total management API requests rejected by rate limiting.", nil, nil,
+		),
+		apiAuditEvents: prometheus.NewDesc(
+			prometheus.BuildFQName(ns, "api", "audit_events_total"),
+			"Total management audit events emitted.", nil, nil,
 		),
 
 		streamBytesIn: prometheus.NewDesc(
@@ -95,6 +140,15 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.streamCount
 	ch <- c.connectionCount
 	ch <- c.uptimeSeconds
+	ch <- c.configFailures
+	ch <- c.configPending
+	ch <- c.configCallbacks
+	ch <- c.configDropped
+	ch <- c.configChanges
+	ch <- c.apiAuthFailures
+	ch <- c.apiRBACFailures
+	ch <- c.apiRateDenials
+	ch <- c.apiAuditEvents
 	ch <- c.streamBytesIn
 	ch <- c.streamVideoFrames
 	ch <- c.streamAudioFrames
@@ -113,6 +167,25 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.streamCount, prometheus.GaugeValue, float64(hub.Count()))
 	ch <- prometheus.MustNewConstMetric(c.connectionCount, prometheus.GaugeValue, float64(c.server.ConnectionCount()))
 	ch <- prometheus.MustNewConstMetric(c.uptimeSeconds, prometheus.GaugeValue, c.server.UptimeSeconds())
+	if manager := c.server.ConfigManager(); manager != nil {
+		status := manager.Status()
+		ch <- prometheus.MustNewConstMetric(c.configFailures, prometheus.GaugeValue, float64(status.ConsecutiveFailures))
+		ch <- prometheus.MustNewConstMetric(c.configPending, prometheus.GaugeValue, float64(len(status.PendingRestart)))
+		ch <- prometheus.MustNewConstMetric(c.configCallbacks, prometheus.CounterValue, float64(status.CallbackFailures))
+		ch <- prometheus.MustNewConstMetric(c.configDropped, prometheus.CounterValue, float64(status.DroppedCallbacks))
+		ch <- prometheus.MustNewConstMetric(c.configChanges, prometheus.CounterValue, float64(status.ConfigChangesAccepted), "accepted")
+		ch <- prometheus.MustNewConstMetric(c.configChanges, prometheus.CounterValue, float64(status.ConfigChangesRejected), "rejected")
+		ch <- prometheus.MustNewConstMetric(c.configChanges, prometheus.CounterValue, float64(status.ConfigChangesApplicationFailed), "application_failed")
+	}
+	if module := c.server.ModuleByName("api"); module != nil {
+		if provider, ok := module.(interface{ SecurityMetricValues() map[string]float64 }); ok {
+			values := provider.SecurityMetricValues()
+			ch <- prometheus.MustNewConstMetric(c.apiAuthFailures, prometheus.CounterValue, values["authentication_failures"])
+			ch <- prometheus.MustNewConstMetric(c.apiRBACFailures, prometheus.CounterValue, values["authorization_failures"])
+			ch <- prometheus.MustNewConstMetric(c.apiRateDenials, prometheus.CounterValue, values["rate_limit_denials"])
+			ch <- prometheus.MustNewConstMetric(c.apiAuditEvents, prometheus.CounterValue, values["audit_events"])
+		}
+	}
 
 	// Per-stream metrics
 	for _, key := range hub.Keys() {

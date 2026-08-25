@@ -69,7 +69,7 @@ func TestBuildInitSegment(t *testing.T) {
 	}
 }
 
-func TestBuildInitSegmentH265(t *testing.T) {
+func TestBuildInitSegmentH265UsesOutOfBandParameterSets(t *testing.T) {
 	data := BuildInitSegment(avframe.CodecH265, avframe.CodecAAC, nil, nil, 1920, 1080, 44100, 2)
 	if len(data) == 0 {
 		t.Fatal("empty init segment")
@@ -77,6 +77,9 @@ func TestBuildInitSegmentH265(t *testing.T) {
 	// Verify ftyp present
 	if string(data[4:8]) != "ftyp" {
 		t.Errorf("expected ftyp, got %s", string(data[4:8]))
+	}
+	if !bytes.Contains(data, []byte("hvc1")) || bytes.Contains(data, []byte("hev1")) {
+		t.Fatal("H.265 init segment must use hvc1 when parameter sets are carried by hvcC")
 	}
 }
 
@@ -385,6 +388,58 @@ func TestBuildMediaSegmentStripsNonVCL(t *testing.T) {
 	}
 }
 
+func TestBuildMediaSegmentH265StripsParameterSetsForHVC1(t *testing.T) {
+	makeNAL := func(nalType byte, size int) []byte {
+		nal := make([]byte, size)
+		nal[0] = nalType << 1
+		nal[1] = 1
+		buf := make([]byte, 4+size)
+		binary.BigEndian.PutUint32(buf, uint32(size))
+		copy(buf[4:], nal)
+		return buf
+	}
+
+	vps := makeNAL(32, 8)
+	sps := makeNAL(33, 10)
+	pps := makeNAL(34, 6)
+	sei := makeNAL(39, 7)
+	idr := makeNAL(19, 50)
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo,
+		avframe.CodecH265,
+		avframe.FrameTypeKeyframe,
+		0,
+		0,
+		concat(vps, sps, pps, sei, idr),
+	)
+
+	segment := BuildMediaSegment([]*avframe.AVFrame{frame}, 1, 0)
+	moofSize := int(binary.BigEndian.Uint32(segment[0:4]))
+	mdatSize := int(binary.BigEndian.Uint32(segment[moofSize : moofSize+4]))
+	if got, want := mdatSize-8, len(sei)+len(idr); got != want {
+		t.Fatalf("H.265 mdat payload = %d bytes, want %d bytes without VPS/SPS/PPS", got, want)
+	}
+}
+
+func TestMuxerWriteSegmentUntilUsesVideoBoundaryForFinalDuration(t *testing.T) {
+	muxer := NewMuxer(avframe.CodecH265, 0)
+	muxer.Init(nil, nil, 640, 480, 0, 0)
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo,
+		avframe.CodecH265,
+		avframe.FrameTypeKeyframe,
+		0,
+		0,
+		[]byte{0, 0, 0, 2, 0x26, 0x01},
+	)
+
+	segment := muxer.WriteSegmentUntil([]*avframe.AVFrame{frame}, 30)
+	_, duration := readSingleSampleTiming(t, segment)
+	if duration != 2700 {
+		t.Fatalf("final video sample duration = %d, want 2700 ticks at the segment boundary", duration)
+	}
+}
+
 func concat(slices ...[]byte) []byte {
 	var result []byte
 	for _, s := range slices {
@@ -415,4 +470,107 @@ func TestBuildMediaSegmentSkipsSequenceHeaders(t *testing.T) {
 	if len(data) == 0 {
 		t.Fatal("expected non-empty segment")
 	}
+}
+
+func TestMuxerOpusSingletonFragmentsHaveContinuousTimeline(t *testing.T) {
+	muxer := NewMuxer(0, avframe.CodecOpus)
+	muxer.Init(nil, nil, 0, 0, 48000, 2)
+
+	first := muxer.WriteSegment([]*avframe.AVFrame{avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe,
+		0, 0, []byte{0xF8, 0xFF, 0xFE},
+	)})
+	second := muxer.WriteSegment([]*avframe.AVFrame{avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe,
+		20, 20, []byte{0xF8, 0xFF, 0xFE},
+	)})
+
+	firstBase, firstDuration := readSingleSampleTiming(t, first)
+	secondBase, secondDuration := readSingleSampleTiming(t, second)
+	if firstBase != 0 || firstDuration != 960 {
+		t.Fatalf("first Opus fragment timeline = base:%d duration:%d, want 0/960", firstBase, firstDuration)
+	}
+	if secondBase != 960 || secondDuration != 960 {
+		t.Fatalf("second Opus fragment timeline = base:%d duration:%d, want 960/960", secondBase, secondDuration)
+	}
+	if firstBase+uint64(firstDuration) != secondBase {
+		t.Fatalf("Opus fragments overlap or leave a gap: first ends at %d, second starts at %d", firstBase+uint64(firstDuration), secondBase)
+	}
+}
+
+func TestBuildMediaSegmentUsesOpusTOCDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		want    uint32
+	}{
+		{name: "CELT 2.5ms", payload: []byte{0x80}, want: 120},
+		{name: "CELT 20ms", payload: []byte{0xF8}, want: 960},
+		{name: "two CELT frames", payload: []byte{0xF9}, want: 1920},
+		{name: "three CELT frames", payload: []byte{0xFB, 0x03}, want: 2880},
+		{name: "hybrid 10ms", payload: []byte{0x60}, want: 480},
+		{name: "SILK 60ms", payload: []byte{0x18}, want: 2880},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			segment := BuildMediaSegment([]*avframe.AVFrame{avframe.NewAVFrame(
+				avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe,
+				0, 0, tt.payload,
+			)}, 1, 48000)
+			_, duration := readSingleSampleTiming(t, segment)
+			if duration != tt.want {
+				t.Fatalf("Opus sample duration = %d, want %d", duration, tt.want)
+			}
+		})
+	}
+}
+
+func readSingleSampleTiming(t *testing.T, segment []byte) (uint64, uint32) {
+	t.Helper()
+	if len(segment) < 8 || string(segment[4:8]) != "moof" {
+		t.Fatal("media segment is missing moof")
+	}
+	moofEnd := int(binary.BigEndian.Uint32(segment[:4]))
+	if moofEnd > len(segment) {
+		t.Fatal("moof is truncated")
+	}
+	var base uint64
+	var duration uint32
+	foundTFDT := false
+	foundTRUN := false
+	for offset := 8; offset+8 <= moofEnd; {
+		size := int(binary.BigEndian.Uint32(segment[offset : offset+4]))
+		if size < 8 || offset+size > moofEnd {
+			t.Fatal("invalid child box in moof")
+		}
+		if string(segment[offset+4:offset+8]) == "traf" {
+			for inner := offset + 8; inner+8 <= offset+size; {
+				innerSize := int(binary.BigEndian.Uint32(segment[inner : inner+4]))
+				if innerSize < 8 || inner+innerSize > offset+size {
+					t.Fatal("invalid child box in traf")
+				}
+				switch string(segment[inner+4 : inner+8]) {
+				case "tfdt":
+					if innerSize < 20 || segment[inner+8] != 1 {
+						t.Fatal("tfdt is not a complete version 1 box")
+					}
+					base = binary.BigEndian.Uint64(segment[inner+12 : inner+20])
+					foundTFDT = true
+				case "trun":
+					if innerSize < 24 || binary.BigEndian.Uint32(segment[inner+12:inner+16]) != 1 {
+						t.Fatal("trun does not contain exactly one sample")
+					}
+					duration = binary.BigEndian.Uint32(segment[inner+20 : inner+24])
+					foundTRUN = true
+				}
+				inner += innerSize
+			}
+		}
+		offset += size
+	}
+	if !foundTFDT || !foundTRUN {
+		t.Fatal("media segment is missing tfdt or trun")
+	}
+	return base, duration
 }

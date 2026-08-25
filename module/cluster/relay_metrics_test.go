@@ -121,7 +121,7 @@ func TestRelayMetricsPacketLoss(t *testing.T) {
 	expected := `
 		# HELP cluster_rtp_packet_loss_ratio RTP packet loss ratio.
 		# TYPE cluster_rtp_packet_loss_ratio gauge
-		cluster_rtp_packet_loss_ratio{direction="forward",stream="live/test"} 0.02
+		cluster_rtp_packet_loss_ratio{direction="forward"} 0.02
 	`
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "cluster_rtp_packet_loss_ratio"); err != nil {
 		t.Errorf("packet loss mismatch: %v", err)

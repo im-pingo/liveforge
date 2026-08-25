@@ -3,6 +3,7 @@ package h265
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 )
 
@@ -130,7 +131,10 @@ func TestAnnexBToHVCCMultiNAL(t *testing.T) {
 
 func TestBuildHVCCDecoderConfig(t *testing.T) {
 	vps := []byte{0x40, 0x01, 0x0C, 0x01, 0xFF}
-	sps := []byte{0x42, 0x01, 0x01, 0x01, 0x60}
+	sps, err := hex.DecodeString("420103016000000300b0000003000003005a0000a0050201e162023b914842e7e13d0bea1bd50feaa08f554a6a02020207f08041")
+	if err != nil {
+		t.Fatal(err)
+	}
 	pps := []byte{0x44, 0x01, 0xC0, 0xF7}
 
 	var annexB []byte
@@ -163,6 +167,37 @@ func TestBuildHVCCDecoderConfig(t *testing.T) {
 	}
 }
 
+func TestBuildHVCCDecoderConfigCopiesSPSProfileTierLevel(t *testing.T) {
+	sps, err := hex.DecodeString("420103016000000300b0000003000003005a0000a0050201e162023b914842e7e13d0bea1bd50feaa08f554a6a02020207f08041")
+	if err != nil {
+		t.Fatal(err)
+	}
+	annexB := append([]byte{0x00, 0x00, 0x00, 0x01}, sps...)
+
+	config := BuildHVCCDecoderConfig(annexB)
+	if config == nil {
+		t.Fatal("expected non-nil config")
+	}
+
+	wantHeader := []byte{
+		0x01,                   // configurationVersion
+		0x01,                   // profile_space=0, tier=0, profile_idc=1
+		0x60, 0x00, 0x00, 0x00, // profile compatibility flags
+		0xb0, 0x00, 0x00, 0x00, 0x00, 0x00, // constraint flags
+		0x5a,       // level_idc=90
+		0xf0, 0x00, // reserved + min_spatial_segmentation_idc
+		0xfc,       // reserved + parallelismType=0
+		0xfd,       // reserved + chromaFormat=1 (4:2:0)
+		0xf8,       // reserved + bitDepthLumaMinus8=0
+		0xf8,       // reserved + bitDepthChromaMinus8=0
+		0x00, 0x00, // avgFrameRate=0
+		0x17, // constantFrameRate=0, two temporal layers, nested, 4-byte NAL lengths
+	}
+	if !bytes.Equal(config[:22], wantHeader) {
+		t.Fatalf("HEVCDecoderConfigurationRecord header = %x, want %x", config[:22], wantHeader)
+	}
+}
+
 func TestBuildHVCCDecoderConfigNoSPS(t *testing.T) {
 	// Only VPS, no SPS
 	vps := []byte{0x40, 0x01, 0x0C, 0x01}
@@ -177,5 +212,30 @@ func TestExtractVPSSPSPPSFromHVCRecordTooShort(t *testing.T) {
 	_, _, _, err := ExtractVPSSPSPPSFromHVCRecord([]byte{1, 2, 3})
 	if err == nil {
 		t.Error("expected error for short record")
+	}
+}
+
+func TestExtractVPSSPSPPSFromHVCRecordRejectsTruncatedArrays(t *testing.T) {
+	fixed := make([]byte, 23)
+	fixed[0] = 1
+	fixed[22] = 1
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "array header", data: append([]byte(nil), fixed...)},
+		{name: "NAL count", data: append(append([]byte(nil), fixed...), NALTypeVPS)},
+		{name: "NAL length", data: append(append([]byte(nil), fixed...), NALTypeVPS, 0, 1)},
+		{name: "NAL payload", data: append(append([]byte(nil), fixed...), NALTypeVPS, 0, 1, 0, 4, 0x40, 0x01)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, err := ExtractVPSSPSPPSFromHVCRecord(tt.data)
+			if err == nil {
+				t.Fatal("truncated HEVCDecoderConfigurationRecord returned nil error")
+			}
+		})
 	}
 }

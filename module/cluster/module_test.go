@@ -1,12 +1,15 @@
 package cluster
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func newTestHub() (*core.StreamHub, *core.EventBus) {
@@ -52,6 +55,34 @@ func TestModuleInitDisabled(t *testing.T) {
 	}
 	if len(m.Hooks()) != 0 {
 		t.Errorf("Hooks should be empty, got %d", len(m.Hooks()))
+	}
+}
+
+func TestModuleExposesRelayMetricsCollector(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Stream.RingBufferSize = 256
+	srv := core.NewServer(cfg)
+	m := NewModule()
+	if err := m.Init(srv); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer m.Close()
+
+	collectors := m.PrometheusCollectors()
+	if len(collectors) != 1 {
+		t.Fatalf("collectors = %d, want 1", len(collectors))
+	}
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors...)
+	m.RelayMetrics().RecordPush("rtmp", 8, nil)
+
+	expected := `
+		# HELP cluster_relay_bytes_total Total bytes relayed.
+		# TYPE cluster_relay_bytes_total counter
+		cluster_relay_bytes_total{direction="forward",protocol="rtmp"} 8
+	`
+	if err := testutil.GatherAndCompare(registry, strings.NewReader(expected), "cluster_relay_bytes_total"); err != nil {
+		t.Fatalf("relay collector: %v", err)
 	}
 }
 
@@ -130,8 +161,17 @@ func TestModuleInitBothEnabled(t *testing.T) {
 }
 
 func TestModuleCloseIdempotent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Stream.RingBufferSize = 256
+	cfg.Cluster.Forward.Enabled = true
+	cfg.Cluster.Forward.Targets = []string{"rtmp://target/live"}
+	cfg.Cluster.Origin.Enabled = true
+	cfg.Cluster.Origin.Servers = []string{"rtmp://origin/live"}
+	srv := core.NewServer(cfg)
 	m := NewModule()
-	// Close on uninitialized module should not panic
+	if err := m.Init(srv); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

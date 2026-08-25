@@ -9,25 +9,54 @@ import (
 
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
-	mu        sync.Mutex
-	ID        string           // SIP Call-ID
-	DeviceID  string
-	ChannelID string
-	StreamKey string
-	Direction SessionDirection
-	LocalPort int
+	mu         sync.Mutex
+	ID         string // SIP Call-ID
+	DeviceID   string
+	ChannelID  string
+	StreamKey  string
+	Direction  SessionDirection
+	LocalPort  int
 	RemoteAddr *net.UDPAddr
 	Transport  string // "udp" or "tcp"
 	State      SessionState
 	Publisher  *Publisher
+	Receiver   *RTPReceiver
 	Stream     *core.Stream
 	SSRC       uint32
+	Playback   bool
+	closed     bool
+	published  bool
+}
+
+// MediaSessionSnapshot is an immutable view of session state used by cleanup
+// and management readers.
+type MediaSessionSnapshot struct {
+	ID          string
+	DeviceID    string
+	ChannelID   string
+	StreamKey   string
+	Direction   SessionDirection
+	LocalPort   int
+	RemoteAddr  *net.UDPAddr
+	Transport   string
+	State       SessionState
+	Publisher   *Publisher
+	PublisherID string
+	Receiver    *RTPReceiver
+	Stream      *core.Stream
+	SSRC        uint32
+	Playback    bool
+	Closed      bool
+	Published   bool
 }
 
 // SetState transitions the session to a new state.
 func (s *MediaSession) SetState(state SessionState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	s.State = state
 }
 
@@ -38,13 +67,93 @@ func (s *MediaSession) GetState() SessionState {
 	return s.State
 }
 
-// Close terminates the media session.
-func (s *MediaSession) Close() {
+// MarkPublished records that the publish lifecycle start event was emitted.
+// It returns false when termination already owns the session.
+func (s *MediaSession) MarkPublished() bool {
+	return s.startPublishLifecycle(nil)
+}
+
+func (s *MediaSession) startPublishLifecycle(emit func()) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed || s.published {
+		return false
+	}
+	s.published = true
+	if emit != nil {
+		emit()
+	}
+	return true
+}
+
+func (s *MediaSession) publishLifecycleStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.published
+}
+
+// Close terminates the media session. The first caller owns the remaining
+// module cleanup and receives true; later callers are no-ops.
+func (s *MediaSession) Close() bool {
+	_, closed := s.closeSnapshot()
+	return closed
+}
+
+func (s *MediaSession) closeSnapshot() (MediaSessionSnapshot, bool) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return MediaSessionSnapshot{}, false
+	}
+	s.closed = true
 	s.State = SessionStateClosed
+	snapshot := s.snapshotLocked()
+	s.mu.Unlock()
+
+	if snapshot.Receiver != nil {
+		snapshot.Receiver.Close()
+	}
+	if snapshot.Publisher != nil {
+		_ = snapshot.Publisher.Close()
+	}
+	return snapshot, true
+}
+
+// Snapshot returns a locked immutable view of the session.
+func (s *MediaSession) Snapshot() MediaSessionSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+func (s *MediaSession) snapshotLocked() MediaSessionSnapshot {
+	var remoteAddr *net.UDPAddr
+	if s.RemoteAddr != nil {
+		copy := *s.RemoteAddr
+		remoteAddr = &copy
+	}
+	publisherID := ""
 	if s.Publisher != nil {
-		s.Publisher.Close()
+		publisherID = s.Publisher.ID()
+	}
+	return MediaSessionSnapshot{
+		ID:          s.ID,
+		DeviceID:    s.DeviceID,
+		ChannelID:   s.ChannelID,
+		StreamKey:   s.StreamKey,
+		Direction:   s.Direction,
+		LocalPort:   s.LocalPort,
+		RemoteAddr:  remoteAddr,
+		Transport:   s.Transport,
+		State:       s.State,
+		Publisher:   s.Publisher,
+		PublisherID: publisherID,
+		Receiver:    s.Receiver,
+		Stream:      s.Stream,
+		SSRC:        s.SSRC,
+		Playback:    s.Playback,
+		Closed:      s.closed,
+		Published:   s.published,
 	}
 }
 
@@ -63,9 +172,10 @@ func NewSessionManager() *SessionManager {
 
 // Add registers a session by its Call-ID.
 func (m *SessionManager) Add(session *MediaSession) {
+	snapshot := session.Snapshot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[session.ID] = session
+	m.sessions[snapshot.ID] = session
 }
 
 // Get returns a session by Call-ID.
@@ -82,12 +192,23 @@ func (m *SessionManager) Remove(callID string) {
 	delete(m.sessions, callID)
 }
 
+// RemoveIf removes only the exact session generation registered under callID.
+func (m *SessionManager) RemoveIf(callID string, expected *MediaSession) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessions[callID] != expected {
+		return false
+	}
+	delete(m.sessions, callID)
+	return true
+}
+
 // GetByStreamKey finds a session by stream key.
 func (m *SessionManager) GetByStreamKey(key string) *MediaSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, s := range m.sessions {
-		if s.StreamKey == key {
+		if s.Snapshot().StreamKey == key {
 			return s
 		}
 	}
@@ -100,7 +221,8 @@ func (m *SessionManager) GetByChannel(channelID string) []*MediaSession {
 	defer m.mu.RUnlock()
 	var result []*MediaSession
 	for _, s := range m.sessions {
-		if s.ChannelID == channelID && s.State != SessionStateClosed {
+		snapshot := s.Snapshot()
+		if snapshot.ChannelID == channelID && snapshot.State != SessionStateClosed {
 			result = append(result, s)
 		}
 	}
@@ -123,7 +245,7 @@ func (m *SessionManager) CloseByDevice(deviceID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, s := range m.sessions {
-		if s.DeviceID == deviceID {
+		if s.Snapshot().DeviceID == deviceID {
 			s.Close()
 			delete(m.sessions, id)
 		}

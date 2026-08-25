@@ -2,6 +2,9 @@ package rtsp
 
 import (
 	"encoding/base64"
+	"net/url"
+	"path"
+	"strconv"
 	"strings"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -11,20 +14,20 @@ import (
 
 // encodingNameToCodec maps SDP encoding names to internal codec types.
 var encodingNameToCodec = map[string]avframe.CodecType{
-	"H264":           avframe.CodecH264,
-	"H265":           avframe.CodecH265,
-	"VP8":            avframe.CodecVP8,
-	"VP9":            avframe.CodecVP9,
-	"AV1":            avframe.CodecAV1,
-	"MPEG4-GENERIC":  avframe.CodecAAC,
-	"MP4A-LATM":      avframe.CodecAAC,
-	"OPUS":           avframe.CodecOpus,
-	"MPA":            avframe.CodecMP3,
-	"PCMU":           avframe.CodecG711U,
-	"PCMA":           avframe.CodecG711A,
-	"G722":           avframe.CodecG722,
-	"G729":           avframe.CodecG729,
-	"SPEEX":          avframe.CodecSpeex,
+	"H264":          avframe.CodecH264,
+	"H265":          avframe.CodecH265,
+	"VP8":           avframe.CodecVP8,
+	"VP9":           avframe.CodecVP9,
+	"AV1":           avframe.CodecAV1,
+	"MPEG4-GENERIC": avframe.CodecAAC,
+	"MP4A-LATM":     avframe.CodecAAC,
+	"OPUS":          avframe.CodecOpus,
+	"MPA":           avframe.CodecMP3,
+	"PCMU":          avframe.CodecG711U,
+	"PCMA":          avframe.CodecG711A,
+	"G722":          avframe.CodecG722,
+	"G729":          avframe.CodecG729,
+	"SPEEX":         avframe.CodecSpeex,
 }
 
 // sdpToMediaInfo extracts MediaInfo from a parsed SDP SessionDescription.
@@ -130,24 +133,18 @@ func parseSPropParameterSets(fmtp string) []byte {
 // e.g., "rtsp://host/live/test/trackID=0" -> 0, true
 // Returns -1, false if no trackID is found.
 func extractTrackID(rawURL string) (int, bool) {
-	idx := strings.Index(rawURL, "trackID=")
-	if idx < 0 {
+	u, err := url.Parse(rawURL)
+	if err != nil {
 		return -1, false
 	}
-	s := rawURL[idx+len("trackID="):]
-	// Parse simple integer
-	n := 0
-	found := false
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-			found = true
-		} else {
-			break
-		}
-	}
-	if !found {
+	segment := path.Base(u.Path)
+	value, ok := strings.CutPrefix(segment, "trackID=")
+	if !ok || value == "" {
 		return -1, false
 	}
-	return n, true
+	id, err := strconv.Atoi(value)
+	if err != nil || id < 0 {
+		return -1, false
+	}
+	return id, true
 }

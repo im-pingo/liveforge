@@ -2,9 +2,12 @@ package sip
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
+	"time"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
@@ -19,6 +22,80 @@ type sipClient struct {
 func (c *sipClient) writeRequest(ctx context.Context, req *sip.Request) error {
 	_, err := c.client.TransactionRequest(ctx, req)
 	return err
+}
+
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
+func (c *sipClient) writeACK(ctx context.Context, req *sip.Request) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := sipgo.ClientRequestBuild(c.client, req); err != nil {
+		return fmt.Errorf("build ACK request: %w", err)
+	}
+	if c.client.TxRequester != nil {
+		_, err := c.client.TxRequester.Request(ctx, req)
+		return err
+	}
+
+	conn, err := c.client.TransportLayer().ClientRequestConnection(ctx, req)
+	if err != nil {
+		return fmt.Errorf("prepare ACK connection: %w", err)
+	}
+	defer conn.TryClose()
+	return writeMessageWithContext(ctx, conn, req)
+}
+
+func writeMessageWithContext(ctx context.Context, conn sip.Connection, msg sip.Message) error {
+	setDeadline, ok := connectionWriteDeadline(conn)
+	if !ok {
+		return fmt.Errorf("SIP connection %T does not support bounded writes", conn)
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if hasDeadline {
+		if err := setDeadline(deadline); err != nil {
+			return fmt.Errorf("set SIP write deadline: %w", err)
+		}
+	}
+
+	writeDone := make(chan struct{})
+	watcherDone := make(chan struct{})
+	var interruptErr error
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			if err := setDeadline(time.Now()); err != nil {
+				interruptErr = errors.Join(err, conn.Close())
+			}
+		case <-writeDone:
+		}
+	}()
+
+	writeErr := conn.WriteMsg(msg)
+	close(writeDone)
+	<-watcherDone
+	clearErr := setDeadline(time.Time{})
+	ctxErr := ctx.Err()
+	if ctxErr == nil && hasDeadline && !time.Now().Before(deadline) {
+		ctxErr = context.DeadlineExceeded
+	}
+	if ctxErr != nil {
+		return errors.Join(ctxErr, interruptErr, writeErr, clearErr)
+	}
+	return errors.Join(interruptErr, writeErr, clearErr)
+}
+
+func connectionWriteDeadline(conn sip.Connection) (func(time.Time) error, bool) {
+	if setter, ok := conn.(writeDeadlineSetter); ok {
+		return setter.SetWriteDeadline, true
+	}
+	if udpConn, ok := conn.(*sip.UDPConnection); ok && udpConn.PacketConn != nil {
+		return udpConn.PacketConn.SetWriteDeadline, true
+	}
+	return nil, false
 }
 
 // service is the concrete implementation of SIPService.
@@ -39,7 +116,9 @@ type service struct {
 	serverID  string
 	domain    string
 
-	cancelFunc context.CancelFunc
+	cancelFunc    context.CancelFunc
+	listenerStart sync.WaitGroup
+	listenerDone  sync.WaitGroup
 }
 
 func newService() *service {
@@ -98,10 +177,19 @@ func (s *service) init(cfg config.SIPConfig) error {
 
 	for _, transport := range cfg.Transport {
 		transport := transport
+		s.listenerStart.Add(1)
+		s.listenerDone.Add(1)
+		var started sync.Once
+		markStarted := func() {
+			started.Do(s.listenerStart.Done)
+		}
+		listenerCtx := context.WithValue(ctx, sipgo.ListenReadyCtxKey, sipgo.ListenReadyFuncCtxValue(func(string, string) {
+			markStarted()
+		}))
 		go func() {
-			if err := srv.ListenAndServe(ctx, transport, cfg.Listen); err != nil {
-				slog.Error("sip listener stopped", "module", "sip", "transport", transport, "error", err)
-			}
+			defer s.listenerDone.Done()
+			defer markStarted()
+			s.serveListener(listenerCtx, srv, transport, cfg.Listen)
 		}()
 		slog.Info("listening", "module", "sip", "transport", transport, "addr", cfg.Listen)
 	}
@@ -109,10 +197,20 @@ func (s *service) init(cfg config.SIPConfig) error {
 	return nil
 }
 
+func (s *service) serveListener(ctx context.Context, srv *sipgo.Server, transport, addr string) {
+	err := srv.ListenAndServe(ctx, transport, addr)
+	if err == nil || (ctx.Err() != nil && errors.Is(err, net.ErrClosed)) {
+		return
+	}
+	slog.Error("sip listener stopped", "module", "sip", "transport", transport, "error", err)
+}
+
 func (s *service) close() {
+	s.listenerStart.Wait()
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
+	s.listenerDone.Wait()
 }
 
 // --- SIPService interface ---
@@ -181,27 +279,51 @@ func (s *service) SendInvite(ctx context.Context, req *sip.Request) (*InviteTran
 	}
 
 	invTx := &InviteTransaction{
-		clientTx: tx,
-		client:   s.client,
-		request:  req,
-		done:     make(chan struct{}),
+		clientTx:       tx,
+		client:         s.client,
+		request:        req,
+		done:           make(chan struct{}),
+		closeRequested: make(chan struct{}),
 	}
 
 	// Wait for final response in background
 	go func() {
-		defer invTx.Close()
+		defer invTx.finish()
+		responses := tx.Responses()
+		storeFinal := func(resp *sip.Response) bool {
+			if resp == nil || resp.StatusCode < 200 {
+				return false
+			}
+			invTx.mu.Lock()
+			invTx.response = resp
+			invTx.mu.Unlock()
+			return true
+		}
+		storeReadyFinal := func() {
+			select {
+			case resp, ok := <-responses:
+				if ok {
+					storeFinal(resp)
+				}
+			default:
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
+				storeReadyFinal()
 				return
-			case resp, ok := <-tx.Responses():
+			case <-invTx.closeRequested:
+				storeReadyFinal()
+				return
+			case <-tx.Done():
+				storeReadyFinal()
+				return
+			case resp, ok := <-responses:
 				if !ok {
 					return
 				}
-				if resp.StatusCode >= 200 {
-					invTx.mu.Lock()
-					invTx.response = resp
-					invTx.mu.Unlock()
+				if storeFinal(resp) {
 					return
 				}
 			}

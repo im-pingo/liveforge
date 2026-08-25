@@ -58,7 +58,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	needsAnnexB := videoCodec == avframe.CodecH264 || videoCodec == avframe.CodecH265
 	if needsAnnexB {
 		if sh := stream.VideoSeqHeader(); sh != nil {
-			paramSetBuf = pkgrtp.ToAnnexB(sh.Payload, true)
+			paramSetBuf = pkgrtp.VideoToAnnexB(videoCodec, sh.Payload, true)
 		}
 	}
 
@@ -67,7 +67,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	// causes either visual jitter (DTS-order) or mosaic corruption
 	// (PTS-order). We drop B-frames and send only I/P reference frames.
 	//
-	// Detection: track the highest PTS sent. Any frame whose PTS is below
+	// Detection: for H.264, track the highest PTS sent. Any frame whose PTS is below
 	// that threshold is a B-frame (its display time precedes a previously
 	// decoded reference frame). When there are no B-frames (PTS == DTS),
 	// all frames pass through since PTS is always increasing.
@@ -82,18 +82,18 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	//   VP8/VP9/AV1: raw frame data passed directly to pion's packetizer.
 	//
 	// PLI/FIR resync: inter-frames are skipped until the next keyframe.
-	// B-frame drop: frames with PTS < maxSentVideoPTS are silently dropped.
-	writeVideoSample := func(frame *avframe.AVFrame) {
+	// H.264 B-frame drop: frames with PTS < maxSentVideoPTS are silently dropped.
+	writeVideoSample := func(frame *avframe.AVFrame) bool {
 		if video == nil {
-			return
+			return false
 		}
 
 		// SequenceHeader: cache parameter sets, do not send as a sample.
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			if needsAnnexB {
-				paramSetBuf = pkgrtp.ToAnnexB(frame.Payload, true)
+				paramSetBuf = pkgrtp.VideoToAnnexB(videoCodec, frame.Payload, true)
 			}
-			return
+			return false
 		}
 
 		// PLI/FIR resync: skip inter-frames until the next keyframe.
@@ -105,28 +105,28 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 					lastVideoDTS = frame.DTS
 				}
 				lastSentVideoDTS = -1 // reset so keyframe gets default duration
-				return
+				return false
 			}
 			video.ClearNeedsKeyframe()
 			slog.Debug("PLI resync: sending keyframe", "module", "webrtc", "bytes", len(frame.Payload))
 		}
 
-		// Drop B-frames: if this frame's display time (PTS) is earlier than
-		// a frame we already sent, it's a B-frame that the WebRTC decoder
-		// cannot handle. Drop it silently but still track DTS for the pacer.
-		if frame.FrameType != avframe.FrameTypeKeyframe && frame.PTS < maxSentVideoPTS {
+		// Drop H.264 B-frames whose display time precedes an already-sent
+		// reference frame. H.265 B-frames may themselves be references and
+		// must stay in the decode-order stream.
+		if shouldDropWHEPVideoFrame(videoCodec, frame, maxSentVideoPTS) {
 			if frame.DTS > 0 {
 				lastVideoDTS = frame.DTS
 			}
-			return
+			return false
 		}
 
 		var payload []byte
 		if needsAnnexB {
 			// H264/H265: convert AVCC/HVCC length-prefixed NALs to Annex-B.
-			payload = pkgrtp.ToAnnexB(frame.Payload, false)
+			payload = pkgrtp.VideoToAnnexB(videoCodec, frame.Payload, false)
 			if len(payload) == 0 {
-				return
+				return false
 			}
 			// Prepend parameter sets to keyframes.
 			if frame.FrameType == avframe.FrameTypeKeyframe && len(paramSetBuf) > 0 {
@@ -139,7 +139,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			// VP8/VP9/AV1: raw frame data, no conversion needed.
 			payload = frame.Payload
 			if len(payload) == 0 {
-				return
+				return false
 			}
 		}
 
@@ -170,8 +170,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			Data:     payload,
 			Duration: duration,
 		}); err != nil {
-			return
+			return false
 		}
+		return true
 	}
 
 	// Compute fixed audio frame duration for transcoded Opus.
@@ -183,23 +184,18 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		fixedAudioDur = 20 * time.Millisecond // 960 samples / 48kHz
 	}
 
-	// writeAudioSample writes audio frames. AAC from RTMP is not WebRTC
-	// compatible (no codecToMime mapping), so audioSender will be nil in
-	// that case and this is a no-op.
+	// writeAudioSample writes only frames matching the negotiated track codec.
+	// This prevents source AAC from being packetized on an Opus track if a
+	// transcoder fails or a source-codec cache reaches this path.
 	writeAudioSample := func(frame *avframe.AVFrame) {
 		if audio == nil {
 			return
 		}
 
-		// Skip audio sequence headers (e.g. AudioSpecificConfig for AAC).
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+		if !whepAudioFrameAllowed(frame, targetAudioCodec) {
 			return
 		}
-
 		payload := frame.Payload
-		if len(payload) == 0 {
-			return
-		}
 
 		var duration time.Duration
 		if fixedAudioDur > 0 {
@@ -223,28 +219,34 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		}
 	}
 
-	// Live mode: send GOP cache so the subscriber gets an immediate keyframe,
-	// paced at 10x real-time speed to avoid flooding the browser's jitter buffer.
-	//
-	// When audio transcoding is needed, skip the GOP cache entirely.
-	// The GOP cache only contains source-codec audio (e.g. AAC) which cannot
-	// be sent over the Opus track. Sending video-only from the cache causes
-	// A/V desync: the browser buffers 1-2s of video before any audio arrives,
-	// making audio lag behind by the GOP cache duration.
-	// Falling back to realtime behavior (wait for live keyframe) ensures both
-	// audio and video start from the same point in time.
-	if mode == "live" && needsTranscode {
-		slog.Info("live mode with audio transcoding: skipping GOP cache to preserve A/V sync",
-			"module", "webrtc")
-		mode = "realtime" // fall back to realtime behavior
+	var gopCache []*avframe.AVFrame
+	var startPos int64
+	if mode == "live" {
+		gopCache, startPos = whepLiveSnapshot(stream, needsTranscode)
+	} else {
+		startPos = stream.RingBuffer().WriteCursor()
 	}
 
+	// Source video always comes from the atomic snapshot cursor. A separate
+	// transcode reader contributes target-codec audio only.
+	transcodeStart := startPos
+	if mode == "live" && needsTranscode {
+		transcodeStart = stream.GOPCacheSourceStart()
+	}
+	readers := newWHEPFeedReaders(stream, startPos, transcodeStart, needsTranscode, targetAudioCodec)
+	defer readers.Close()
+
+	// Live mode: send the cached GOP so the subscriber gets an immediate
+	// keyframe, paced at 10x real-time speed. When transcoding, the snapshot
+	// contains video only; source-codec audio must never enter the target track.
+	cacheKeyframeSent := false
 	if mode == "live" {
-		gopCache := stream.GOPCache()
 		var prevDTS int64
 		for _, frame := range gopCache {
 			if frame.MediaType.IsVideo() {
-				writeVideoSample(frame)
+				if writeVideoSample(frame) && frame.FrameType == avframe.FrameTypeKeyframe {
+					cacheKeyframeSent = true
+				}
 			} else if frame.MediaType.IsAudio() {
 				writeAudioSample(frame)
 			}
@@ -273,11 +275,6 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		// writeAudioSample during cache playback.)
 	}
 
-	// Capture write position AFTER GOP cache so the live reader starts at
-	// the current position, not where we were before the cache was sent.
-	// This avoids DTS discontinuities between cached and live frames.
-	startPos := stream.RingBuffer().WriteCursor()
-
 	// DTS-based pacer: track wall-clock reference point to prevent bursting.
 	// pion's WriteSample sends RTP packets immediately (no internal pacing).
 	// Without pacing, the feed loop sends all buffered frames in a burst
@@ -295,97 +292,159 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 		paceBaseDTS = lastVideoDTS
 	}
 
-	// Set up the live reader. When audio transcoding is needed, use
-	// TranscodeManager's reader which provides video passthrough and
-	// transcoded audio frames in the target codec.
-	var reader *util.RingReader[*avframe.AVFrame]
-	var transcodeRelease func()
-	if needsTranscode {
-		if tm := stream.TranscodeManager(); tm != nil {
-			var err error
-			reader, transcodeRelease, err = tm.GetOrCreateReader(targetAudioCodec)
-			if err != nil {
-				slog.Warn("whep: audio transcode failed, video only", "error", err)
-				needsTranscode = false
-				reader = stream.RingBuffer().NewReaderAt(startPos)
-			}
-		} else {
-			needsTranscode = false
-			reader = stream.RingBuffer().NewReaderAt(startPos)
-		}
-	} else {
-		reader = stream.RingBuffer().NewReaderAt(startPos)
-	}
-	if transcodeRelease != nil {
-		defer transcodeRelease()
-	}
-
 	// Live frame loop: start reading only NEW frames (after snapshot).
 	// In realtime mode, skip all frames until the first video keyframe
 	// arrives, then start sending from that keyframe onward.
-	gotKeyframe := mode == "live" // live mode already has GOP cache, no need to wait
+	gotKeyframe := whepInitialKeyframeReady(mode, cacheKeyframeSent)
 	for {
-		frame, ok := reader.TryRead()
-		if ok {
-			// Realtime mode: discard frames until first keyframe.
-			if !gotKeyframe {
-				if frame.MediaType.IsVideo() && frame.FrameType == avframe.FrameTypeKeyframe {
-					gotKeyframe = true
-					slog.Info("realtime mode: got first keyframe", "module", "webrtc")
-				} else {
-					continue
-				}
-			}
+		readers.drainTargetAudio(gotKeyframe, targetAudioCodec, writeAudioSample)
 
-			// Audio: deliver immediately without DTS pacing.
-			// Audio has its own fixed duration (e.g. 20ms for Opus) that drives
-			// RTP timestamp advancement. Chrome's audio jitter buffer handles
-			// arrival variance independently. Pacing audio would delay video
-			// frame reads in this goroutine, causing video jitter.
+		frame, ok := readers.source.TryRead()
+		if ok {
 			if frame.MediaType.IsAudio() {
-				writeAudioSample(frame)
+				if !needsTranscode && gotKeyframe {
+					writeAudioSample(frame)
+				}
 				continue
 			}
 
-			// DTS-based pacing: sleep if we're sending video faster than real-time.
-			if frame.DTS > 0 {
-				if paceBaseWall.IsZero() {
-					paceBaseWall = time.Now()
-					paceBaseDTS = frame.DTS
-				} else {
-					dtsDelta := time.Duration(frame.DTS-paceBaseDTS) * time.Millisecond
-					targetTime := paceBaseWall.Add(dtsDelta)
-					sleepDur := time.Until(targetTime)
+			if frame.MediaType.IsVideo() {
+				// Realtime and empty-cache Live modes discard frames until the
+				// first live keyframe.
+				if !gotKeyframe && frame.FrameType == avframe.FrameTypeKeyframe {
+					gotKeyframe = true
+					slog.Info("whep: got first live keyframe", "module", "webrtc", "mode", mode)
+				} else if !gotKeyframe {
+					continue
+				}
 
-					switch dtsPaceAction(sleepDur) {
-					case "sleep":
-						timer := time.NewTimer(sleepDur)
-						select {
-						case <-timer.C:
-						case <-done:
-							timer.Stop()
-							return
-						}
-					case "reset":
+				// DTS-based pacing: sleep if we're sending video faster than real-time.
+				if frame.DTS > 0 {
+					if paceBaseWall.IsZero() {
 						paceBaseWall = time.Now()
 						paceBaseDTS = frame.DTS
-					}
-					// "deliver": behind real-time, send immediately.
-					// GCC pacer smooths the RTP output.
-				}
-			}
+					} else {
+						dtsDelta := time.Duration(frame.DTS-paceBaseDTS) * time.Millisecond
+						targetTime := paceBaseWall.Add(dtsDelta)
+						sleepDur := time.Until(targetTime)
 
-			if frame.MediaType.IsVideo() {
+						switch dtsPaceAction(sleepDur) {
+						case "sleep":
+							timer := time.NewTimer(sleepDur)
+							select {
+							case <-timer.C:
+							case <-done:
+								timer.Stop()
+								return
+							}
+						case "reset":
+							paceBaseWall = time.Now()
+							paceBaseDTS = frame.DTS
+						}
+						// "deliver": behind real-time, send immediately.
+						// GCC pacer smooths the RTP output.
+					}
+				}
 				writeVideoSample(frame)
 			}
 			continue
 		}
-		select {
-		case <-done:
+		if !readers.wait(done) {
 			return
-		case <-reader.Signal():
 		}
 	}
+}
+
+// whepLiveSnapshot captures the cached GOP and source-ring cursor together.
+// When audio will be transcoded, the source cache contributes video only;
+// source-codec audio cannot be packetized on the negotiated target track.
+func whepLiveSnapshot(stream *core.Stream, needsTranscode bool) ([]*avframe.AVFrame, int64) {
+	frames, startPos := stream.GOPCacheSnapshot()
+	if !needsTranscode {
+		return frames, startPos
+	}
+
+	videoOnly := frames[:0]
+	for _, frame := range frames {
+		if frame.MediaType.IsVideo() {
+			videoOnly = append(videoOnly, frame)
+		}
+	}
+	return videoOnly, startPos
+}
+
+type whepFeedReaders struct {
+	source      *util.RingReader[*avframe.AVFrame]
+	targetAudio *util.RingReader[*avframe.AVFrame]
+	release     func()
+}
+
+func newWHEPFeedReaders(stream *core.Stream, startPos, transcodeStart int64, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
+	readers := &whepFeedReaders{source: stream.RingBuffer().NewReaderAt(startPos)}
+	if needsTranscode {
+		if tm := stream.TranscodeManager(); tm != nil {
+			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, transcodeStart)
+			if err != nil {
+				slog.Warn("whep: audio transcode failed, video only", "error", err)
+			} else {
+				readers.targetAudio = reader
+				readers.release = release
+			}
+		}
+	}
+	return readers
+}
+
+func (r *whepFeedReaders) Close() {
+	if r.release != nil {
+		r.release()
+	}
+}
+
+func (r *whepFeedReaders) drainTargetAudio(ready bool, targetCodec avframe.CodecType, writeAudio func(*avframe.AVFrame)) {
+	if r.targetAudio == nil {
+		return
+	}
+	for {
+		frame, ok := r.targetAudio.TryRead()
+		if !ok {
+			return
+		}
+		if ready && frame.MediaType.IsAudio() && whepAudioFrameAllowed(frame, targetCodec) {
+			writeAudio(frame)
+		}
+	}
+}
+
+func (r *whepFeedReaders) wait(done <-chan struct{}) bool {
+	if r.targetAudio == nil {
+		select {
+		case <-done:
+			return false
+		case <-r.source.Signal():
+			return true
+		}
+	}
+	select {
+	case <-done:
+		return false
+	case <-r.source.Signal():
+		return true
+	case <-r.targetAudio.Signal():
+		return true
+	}
+}
+
+func whepInitialKeyframeReady(mode string, cacheKeyframeSent bool) bool {
+	return mode == "live" && cacheKeyframeSent
+}
+
+func shouldDropWHEPVideoFrame(codec avframe.CodecType, frame *avframe.AVFrame, maxSentPTS int64) bool {
+	return codec == avframe.CodecH264 && frame.FrameType != avframe.FrameTypeKeyframe && frame.PTS < maxSentPTS
+}
+
+func whepAudioFrameAllowed(frame *avframe.AVFrame, targetCodec avframe.CodecType) bool {
+	return frame.Codec == targetCodec && frame.FrameType != avframe.FrameTypeSequenceHeader && len(frame.Payload) > 0
 }
 
 // dtsPaceAction returns the action the feed loop should take based on

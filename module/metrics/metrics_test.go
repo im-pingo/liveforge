@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,9 +10,18 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+type inertConfigSource struct{}
+
+func (inertConfigSource) Load(context.Context, configruntime.Version) (configruntime.Snapshot, error) {
+	return configruntime.Snapshot{}, nil
+}
+func (inertConfigSource) Close() error { return nil }
 
 func testConfig() *config.Config {
 	return &config.Config{
@@ -70,14 +80,122 @@ func TestMetricsModuleStartStop(t *testing.T) {
 	}
 }
 
+func TestMetricsExposeRuntimeConfigHealth(t *testing.T) {
+	cfg := testConfig()
+	s := core.NewServer(cfg)
+	manager, err := configruntime.NewManager(configruntime.Options{Source: inertConfigSource{}, SourceName: "test", Initial: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	s.SetConfigManager(manager)
+	m := NewModule()
+	s.RegisterModule(m)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+	resp, err := http.Get("http://" + m.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, name := range []string{"liveforge_config_consecutive_failures", "liveforge_config_pending_restart", "liveforge_config_callback_failures"} {
+		if !strings.Contains(string(body), name) {
+			t.Errorf("missing %s", name)
+		}
+	}
+	for _, result := range []string{"accepted", "rejected", "application_failed"} {
+		metric := `liveforge_config_changes_total{result="` + result + `"}`
+		if !strings.Contains(string(body), metric) {
+			t.Errorf("missing bounded config change metric %s", metric)
+		}
+	}
+}
+
+type securityMetricStub struct{}
+
+func (securityMetricStub) Name() string                   { return "api" }
+func (securityMetricStub) Init(*core.Server) error        { return nil }
+func (securityMetricStub) Hooks() []core.HookRegistration { return nil }
+func (securityMetricStub) Close() error                   { return nil }
+func (securityMetricStub) SecurityMetricValues() map[string]float64 {
+	return map[string]float64{"authentication_failures": 2, "authorization_failures": 3, "rate_limit_denials": 4, "audit_events": 5}
+}
+
+type collectorStub struct{ gauge prometheus.Gauge }
+
+func newCollectorStub() *collectorStub {
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "liveforge_test_module_value", Help: "test"})
+	gauge.Set(7)
+	return &collectorStub{gauge: gauge}
+}
+func (*collectorStub) Name() string                   { return "collector-stub" }
+func (*collectorStub) Init(*core.Server) error        { return nil }
+func (*collectorStub) Hooks() []core.HookRegistration { return nil }
+func (*collectorStub) Close() error                   { return nil }
+func (s *collectorStub) PrometheusCollectors() []prometheus.Collector {
+	return []prometheus.Collector{s.gauge}
+}
+
+func TestMetricsRegistersModuleCollectors(t *testing.T) {
+	cfg := testConfig()
+	s := core.NewServer(cfg)
+	s.RegisterModule(newCollectorStub())
+	m := NewModule()
+	s.RegisterModule(m)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+	resp, err := http.Get("http://" + m.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "liveforge_test_module_value 7") {
+		t.Fatalf("module collector missing from %s", body)
+	}
+}
+
+func TestMetricsExposeManagementSecurityCounters(t *testing.T) {
+	cfg := testConfig()
+	s := core.NewServer(cfg)
+	s.RegisterModule(securityMetricStub{})
+	m := NewModule()
+	s.RegisterModule(m)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown()
+	resp, err := http.Get("http://" + m.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, metric := range []string{
+		"liveforge_api_authentication_failures_total 2",
+		"liveforge_api_authorization_failures_total 3",
+		"liveforge_api_rate_limit_denials_total 4",
+		"liveforge_api_audit_events_total 5",
+	} {
+		if !strings.Contains(string(body), metric) {
+			t.Errorf("missing %q in metrics output", metric)
+		}
+	}
+}
+
 type stubPublisher struct {
 	id        string
 	mediaInfo *avframe.MediaInfo
 }
 
-func (p *stubPublisher) ID() string                 { return p.id }
+func (p *stubPublisher) ID() string                    { return p.id }
 func (p *stubPublisher) MediaInfo() *avframe.MediaInfo { return p.mediaInfo }
-func (p *stubPublisher) Close() error                { return nil }
+func (p *stubPublisher) Close() error                  { return nil }
 
 func TestMetricsWithStreams(t *testing.T) {
 	cfg := testConfig()

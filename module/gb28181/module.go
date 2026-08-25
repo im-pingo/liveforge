@@ -51,26 +51,18 @@ func (m *Module) Init(s *core.Server) error {
 		prefix = "gb28181"
 	}
 
-	// Device registry
-	m.registry = NewDeviceRegistry(cfg.Keepalive.Timeout, cfg.DumpFile)
-	m.registry.RestoreFromFile()
-	m.registry.StartMonitor(func(deviceID string) {
-		slog.Info("device offline", "module", "gb28181", "device", deviceID)
-		m.sessions.CloseByDevice(deviceID)
-	})
-
 	// Session manager
 	m.sessions = NewSessionManager()
 
+	// Device registry
+	m.registry = NewDeviceRegistry(cfg.Keepalive.Timeout, cfg.DumpFile)
+	m.registry.RestoreFromFile()
+
 	// Auth config
 	sipCfg := s.Config().SIP
-	var authCfg *digestAuthConfig
+	var authCfg *sipmod.DigestAuth
 	if sipCfg.Auth.Enabled {
-		authCfg = &digestAuthConfig{
-			enabled:  true,
-			realm:    sipCfg.Domain,
-			password: sipCfg.Auth.Password,
-		}
+		authCfg = sipmod.NewDigestAuth(sipCfg.Domain, sipCfg.Auth.Password)
 	}
 
 	// Handler
@@ -83,6 +75,10 @@ func (m *Module) Init(s *core.Server) error {
 		prefix:   prefix,
 		auth:     authCfg,
 	}
+	m.registry.StartMonitor(func(deviceID string) {
+		slog.Info("device offline", "module", "gb28181", "device", deviceID)
+		m.handler.closeSessionsByDevice(deviceID)
+	})
 
 	// Catalog client
 	m.catalog = &catalogClient{
@@ -129,6 +125,11 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 func (m *Module) Close() error {
 	if m.registry != nil {
 		m.registry.Stop()
+	}
+	if m.handler != nil && m.sessions != nil {
+		for _, session := range m.sessions.All() {
+			m.handler.closeSession(session, "")
+		}
 	}
 	slog.Info("stopped", "module", "gb28181")
 	return nil

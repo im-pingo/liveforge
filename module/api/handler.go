@@ -13,11 +13,19 @@ import (
 // so it can be registered on any http.ServeMux (httpstream, standalone API, etc.).
 type Handlers struct {
 	server *core.Server
+	audit  *AuditStore
 }
 
 // NewHandlers creates API handlers backed by the given server.
 func NewHandlers(s *core.Server) *Handlers {
-	return &Handlers{server: s}
+	return &Handlers{server: s, audit: NewAuditStore(s.Config().API.Audit.MaxEntries)}
+}
+
+func newHandlersWithAudit(s *core.Server, audit *AuditStore) *Handlers {
+	if audit == nil {
+		audit = NewAuditStore(s.Config().API.Audit.MaxEntries)
+	}
+	return &Handlers{server: s, audit: audit}
 }
 
 // apiResponse is the standard API response envelope.
@@ -41,17 +49,17 @@ func writeError(w http.ResponseWriter, httpCode int, msg string) {
 
 // StreamInfo represents a single stream in the API response.
 type StreamInfo struct {
-	Key         string              `json:"key"`
-	State       string              `json:"state"`
-	Publisher   string              `json:"publisher"`
-	VideoCodec  string              `json:"video_codec"`
-	AudioCodec  string              `json:"audio_codec"`
-	GOPCacheLen    int              `json:"gop_cache_len"`
-	GOPVideoFrames int             `json:"gop_video_frames"`
-	GOPAudioFrames int             `json:"gop_audio_frames"`
-	GOPDurationMs  int64           `json:"gop_duration_ms"`
-	Subscribers    map[string]int  `json:"subscribers"`
-	Stats       *StreamStatsDetail  `json:"stats,omitempty"`
+	Key            string             `json:"key"`
+	State          string             `json:"state"`
+	Publisher      string             `json:"publisher"`
+	VideoCodec     string             `json:"video_codec"`
+	AudioCodec     string             `json:"audio_codec"`
+	GOPCacheLen    int                `json:"gop_cache_len"`
+	GOPVideoFrames int                `json:"gop_video_frames"`
+	GOPAudioFrames int                `json:"gop_audio_frames"`
+	GOPDurationMs  int64              `json:"gop_duration_ms"`
+	Subscribers    map[string]int     `json:"subscribers"`
+	Stats          *StreamStatsDetail `json:"stats,omitempty"`
 }
 
 // StreamStatsDetail contains detailed stream statistics.
@@ -87,13 +95,13 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 	gopDetail := stream.GOPCacheDetail()
 
 	info := StreamInfo{
-		Key:         stream.Key(),
-		State:       state.String(),
+		Key:            stream.Key(),
+		State:          state.String(),
 		GOPCacheLen:    gopDetail.TotalFrames,
 		GOPVideoFrames: gopDetail.VideoFrames,
 		GOPAudioFrames: gopDetail.AudioFrames,
 		GOPDurationMs:  gopDetail.DurationMs,
-		Subscribers: subs,
+		Subscribers:    subs,
 	}
 
 	if pub := stream.Publisher(); pub != nil {
@@ -186,6 +194,10 @@ func (h *Handlers) handleStreamDelete(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 	// Path: /api/v1/streams/{key}/kick — extract key by removing prefix and /kick suffix
 	key := extractStreamKey(r.URL.Path, "/api/v1/streams/")
+	if !strings.HasSuffix(key, "/kick") {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	key = strings.TrimSuffix(key, "/kick")
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "missing stream key")
@@ -205,11 +217,12 @@ func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pub.Close()
-	stream.RemovePublisher()
+	stream.RemovePublisherIf(pub)
 
 	h.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-		StreamKey: key,
-		Protocol:  "api-kick",
+		StreamKey:   key,
+		PublisherID: pub.ID(),
+		Protocol:    "api-kick",
 	}) //nolint:errcheck
 
 	writeJSON(w, http.StatusOK, nil)
@@ -238,6 +251,9 @@ func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	if cfg.RTSP.Enabled {
 		endpoints["rtsp"] = cfg.RTSP.Listen
 	}
+	if cfg.DVR.Enabled {
+		endpoints["dvr"] = cfg.DVR.Listen
+	}
 	writeJSON(w, http.StatusOK, ServerInfo{
 		Version:   core.Version,
 		Uptime:    int64(time.Since(h.server.StartTime()).Seconds()),
@@ -259,27 +275,99 @@ func (h *Handlers) handleServerStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ConfigRuntimeStatus is the redacted runtime configuration loader status.
+type ConfigRuntimeStatus struct {
+	Enabled                        bool      `json:"enabled"`
+	Source                         string    `json:"source,omitempty"`
+	ActiveVersion                  string    `json:"active_version,omitempty"`
+	ActiveHash                     string    `json:"active_hash,omitempty"`
+	LastAttempt                    time.Time `json:"last_attempt,omitempty"`
+	LastSuccess                    time.Time `json:"last_success,omitempty"`
+	ConsecutiveFailures            uint64    `json:"consecutive_failures"`
+	LastError                      string    `json:"last_error,omitempty"`
+	PendingRestart                 []string  `json:"pending_restart,omitempty"`
+	CallbackFailures               uint64    `json:"callback_failures"`
+	DroppedCallbacks               uint64    `json:"dropped_callbacks"`
+	ConfigChangesAccepted          uint64    `json:"config_changes_accepted"`
+	ConfigChangesRejected          uint64    `json:"config_changes_rejected"`
+	ConfigChangesApplicationFailed uint64    `json:"config_changes_application_failed"`
+}
+
+func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeJSON(w, http.StatusOK, ConfigRuntimeStatus{})
+		return
+	}
+	status := manager.Status()
+	writeJSON(w, http.StatusOK, ConfigRuntimeStatus{
+		Enabled:                        true,
+		Source:                         status.Source,
+		ActiveVersion:                  status.ActiveVersion.Value,
+		ActiveHash:                     status.ActiveVersion.Hash,
+		LastAttempt:                    status.LastAttempt,
+		LastSuccess:                    status.LastSuccess,
+		ConsecutiveFailures:            status.ConsecutiveFailures,
+		LastError:                      status.LastError,
+		PendingRestart:                 status.PendingRestart,
+		CallbackFailures:               status.CallbackFailures,
+		DroppedCallbacks:               status.DroppedCallbacks,
+		ConfigChangesAccepted:          status.ConfigChangesAccepted,
+		ConfigChangesRejected:          status.ConfigChangesRejected,
+		ConfigChangesApplicationFailed: status.ConfigChangesApplicationFailed,
+	})
+}
+
+func (h *Handlers) handleConfigRefresh(w http.ResponseWriter, r *http.Request) {
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime config manager unavailable")
+		return
+	}
+	if err := manager.Refresh(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scheduled"})
+}
+
+func (h *Handlers) handleAudit(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.audit.Entries())
+}
+
+type SecurityTokenStatus struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+type SecurityStatus struct {
+	LegacyBearerConfigured bool                  `json:"legacy_bearer_configured"`
+	Tokens                 []SecurityTokenStatus `json:"tokens"`
+	ConsoleConfigured      bool                  `json:"console_configured"`
+	ConsoleRole            string                `json:"console_role,omitempty"`
+	AuditEnabled           bool                  `json:"audit_enabled"`
+	AuditEntries           int                   `json:"audit_entries"`
+	AuditEvents            uint64                `json:"audit_events_total"`
+}
+
+func (h *Handlers) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
+	cfg := h.server.Config().API
+	tokens := make([]SecurityTokenStatus, 0, len(cfg.Auth.Tokens))
+	for _, binding := range cfg.Auth.Tokens {
+		tokens = append(tokens, SecurityTokenStatus{Name: binding.Name, Role: defaultRole(binding.Role)})
+	}
+	entries := h.audit.Entries()
+	writeJSON(w, http.StatusOK, SecurityStatus{
+		LegacyBearerConfigured: cfg.Auth.BearerToken != "",
+		Tokens:                 tokens,
+		ConsoleConfigured:      cfg.Console.Username != "",
+		ConsoleRole:            defaultRole(cfg.Console.Role),
+		AuditEnabled:           true,
+		AuditEntries:           len(entries),
+		AuditEvents:            h.audit.Total(),
+	})
+}
+
 func (h *Handlers) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
-}
-
-// DVRStatusProvider is implemented by the DVR module to expose session status.
-type DVRStatusProvider interface {
-	SessionStatus() any
-}
-
-func (h *Handlers) handleDVRStatus(w http.ResponseWriter, r *http.Request) {
-	mod := h.server.ModuleByName("dvr")
-	if mod == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "sessions": []any{}})
-		return
-	}
-
-	provider, ok := mod.(DVRStatusProvider)
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": []any{}})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": provider.SessionStatus()})
 }

@@ -17,8 +17,23 @@
     "config_schema": "docs/config/config.schema.json",
     "recipes": "docs/recipes/"
   },
+  "configuration": {
+    "runtime_loader": {
+      "status": "available",
+      "sources": ["file", "http", "https", "consul", "redis"],
+      "polling": "background periodic refresh",
+      "read_path": "atomic immutable snapshot; no file/network I/O or blocking waits",
+      "failure_behavior": "retain last valid snapshot and expose source status",
+      "http_policy": "runtime.source http requires an http URL and https requires an https URL; redirects are disabled; ETag and Last-Modified validators advance only after a document is accepted",
+      "reload": "SIGHUP schedules asynchronous refresh",
+      "restart_required": ["module enablement", "listener addresses", "TLS files/mode", "port ranges", "audio codec enablement"],
+      "status_counters": ["config_changes_accepted", "config_changes_rejected", "config_changes_application_failed", "callback_failures", "dropped_callbacks"],
+      "docs": "docs/recipes/runtime-config-sources.md"
+    }
+  },
   "runtime": {
     "go": ">=1.26",
+    "startup_failure": "report the original listener or module error and roll back only modules whose initialization was attempted; uninitialized later modules are not closed",
     "default_build": {
       "cgo": false,
       "tags": [],
@@ -34,11 +49,11 @@
   },
   "capabilities": [
     {"id": "rtmp", "direction": ["publish", "play"], "status": "stable", "port": 1935, "url_templates": ["rtmp://HOST:1935/STREAM_KEY"]},
-    {"id": "rtsp", "direction": ["publish", "play"], "status": "stable", "port": 8554, "url_templates": ["rtsp://HOST:8554/STREAM_KEY"]},
+    {"id": "rtsp", "direction": ["publish", "play"], "status": "stable", "port": 8554, "url_templates": ["rtsp://HOST:8554/STREAM_KEY"], "setup_policy": "track IDs must be unique, valid, in range, and eligible for the announced or described media before transport allocation"},
     {"id": "srt", "direction": ["publish", "play"], "status": "stable", "port": 6000, "url_templates": ["srt://HOST:6000?streamid=publish:STREAM_KEY", "srt://HOST:6000?streamid=subscribe:STREAM_KEY"]},
-    {"id": "webrtc", "direction": ["publish", "play"], "status": "stable", "port": 8443, "entrypoints": ["POST /webrtc/whip/{stream_key}", "POST /webrtc/whep/{stream_key}"], "requires": ["HTTPS or a browser-compatible secure context for browser camera and microphone access"]},
+    {"id": "webrtc", "direction": ["publish", "play"], "status": "stable", "port": 8443, "entrypoints": ["POST /webrtc/whip/{stream_key}", "POST /webrtc/whep/{stream_key}"], "max_sdp_offer_bytes": 1048576, "requires": ["HTTPS or a browser-compatible secure context for browser camera and microphone access"]},
     {"id": "hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"]},
-    {"id": "ll-hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"], "requires": ["llhls.enabled=true"]},
+    {"id": "ll-hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8"], "requires": ["llhls.enabled=true"], "startup_policy": "initial manifest waits for one complete segment without completed PART tags; blocking reloads retain the latest completed PART identity"},
     {"id": "dash", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mpd"]},
     {"id": "http-flv", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.flv"]},
     {"id": "fmp4", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mp4"]},
@@ -60,13 +75,28 @@
   "api": {
     "openapi": "docs/api/openapi.yaml",
     "base_path": "/api/v1",
-    "authentication": "API bearer token is configured at api.auth.bearer_token; management and GB28181 endpoints require a token or console session when configured, while GET /api/v1/server/health remains public; publish and subscribe auth are configured under auth."
+    "authentication": "Management accepts api.auth.bearer_token, named viewer/operator/admin tokens, or a console session when configured; GET /api/v1/server/health remains public; publish and subscribe auth are configured under auth.",
+    "runtime_config_status": "GET /api/v1/server/config returns redacted source/version/failure/callback/restart state; POST /api/v1/server/config/refresh schedules asynchronous refresh.",
+    "management_surfaces": ["streams", "runtime config", "cluster status", "SIP Gateway calls", "recordings and DVR", "security status", "audit", "GB28181"],
+    "response_contracts": {"management": "code/message/data envelope", "gb28181": "direct JSON", "webrtc": "SDP success and plain-text errors"}
+  },
+  "operations": {
+    "console": {"status": "available", "views": ["Streams", "GB28181", "Config", "Cluster", "SIP Calls", "Storage", "Security"], "recent_audit": "inside Security; not a separate tab", "permission_aware_actions": true, "preview_protocols": ["http-flv", "ws-flv", "http-ts", "fmp4", "hls", "dash", "whep-realtime", "whep-live"]},
+    "whip_h265_opus_bridge": {"status": "browser_verified", "source": {"protocol": "whip", "video": "H265", "audio": "Opus"}, "preview_protocols": ["http-flv", "ws-flv", "http-ts", "fmp4", "hls", "dash", "whep-realtime", "whep-live"], "timeline": "session-level RTP clock with packet-arrival track offsets; HTTP snapshot muxers use a combined target-audio/source-video transcode reader from the cached GOP cursor and filter cached video by video DTS; WebRTC audio transcoding waits on its reader condition without consuming the source playback wakeup", "success_criteria": ["decoded first frame", "non-zero dimensions", "advancing media clock", "no media error", "no fixed multi-second audio offset", "stable video pacing when source audio pauses"], "docs": "docs/recipes/whip-h265-opus-playback.md"},
+    "recording": {"status": "available", "formats": ["flv", "fmp4", "mp4", "ts", "hls"], "management": ["list", "status", "detail", "range download", "inline range playback", "delete"], "dvr_status": true, "dvr_media_authorization": "synchronous subscribe authorization hooks only; no asynchronous subscribe lifecycle emission", "dvr_media_cors": "non-credentialed wildcard CORS for split-port HLS playlist/segment fetches", "console_playback": {"recordings": "authenticated management API session; browser-native MP4/fMP4 and mpegts.js FLV/TS", "dvr": "HLS on the separate dvr.listen media listener; Console does not persist or append bearer tokens"}, "docs": "docs/recipes/recording-dvr-management.md"},
+    "sipgateway": {"status": "available", "management": ["list", "dial", "detail", "hangup"], "docs": "docs/recipes/sipgateway-management.md"},
+    "cluster": {"status": "available", "protocols": ["rtmp", "srt", "rtsp", "rtp", "gb28181"], "credential_resolution": "atomic per request; api.auth.bearer_token then first named admin token", "peer_errors": "bounded and redacted", "docs": "docs/recipes/cluster-relay-operations.md"},
+    "rtsp_multitrack_setup": {"status": "available", "transports": ["tcp-interleaved", "udp"], "tracks": ["audio", "video"]}
   },
   "security": {
     "sample_config_scope": "local_development_only",
     "default_auth_enabled": false,
     "default_tls_enabled": false,
     "default_console_credentials": "admin/admin",
+    "roles": ["viewer", "operator", "admin"],
+    "health_public": true,
+    "console_session_cookie": "lf_session is HttpOnly, SameSite=Strict, path=/, and Secure when the API listener uses TLS",
+    "audit": "bounded in-memory entries plus structured logs with secret metadata redaction",
     "production_requirements": ["Change console credentials", "Enable TLS", "Enable API and stream authentication", "Restrict exposed ports", "Configure rate limits"]
   },
   "limitations": [
@@ -74,12 +104,20 @@
     "The Docker image is only available after the release workflow publishes it.",
     "A GHCR package may require public visibility or registry authentication before docker pull works.",
     "Audio transcoding is unavailable unless the audiocodec build tag and FFmpeg libraries are present.",
-    "WebRTC browser publishing and playback require correct ICE/TURN and secure-context configuration in real deployments."
+    "WebRTC browser publishing and playback require correct ICE/TURN and secure-context configuration in real deployments.",
+    "Simulcast layer selection remains deferred; stream.simulcast is configuration-only."
   ],
   "recipes": [
     "docs/recipes/source-build.md",
     "docs/recipes/docker-local.md",
     "docs/recipes/rtmp-to-hls.md",
-    "docs/recipes/auth-and-tls.md"
+    "docs/recipes/whip-h265-opus-playback.md",
+    "docs/recipes/auth-and-tls.md",
+    "docs/recipes/runtime-config-sources.md",
+    "docs/recipes/recording-dvr-management.md",
+    "docs/recipes/sipgateway-management.md",
+    "docs/recipes/cluster-relay-operations.md",
+    "docs/recipes/rbac-audit.md",
+    "docs/recipes/release-verification.md"
   ]
 }

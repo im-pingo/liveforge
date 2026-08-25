@@ -80,8 +80,14 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 
 // Close stops the SRT module.
 func (m *Module) Close() error {
-	close(m.closing)
-	m.srtSrv.Shutdown()
+	select {
+	case <-m.closing:
+	default:
+		close(m.closing)
+	}
+	if m.srtSrv != nil {
+		m.srtSrv.Shutdown()
+	}
 	m.wg.Wait()
 	slog.Info("stopped", "module", "srt")
 	return nil
@@ -173,11 +179,12 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 	case "publish":
 		// Fire EventPublish via event bus for auth check
 		ctx := &core.EventContext{
-			StreamKey:  streamKey,
-			Protocol:   "srt",
-			RemoteAddr: req.RemoteAddr().String(),
+			StreamKey:   streamKey,
+			PublisherID: publisherID(streamKey, req.SocketId(), req.PeerSocketId()),
+			Protocol:    "srt",
+			RemoteAddr:  req.RemoteAddr().String(),
 		}
-		if err := m.eventBus.Emit(core.EventPublish, ctx); err != nil {
+		if err := m.eventBus.EmitSync(core.EventPublish, ctx); err != nil {
 			slog.Warn("publish auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT
@@ -190,7 +197,7 @@ func (m *Module) handleConnect(req gosrt.ConnRequest) gosrt.ConnType {
 			Protocol:   "srt",
 			RemoteAddr: req.RemoteAddr().String(),
 		}
-		if err := m.eventBus.Emit(core.EventSubscribe, ctx); err != nil {
+		if err := m.eventBus.EmitSync(core.EventSubscribe, ctx); err != nil {
 			slog.Warn("subscribe auth rejected", "module", "srt", "stream", streamKey, "error", err)
 			m.server.ReleaseConn()
 			return gosrt.REJECT

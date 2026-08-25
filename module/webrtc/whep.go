@@ -2,7 +2,6 @@ package webrtc
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -19,9 +18,20 @@ import (
 
 // handleWHEP handles POST /webrtc/whep/{path...} for WHEP playback.
 func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
+	if !m.beginSetup() {
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.endSetup()
+
 	streamKey := r.PathValue("path")
 	if streamKey == "" {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
+		return
+	}
+	subscribeCtx := eventContextFromRequest(r, streamKey)
+	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
+		rejectUnauthorized(w)
 		return
 	}
 
@@ -29,12 +39,9 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
 		return
 	}
-	connAcquired := true
+	var releaseConnOnce sync.Once
 	releaseConn := func() {
-		if connAcquired {
-			connAcquired = false
-			m.server.ReleaseConn()
-		}
+		releaseConnOnce.Do(m.server.ReleaseConn)
 	}
 
 	contentType := r.Header.Get("Content-Type")
@@ -44,10 +51,14 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offerBytes, err := io.ReadAll(r.Body)
-	if err != nil {
+	offerBytes, ok := readSDPOffer(w, r)
+	if !ok {
 		releaseConn()
-		http.Error(w, "failed to read offer", http.StatusBadRequest)
+		return
+	}
+	if m.isClosing() {
+		releaseConn()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -112,7 +123,18 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := uuid.New().String()
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
-	m.storeSession(sess)
+	lifecycleCtx := *subscribeCtx
+	lifecycleCtx.SubscriberID = sessionID
+	sess.setCleanup(func() {
+		stream.RemoveSubscriber("webrtc")
+		sess.stopLifecycle(m.server.GetEventBus(), core.EventSubscribeStop, &lifecycleCtx)
+		releaseConn()
+	})
+	if !m.storeSession(sess) {
+		sess.Close()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Parse the offer SDP to determine which media types the client requests.
 	// Only add tracks that match an m-line in the offer; adding tracks without
@@ -198,8 +220,6 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	if videoSender == nil && audioSender == nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
-		releaseConn()
 		http.Error(w, "no compatible tracks for WebRTC", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -232,21 +252,12 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 				close(connected)
 			}
 		case webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
-			stream.RemoveSubscriber("webrtc")
-			m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
-				StreamKey:  streamKey,
-				Protocol:   "webrtc",
-				RemoteAddr: r.RemoteAddr,
-			})
-			releaseConn()
 			sess.Close()
 		}
 	})
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
-		releaseConn()
 		http.Error(w, fmt.Sprintf("set remote description: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -254,16 +265,12 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
-		releaseConn()
 		http.Error(w, fmt.Sprintf("create answer: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		sess.Close()
-		stream.RemoveSubscriber("webrtc")
-		releaseConn()
 		http.Error(w, fmt.Sprintf("set local description: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -306,11 +313,11 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
 	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, targetAudioCodec, bwe)
 
-	m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "webrtc",
-		RemoteAddr: r.RemoteAddr,
-	})
+	if !sess.startLifecycle(m.server.GetEventBus(), core.EventSubscribe, &lifecycleCtx) {
+		sess.Close()
+		http.Error(w, "session closed during setup", http.StatusServiceUnavailable)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/webrtc/session/"+sessionID)

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 func TestNewMulticastTransport(t *testing.T) {
@@ -147,6 +148,7 @@ func TestHandleSetupMulticastEnabled(t *testing.T) {
 	h := NewHandler(nil, nil, mcastCfg)
 	session := NewRTSPSession("mcast-test", "live/mcast")
 	session.Transition(StateDescribed)
+	session.MediaInfo = &avframe.MediaInfo{VideoCodec: avframe.CodecH264}
 
 	req := &Request{
 		Method:  "SETUP",
@@ -185,6 +187,7 @@ func TestHandleSetupMulticastDisabled(t *testing.T) {
 	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("no-mcast", "live/nomcast")
 	session.Transition(StateDescribed)
+	session.MediaInfo = &avframe.MediaInfo{VideoCodec: avframe.CodecH264}
 
 	req := &Request{
 		Method:  "SETUP",

@@ -12,6 +12,7 @@ import (
 type TransportRegistry struct {
 	mu         sync.RWMutex
 	transports map[string]RelayTransport
+	close      sync.Once
 }
 
 // NewTransportRegistry creates an empty registry.
@@ -48,11 +49,13 @@ func (r *TransportRegistry) Resolve(rawURL string) (RelayTransport, error) {
 
 // Close closes all registered transports.
 func (r *TransportRegistry) Close() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, t := range r.transports {
-		t.Close()
-	}
+	r.close.Do(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, t := range r.transports {
+			t.Close()
+		}
+	})
 }
 
 // extractScheme returns the scheme portion of a URL (before "://").

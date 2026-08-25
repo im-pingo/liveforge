@@ -2,13 +2,18 @@ package record
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
-	"os"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -19,11 +24,16 @@ import (
 )
 
 // frameWriter is the interface for format-specific frame writing.
+type mediaFile interface {
+	io.WriteSeeker
+	Name() string
+}
+
 type frameWriter interface {
 	// writeHeader writes format-specific file header on the first frame.
-	writeHeader(f *os.File, frame *avframe.AVFrame) error
+	writeHeader(f mediaFile, frame *avframe.AVFrame) error
 	// writeFrame writes a single frame.
-	writeFrame(f *os.File, frame *avframe.AVFrame) error
+	writeFrame(f mediaFile, frame *avframe.AVFrame) error
 }
 
 // flvFrameWriter writes AVFrames using the FLV muxer.
@@ -31,13 +41,13 @@ type flvFrameWriter struct {
 	muxer *flv.Muxer
 }
 
-func (w *flvFrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *flvFrameWriter) writeHeader(f mediaFile, frame *avframe.AVFrame) error {
 	hasVideo := frame.MediaType.IsVideo()
 	hasAudio := frame.MediaType.IsAudio()
 	return w.muxer.WriteHeader(f, hasVideo, hasAudio)
 }
 
-func (w *flvFrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
+func (w *flvFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 	return w.muxer.WriteFrame(f, frame)
 }
 
@@ -50,12 +60,12 @@ type fmp4FrameWriter struct {
 	audioSeq  *avframe.AVFrame
 }
 
-func (w *fmp4FrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *fmp4FrameWriter) writeHeader(f mediaFile, frame *avframe.AVFrame) error {
 	// fMP4 init segment requires codec info; defer until we have sequence headers.
 	return nil
 }
 
-func (w *fmp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
+func (w *fmp4FrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 	// Capture sequence headers for init segment
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
 		if frame.MediaType.IsVideo() {
@@ -106,7 +116,7 @@ func (w *fmp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
 }
 
 // flush writes any remaining buffered frames.
-func (w *fmp4FrameWriter) flush(f *os.File) error {
+func (w *fmp4FrameWriter) flush(f mediaFile) error {
 	if !w.initDone || len(w.gopBuffer) == 0 || w.muxer == nil {
 		return nil
 	}
@@ -125,11 +135,11 @@ type mp4FrameWriter struct {
 	prevDTS int64
 }
 
-func (w *mp4FrameWriter) writeHeader(f *os.File, frame *avframe.AVFrame) error {
+func (w *mp4FrameWriter) writeHeader(f mediaFile, frame *avframe.AVFrame) error {
 	return nil // defer until we have codec info
 }
 
-func (w *mp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
+func (w *mp4FrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
 		if w.muxer == nil {
 			videoCodec := avframe.CodecType(0)
@@ -161,7 +171,7 @@ func (w *mp4FrameWriter) writeFrame(f *os.File, frame *avframe.AVFrame) error {
 	return err
 }
 
-func (w *mp4FrameWriter) finalize(f *os.File) error {
+func (w *mp4FrameWriter) finalize(f mediaFile) error {
 	if w.muxer == nil || !w.started {
 		return nil
 	}
@@ -173,21 +183,49 @@ type FileWriter struct {
 	cfg          config.RecordConfig
 	streamKey    string
 	format       frameWriter
-	file         *os.File
+	storage      Storage
+	pathTemplate string
+	object       WriteObject
+	file         mediaFile
 	filePath     string
+	recordingID  string
 	startTime    time.Time
-	bytesWritten int64
+	bytesWritten atomic.Int64
+	totalBytes   atomic.Int64
+	writeRetries atomic.Uint64
+	lastError    atomic.Pointer[string]
 	headerDone   bool
 	segmentIndex int
+	metrics      *RecordingMetrics
+	ownsStorage  bool
+	storageOnce  sync.Once
+	storageErr   error
 }
 
 // NewFileWriter creates a new file writer for the given stream key.
 func NewFileWriter(streamKey string, cfg config.RecordConfig) (*FileWriter, error) {
+	storage, template, err := newStorageForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := newFileWriterWithStorage(streamKey, cfg, storage, template, nil)
+	if err != nil {
+		_ = storage.Close()
+		return nil, err
+	}
+	writer.ownsStorage = true
+	return writer, nil
+}
+
+func newFileWriterWithStorage(streamKey string, cfg config.RecordConfig, storage Storage, pathTemplate string, metrics *RecordingMetrics) (*FileWriter, error) {
 	w := &FileWriter{
-		cfg:       cfg,
-		streamKey: streamKey,
-		format:    newFrameWriterWithContext(cfg.Format, streamKey, cfg),
-		startTime: time.Now(),
+		cfg:          cfg,
+		streamKey:    streamKey,
+		format:       newFrameWriterWithContext(cfg.Format, streamKey, cfg),
+		storage:      storage,
+		pathTemplate: pathTemplate,
+		startTime:    time.Now().UTC(),
+		metrics:      metrics,
 	}
 
 	if err := w.openFile(); err != nil {
@@ -241,7 +279,8 @@ func (w *FileWriter) WriteFrame(frame *avframe.AVFrame) error {
 	if err := w.format.writeFrame(w.file, frame); err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}
-	w.bytesWritten += int64(len(frame.Payload))
+	w.bytesWritten.Add(int64(len(frame.Payload)))
+	w.totalBytes.Add(int64(len(frame.Payload)))
 
 	// Check segmentation by duration
 	if w.cfg.Segment.Duration > 0 && time.Since(w.startTime) >= w.cfg.Segment.Duration {
@@ -251,7 +290,7 @@ func (w *FileWriter) WriteFrame(frame *avframe.AVFrame) error {
 	}
 
 	// Check segmentation by max file size
-	if maxBytes := parseSize(w.cfg.Segment.MaxSize); maxBytes > 0 && w.bytesWritten >= maxBytes {
+	if maxBytes := parseSize(w.cfg.Segment.MaxSize); maxBytes > 0 && w.bytesWritten.Load() >= maxBytes {
 		if err := w.rotate(); err != nil {
 			return fmt.Errorf("rotate file (size): %w", err)
 		}
@@ -262,20 +301,24 @@ func (w *FileWriter) WriteFrame(frame *avframe.AVFrame) error {
 
 // Close flushes and closes the current file.
 func (w *FileWriter) Close() {
-	if w.file != nil {
-		switch fw := w.format.(type) {
-		case *fmp4FrameWriter:
-			fw.flush(w.file) //nolint:errcheck
-		case *mp4FrameWriter:
-			fw.finalize(w.file) //nolint:errcheck
-		case *tsFrameWriter:
-			fw.flush(w.file) //nolint:errcheck
-		}
-		w.file.Close()
-		w.notifyFileComplete()
-		slog.Info("file closed", "module", "record", "path", w.filePath, "bytes", w.bytesWritten)
-		w.file = nil
+	_ = w.CloseWithError(nil)
+}
+
+// CloseWithError finalizes a successful file or preserves it as failed.
+func (w *FileWriter) CloseWithError(cause error) error {
+	return errors.Join(w.finishCurrent(cause), w.closeOwnedStorage())
+}
+
+func (w *FileWriter) closeOwnedStorage() error {
+	if !w.ownsStorage {
+		return nil
 	}
+	w.storageOnce.Do(func() {
+		if closer, ok := w.storage.(interface{ Close() error }); ok {
+			w.storageErr = closer.Close()
+		}
+	})
+	return w.storageErr
 }
 
 // FilePath returns the current file path (for testing).
@@ -283,42 +326,48 @@ func (w *FileWriter) FilePath() string {
 	return w.filePath
 }
 
+func (w *FileWriter) RecordingID() string { return w.recordingID }
+
+func (w *FileWriter) BytesWritten() int64 { return w.totalBytes.Load() }
+
+func (w *FileWriter) WriteRetries() uint64 { return w.writeRetries.Load() }
+
+func (w *FileWriter) LastError() string {
+	if value := w.lastError.Load(); value != nil {
+		return *value
+	}
+	return ""
+}
+
 func (w *FileWriter) openFile() error {
-	filePath := w.expandPath()
-
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create dir %s: %w", dir, err)
-	}
-
-	f, err := os.Create(filePath)
+	w.startTime = time.Now().UTC()
+	id := w.expandPath()
+	object, err := w.storage.Create(context.Background(), id, RecordingInfo{
+		StreamKey: w.streamKey,
+		Format:    w.Format(),
+		StartedAt: w.startTime,
+	})
 	if err != nil {
-		return fmt.Errorf("create file %s: %w", filePath, err)
+		return err
 	}
-
-	w.file = f
-	w.filePath = filePath
+	retry := newRetryWriteSeeker(object, 3, func() {
+		w.writeRetries.Add(1)
+		if w.metrics != nil {
+			w.metrics.retries.Add(1)
+		}
+	})
+	w.object = object
+	w.file = retry
+	w.filePath = object.Name()
+	w.recordingID = id
 	w.headerDone = false
-	w.bytesWritten = 0
-	w.startTime = time.Now()
+	w.bytesWritten.Store(0)
 	return nil
 }
 
 func (w *FileWriter) rotate() error {
-	switch fw := w.format.(type) {
-	case *fmp4FrameWriter:
-		fw.flush(w.file) //nolint:errcheck
-	case *mp4FrameWriter:
-		fw.finalize(w.file) //nolint:errcheck
-	case *tsFrameWriter:
-		fw.flush(w.file) //nolint:errcheck
-	}
-
-	// Close current file
-	if w.file != nil {
-		w.file.Close()
-		w.notifyFileComplete()
-		slog.Info("segment complete", "module", "record", "path", w.filePath, "bytes", w.bytesWritten)
+	if err := w.finishCurrent(nil); err != nil {
+		return err
 	}
 
 	w.segmentIndex++
@@ -332,22 +381,96 @@ func (w *FileWriter) rotate() error {
 
 func (w *FileWriter) expandPath() string {
 	now := time.Now()
-	p := w.cfg.Path
-	if p == "" {
-		ext := "flv"
-		if w.Format() == "fmp4" {
-			ext = "mp4"
-		}
-		p = fmt.Sprintf("./recordings/{stream_key}/{date}_{time}.%s", ext)
-	}
+	p := w.pathTemplate
 
 	// Replace stream_key slashes with OS path separator for directory structure
-	streamDir := strings.ReplaceAll(w.streamKey, "/", string(filepath.Separator))
+	streamDir := strings.ReplaceAll(filepath.ToSlash(w.streamKey), "/", string(filepath.Separator))
 
 	p = strings.ReplaceAll(p, "{stream_key}", streamDir)
 	p = strings.ReplaceAll(p, "{date}", now.Format("2006-01-02"))
 	p = strings.ReplaceAll(p, "{time}", fmt.Sprintf("%s_%04d", now.Format("150405"), w.segmentIndex))
-	return p
+	ext := "flv"
+	switch w.Format() {
+	case "mp4", "fmp4":
+		ext = "mp4"
+	case "ts":
+		ext = "ts"
+	}
+	p = strings.ReplaceAll(p, "{ext}", ext)
+	return filepath.ToSlash(filepath.Clean(p))
+}
+
+func (w *FileWriter) finishCurrent(cause error) error {
+	if w.object == nil {
+		return nil
+	}
+	if cause == nil {
+		switch fw := w.format.(type) {
+		case *fmp4FrameWriter:
+			cause = fw.flush(w.file)
+		case *mp4FrameWriter:
+			cause = fw.finalize(w.file)
+		case *tsFrameWriter:
+			cause = fw.flush(w.file)
+		}
+	} else if fw, ok := w.format.(*tsFrameWriter); ok {
+		fw.abort()
+	}
+	update := RecordingInfo{DurationSec: time.Since(w.startTime).Seconds(), Format: w.Format(), StreamKey: w.streamKey}
+	var info RecordingInfo
+	var err error
+	if cause != nil {
+		w.setLastError(cause)
+		info, err = w.object.Fail(context.Background(), cause)
+		if w.metrics != nil {
+			w.metrics.failed.Add(1)
+			w.metrics.writeFailure.Add(1)
+			w.metrics.storageError.Add(1)
+		}
+	} else {
+		info, err = w.object.Complete(context.Background(), update)
+		if err == nil && w.metrics != nil {
+			w.metrics.completed.Add(1)
+			if info.Size > 0 {
+				w.metrics.bytesWritten.Add(uint64(info.Size))
+			}
+		}
+	}
+	if info.ID != "" {
+		w.recordingID = info.ID
+		if local, ok := w.storage.(*LocalStorage); ok {
+			w.filePath = filepath.Join(local.Root(), filepath.FromSlash(info.ID))
+		} else if strings.HasSuffix(w.filePath, ".partial") {
+			w.filePath = strings.TrimSuffix(w.filePath, ".partial")
+			if info.State == RecordingFailed {
+				w.filePath += ".failed"
+			}
+		}
+	}
+	w.object = nil
+	w.file = nil
+	if err != nil {
+		if w.metrics != nil && cause == nil {
+			w.metrics.failed.Add(1)
+			w.metrics.storageError.Add(1)
+		}
+		w.setLastError(err)
+		return err
+	}
+	if cause != nil {
+		return cause
+	}
+	w.notifyFileComplete()
+	slog.Info("file closed", "module", "record", "path", w.filePath, "bytes", w.bytesWritten.Load())
+	return nil
+}
+
+func (w *FileWriter) setLastError(err error) {
+	if err == nil {
+		return
+	}
+	message := err.Error()
+	w.lastError.Store(&message)
 }
 
 // parseSize parses a human-readable size string like "512MB", "1GB", "100KB".
@@ -389,16 +512,25 @@ func (w *FileWriter) notifyFileComplete() {
 	payload := map[string]any{
 		"stream_key": w.streamKey,
 		"file_path":  w.filePath,
-		"bytes":      w.bytesWritten,
+		"bytes":      w.bytesWritten.Load(),
 		"duration":   time.Since(w.startTime).Seconds(),
 		"format":     w.Format(),
 	}
 	body, _ := json.Marshal(payload)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:gosec
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body)) //nolint:gosec
 	if err != nil {
-		slog.Error("file complete callback error", "module", "record", "error", err)
+		slog.Error("file complete callback error", "module", "record", "endpoint", callbackLogTarget(url), "reason", "delivery failed")
 		return
 	}
 	resp.Body.Close()
+}
+
+func callbackLogTarget(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }

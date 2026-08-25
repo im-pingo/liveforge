@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 )
 
 // Version is set at build time via -ldflags.
@@ -25,16 +27,22 @@ var Version = "dev"
 
 // Server is the main application server that manages modules and lifecycle.
 type Server struct {
-	configPtr atomic.Pointer[config.Config]
-	eventBus  *EventBus
-	hub       *StreamHub
-	modules   []Module
-	startTime time.Time
-	connCount atomic.Int64
-	done      chan struct{}
+	configPtr     atomic.Pointer[config.Config]
+	eventBus      *EventBus
+	hub           *StreamHub
+	modules       []Module
+	attempted     []Module
+	modulesMu     sync.RWMutex
+	configApplyMu sync.Mutex
+	startTime     time.Time
+	connCount     atomic.Int64
+	done          chan struct{}
 
-	apiMu       sync.RWMutex
-	apiHandlers map[string]http.Handler
+	apiMu          sync.RWMutex
+	apiHandlers    map[string]http.Handler
+	pendingMu      sync.RWMutex
+	pendingRestart []string
+	configManager  *configruntime.Manager
 
 	autoCertOnce sync.Once
 	autoCert     *tls.Certificate // auto-generated self-signed cert (nil if file-based TLS configured)
@@ -63,15 +71,118 @@ func (s *Server) Config() *config.Config {
 // Reloadable modules. Errors from individual modules are logged but do not
 // stop the reload process.
 func (s *Server) UpdateConfig(cfg *config.Config) {
-	s.configPtr.Store(cfg)
-	for _, m := range s.modules {
+	_ = s.updateConfig(cfg, nil)
+}
+
+// UpdateConfigSnapshot publishes a validated runtime snapshot and records
+// changes that require a process restart. Existing module reload callbacks are
+// still invoked for the hot portion of the snapshot.
+func (s *Server) UpdateConfigSnapshot(snapshot *configruntime.ConfigSnapshot) error {
+	if snapshot == nil || snapshot.Config == nil {
+		return nil
+	}
+	if err := s.updateConfig(snapshot.Config, snapshot.PendingRestart); err != nil {
+		return err
+	}
+	for _, m := range s.moduleSnapshot() {
+		if listener, ok := m.(ConfigApplied); ok {
+			listener.OnConfigApplied(snapshot)
+		}
+	}
+	return nil
+}
+
+func (s *Server) updateConfig(cfg *config.Config, pending []string) error {
+	s.configApplyMu.Lock()
+	defer s.configApplyMu.Unlock()
+
+	view := s.reloadView(cfg)
+	modules := s.moduleSnapshot()
+	prepared := make(map[int]func())
+	for i, m := range modules {
+		if _, ok := m.(Reloadable); !ok {
+			continue
+		}
+		if preparer, ok := m.(ReloadPreparer); ok {
+			commit, err := preparer.PrepareReload(view)
+			if err != nil {
+				return fmt.Errorf("%s: %w", m.Name(), err)
+			}
+			prepared[i] = commit
+		}
+	}
+	applied := make([]Reloadable, 0, len(modules))
+	var reloadErrors []error
+	for i, m := range modules {
 		if r, ok := m.(Reloadable); ok {
-			if err := r.OnReload(s); err != nil {
+			applied = append(applied, r)
+			if commit, preparedOK := prepared[i]; preparedOK {
+				if commit != nil {
+					commit()
+				}
+				continue
+			}
+			if err := r.OnReload(view); err != nil {
 				slog.Error("module reload failed", "module", m.Name(), "error", err)
+				reloadErrors = append(reloadErrors, fmt.Errorf("%s: %w", m.Name(), err))
+				break
 			}
 		}
 	}
+	if err := errors.Join(reloadErrors...); err != nil {
+		for i := len(applied) - 1; i >= 0; i-- {
+			if rollbackErr := applied[i].OnReload(s); rollbackErr != nil {
+				slog.Error("module reload rollback failed", "error", rollbackErr)
+			}
+		}
+		return err
+	}
+
+	s.hub.UpdatePolicy(cfg.Stream, cfg.Limits)
+	s.pendingMu.Lock()
+	s.pendingRestart = append([]string(nil), pending...)
+	s.pendingMu.Unlock()
+	s.configPtr.Store(cfg)
+	return nil
 }
+
+func (s *Server) reloadView(cfg *config.Config) *Server {
+	view := &Server{
+		eventBus:      s.eventBus,
+		hub:           s.hub,
+		startTime:     s.startTime,
+		done:          s.done,
+		configManager: s.configManager,
+	}
+	view.configPtr.Store(cfg)
+	return view
+}
+
+func (s *Server) moduleSnapshot() []Module {
+	s.modulesMu.RLock()
+	defer s.modulesMu.RUnlock()
+	return append([]Module(nil), s.modules...)
+}
+
+func (s *Server) attemptedModuleSnapshot() []Module {
+	s.modulesMu.RLock()
+	defer s.modulesMu.RUnlock()
+	return append([]Module(nil), s.attempted...)
+}
+
+// PendingRestartChanges returns configuration paths that are active in the
+// published snapshot but cannot be applied to listeners/modules in place.
+func (s *Server) PendingRestartChanges() []string {
+	s.pendingMu.RLock()
+	defer s.pendingMu.RUnlock()
+	return append([]string(nil), s.pendingRestart...)
+}
+
+// SetConfigManager attaches the runtime manager for status/API integrations.
+func (s *Server) SetConfigManager(manager *configruntime.Manager) { s.configManager = manager }
+
+// ConfigManager returns the attached runtime manager, if any.
+func (s *Server) ConfigManager() *configruntime.Manager { return s.configManager }
 
 // GetEventBus returns the server's event bus.
 func (s *Server) GetEventBus() *EventBus {
@@ -85,12 +196,17 @@ func (s *Server) StreamHub() *StreamHub {
 
 // RegisterModule adds a module to the server.
 func (s *Server) RegisterModule(m Module) {
+	s.modulesMu.Lock()
+	defer s.modulesMu.Unlock()
 	s.modules = append(s.modules, m)
 }
 
 // Init initializes all registered modules, registers their hooks, and starts the alive loop.
 func (s *Server) Init() error {
-	for _, m := range s.modules {
+	for _, m := range s.moduleSnapshot() {
+		s.modulesMu.Lock()
+		s.attempted = append(s.attempted, m)
+		s.modulesMu.Unlock()
 		if err := m.Init(s); err != nil {
 			return err
 		}
@@ -107,8 +223,9 @@ func (s *Server) Init() error {
 // Shutdown stops the alive loop and closes all modules in reverse registration order.
 func (s *Server) Shutdown() {
 	close(s.done)
-	for i := len(s.modules) - 1; i >= 0; i-- {
-		s.modules[i].Close() //nolint:errcheck
+	modules := s.attemptedModuleSnapshot()
+	for i := len(modules) - 1; i >= 0; i-- {
+		modules[i].Close() //nolint:errcheck
 	}
 }
 
@@ -124,8 +241,9 @@ func (s *Server) UptimeSeconds() float64 {
 
 // ModuleNames returns the names of all registered modules.
 func (s *Server) ModuleNames() []string {
-	names := make([]string, len(s.modules))
-	for i, m := range s.modules {
+	modules := s.moduleSnapshot()
+	names := make([]string, len(modules))
+	for i, m := range modules {
 		names[i] = m.Name()
 	}
 	return names
@@ -133,7 +251,7 @@ func (s *Server) ModuleNames() []string {
 
 // ModuleByName returns the module with the given name, or nil if not found.
 func (s *Server) ModuleByName(name string) Module {
-	for _, m := range s.modules {
+	for _, m := range s.moduleSnapshot() {
 		if m.Name() == name {
 			return m
 		}
@@ -369,12 +487,12 @@ func (s *Server) emitAliveEvents() {
 
 		stats := stream.Stats()
 		extra := map[string]any{
-			"bytes_in":      stats.BytesIn,
-			"video_frames":  stats.VideoFrames,
-			"audio_frames":  stats.AudioFrames,
-			"bitrate_kbps":  stats.BitrateKbps,
-			"fps":           stats.FPS,
-			"uptime_sec":    int64(stats.Uptime.Seconds()),
+			"bytes_in":     stats.BytesIn,
+			"video_frames": stats.VideoFrames,
+			"audio_frames": stats.AudioFrames,
+			"bitrate_kbps": stats.BitrateKbps,
+			"fps":          stats.FPS,
+			"uptime_sec":   int64(stats.Uptime.Seconds()),
 		}
 
 		ctx := &EventContext{StreamKey: key, Extra: extra}

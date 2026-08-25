@@ -1,15 +1,23 @@
 package httpstream
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
 )
+
+var subscriberSequence atomic.Uint64
+
+func nextSubscriberID(protocol, streamKey string) string {
+	return fmt.Sprintf("%s-sub-%s-%d", protocol, streamKey, subscriberSequence.Add(1))
+}
 
 // parseStreamPath parses "/app/key.format" from the URL path.
 // Returns app, key, format, and whether the parse succeeded.
@@ -230,13 +238,15 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Emit subscribe event (auth hooks can reject)
-	if err := m.server.GetEventBus().Emit(core.EventSubscribe, &core.EventContext{
+	// Run authorization before admitting the subscriber. Lifecycle delivery is
+	// emitted separately only after the stream has been found.
+	subscribeCtx := &core.EventContext{
 		StreamKey:  streamKey,
 		Protocol:   "http-" + format,
 		RemoteAddr: r.RemoteAddr,
 		Params:     queryToMap(r.URL.Query()),
-	}); err != nil {
+	}
+	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -248,14 +258,16 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	lifecycleCtx := *subscribeCtx
+	lifecycleCtx.SubscriberID = nextSubscriberID(lifecycleCtx.Protocol, streamKey)
+	if err := m.server.GetEventBus().EmitAsync(core.EventSubscribe, &lifecycleCtx); err != nil {
+		http.Error(w, "subscriber lifecycle capacity exceeded", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &lifecycleCtx) //nolint:errcheck
+
 	slog.Info("subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveStream(w, r, format, stream)
-
-	m.server.GetEventBus().Emit(core.EventSubscribeStop, &core.EventContext{
-		StreamKey:  streamKey,
-		Protocol:   "http-" + format,
-		RemoteAddr: r.RemoteAddr,
-	}) //nolint:errcheck
 }
 
 // queryToMap converts url.Values to a flat map (first value wins).

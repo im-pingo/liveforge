@@ -41,6 +41,7 @@ var (
 	BoxAvc1 = [4]byte{'a', 'v', 'c', '1'}
 	BoxAvcC = [4]byte{'a', 'v', 'c', 'C'}
 	BoxHev1 = [4]byte{'h', 'e', 'v', '1'}
+	BoxHvc1 = [4]byte{'h', 'v', 'c', '1'}
 	BoxHvcC = [4]byte{'h', 'v', 'c', 'C'}
 	BoxAv01 = [4]byte{'a', 'v', '0', '1'}
 	BoxAv1C = [4]byte{'a', 'v', '1', 'C'}

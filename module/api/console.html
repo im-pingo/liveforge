@@ -41,7 +41,7 @@ header {
   gap: 12px;
 }
 .logo svg { width: 28px; height: 28px; }
-.logo h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+.logo h1 { font-size: 18px; font-weight: 600; letter-spacing: 0; }
 .logo span { color: var(--text2); font-weight: 400; }
 .status-bar {
   display: flex;
@@ -75,7 +75,7 @@ header {
   border-radius: var(--radius);
   padding: 16px 20px;
 }
-.stat-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.stat-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0; margin-bottom: 4px; }
 .stat-value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .stat-value.accent { color: var(--accent); }
 
@@ -93,7 +93,7 @@ th {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
   color: var(--text2);
   background: var(--surface2);
   border-bottom: 1px solid var(--border);
@@ -458,7 +458,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   font-size: 12px;
   color: var(--text2);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
   margin-bottom: 6px;
 }
 .publish-form-row input,
@@ -553,6 +553,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-bottom: 1px solid var(--border);
 }
 .nav-tab {
+  flex: 0 0 auto;
   background: none;
   border: none;
   color: var(--text2);
@@ -562,12 +563,20 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
 }
 .nav-tab:hover { color: var(--text); }
 .nav-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 /* GB28181 device badges */
-.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.3px; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0; }
 .badge-online { background: rgba(74,222,128,0.15); color: var(--green); }
 .badge-offline { background: rgba(248,113,113,0.15); color: var(--red); }
 .badge-on { background: rgba(74,222,128,0.15); color: var(--green); }
@@ -580,7 +589,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .channel-row td:first-child { border-left: 3px solid var(--accent); }
 
 /* GB28181 section headers */
-.gb-section-title { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin: 24px 0 12px; }
+.gb-section-title { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0; margin: 24px 0 12px; }
 
 /* PTZ modal */
 .ptz-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1000; display: none; align-items: center; justify-content: center; }
@@ -618,6 +627,141 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 /* Toast notification */
 .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; font-size: 13px; z-index: 2000; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
 .toast.show { opacity: 1; }
+
+/* Management views */
+.nav-tabs { overflow-x: auto; scrollbar-width: thin; }
+.nav-tab[hidden] { display: none; }
+.ops-view[hidden] { display: none; }
+.ops-toolbar {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.ops-toolbar h2 { font-size: 16px; font-weight: 600; }
+.ops-toolbar-actions { display: flex; align-items: center; gap: 8px; }
+.ops-section { margin-top: 24px; }
+.ops-section:first-child { margin-top: 0; }
+.ops-section-title {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--text2);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.ops-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.ops-field {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(140px, 0.8fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ops-field:nth-last-child(-n+2) { border-bottom: none; }
+.ops-field-label { color: var(--text2); font-size: 12px; }
+.ops-field-value { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.ops-error {
+  display: none;
+  min-height: 38px;
+  align-items: center;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-left: 3px solid var(--red);
+  background: rgba(248,113,113,0.08);
+  color: var(--red);
+  font-size: 13px;
+}
+.ops-error.show { display: flex; }
+.ops-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.ops-input {
+  min-width: 0;
+  height: 36px;
+  padding: 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font: 13px "SF Mono", "Fira Code", monospace;
+  outline: none;
+}
+.ops-input:focus { border-color: var(--accent); }
+.ops-detail {
+  min-height: 72px;
+  max-height: 240px;
+  overflow: auto;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text2);
+  font: 12px/1.55 "SF Mono", "Fira Code", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ops-list { display: flex; flex-wrap: wrap; gap: 6px; min-height: 30px; }
+.ops-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid rgba(251,191,36,0.28);
+  border-radius: 4px;
+  color: var(--yellow);
+  background: rgba(251,191,36,0.07);
+  font: 12px "SF Mono", "Fira Code", monospace;
+}
+.btn:disabled { opacity: 0.38; cursor: not-allowed; }
+.health-good { color: var(--green); }
+.health-warn { color: var(--yellow); }
+.health-bad { color: var(--red); }
+.ops-view .stat-card { min-height: 92px; }
+.ops-view .table-wrap { min-height: 96px; }
+#view-cluster table,
+#view-sip table,
+#view-storage table,
+#view-security .ops-section:last-child table { min-width: 720px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+@media (max-width: 760px) {
+  .container { padding: 20px 12px; }
+  header { align-items: flex-start; gap: 14px; }
+  .status-bar { flex-wrap: wrap; justify-content: flex-end; }
+  .nav-tab { padding: 10px 12px; font-size: 13px; }
+  .ops-grid { grid-template-columns: 1fr; }
+  .ops-field, .ops-field:nth-last-child(-n+2) { border-bottom: 1px solid var(--border); }
+  .ops-field:last-child { border-bottom: none; }
+  .ops-form { grid-template-columns: 1fr; }
+  .ops-toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .ops-toolbar-actions { width: 100%; }
+  .ops-toolbar-actions .btn { width: 100%; }
+}
 </style>
 </head>
 <body>
@@ -643,12 +787,17 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     To avoid browser warnings: <a href="/console/cert.pem" style="color:#6c9eff;text-decoration:underline;">Download cert.pem</a> and add it to your OS trust store, or launch Chrome with <code style="background:#221a00;padding:2px 6px;border-radius:3px;">--ignore-certificate-errors</code>
   </div>
 
-  <div class="nav-tabs" id="nav-tabs" style="display:none">
-    <button class="nav-tab active" onclick="switchTab('streams')">Streams</button>
-    <button class="nav-tab" onclick="switchTab('gb28181')">GB28181 Devices</button>
+  <div class="nav-tabs" id="nav-tabs" role="tablist" aria-label="Management views">
+    <button class="nav-tab active" id="tab-streams" data-view="streams" role="tab" aria-selected="true" aria-controls="view-streams" tabindex="0">Streams</button>
+    <button class="nav-tab" id="tab-gb28181" data-view="gb28181" role="tab" aria-selected="false" aria-controls="view-gb28181" tabindex="-1" hidden>GB28181</button>
+    <button class="nav-tab" id="tab-config" data-view="config" role="tab" aria-selected="false" aria-controls="view-config" tabindex="-1">Config</button>
+    <button class="nav-tab" id="tab-cluster" data-view="cluster" role="tab" aria-selected="false" aria-controls="view-cluster" tabindex="-1">Cluster</button>
+    <button class="nav-tab" id="tab-sip" data-view="sip" role="tab" aria-selected="false" aria-controls="view-sip" tabindex="-1">SIP Calls</button>
+    <button class="nav-tab" id="tab-storage" data-view="storage" role="tab" aria-selected="false" aria-controls="view-storage" tabindex="-1">Storage</button>
+    <button class="nav-tab" id="tab-security" data-view="security" role="tab" aria-selected="false" aria-controls="view-security" tabindex="-1">Security</button>
   </div>
 
-  <div id="view-streams">
+  <div id="view-streams" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
   <div class="stats">
     <div class="stat-card">
       <div class="stat-label">Active Streams</div>
@@ -707,7 +856,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
   </div><!-- /view-streams -->
 
-  <div id="view-gb28181" style="display:none">
+  <div id="view-gb28181" role="tabpanel" aria-labelledby="tab-gb28181" tabindex="0" hidden>
     <div class="stats">
       <div class="stat-card">
         <div class="stat-label">Devices Online</div>
@@ -771,15 +920,126 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
     </div>
   </div><!-- /view-gb28181 -->
+
+  <div id="view-config" class="ops-view" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
+    <div class="ops-toolbar">
+      <h2>Runtime Config</h2>
+      <div class="ops-toolbar-actions">
+        <button class="btn" id="config-refresh" data-permission="operator" onclick="refreshRuntimeConfigNow()">&#8635; Refresh</button>
+      </div>
+    </div>
+    <div class="ops-error" id="config-error"></div>
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">Loader</div><div class="stat-value" id="config-enabled" style="font-size:20px">-</div></div>
+      <div class="stat-card"><div class="stat-label">Source</div><div class="stat-value accent" id="config-source" style="font-size:20px">-</div></div>
+      <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" id="config-version" style="font-size:20px">-</div></div>
+      <div class="stat-card"><div class="stat-label">Failures</div><div class="stat-value" id="config-failures">0</div></div>
+    </div>
+    <div class="ops-grid">
+      <div class="ops-field"><span class="ops-field-label">Active hash</span><span class="ops-field-value mono" id="config-hash">-</span></div>
+      <div class="ops-field"><span class="ops-field-label">Last success</span><span class="ops-field-value" id="config-last-success">-</span></div>
+      <div class="ops-field"><span class="ops-field-label">Last attempt</span><span class="ops-field-value" id="config-last-attempt">-</span></div>
+      <div class="ops-field"><span class="ops-field-label">Callback failures</span><span class="ops-field-value mono" id="config-callback-failures">0</span></div>
+      <div class="ops-field"><span class="ops-field-label">Accepted / rejected</span><span class="ops-field-value mono" id="config-change-counts">0 / 0</span></div>
+      <div class="ops-field"><span class="ops-field-label">Apply failures</span><span class="ops-field-value mono" id="config-apply-failures">0</span></div>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Pending Restart</span><span id="config-pending-count">0</span></div>
+      <div class="ops-list" id="config-pending"></div>
+    </div>
+  </div>
+
+  <div id="view-cluster" class="ops-view" role="tabpanel" aria-labelledby="tab-cluster" tabindex="0" hidden>
+    <div class="ops-toolbar"><h2>Cluster Relays</h2></div>
+    <div class="ops-error" id="cluster-error"></div>
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">Forward Relays</div><div class="stat-value accent" id="cluster-forwards">0</div></div>
+      <div class="stat-card"><div class="stat-label">Origin Relays</div><div class="stat-value" id="cluster-origins">0</div></div>
+      <div class="stat-card"><div class="stat-label">Peers</div><div class="stat-value" id="cluster-peers">0</div></div>
+      <div class="stat-card"><div class="stat-label">Snapshot</div><div class="stat-value" id="cluster-truncated" style="font-size:20px">Complete</div></div>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title">Active Relays</div>
+      <div class="table-wrap"><table><thead><tr><th>Direction</th><th>Protocol</th><th>Stream</th><th>Endpoint</th><th>Started</th></tr></thead><tbody id="cluster-relays-tbody"></tbody></table><div id="cluster-relays-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No active relays</div></div></div>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title">Peer Health</div>
+      <div class="table-wrap"><table><thead><tr><th>Host</th><th>Failures</th><th>Last Attempt</th><th>Last Success</th><th>State</th></tr></thead><tbody id="cluster-peers-tbody"></tbody></table><div id="cluster-peers-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No tracked peers</div></div></div>
+    </div>
+  </div>
+
+  <div id="view-sip" class="ops-view" role="tabpanel" aria-labelledby="tab-sip" tabindex="0" hidden>
+    <div class="ops-toolbar"><h2>SIP Gateway Calls</h2></div>
+    <div class="ops-error" id="sip-error"></div>
+    <form class="ops-form" onsubmit="dialSIPCall(event)">
+      <input class="ops-input" id="sip-target-uri" aria-label="Target URI" placeholder="sip:1001@example.com" required>
+      <input class="ops-input" id="sip-stream-key" aria-label="Stream key" placeholder="live/audio" required>
+      <button class="btn btn-play" id="sip-dial" data-permission="operator" type="submit">Dial</button>
+    </form>
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">Active Calls</div><div class="stat-value accent" id="sip-active">0</div></div>
+      <div class="stat-card"><div class="stat-label">Inbound</div><div class="stat-value" id="sip-inbound">0</div></div>
+      <div class="stat-card"><div class="stat-label">Outbound</div><div class="stat-value" id="sip-outbound">0</div></div>
+      <div class="stat-card"><div class="stat-label">Network Failures</div><div class="stat-value" id="sip-network-failures">0</div></div>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>Call ID</th><th>Direction</th><th>Stream</th><th>Codec</th><th>State</th><th>RTP</th><th>Actions</th></tr></thead><tbody id="sip-calls-tbody"></tbody></table><div id="sip-calls-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No SIP calls</div></div></div>
+    <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
+  </div>
+
+  <div id="view-storage" class="ops-view" role="tabpanel" aria-labelledby="tab-storage" tabindex="0" hidden>
+    <div class="ops-toolbar"><h2>Recordings &amp; DVR</h2></div>
+    <div class="ops-error" id="storage-error"></div>
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">Recordings</div><div class="stat-value accent" id="recording-count">0</div></div>
+      <div class="stat-card"><div class="stat-label">Files Completed</div><div class="stat-value" id="recording-completed">0</div></div>
+      <div class="stat-card"><div class="stat-label">DVR Sessions</div><div class="stat-value" id="storage-dvr-sessions">0</div></div>
+      <div class="stat-card"><div class="stat-label">Storage</div><div class="stat-value" id="storage-health" style="font-size:20px">-</div></div>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title">Recordings</div>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>Stream</th><th>Format</th><th>State</th><th>Size</th><th>Completed</th><th>Actions</th></tr></thead><tbody id="recordings-tbody"></tbody></table><div id="recordings-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No recordings</div></div></div>
+      <pre class="ops-detail" id="recording-detail">Select a recording for details</pre>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title">DVR Sessions</div>
+      <div class="table-wrap"><table><thead><tr><th>Stream</th><th>State</th><th>Segments</th><th>Duration</th><th>Bytes</th><th>Window</th><th>Actions</th></tr></thead><tbody id="dvr-tbody"></tbody></table><div id="dvr-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No DVR sessions</div></div></div>
+      <pre class="ops-detail" id="dvr-detail">Select a DVR session for details</pre>
+    </div>
+  </div>
+
+  <div id="view-security" class="ops-view" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
+    <div class="ops-toolbar"><h2>Security &amp; Audit</h2></div>
+    <div class="ops-error" id="security-error"></div>
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">Console Role</div><div class="stat-value accent" id="security-role" style="font-size:20px">-</div></div>
+      <div class="stat-card"><div class="stat-label">Named Tokens</div><div class="stat-value" id="security-tokens">0</div></div>
+      <div class="stat-card"><div class="stat-label">Audit Entries</div><div class="stat-value" id="security-audit-entries">0</div></div>
+      <div class="stat-card"><div class="stat-label">Audit Events</div><div class="stat-value" id="security-audit-events">0</div></div>
+    </div>
+    <div class="ops-grid">
+      <div class="ops-field"><span class="ops-field-label">Console login</span><span class="ops-field-value" id="security-console">-</span></div>
+      <div class="ops-field"><span class="ops-field-label">Legacy bearer</span><span class="ops-field-value" id="security-legacy">-</span></div>
+      <div class="ops-field"><span class="ops-field-label">Audit</span><span class="ops-field-value" id="security-audit">-</span></div>
+      <div class="ops-field"><span class="ops-field-label">Active principal</span><span class="ops-field-value mono" id="security-principal">console session</span></div>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title">Role Bindings</div>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th></tr></thead><tbody id="security-token-tbody"></tbody></table><div id="security-token-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No named bearer bindings</div></div></div>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title">Recent Audit</div>
+      <div class="table-wrap"><table><thead><tr><th>Time</th><th>Principal</th><th>Role</th><th>Action</th><th>Resource</th><th>Result</th></tr></thead><tbody id="audit-tbody"></tbody></table><div id="audit-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No audit entries</div></div></div>
+    </div>
+  </div>
 </div>
 
 <!-- Confirm modal -->
-<div class="modal-overlay" id="modal">
+<div class="modal-overlay" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-msg">
   <div class="modal">
     <h3 id="modal-title">Confirm</h3>
     <p id="modal-msg"></p>
     <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="modal-cancel">Cancel</button>
       <button class="btn btn-danger" id="modal-confirm">Confirm</button>
     </div>
   </div>
@@ -922,6 +1182,93 @@ var streamMedia = Object.create(null);
 var statsInterval = null;
 var statsPrev = null;
 var statsVisible = false;
+var managementRole = "viewer";
+var activeTab = "streams";
+var activeViewController = null;
+var activeViewInterval = null;
+
+function apiFetch(url, options) {
+  options = options || {};
+  var request = {
+    method: options.method || "GET",
+    credentials: "same-origin",
+    signal: options.signal
+  };
+  if (options.headers) request.headers = options.headers;
+  if (options.body != null) request.body = options.body;
+  return fetch(url, request).then(function(response) {
+    if (response.status === 204) return null;
+    if (response.ok && options.responseType === "blob") return response.blob();
+    var contentType = response.headers.get("Content-Type") || "";
+    var parsed = contentType.indexOf("application/json") >= 0
+      ? response.json().catch(function() { return null; })
+      : Promise.resolve(null);
+    return parsed.then(function(payload) {
+      if (!response.ok) {
+        var detail = payload && (payload.message || payload.error);
+        var err = new Error(detail || response.statusText || "Request failed");
+        err.status = response.status;
+        throw err;
+      }
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "data")) return payload.data;
+      return payload;
+    });
+  });
+}
+
+function managementErrorMessage(err) {
+  var detail = err && err.message ? err.message : "Request failed";
+  switch (err && err.status) {
+    case 401: return "Session expired. Sign in again.";
+    case 403: return "This console role cannot perform that action.";
+    case 409: return "The resource changed or is not ready: " + detail;
+    case 503: return "The requested module is unavailable: " + detail;
+    default: return detail;
+  }
+}
+
+function showManagementError(view, err) {
+  if (err && err.name === "AbortError") return;
+  var el = document.getElementById(view + "-error");
+  if (el) {
+    el.textContent = managementErrorMessage(err);
+    el.classList.add("show");
+  }
+  showToast(managementErrorMessage(err));
+}
+
+function clearManagementError(view) {
+  var el = document.getElementById(view + "-error");
+  if (el) {
+    el.textContent = "";
+    el.classList.remove("show");
+  }
+}
+
+function canManage(requiredRole) {
+  if (managementRole === "admin") return true;
+  return requiredRole === "operator" && managementRole === "operator";
+}
+
+function applyManagementPermissions() {
+  var controls = document.querySelectorAll("[data-permission]");
+  for (var i = 0; i < controls.length; i++) {
+    var allowed = canManage(controls[i].getAttribute("data-permission"));
+    controls[i].disabled = !allowed;
+    controls[i].title = allowed ? "" : "Insufficient console role";
+  }
+}
+
+function abortActiveViewRequest() {
+  if (activeViewController) activeViewController.abort();
+  activeViewController = null;
+}
+
+function newActiveViewSignal() {
+  abortActiveViewRequest();
+  activeViewController = new AbortController();
+  return activeViewController.signal;
+}
 
 function esc(s) {
   if (!s) return "";
@@ -958,31 +1305,105 @@ function formatUptime(sec) {
 
 /* --- Confirm modal --- */
 var pendingAction = null;
+var modalReturnFocus = null;
+var modalReturnFocusIdentity = null;
+function captureModalFocusIdentity(element) {
+  if (!element || !element.getAttribute) return null;
+  return {
+    id: element.id || "",
+    action: element.getAttribute("data-action"),
+    actionID: element.getAttribute("data-action-id")
+  };
+}
+function resolveModalReturnFocus(element, identity) {
+  if (element && element.isConnected) return element;
+  if (identity && identity.id) {
+    var identified = document.getElementById(identity.id);
+    if (identified) return identified;
+  }
+  if (identity && identity.action !== null && identity.actionID !== null) {
+    var actions = document.querySelectorAll("[data-action][data-action-id]");
+    for (var i = 0; i < actions.length; i++) {
+      if (actions[i].getAttribute("data-action") === identity.action && actions[i].getAttribute("data-action-id") === identity.actionID) {
+        return actions[i];
+      }
+    }
+  }
+  var tabs = document.querySelectorAll(".nav-tab");
+  for (var j = 0; j < tabs.length; j++) {
+    if (!tabs[j].hidden && tabs[j].getAttribute("aria-selected") === "true") return tabs[j];
+  }
+  return null;
+}
 function showModal(title, msg, onConfirm) {
+  modalReturnFocus = document.activeElement;
+  modalReturnFocusIdentity = captureModalFocusIdentity(modalReturnFocus);
   document.getElementById("modal-title").textContent = title;
   document.getElementById("modal-msg").textContent = msg;
   document.getElementById("modal").classList.add("active");
+  document.getElementById("modal-confirm").disabled = false;
   pendingAction = onConfirm;
+  document.getElementById("modal-confirm").focus();
 }
 function closeModal() {
   document.getElementById("modal").classList.remove("active");
   pendingAction = null;
+  var returnFocus = resolveModalReturnFocus(modalReturnFocus, modalReturnFocusIdentity);
+  modalReturnFocus = null;
+  modalReturnFocusIdentity = null;
+  if (returnFocus) returnFocus.focus();
 }
+document.getElementById("modal-cancel").addEventListener("click", closeModal);
 document.getElementById("modal-confirm").addEventListener("click", function() {
-  if (pendingAction) pendingAction();
-  closeModal();
+  if (!pendingAction) return;
+  var action = pendingAction;
+  pendingAction = null;
+  var button = document.getElementById("modal-confirm");
+  button.disabled = true;
+  Promise.resolve().then(action).finally(function() {
+    button.disabled = false;
+    closeModal();
+  });
+});
+document.getElementById("modal").addEventListener("keydown", function(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  var focusable = Array.from(this.querySelectorAll("button:not([disabled])"));
+  if (!focusable.length) return;
+  var first = focusable[0];
+  var last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+document.addEventListener("focusin", function(event) {
+  var modal = document.getElementById("modal");
+  if (modal.classList.contains("active") && !modal.contains(event.target)) {
+    var confirm = document.getElementById("modal-confirm");
+    (confirm.disabled ? document.getElementById("modal-cancel") : confirm).focus();
+  }
 });
 
 function kickStream(key) {
   showModal("Kick Publisher", 'Disconnect the publisher from "' + key + '"?', function() {
-    fetch("/api/v1/streams/" + encodeURIComponent(key) + "/kick", { method: "POST" })
-      .then(function() { refresh(); });
+    return apiFetch("/api/v1/streams/" + encodeURIComponent(key) + "/kick", { method: "POST" })
+      .then(function() { refreshActiveView(); })
+      .catch(function(err) { showManagementError("streams", err); });
   });
 }
 function deleteStream(key) {
   showModal("Delete Stream", 'Remove stream "' + key + '" entirely?', function() {
-    fetch("/api/v1/streams/" + encodeURIComponent(key), { method: "DELETE" })
-      .then(function() { refresh(); });
+    return apiFetch("/api/v1/streams/" + encodeURIComponent(key), { method: "DELETE" })
+      .then(function() { refreshActiveView(); })
+      .catch(function(err) { showManagementError("streams", err); });
   });
 }
 
@@ -991,6 +1412,20 @@ function portFromListen(listen) {
   if (!listen) return "";
   var i = listen.lastIndexOf(":");
   return i >= 0 ? listen.substring(i + 1) : listen;
+}
+
+function hostFromListen(listen) {
+  if (!listen) return location.hostname;
+  var value = String(listen);
+  if (value.charAt(0) === "[") {
+    var close = value.indexOf("]");
+    if (close > 0) value = value.substring(1, close);
+  } else {
+    var separator = value.lastIndexOf(":");
+    if (separator > 0) value = value.substring(0, separator);
+  }
+  if (!value || value === "0.0.0.0" || value === "::" || value === "[::]" || value === "*") return location.hostname;
+  return value;
 }
 
 /* --- WebRTC Stats Overlay --- */
@@ -1081,6 +1516,7 @@ function renderStatsOverlay(v, a) {
   }
 
   var aLost = (a && pa) ? a.packetsLost - pa.packetsLost : '-';
+  var aPackets = (a && pa) ? a.packetsReceived - pa.packetsReceived : '-';
   var aJit  = a ? (a.jitter * 1000).toFixed(0) + 'ms' : '-';
 
   // Color classes
@@ -1105,6 +1541,7 @@ function renderStatsOverlay(v, a) {
     '<span class="stat-item">' + L + 'PLI' + E + val(dPLI, pliCls) + '</span>' +
     '<span class="stat-item">' + L + 'NACK' + E + val(dNACK) + '</span>' +
     '<span class="stat-item">' + L + 'Jit' + E + val(jitterMs) + '</span>' +
+    '<span class="stat-item">' + L + 'A.Pkts' + E + val(aPackets) + '</span>' +
     '<span class="stat-item">' + L + 'A.Lost' + E + val(aLost) + '</span>' +
     '<span class="stat-item">' + L + 'A.Jit' + E + val(aJit) + '</span>' +
     '</div>' +
@@ -1114,6 +1551,7 @@ function renderStatsOverlay(v, a) {
     'drop=' + v.framesDropped + ' ' +
     'kf=' + v.keyFramesDecoded + ' ' +
     'lost=' + v.packetsLost + '/' + v.packetsReceived + ' ' +
+    'audio=' + (a ? a.packetsLost + '/' + a.packetsReceived : '-') + ' ' +
     'freeze=' + (v.freezeCount || 0) + ' (' + ((v.totalFreezesDuration || 0) * 1000).toFixed(0) + 'ms) ' +
     'pli=' + (v.pliCount || 0) +
     '</div>';
@@ -1194,6 +1632,93 @@ function setPlayerURL(url) {
   el.style.display = url ? "block" : "none";
 }
 
+function monitorPlayableVideo(video, generation, label, streamKey) {
+  if (currentVideoEventCleanup) {
+    try { currentVideoEventCleanup(); } catch(e) {}
+    currentVideoEventCleanup = null;
+  }
+
+  var finished = false;
+  var frameCallbackID = null;
+  var media = streamMedia[streamKey] || {};
+  var expectsVideo = normalizePlayerCodec(media.video_codec) !== "";
+  var lastMediaTime = Number(video.currentTime) || 0;
+  var lastProgressAt = Date.now();
+  var playbackConfirmed = false;
+  var playbackStalled = false;
+
+  function cleanup() {
+    if (finished) return;
+    finished = true;
+    clearTimeout(startupTimeoutID);
+    clearInterval(stallIntervalID);
+    video.removeEventListener("loadeddata", checkReady);
+    video.removeEventListener("playing", checkReady);
+    video.removeEventListener("timeupdate", checkReady);
+    if (frameCallbackID !== null && video.cancelVideoFrameCallback) {
+      try { video.cancelVideoFrameCallback(frameCallbackID); } catch(e) {}
+    }
+    if (currentVideoEventCleanup === cleanup) currentVideoEventCleanup = null;
+  }
+
+  function markPlaying() {
+    if (!isCurrentPlayer(generation)) return;
+    playbackConfirmed = true;
+    playbackStalled = false;
+    setPlayerStatus("Playing (" + label + ")", "ok");
+  }
+
+  function checkReady() {
+    if (!isCurrentPlayer(generation)) {
+      cleanup();
+      return;
+    }
+    if (video.readyState < 2 || video.paused) return;
+    if (expectsVideo && (video.videoWidth <= 0 || video.videoHeight <= 0)) return;
+
+    var mediaTime = Number(video.currentTime) || 0;
+    if (mediaTime > lastMediaTime + 0.05) {
+      lastMediaTime = mediaTime;
+      lastProgressAt = Date.now();
+      if (!playbackConfirmed || playbackStalled) markPlaying();
+    } else if (mediaTime < lastMediaTime - 0.5) {
+      lastMediaTime = mediaTime;
+      lastProgressAt = Date.now();
+    }
+  }
+
+  var startupTimeoutID = setTimeout(function() {
+    if (!isCurrentPlayer(generation)) return;
+    if (!playbackConfirmed) {
+      setPlayerStatus("No advancing media received (check codec support and keyframes)", "error");
+    }
+  }, 8000);
+
+  var stallIntervalID = setInterval(function() {
+    if (!isCurrentPlayer(generation)) {
+      cleanup();
+      return;
+    }
+    checkReady();
+    if (playbackConfirmed && !playbackStalled && !video.paused && Date.now() - lastProgressAt >= 3000) {
+      playbackStalled = true;
+      setPlayerStatus("Playback stalled (" + label + ")", "error");
+    }
+  }, 500);
+
+  currentVideoEventCleanup = cleanup;
+  video.addEventListener("loadeddata", checkReady);
+  video.addEventListener("playing", checkReady);
+  video.addEventListener("timeupdate", checkReady);
+
+  if (expectsVideo && video.requestVideoFrameCallback) {
+    frameCallbackID = video.requestVideoFrameCallback(function() {
+      checkReady();
+    });
+  }
+  checkReady();
+}
+
 function playHTTPFLV(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
@@ -1215,7 +1740,8 @@ function playHTTPFLV(streamKey) {
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (HTTP-FLV)", "ok");
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1253,7 +1779,8 @@ function playWSFLV(streamKey) {
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (WS-FLV)", "ok");
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(document.getElementById("player-video"), generation, "WS-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1290,7 +1817,8 @@ function playHTTPTS(streamKey) {
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (HTTP-TS)", "ok");
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-TS", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1304,6 +1832,32 @@ function playHTTPTS(streamKey) {
     return;
   }
   currentPlayer = player;
+}
+
+function fmp4MimeCandidates(streamKey) {
+  var media = streamMedia[streamKey] || {};
+  var videoCodec = normalizePlayerCodec(media.video_codec);
+  var audioCodec = normalizePlayerCodec(media.audio_codec);
+  var videoCodecs = {
+    h264: "avc1.42E01E",
+    avc: "avc1.42E01E",
+    avc1: "avc1.42E01E",
+    h265: "hvc1.1.6.L120.B0",
+    hevc: "hvc1.1.6.L120.B0",
+    hev1: "hvc1.1.6.L120.B0",
+    hvc1: "hvc1.1.6.L120.B0"
+  };
+  var audioCodecs = {
+    aac: "mp4a.40.2",
+    opus: "opus",
+    mp3: "mp4a.40.34"
+  };
+  var video = videoCodecs[videoCodec] || "";
+  var audio = audioCodecs[audioCodec] || "";
+  if (video && audio) return ['video/mp4; codecs="' + video + ', ' + audio + '"'];
+  if (video) return ['video/mp4; codecs="' + video + '"'];
+  if (audio) return ['audio/mp4; codecs="' + audio + '"'];
+  return ["video/mp4"];
 }
 
 function playFMP4(streamKey) {
@@ -1331,11 +1885,7 @@ function playFMP4(streamKey) {
 
   ms.addEventListener("sourceopen", function() {
     if (!isCurrentPlayer(generation) || currentMSEMediaSource !== ms) return;
-    var mimes = [
-      'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
-      'video/mp4; codecs="avc1.42E01E"',
-      'video/mp4'
-    ];
+    var mimes = fmp4MimeCandidates(streamKey);
     var mime = mimes.find(function(m) { return MediaSource.isTypeSupported(m); });
     if (!mime) {
       if (isCurrentPlayer(generation) && currentMSEMediaSource === ms) {
@@ -1355,11 +1905,28 @@ function playFMP4(streamKey) {
       }
       return;
     }
-    sb.mode = "sequence";
+    sb.mode = "segments";
     currentMSESourceBuffer = sb;
 
     var queue = [];
     var appending = false;
+    var playbackMonitorStarted = false;
+    var streamReader = null;
+    var failed = false;
+    var streamEnded = false;
+
+    function failFMP4(message) {
+      if (failed || !isCurrentPlayer(generation) || currentMSEMediaSource !== ms) return;
+      failed = true;
+      queue.length = 0;
+      if (streamReader) {
+        var reader = streamReader;
+        streamReader = null;
+        try { reader.cancel().catch(function(){}); } catch(e) {}
+      }
+      destroyCurrentPlayer();
+      setPlayerStatus(message, "error");
+    }
 
     function sourceBufferActive() {
       if (!isCurrentPlayer(generation) || currentMSEMediaSource !== ms || currentMSESourceBuffer !== sb || ms.readyState !== "open") {
@@ -1371,6 +1938,11 @@ function playFMP4(streamKey) {
       return false;
     }
 
+    function maybeEndOfStream() {
+      if (!streamEnded || appending || sb.updating || queue.length > 0 || !sourceBufferActive()) return;
+      try { ms.endOfStream(); } catch(e) {}
+    }
+
     function appendNext() {
       if (!sourceBufferActive() || appending || queue.length === 0 || sb.updating) return;
       var chunk = queue.shift();
@@ -1379,7 +1951,7 @@ function playFMP4(streamKey) {
         sb.appendBuffer(chunk);
       } catch(e) {
         appending = false;
-        if (sourceBufferActive()) setPlayerStatus("Append error: " + e.message, "error");
+        failFMP4("Append error: " + e.message);
       }
     }
 
@@ -1387,16 +1959,28 @@ function playFMP4(streamKey) {
       if (!sourceBufferActive()) return;
       appending = false;
       appendNext();
-      if (video.paused && video.readyState >= 2) {
+      maybeEndOfStream();
+      if (!playbackMonitorStarted && video.readyState >= 2) {
+        playbackMonitorStarted = true;
+        if (video.buffered.length > 0) {
+          var firstBufferedStart = video.buffered.start(0);
+          var firstBufferedEnd = video.buffered.end(0);
+          if (video.currentTime < firstBufferedStart || video.currentTime > firstBufferedEnd) {
+            video.currentTime = firstBufferedStart;
+          }
+        }
         video.play().then(function() {
           if (!isCurrentPlayer(generation)) return;
-          setPlayerStatus("Playing (FMP4)", "ok");
-        }).catch(function(){});
+          setPlayerStatus("Connected, waiting for first decoded frame...");
+          monitorPlayableVideo(video, generation, "FMP4", streamKey);
+        }).catch(function(e) {
+          if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
+        });
       }
     });
 
     sb.addEventListener("error", function() {
-      if (sourceBufferActive()) setPlayerStatus("SourceBuffer error", "error");
+      failFMP4("SourceBuffer error");
     });
 
     fetch(url, { signal: abortCtrl.signal })
@@ -1405,7 +1989,8 @@ function playFMP4(streamKey) {
         if (!resp.body) throw new Error("empty response body");
         if (!isCurrentPlayer(generation)) return null;
         setPlayerStatus("Buffering...");
-        var reader = resp.body.getReader();
+        streamReader = resp.body.getReader();
+        var reader = streamReader;
         function pump() {
           if (!isCurrentPlayer(generation)) {
             reader.cancel().catch(function(){});
@@ -1414,9 +1999,9 @@ function playFMP4(streamKey) {
           return reader.read().then(function(result) {
             if (!isCurrentPlayer(generation)) return;
             if (result.done) {
-              if (ms.readyState === "open") {
-                try { ms.endOfStream(); } catch(e) {}
-              }
+              streamReader = null;
+              streamEnded = true;
+              maybeEndOfStream();
               return;
             }
             if (result.value && result.value.byteLength > 0) queue.push(result.value);
@@ -1454,7 +2039,7 @@ function playHLS(streamKey) {
     var hls = new Hls({
       liveDurationInfinity: true,
       enableWorker: true,
-      lowLatencyMode: false
+      lowLatencyMode: true
     });
     currentHls = hls;
 
@@ -1465,7 +2050,8 @@ function playHLS(streamKey) {
       if (!isCurrentPlayer(generation) || currentHls !== hls) return;
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
-        setPlayerStatus("Playing (HLS)", "ok");
+        setPlayerStatus("Connected, waiting for first decoded frame...");
+        monitorPlayableVideo(video, generation, "HLS", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -1486,7 +2072,8 @@ function playHLS(streamKey) {
       if (!isCurrentPlayer(generation) || video.src !== url) return;
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
-        setPlayerStatus("Playing (HLS native)", "ok");
+        setPlayerStatus("Connected, waiting for first decoded frame...");
+        monitorPlayableVideo(video, generation, "HLS native", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -1523,7 +2110,7 @@ function playDASH(streamKey) {
   player.updateSettings({
     streaming: {
       delay: {
-        liveDelay: 4
+        liveDelayFragmentCount: 1
       },
       buffer: {
         fastSwitchEnabled: true
@@ -1533,9 +2120,12 @@ function playDASH(streamKey) {
 
   player.initialize(video, url, true);
 
+  var playbackMonitorStarted = false;
   player.on(dashjs.MediaPlayer.events.PLAYBACK_PLAYING, function() {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Playing (DASH)", "ok");
+    if (!isCurrentPlayer(generation) || playbackMonitorStarted) return;
+    playbackMonitorStarted = true;
+    setPlayerStatus("Connected, waiting for first decoded frame...");
+    monitorPlayableVideo(video, generation, "DASH", streamKey);
   });
 
   player.on(dashjs.MediaPlayer.events.ERROR, function(e) {
@@ -1565,17 +2155,24 @@ function playWHEP(streamKey, mode) {
 
   var remoteStream = new MediaStream();
   var receivedTrack = false;
-  document.getElementById("player-video").srcObject = remoteStream;
+  var playbackMonitorStarted = false;
+  var video = document.getElementById("player-video");
+  video.srcObject = remoteStream;
 
   pc.ontrack = function(event) {
     if (!isCurrentPlayer(generation)) return;
     receivedTrack = true;
     remoteStream.addTrack(event.track);
-    var video = document.getElementById("player-video");
-    if (video.paused) {
-      video.play().catch(function(){});
+    if (!playbackMonitorStarted && (event.track.kind === "video" || !normalizePlayerCodec((streamMedia[streamKey] || {}).video_codec))) {
+      playbackMonitorStarted = true;
+      video.play().then(function() {
+        if (!isCurrentPlayer(generation)) return;
+        setPlayerStatus("WebRTC connected, waiting for first decoded frame...");
+        monitorPlayableVideo(video, generation, "WebRTC/WHEP", streamKey);
+      }).catch(function(e) {
+        if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
+      });
     }
-    setPlayerStatus("Playing (WebRTC/WHEP)", "ok");
   };
 
   pc.oniceconnectionstatechange = function() {
@@ -1627,7 +2224,7 @@ function playWHEP(streamKey, mode) {
     return pc.setRemoteDescription({ type: "answer", sdp: sdp });
   }).then(function() {
     if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus(receivedTrack ? "Playing (WebRTC/WHEP)" : "WebRTC connected, waiting for media...");
+    setPlayerStatus(receivedTrack ? "WebRTC connected, waiting for first decoded frame..." : "WebRTC connected, waiting for media...");
     startStatsOverlay(pc);
   }).catch(function(e) {
     if (isCurrentPlayer(generation)) {
@@ -1742,11 +2339,9 @@ document.getElementById("player-overlay").addEventListener("click", function(e) 
 });
 
 /* --- Server info --- */
-function refreshServerInfo() {
-  fetch("/api/v1/server/info")
-    .then(function(r) { return r.json(); })
-    .then(function(resp) {
-      var data = resp.data;
+function refreshServerInfo(signal) {
+  var infoRequest = apiFetch("/api/v1/server/info", { signal: signal })
+    .then(function(data) {
       if (!data) return;
       document.getElementById("server-version").textContent = "v" + (data.version || "?");
       document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
@@ -1756,28 +2351,24 @@ function refreshServerInfo() {
     })
     .catch(function() {});
 
-  fetch("/api/v1/server/stats")
-    .then(function(r) { return r.json(); })
-    .then(function(resp) {
-      var data = resp.data;
+  var statsRequest = apiFetch("/api/v1/server/stats", { signal: signal })
+    .then(function(data) {
       if (!data) return;
       document.getElementById("stat-conns").textContent = data.connections || 0;
     })
     .catch(function() {});
+  return Promise.all([infoRequest, statsRequest]);
 }
 
 /* --- Stream list --- */
-function refresh() {
+function refresh(signal) {
   var q = (document.getElementById("stream-search") || {}).value || "";
   var url = "/api/v1/streams";
   if (q) url += "?q=" + encodeURIComponent(q);
-  fetch(url)
-    .then(function(r) { return r.json(); })
-    .then(function(resp) {
-      var streams = (resp.data && resp.data.streams) || [];
+  return apiFetch(url, { signal: signal })
+    .then(function(data) {
+      var streams = (data && data.streams) || [];
       var nextStreamMedia = Object.create(null);
-      var tbody = document.getElementById("tbody");
-      var empty = document.getElementById("empty");
       var totalSubs = 0;
       var publishing = 0;
 
@@ -1798,97 +2389,97 @@ function refresh() {
       document.getElementById("stat-subs").textContent = totalSubs;
       document.getElementById("updated").textContent = new Date().toLocaleTimeString();
 
-      if (streams.length === 0) {
-        tbody.innerHTML = "";
-        empty.style.display = "block";
-        return;
-      }
-      empty.style.display = "none";
-
-      streams.sort(function(a, b) {
-        if (a.key < b.key) return -1;
-        if (a.key > b.key) return 1;
-        return 0;
-      });
-
-      var html = "";
-      for (var i = 0; i < streams.length; i++) {
-        var s = streams[i];
-        var st = s.stats || {};
-
-        var codecs = "";
-        if (s.video_codec) codecs += '<span class="codec-tag video">' + esc(s.video_codec) + '</span> ';
-        if (s.audio_codec) codecs += '<span class="codec-tag audio">' + esc(s.audio_codec) + '</span>';
-        if (!codecs) codecs = '<span style="color:#555">-</span>';
-
-        var subHtml = "";
-        var subKeys = Object.keys(s.subscribers || {}).sort();
-        for (var j = 0; j < subKeys.length; j++) {
-          var fmt = subKeys[j];
-          var cnt = s.subscribers[fmt];
-          var cls = cnt > 0 ? "sub-pill active" : "sub-pill";
-          subHtml += '<span class="' + cls + '">' + esc(fmt.toUpperCase()) + ' <span class="count">' + cnt + '</span></span>';
-        }
-        if (!subHtml) subHtml = '<span style="color:#555;font-size:12px">-</span>';
-
-        var safeKey = esc(s.key).replace(/'/g, "\\'");
-        var acts = '<div class="actions">';
-        if (s.state === "publishing") {
-          acts += '<button class="btn btn-play" onclick="openPlayer(\'' + safeKey + '\')">Preview</button>';
-        }
-        if (s.publisher) {
-          acts += '<button class="btn btn-warn" onclick="kickStream(\'' + safeKey + '\')">Kick</button>';
-        }
-        acts += '<button class="btn btn-danger" onclick="deleteStream(\'' + safeKey + '\')">Delete</button>';
-        acts += '</div>';
-
-        // GOP cache cell
-        var gopLen = s.gop_cache_len || 0;
-        var gopV = s.gop_video_frames || 0;
-        var gopA = s.gop_audio_frames || 0;
-        var gopMs = s.gop_duration_ms || 0;
-        var gopSec = (gopMs / 1000).toFixed(1);
-        // Bar width: assume max ~120 frames in a GOP (2s @60fps), cap at 100%
-        var gopPct = Math.min(gopLen / 120 * 100, 100);
-        var gopHtml = '<div class="gop-cell">'
-          + '<div class="gop-bar-wrap"><div class="gop-bar" style="width:' + gopPct.toFixed(0) + '%"></div></div>'
-          + '<div class="gop-label"><b>' + gopLen + '</b> frames &middot; ' + gopSec + 's'
-          + ' <span style="color:var(--blue)">V' + gopV + '</span>'
-          + ' <span style="color:#c084fc">A' + gopA + '</span></div></div>';
-
-        var uptimeHtml = st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : '<span style="color:#555">-</span>';
-
-        html += "<tr>"
-          + '<td class="stream-key">' + esc(s.key) + "</td>"
-          + '<td><span class="state state-' + esc(s.state) + '">' + esc(s.state.replace("_", " ")) + '</span></td>'
-          + '<td class="publisher-id">' + (s.publisher ? esc(s.publisher) : '<span style="color:#555">-</span>') + "</td>"
-          + "<td>" + codecs + "</td>"
-          + '<td class="mono">' + formatBitrate(st.bitrate_kbps) + "</td>"
-          + '<td class="mono">' + (st.fps ? st.fps.toFixed(1) : "-") + "</td>"
-          + '<td class="mono">' + uptimeHtml + "</td>"
-          + "<td>" + gopHtml + "</td>"
-          + '<td><div class="subs">' + subHtml + "</div></td>"
-          + "<td>" + acts + "</td>"
-          + "</tr>";
-      }
-      tbody.innerHTML = html;
+      renderStreams(streams);
     })
-    .catch(function() {});
+    .catch(function(err) { showManagementError("streams", err); });
+}
+
+function renderStreams(streams) {
+  streams = streams || [];
+  var tbody = document.getElementById("tbody");
+  var empty = document.getElementById("empty");
+  tbody.replaceChildren();
+  empty.style.display = streams.length ? "none" : "block";
+  streams.slice().sort(function(a, b) { return String(a.key).localeCompare(String(b.key)); }).forEach(function(s) {
+    var st = s.stats || {};
+    var row = tbody.insertRow();
+    appendTextCell(row, s.key, "stream-key");
+
+    var stateCell = row.insertCell();
+    var state = document.createElement("span");
+    state.className = "state state-" + String(s.state || "").replace(/[^a-z0-9_-]/gi, "-");
+    state.textContent = String(s.state || "").replace("_", " ");
+    stateCell.appendChild(state);
+    appendTextCell(row, s.publisher || "-", "publisher-id");
+
+    var codecCell = row.insertCell();
+    ["video", "audio"].forEach(function(kind) {
+      var value = s[kind + "_codec"];
+      if (!value) return;
+      var tag = document.createElement("span");
+      tag.className = "codec-tag " + kind;
+      tag.textContent = value;
+      codecCell.appendChild(tag);
+    });
+    if (!codecCell.childNodes.length) codecCell.textContent = "-";
+    appendTextCell(row, formatBitrate(st.bitrate_kbps), "mono");
+    appendTextCell(row, st.fps ? st.fps.toFixed(1) : "-", "mono");
+    appendTextCell(row, st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : "-", "mono");
+
+    var gopCell = row.insertCell();
+    var gop = document.createElement("div");
+    gop.className = "gop-cell";
+    var barWrap = document.createElement("div");
+    barWrap.className = "gop-bar-wrap";
+    var bar = document.createElement("div");
+    bar.className = "gop-bar";
+    bar.style.width = Math.min((s.gop_cache_len || 0) / 120 * 100, 100).toFixed(0) + "%";
+    barWrap.appendChild(bar);
+    var gopLabel = document.createElement("div");
+    gopLabel.className = "gop-label";
+    gopLabel.textContent = (s.gop_cache_len || 0) + " frames · " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+    gop.appendChild(barWrap);
+    gop.appendChild(gopLabel);
+    gopCell.appendChild(gop);
+
+    var subscriberCell = row.insertCell();
+    var subscriberList = document.createElement("div");
+    subscriberList.className = "subs";
+    var subscriberKeys = Object.keys(s.subscribers || {}).sort();
+    subscriberKeys.forEach(function(format) {
+      var count = s.subscribers[format];
+      var pill = document.createElement("span");
+      pill.className = count > 0 ? "sub-pill active" : "sub-pill";
+      pill.textContent = format.toUpperCase() + " " + count;
+      subscriberList.appendChild(pill);
+    });
+    if (!subscriberKeys.length) subscriberList.textContent = "-";
+    subscriberCell.appendChild(subscriberList);
+
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (s.state === "publishing") appendActionButton(actions, "Preview", "btn-play", "stream-preview", s.key);
+    if (s.publisher && canManage("operator")) appendActionButton(actions, "Kick", "btn-warn", "stream-kick", s.key);
+    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "stream-delete", s.key);
+    actionCell.appendChild(actions);
+  });
 }
 
 /* --- DVR Status --- */
-function refreshDVR() {
-  fetch("/api/v1/dvr/status")
-    .then(function(r) { return r.json(); })
-    .then(function(resp) {
-      var d = resp.data || {};
+function refreshDVR(signal) {
+  return apiFetch("/api/v1/dvr/status", { signal: signal })
+    .then(function(d) {
+      d = d || {};
       var card = document.getElementById("stat-dvr-card");
       if (!d.enabled) { card.style.display = "none"; return; }
       card.style.display = "";
       var sessions = d.sessions || [];
       document.getElementById("stat-dvr").textContent = sessions.length;
     })
-    .catch(function() {});
+    .catch(function(err) {
+      if (!err || err.name !== "AbortError") document.getElementById("stat-dvr-card").style.display = "none";
+    });
 }
 
 /* --- WebRTC Publish --- */
@@ -2275,10 +2866,491 @@ function updatePublishButton() {
   if (btn) btn.style.display = endpoints.webrtc ? "inline-block" : "none";
 }
 
+/* === Management Console === */
+function formatDate(value) {
+  if (!value || value === "0001-01-01T00:00:00Z") return "-";
+  var date = new Date(value);
+  return isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function formatBytes(value) {
+  var bytes = Number(value) || 0;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KiB";
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MiB";
+  return (bytes / 1073741824).toFixed(1) + " GiB";
+}
+
+function formatDurationSeconds(value) {
+  var seconds = Number(value) || 0;
+  return seconds > 0 ? formatUptime(seconds) : "-";
+}
+
+function appendTextCell(row, value, className) {
+  var cell = row.insertCell();
+  if (className) cell.className = className;
+  cell.textContent = value == null ? "" : String(value);
+  return cell;
+}
+
+function appendActionButton(container, label, className, action, actionID) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn" + (className ? " " + className : "");
+  button.textContent = label;
+  button.dataset.action = action;
+  button.dataset.actionId = String(actionID == null ? "" : actionID);
+  container.appendChild(button);
+  return button;
+}
+
+function createDynamicActionHandlers() {
+  return {
+    "stream-preview": function(value) { openPlayer(value); },
+    "stream-kick": function(value) { kickStream(value); },
+    "stream-delete": function(value) { deleteStream(value); },
+    "sip-detail": function(value) { loadSIPCall(value); },
+    "sip-hangup": function(value) { hangupSIPCall(value); },
+    "recording-detail": function(value) { loadRecording(value); },
+    "recording-play": function(value) { playRecording(value); },
+    "recording-download": function(value) { downloadRecording(value); },
+    "recording-delete": function(value) { deleteRecording(value); },
+    "dvr-detail": function(value) { loadDVRSession(value); },
+    "dvr-play": function(value) { playDVR(value); },
+    "gb-toggle-device": function(value) { toggleDevice(value); },
+    "gb-catalog": function(value) { gbCatalog(value); },
+    "gb-delete-device": function(value) { gbDeleteDevice(value); },
+    "gb-play": function(value) { gbPlay(value); },
+    "gb-stop": function(value) { gbStop(value); },
+    "gb-ptz": function(value) { openPTZ(value); },
+    "gb-playback": function(value) { openPlayback(value); },
+    "gb-preview": function(value) { openPlayer(value); },
+    "gb-close-session": function(value) { gbCloseSession(value); }
+  };
+}
+
+var dynamicActionHandlers = createDynamicActionHandlers();
+document.addEventListener("click", function(event) {
+  var button = event.target.closest("[data-action]");
+  if (!button) return;
+  var handler = dynamicActionHandlers[button.dataset.action];
+  if (handler) handler(button.dataset.actionId);
+});
+
+function renderEmptyTable(tbodyID, emptyID, rows) {
+  document.getElementById(tbodyID).innerHTML = rows;
+  document.getElementById(emptyID).style.display = rows ? "none" : "block";
+}
+
+function refreshRuntimeConfig(signal) {
+  clearManagementError("config");
+  return apiFetch("/api/v1/server/config", { signal: signal }).then(function(data) {
+    data = data || {};
+    document.getElementById("config-enabled").textContent = data.enabled ? "Active" : "Disabled";
+    document.getElementById("config-enabled").className = "stat-value " + (data.enabled ? "health-good" : "");
+    document.getElementById("config-source").textContent = data.source || "-";
+    document.getElementById("config-version").textContent = data.active_version || "-";
+    document.getElementById("config-failures").textContent = data.consecutive_failures || 0;
+    document.getElementById("config-hash").textContent = data.active_hash || "-";
+    document.getElementById("config-last-success").textContent = formatDate(data.last_success);
+    document.getElementById("config-last-attempt").textContent = formatDate(data.last_attempt);
+    document.getElementById("config-callback-failures").textContent = (data.callback_failures || 0) + " / dropped " + (data.dropped_callbacks || 0);
+    document.getElementById("config-change-counts").textContent = (data.config_changes_accepted || 0) + " / " + (data.config_changes_rejected || 0);
+    document.getElementById("config-apply-failures").textContent = data.config_changes_application_failed || 0;
+    var pending = data.pending_restart || [];
+    document.getElementById("config-pending-count").textContent = pending.length;
+    document.getElementById("config-pending").innerHTML = pending.length
+      ? pending.map(function(path) { return '<span class="ops-chip">' + esc(path) + "</span>"; }).join("")
+      : '<span class="ops-field-label">None</span>';
+    if (data.last_error) showManagementError("config", new Error(data.last_error));
+    var button = document.getElementById("config-refresh");
+    button.disabled = !data.enabled || !canManage("operator");
+  }).catch(function(err) { showManagementError("config", err); });
+}
+
+function refreshRuntimeConfigNow() {
+  var button = document.getElementById("config-refresh");
+  button.disabled = true;
+  clearManagementError("config");
+  apiFetch("/api/v1/server/config/refresh", { method: "POST" })
+    .then(function() {
+      showToast("Configuration refresh scheduled");
+      setTimeout(refreshActiveView, 250);
+    })
+    .catch(function(err) { showManagementError("config", err); })
+    .finally(function() { button.disabled = !canManage("operator"); });
+}
+
+function refreshCluster(signal) {
+  clearManagementError("cluster");
+  return apiFetch("/api/v1/cluster/status", { signal: signal }).then(function(data) {
+    data = data || {};
+    var relays = data.relays || [];
+    var peers = data.peers || [];
+    document.getElementById("cluster-forwards").textContent = data.active_forwards || 0;
+    document.getElementById("cluster-origins").textContent = data.active_origins || 0;
+    document.getElementById("cluster-peers").textContent = peers.length;
+    document.getElementById("cluster-truncated").textContent = data.truncated ? "Truncated" : "Complete";
+    document.getElementById("cluster-truncated").className = "stat-value " + (data.truncated ? "health-warn" : "health-good");
+    var relayRows = relays.map(function(relay) {
+      return "<tr><td>" + esc(relay.direction) + "</td><td><span class=\"codec-tag\">" + esc(relay.protocol) + "</span></td><td class=\"stream-key\">" + esc(relay.stream_key) + "</td><td class=\"mono\">" + esc(relay.endpoint) + "</td><td>" + formatDate(relay.started_at) + "</td></tr>";
+    }).join("");
+    renderEmptyTable("cluster-relays-tbody", "cluster-relays-empty", relayRows);
+    var peerRows = peers.map(function(peer) {
+      var state = peer.evicted ? '<span class="health-bad">Evicted</span>' : '<span class="health-good">Available</span>';
+      return "<tr><td class=\"mono\">" + esc(peer.host) + "</td><td>" + (peer.consecutive_failures || 0) + "</td><td>" + formatDate(peer.last_attempt) + "</td><td>" + formatDate(peer.last_success) + "</td><td>" + state + "</td></tr>";
+    }).join("");
+    renderEmptyTable("cluster-peers-tbody", "cluster-peers-empty", peerRows);
+  }).catch(function(err) { showManagementError("cluster", err); });
+}
+
+function refreshSIPCalls(signal) {
+  clearManagementError("sip");
+  return apiFetch("/api/v1/sipgateway/calls", { signal: signal }).then(function(data) {
+    data = data || {};
+    var metrics = data.metrics || {};
+    var calls = data.calls || [];
+    document.getElementById("sip-active").textContent = metrics.active_calls || 0;
+    document.getElementById("sip-inbound").textContent = metrics.active_inbound || 0;
+    document.getElementById("sip-outbound").textContent = metrics.active_outbound || 0;
+    document.getElementById("sip-network-failures").textContent = metrics.network_failures_total || 0;
+    renderSIPCalls(calls);
+  }).catch(function(err) { showManagementError("sip", err); });
+}
+
+function renderSIPCalls(calls) {
+  calls = calls || [];
+  var tbody = document.getElementById("sip-calls-tbody");
+  tbody.replaceChildren();
+  document.getElementById("sip-calls-empty").style.display = calls.length ? "none" : "block";
+  calls.forEach(function(call) {
+    var row = tbody.insertRow();
+    appendTextCell(row, call.call_id, "mono");
+    appendTextCell(row, call.direction);
+    appendTextCell(row, call.stream_key, "stream-key");
+    appendTextCell(row, call.codec || "-");
+    appendTextCell(row, call.state);
+    appendTextCell(row, (call.rtp_packets_sent || 0) + " tx / " + (call.rtp_packets_received || 0) + " rx", "mono");
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    appendActionButton(actions, "Details", "", "sip-detail", call.call_id);
+    if (canManage("operator")) appendActionButton(actions, "Hang up", "btn-danger", "sip-hangup", call.call_id);
+    actionCell.appendChild(actions);
+  });
+}
+
+function dialSIPCall(event) {
+  event.preventDefault();
+  var button = document.getElementById("sip-dial");
+  button.disabled = true;
+  clearManagementError("sip");
+  apiFetch("/api/v1/sipgateway/calls", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_uri: document.getElementById("sip-target-uri").value.trim(), stream_key: document.getElementById("sip-stream-key").value.trim() }) })
+    .then(function(data) {
+      showToast("SIP call created: " + ((data && data.call_id) || "pending"));
+      refreshActiveView();
+    })
+    .catch(function(err) { showManagementError("sip", err); })
+    .finally(function() { button.disabled = !canManage("operator"); });
+}
+
+function loadSIPCall(callID) {
+  clearManagementError("sip");
+  apiFetch("/api/v1/sipgateway/calls/" + encodeURIComponent(callID))
+    .then(function(data) { document.getElementById("sip-call-detail").textContent = JSON.stringify(data, null, 2); })
+    .catch(function(err) { showManagementError("sip", err); });
+}
+
+function hangupSIPCall(callID) {
+  showModal("Hang up SIP call", 'Terminate call "' + callID + '"?', function() {
+    return apiFetch("/api/v1/sipgateway/calls/" + encodeURIComponent(callID), { method: "DELETE" })
+      .then(function() { showToast("SIP call ended"); refreshActiveView(); })
+      .catch(function(err) { showManagementError("sip", err); });
+  });
+}
+
+function settledRequest(promise) {
+  return promise.then(function(value) { return { value: value }; }, function(error) { return { error: error }; });
+}
+
+function recordingURL(recordingID) {
+  return "/api/v1/recordings/" + String(recordingID || "").split("/").map(encodeURIComponent).join("/");
+}
+
+function recordingPlayURL(recordingID) {
+  return recordingURL(recordingID) + "/play";
+}
+
+function renderRecordings(items) {
+  items = items || [];
+  document.getElementById("recording-count").textContent = items.length;
+  var tbody = document.getElementById("recordings-tbody");
+  tbody.replaceChildren();
+  document.getElementById("recordings-empty").style.display = items.length ? "none" : "block";
+  items.forEach(function(item) {
+    var row = tbody.insertRow();
+    appendTextCell(row, item.id, "mono");
+    appendTextCell(row, item.stream_key || "-", "stream-key");
+    appendTextCell(row, item.format || "-");
+    appendTextCell(row, item.state || "-");
+    appendTextCell(row, formatBytes(item.size_bytes), "mono");
+    appendTextCell(row, formatDate(item.completed_at));
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    appendActionButton(actions, "Details", "", "recording-detail", item.id);
+    if (item.state === "completed") {
+      appendActionButton(actions, "Play", "btn-play", "recording-play", item.id);
+      appendActionButton(actions, "Download", "", "recording-download", item.id);
+    }
+    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "recording-delete", item.id);
+    actionCell.appendChild(actions);
+  });
+}
+
+function renderDVR(data) {
+  data = data || {};
+  var sessions = data.sessions || [];
+  document.getElementById("storage-dvr-sessions").textContent = sessions.length;
+  var tbody = document.getElementById("dvr-tbody");
+  tbody.replaceChildren();
+  document.getElementById("dvr-empty").style.display = sessions.length ? "none" : "block";
+  sessions.forEach(function(session) {
+    var row = tbody.insertRow();
+    appendTextCell(row, session.stream_key, "stream-key");
+    var stateCell = appendTextCell(row, session.live ? "Live" : "Closed");
+    if (session.live) stateCell.className = "health-good";
+    appendTextCell(row, session.segments || 0);
+    appendTextCell(row, formatDurationSeconds(session.duration_sec));
+    appendTextCell(row, formatBytes(session.bytes), "mono");
+    appendTextCell(row, formatDate(session.oldest_segment) + " / " + formatDate(session.newest_segment));
+    var actionCell = row.insertCell();
+    appendActionButton(actionCell, "Details", "", "dvr-detail", session.stream_key);
+    if (Number(session.segments) > 0) appendActionButton(actionCell, "Play", "btn-play", "dvr-play", session.stream_key);
+  });
+}
+
+function refreshStorage(signal) {
+  clearManagementError("storage");
+  return Promise.all([
+    settledRequest(apiFetch("/api/v1/recordings", { signal: signal })),
+    settledRequest(apiFetch("/api/v1/recordings/status", { signal: signal })),
+    settledRequest(apiFetch("/api/v1/dvr/status", { signal: signal }))
+  ]).then(function(results) {
+    if (results[0].value) renderRecordings(results[0].value);
+    var recordingStatus = results[1].value || {};
+    var recordingMetrics = recordingStatus.metrics || {};
+    document.getElementById("recording-completed").textContent = recordingMetrics.files_completed || 0;
+    var recordHealth = recordingStatus.storage || {};
+    var dvrData = results[2].value || {};
+    var dvrHealth = dvrData.storage || {};
+    var healthy = (recordHealth.healthy || !recordHealth.root) && (dvrHealth.healthy || !dvrHealth.root);
+    var lowSpace = recordHealth.low_space || dvrHealth.low_space;
+    var health = document.getElementById("storage-health");
+    health.textContent = lowSpace ? "Low space" : healthy ? "Healthy" : "Unavailable";
+    health.className = "stat-value " + (lowSpace ? "health-warn" : healthy ? "health-good" : "health-bad");
+    renderDVR(dvrData);
+    var failed = results.filter(function(result) { return result.error && result.error.name !== "AbortError"; });
+    if (failed.length) showManagementError("storage", failed[0].error);
+  });
+}
+
+function loadRecording(recordingID) {
+  clearManagementError("storage");
+  return apiFetch(recordingURL(recordingID))
+    .then(function(data) { document.getElementById("recording-detail").textContent = JSON.stringify(data, null, 2); })
+    .catch(function(err) { showManagementError("storage", err); });
+}
+
+function playRecording(recordingID) {
+  destroyCurrentPlayer();
+  statsVisible = false;
+  var btnStats = document.getElementById("btn-stats");
+  if (btnStats) btnStats.classList.remove("active");
+  document.getElementById("player-stream-key").textContent = recordingID;
+  document.getElementById("player-overlay").classList.add("active");
+  document.getElementById("proto-tabs").replaceChildren();
+  setPlayerURL(recordingPlayURL(recordingID));
+  setPlayerStatus("Loading recording...");
+  var video = document.getElementById("player-video");
+  var ext = String(recordingID).split(".").pop().toLowerCase();
+  if (ext === "mp4" || ext === "m4v") {
+    video.src = recordingPlayURL(recordingID);
+    video.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
+    return;
+  }
+  if ((ext === "flv" || ext === "ts") && typeof mpegts !== "undefined" && mpegts.isSupported()) {
+    var player = mpegts.createPlayer({ type: ext === "flv" ? "flv" : "mpegts", url: recordingPlayURL(recordingID), isLive: false });
+    player.attachMediaElement(video);
+    player.load();
+    player.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
+    currentPlayer = player;
+    return;
+  }
+  video.src = recordingPlayURL(recordingID);
+  video.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Browser cannot play this recording: " + formatErr(err), "error"); });
+}
+
+function downloadRecording(recordingID) {
+  clearManagementError("storage");
+  return apiFetch(recordingURL(recordingID) + "/download", { responseType: "blob" })
+    .then(function(blob) {
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = String(recordingID).split("/").pop() || "recording";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    })
+    .catch(function(err) { showManagementError("storage", err); });
+}
+
+function deleteRecording(recordingID) {
+  showModal("Delete recording", 'Permanently delete "' + recordingID + '"?', function() {
+    return apiFetch("/api/v1/recordings/" + String(recordingID).split("/").map(encodeURIComponent).join("/"), { method: "DELETE" })
+      .then(function() { showToast("Recording deleted"); refreshActiveView(); })
+      .catch(function(err) { showManagementError("storage", err); });
+  });
+}
+
+function loadDVRSession(streamKey) {
+  clearManagementError("storage");
+  apiFetch("/api/v1/dvr/sessions/" + String(streamKey).split("/").map(encodeURIComponent).join("/"))
+    .then(function(data) { document.getElementById("dvr-detail").textContent = JSON.stringify(data, null, 2); })
+    .catch(function(err) { showManagementError("storage", err); });
+}
+
+function dvrMediaURL(streamKey) {
+  var port = portFromListen(endpoints.dvr);
+  if (!port) return "";
+  var pathValue = String(streamKey || "").split("/").map(encodeURIComponent).join("/");
+  var host = hostFromListen(endpoints.dvr);
+  if (host.indexOf(":") >= 0 && host.charAt(0) !== "[") host = "[" + host + "]";
+  return location.protocol + "//" + host + ":" + port + "/dvr/" + pathValue + ".m3u8";
+}
+
+function playDVR(streamKey) {
+  var url = dvrMediaURL(streamKey);
+  if (!url) {
+    showManagementError("storage", new Error("DVR media endpoint is unavailable"));
+    return;
+  }
+  destroyCurrentPlayer();
+  statsVisible = false;
+  var btnStats = document.getElementById("btn-stats");
+  if (btnStats) btnStats.classList.remove("active");
+  document.getElementById("player-stream-key").textContent = "DVR " + streamKey;
+  document.getElementById("player-overlay").classList.add("active");
+  document.getElementById("proto-tabs").replaceChildren();
+  setPlayerURL(url);
+  setPlayerStatus("Loading DVR...");
+  var video = document.getElementById("player-video");
+  if (typeof Hls !== "undefined" && Hls.isSupported()) {
+    var hls = new Hls();
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, function() { video.play().then(function() { setPlayerStatus("Playing DVR", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); }); });
+    hls.on(Hls.Events.ERROR, function(_, data) { if (data && data.fatal) setPlayerStatus("DVR error: " + formatErr(data), "error"); });
+    currentHls = hls;
+    return;
+  }
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+    video.play().then(function() { setPlayerStatus("Playing DVR", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
+    return;
+  }
+  setPlayerStatus("HLS is not supported in this browser", "error");
+}
+
+function refreshSecurity(signal) {
+  clearManagementError("security");
+  return Promise.all([
+    settledRequest(apiFetch("/api/v1/security/status", { signal: signal })),
+    settledRequest(apiFetch("/api/v1/audit", { signal: signal }))
+  ]).then(function(results) {
+    if (results[0].error) {
+      showManagementError("security", results[0].error);
+      return;
+    }
+    var status = results[0].value || {};
+    managementRole = status.console_role || "viewer";
+    applyManagementPermissions();
+    document.getElementById("security-role").textContent = managementRole;
+    document.getElementById("security-tokens").textContent = (status.tokens || []).length;
+    document.getElementById("security-audit-entries").textContent = status.audit_entries || 0;
+    document.getElementById("security-audit-events").textContent = status.audit_events_total || 0;
+    document.getElementById("security-console").textContent = status.console_configured ? "Configured" : "Disabled";
+    document.getElementById("security-legacy").textContent = status.legacy_bearer_configured ? "Configured" : "Disabled";
+    document.getElementById("security-audit").textContent = status.audit_enabled ? "Enabled" : "Disabled";
+    var tokenRows = (status.tokens || []).map(function(binding) {
+      return "<tr><td class=\"mono\">" + esc(binding.name || "unnamed") + "</td><td>" + esc(binding.role || "-") + "</td></tr>";
+    }).join("");
+    renderEmptyTable("security-token-tbody", "security-token-empty", tokenRows);
+    if (results[1].error) {
+      showManagementError("security", results[1].error);
+      return;
+    }
+    var entries = (results[1].value || []).slice().reverse();
+    var auditRows = entries.map(function(entry) {
+      var resultClass = entry.result === "success" ? "health-good" : entry.result === "denied" || entry.result === "unauthorized" ? "health-bad" : "health-warn";
+      return "<tr><td>" + formatDate(entry.time) + "</td><td class=\"mono\">" + esc(entry.principal) + "</td><td>" + esc(entry.role || "-") + "</td><td class=\"mono\">" + esc(entry.action) + "</td><td class=\"mono\">" + esc(entry.resource) + "</td><td class=\"" + resultClass + "\">" + esc(entry.result) + "</td></tr>";
+    }).join("");
+    renderEmptyTable("audit-tbody", "audit-empty", auditRows);
+  });
+}
+
+function bootstrapManagementRole() {
+  apiFetch("/api/v1/security/status")
+    .then(function(status) {
+      managementRole = (status && status.console_role) || "viewer";
+      applyManagementPermissions();
+    })
+    .catch(function() { applyManagementPermissions(); });
+}
+
+var activeViewRefreshers = {
+  streams: function(signal) { return Promise.all([refreshServerInfo(signal), refresh(signal), refreshDVR(signal)]); },
+  gb28181: function(signal) { return Promise.all([refreshServerInfo(signal), refreshGB28181(signal)]); },
+  config: function(signal) { return Promise.all([refreshServerInfo(signal), refreshRuntimeConfig(signal)]); },
+  cluster: function(signal) { return Promise.all([refreshServerInfo(signal), refreshCluster(signal)]); },
+  sip: function(signal) { return Promise.all([refreshServerInfo(signal), refreshSIPCalls(signal)]); },
+  storage: function(signal) { return Promise.all([refreshServerInfo(signal), refreshStorage(signal)]); },
+  security: function(signal) { return Promise.all([refreshServerInfo(signal), refreshSecurity(signal)]); }
+};
+
+function refreshActiveView() {
+  if (document.hidden) return Promise.resolve();
+  var refresher = activeViewRefreshers[activeTab];
+  if (!refresher) return Promise.resolve();
+  return Promise.resolve(refresher(newActiveViewSignal()));
+}
+
+function stopActiveViewPolling() {
+  if (activeViewInterval) {
+    clearInterval(activeViewInterval);
+    activeViewInterval = null;
+  }
+  abortActiveViewRequest();
+}
+
+function startActiveViewPolling() {
+  stopActiveViewPolling();
+  if (document.hidden) return;
+  refreshActiveView();
+  activeViewInterval = setInterval(refreshActiveView, 3000);
+}
+
+document.addEventListener("visibilitychange", function() {
+  if (document.hidden) {
+    stopActiveViewPolling();
+  } else {
+    startActiveViewPolling();
+  }
+});
+
 /* === GB28181 Console === */
-var activeTab = 'streams';
-var gbInterval = null;
-var streamsInterval = null;
 var gbHasModule = false;
 var ptzTargetChannel = '';
 var pbTargetChannel = '';
@@ -2287,35 +3359,63 @@ var gbDeviceChannels = {};
 
 function updateGB28181Tab(modules) {
   gbHasModule = modules && modules.indexOf("gb28181") >= 0;
-  var tabs = document.getElementById("nav-tabs");
-  if (tabs) tabs.style.display = gbHasModule ? "flex" : "none";
+  var tab = document.getElementById("tab-gb28181");
+  if (tab) tab.hidden = !gbHasModule;
+  if (!gbHasModule && activeTab === "gb28181") switchTab("streams");
 }
 
 function switchTab(name) {
-  activeTab = name;
+  var target = document.getElementById("view-" + name);
   var tabs = document.querySelectorAll(".nav-tab");
+  var selected = null;
   for (var i = 0; i < tabs.length; i++) {
-    tabs[i].classList.toggle("active", tabs[i].textContent.toLowerCase().indexOf(name === 'streams' ? 'stream' : 'gb28181') >= 0);
+    if (tabs[i].getAttribute("data-view") === name) selected = tabs[i];
   }
-  document.getElementById("view-streams").style.display = name === 'streams' ? 'block' : 'none';
-  document.getElementById("view-gb28181").style.display = name === 'gb28181' ? 'block' : 'none';
-
-  // Manage polling
-  if (name === 'streams') {
-    if (gbInterval) { clearInterval(gbInterval); gbInterval = null; }
-    if (!streamsInterval) { streamsInterval = setInterval(refresh, 2000); }
-    refresh();
-  } else {
-    if (streamsInterval) { clearInterval(streamsInterval); streamsInterval = null; }
-    if (!gbInterval) { gbInterval = setInterval(refreshGB28181, 3000); }
-    refreshGB28181();
+  if (!target || !selected || selected.hidden) return;
+  stopActiveViewPolling();
+  activeTab = name;
+  for (var j = 0; j < tabs.length; j++) {
+    var active = tabs[j].getAttribute("data-view") === name;
+    tabs[j].classList.toggle("active", active);
+    tabs[j].setAttribute("aria-selected", active ? "true" : "false");
+    tabs[j].tabIndex = active ? 0 : -1;
   }
+  var views = document.querySelectorAll("[id^=\"view-\"]");
+  for (var k = 0; k < views.length; k++) {
+    var view = views[k];
+    view.hidden = view.id !== "view-" + name;
+  }
+  startActiveViewPolling();
 }
 
-function refreshGB28181() {
-  Promise.all([
-    fetch("/api/v1/gb28181/devices").then(function(r) { return r.json(); }),
-    fetch("/api/v1/gb28181/sessions").then(function(r) { return r.json(); })
+function visibleManagementTabs() {
+  return Array.from(document.querySelectorAll(".nav-tab")).filter(function(tab) { return !tab.hidden; });
+}
+
+document.getElementById("nav-tabs").addEventListener("click", function(event) {
+  var tab = event.target.closest(".nav-tab");
+  if (tab && !tab.hidden) switchTab(tab.getAttribute("data-view"));
+});
+
+document.getElementById("nav-tabs").addEventListener("keydown", function(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  var tabs = visibleManagementTabs();
+  var current = tabs.indexOf(event.target.closest(".nav-tab"));
+  if (current < 0) return;
+  event.preventDefault();
+  var next = current;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = tabs.length - 1;
+  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+  if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+  switchTab(tabs[next].getAttribute("data-view"));
+  tabs[next].focus();
+});
+
+function refreshGB28181(signal) {
+  return Promise.all([
+    apiFetch("/api/v1/gb28181/devices", { signal: signal }),
+    apiFetch("/api/v1/gb28181/sessions", { signal: signal })
   ]).then(function(results) {
     var devices = results[0] || [];
     var sessions = results[1] || [];
@@ -2332,92 +3432,111 @@ function refreshGB28181() {
     document.getElementById("gb-stat-devices").textContent = devices.length;
     document.getElementById("gb-stat-channels").textContent = totalCh;
     document.getElementById("gb-stat-sessions").textContent = sessions.length;
-  }).catch(function() {});
+  }).catch(function(err) { showManagementError("gb28181", err); });
 }
 
 function renderDevicesTable(devices) {
   var tbody = document.getElementById("gb-devices-tbody");
   var empty = document.getElementById("gb-devices-empty");
+  tbody.replaceChildren();
   if (devices.length === 0) {
-    tbody.innerHTML = "";
     empty.style.display = "block";
     return;
   }
   empty.style.display = "none";
-  var html = "";
-  for (var i = 0; i < devices.length; i++) {
-    var d = devices[i];
+  devices.forEach(function(d) {
     var badgeCls = d.status === "online" ? "badge-online" : "badge-offline";
-    var safeID = esc(d.device_id);
     var expanded = gbExpandedDevices[d.device_id];
-    var arrow = expanded ? "&#9660;" : "&#9654;";
     var timeStr = d.last_keepalive ? new Date(d.last_keepalive).toLocaleTimeString() : "-";
-
-    html += '<tr class="ch-toggle" onclick="toggleDevice(\'' + safeID + '\')">'
-      + '<td style="width:24px;text-align:center;color:var(--text2)">' + arrow + '</td>'
-      + '<td style="font-family:monospace;font-size:13px">' + safeID + '</td>'
-      + '<td>' + esc(d.remote_addr) + '</td>'
-      + '<td>' + esc(d.transport || "udp").toUpperCase() + '</td>'
-      + '<td><span class="badge ' + badgeCls + '">' + esc(d.status) + '</span></td>'
-      + '<td>' + (d.channel_count || 0) + '</td>'
-      + '<td>' + timeStr + '</td>'
-      + '<td><div class="actions">'
-      + '<button class="btn btn-play" onclick="event.stopPropagation();gbCatalog(\'' + safeID + '\')">Catalog</button>'
-      + '<button class="btn btn-danger" onclick="event.stopPropagation();gbDeleteDevice(\'' + safeID + '\')">Delete</button>'
-      + '</div></td></tr>';
+    var row = tbody.insertRow();
+    row.className = "ch-toggle";
+    var toggleCell = row.insertCell();
+    toggleCell.style.width = "24px";
+    var toggle = appendActionButton(toggleCell, expanded ? "▼" : "▶", "", "gb-toggle-device", d.device_id);
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    toggle.setAttribute("aria-label", (expanded ? "Collapse " : "Expand ") + d.device_id);
+    appendTextCell(row, d.device_id, "mono");
+    appendTextCell(row, d.remote_addr);
+    appendTextCell(row, String(d.transport || "udp").toUpperCase());
+    var statusCell = row.insertCell();
+    var badge = document.createElement("span");
+    badge.className = "badge " + badgeCls;
+    badge.textContent = d.status;
+    statusCell.appendChild(badge);
+    appendTextCell(row, d.channel_count || 0);
+    appendTextCell(row, timeStr);
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (canManage("operator")) appendActionButton(actions, "Catalog", "btn-play", "gb-catalog", d.device_id);
+    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "gb-delete-device", d.device_id);
+    actionCell.appendChild(actions);
 
     // Expanded channel rows
     if (expanded && gbDeviceChannels[d.device_id]) {
       var channels = gbDeviceChannels[d.device_id];
-      for (var j = 0; j < channels.length; j++) {
-        var ch = channels[j];
+      channels.forEach(function(ch) {
         var chStatus = (ch.status || "").toUpperCase() === "ON" ? "badge-on" : "badge-off";
-        var chID = esc(ch.channel_id);
-        html += '<tr class="channel-row">'
-          + '<td></td>'
-          + '<td style="font-family:monospace;font-size:12px">' + chID + '</td>'
-          + '<td>' + esc(ch.name) + '</td>'
-          + '<td></td>'
-          + '<td><span class="badge ' + chStatus + '">' + esc(ch.status || "OFF") + '</span></td>'
-          + '<td>' + (ch.ptz_type > 0 ? "PTZ-" + ch.ptz_type : "-") + '</td>'
-          + '<td></td>'
-          + '<td><div class="actions">'
-          + '<button class="btn btn-play" onclick="gbPlay(\'' + chID + '\')">Play</button>'
-          + '<button class="btn btn-warn" onclick="gbStop(\'' + chID + '\')">Stop</button>'
-          + '<button class="btn" style="background:var(--blue);color:#fff" onclick="openPTZ(\'' + chID + '\')">PTZ</button>'
-          + '<button class="btn" style="background:var(--yellow);color:#000" onclick="openPlayback(\'' + chID + '\')">Playback</button>'
-          + '</div></td></tr>';
-      }
+        var channelRow = tbody.insertRow();
+        channelRow.className = "channel-row";
+        appendTextCell(channelRow, "");
+        appendTextCell(channelRow, ch.channel_id, "mono");
+        appendTextCell(channelRow, ch.name);
+        appendTextCell(channelRow, "");
+        var channelStatusCell = channelRow.insertCell();
+        var channelBadge = document.createElement("span");
+        channelBadge.className = "badge " + chStatus;
+        channelBadge.textContent = ch.status || "OFF";
+        channelStatusCell.appendChild(channelBadge);
+        appendTextCell(channelRow, ch.ptz_type > 0 ? "PTZ-" + ch.ptz_type : "-");
+        appendTextCell(channelRow, "");
+        var channelActionCell = channelRow.insertCell();
+        var channelActions = document.createElement("div");
+        channelActions.className = "actions";
+        if (canManage("operator")) {
+          appendActionButton(channelActions, "Play", "btn-play", "gb-play", ch.channel_id);
+          appendActionButton(channelActions, "Stop", "btn-warn", "gb-stop", ch.channel_id);
+          var ptz = appendActionButton(channelActions, "PTZ", "", "gb-ptz", ch.channel_id);
+          ptz.style.background = "var(--blue)";
+          ptz.style.color = "#fff";
+          var playback = appendActionButton(channelActions, "Playback", "", "gb-playback", ch.channel_id);
+          playback.style.background = "var(--yellow)";
+          playback.style.color = "#000";
+        }
+        channelActionCell.appendChild(channelActions);
+      });
     }
-  }
-  tbody.innerHTML = html;
+  });
 }
 
 function renderSessionsTable(sessions) {
   var tbody = document.getElementById("gb-sessions-tbody");
   var empty = document.getElementById("gb-sessions-empty");
+  tbody.replaceChildren();
   if (sessions.length === 0) {
-    tbody.innerHTML = "";
     empty.style.display = "block";
     return;
   }
   empty.style.display = "none";
-  var html = "";
-  for (var i = 0; i < sessions.length; i++) {
-    var s = sessions[i];
+  sessions.forEach(function(s) {
     var stCls = s.state === "streaming" ? "state-publishing" : "state-idle";
-    html += '<tr>'
-      + '<td style="font-family:monospace;font-size:12px">' + esc(s.id).substring(0, 20) + '</td>'
-      + '<td style="font-family:monospace;font-size:12px">' + esc(s.channel_id) + '</td>'
-      + '<td class="stream-key">' + esc(s.stream_key) + '</td>'
-      + '<td>' + esc(s.direction) + '</td>'
-      + '<td><span class="state ' + stCls + '">' + esc(s.state) + '</span></td>'
-      + '<td><div class="actions">'
-      + '<button class="btn btn-play" onclick="openPlayer(\'' + esc(s.stream_key).replace(/'/g, "\\'") + '\')">Preview</button>'
-      + '<button class="btn btn-danger" onclick="gbCloseSession(\'' + esc(s.id).replace(/'/g, "\\'") + '\')">Close</button>'
-      + '</div></td></tr>';
-  }
-  tbody.innerHTML = html;
+    var row = tbody.insertRow();
+    appendTextCell(row, String(s.id || "").substring(0, 20), "mono");
+    appendTextCell(row, s.channel_id, "mono");
+    appendTextCell(row, s.stream_key, "stream-key");
+    appendTextCell(row, s.direction);
+    var stateCell = row.insertCell();
+    var state = document.createElement("span");
+    state.className = "state " + stCls;
+    state.textContent = s.state;
+    stateCell.appendChild(state);
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    appendActionButton(actions, "Preview", "btn-play", "gb-preview", s.stream_key);
+    if (canManage("admin")) appendActionButton(actions, "Close", "btn-danger", "gb-close-session", s.id);
+    actionCell.appendChild(actions);
+  });
 }
 
 /* Device actions */
@@ -2428,8 +3547,7 @@ function toggleDevice(deviceID) {
     return;
   }
   gbExpandedDevices[deviceID] = true;
-  fetch("/api/v1/gb28181/channels?device_id=" + encodeURIComponent(deviceID))
-    .then(function(r) { return r.json(); })
+  apiFetch("/api/v1/gb28181/channels?device_id=" + encodeURIComponent(deviceID))
     .then(function(channels) {
       gbDeviceChannels[deviceID] = channels || [];
       refreshGB28181();
@@ -2437,22 +3555,21 @@ function toggleDevice(deviceID) {
 }
 
 function gbCatalog(deviceID) {
-  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(deviceID) + "/catalog", { method: "POST" })
-    .then(function(r) { return r.json(); })
+  apiFetch("/api/v1/gb28181/channels/" + encodeURIComponent(deviceID) + "/catalog", { method: "POST" })
     .then(function() { showToast("Catalog query sent to " + deviceID); refreshGB28181(); });
 }
 
 function gbDeleteDevice(deviceID) {
   showModal("Delete Device", 'Unregister device "' + deviceID + '" and close all sessions?', function() {
-    fetch("/api/v1/gb28181/devices/" + encodeURIComponent(deviceID), { method: "DELETE" })
-      .then(function() { delete gbExpandedDevices[deviceID]; delete gbDeviceChannels[deviceID]; refreshGB28181(); });
+    return apiFetch("/api/v1/gb28181/devices/" + encodeURIComponent(deviceID), { method: "DELETE" })
+      .then(function() { delete gbExpandedDevices[deviceID]; delete gbDeviceChannels[deviceID]; refreshActiveView(); })
+      .catch(function(err) { showManagementError("gb28181", err); });
   });
 }
 
 /* Channel actions */
 function gbPlay(channelID) {
-  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(channelID) + "/play", { method: "POST" })
-    .then(function(r) { return r.json(); })
+  apiFetch("/api/v1/gb28181/channels/" + encodeURIComponent(channelID) + "/play", { method: "POST" })
     .then(function(data) {
       if (data.error) { showToast("Error: " + data.error); return; }
       showToast("Playing: " + (data.stream_key || channelID));
@@ -2461,13 +3578,14 @@ function gbPlay(channelID) {
         setTimeout(function() { openPlayer(data.stream_key); }, 1500);
       }
     })
-    .catch(function() { showToast("Play request failed"); });
+    .catch(function(err) { showManagementError("gb28181", err); });
 }
 
 function gbStop(channelID) {
   showModal("Stop Play", 'Stop live view for "' + channelID + '"?', function() {
-    fetch("/api/v1/gb28181/channels/" + encodeURIComponent(channelID) + "/play", { method: "DELETE" })
-      .then(function() { refreshGB28181(); });
+    return apiFetch("/api/v1/gb28181/channels/" + encodeURIComponent(channelID) + "/play", { method: "DELETE" })
+      .then(function() { refreshActiveView(); })
+      .catch(function(err) { showManagementError("gb28181", err); });
   });
 }
 
@@ -2487,11 +3605,11 @@ function sendPTZ(command) {
   if (!ptzTargetChannel) return;
   var hSpeed = parseInt(document.getElementById("ptz-hspeed").value) || 64;
   var vSpeed = parseInt(document.getElementById("ptz-vspeed").value) || 64;
-  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(ptzTargetChannel) + "/ptz", {
+  return apiFetch("/api/v1/gb28181/channels/" + encodeURIComponent(ptzTargetChannel) + "/ptz", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({command: command, h_speed: hSpeed, v_speed: vSpeed})
-  });
+  }).catch(function(err) { showManagementError("gb28181", err); });
 }
 
 // PTZ speed slider display
@@ -2528,12 +3646,11 @@ function gbStartPlayback() {
   var startTime = new Date(startVal).toISOString();
   var endTime = new Date(endVal).toISOString();
 
-  fetch("/api/v1/gb28181/channels/" + encodeURIComponent(pbTargetChannel) + "/playback", {
+  apiFetch("/api/v1/gb28181/channels/" + encodeURIComponent(pbTargetChannel) + "/playback", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({start_time: startTime, end_time: endTime})
   })
-    .then(function(r) { return r.json(); })
     .then(function(data) {
       closePlayback();
       if (data.error) { showToast("Error: " + data.error); return; }
@@ -2543,14 +3660,15 @@ function gbStartPlayback() {
         setTimeout(function() { openPlayer(data.stream_key); }, 1500);
       }
     })
-    .catch(function() { showToast("Playback request failed"); });
+    .catch(function(err) { showManagementError("gb28181", err); });
 }
 
 /* Session actions */
 function gbCloseSession(sessionID) {
   showModal("Close Session", 'Force close session "' + sessionID.substring(0, 20) + '..."?', function() {
-    fetch("/api/v1/gb28181/sessions/" + encodeURIComponent(sessionID), { method: "DELETE" })
-      .then(function() { refreshGB28181(); });
+    return apiFetch("/api/v1/gb28181/sessions/" + encodeURIComponent(sessionID), { method: "DELETE" })
+      .then(function() { refreshActiveView(); })
+      .catch(function(err) { showManagementError("gb28181", err); });
   });
 }
 
@@ -2563,12 +3681,9 @@ function showToast(msg) {
 }
 
 /* === Init === */
-refreshServerInfo();
-refresh();
-refreshDVR();
-streamsInterval = setInterval(refresh, 2000);
-setInterval(refreshServerInfo, 5000);
-setInterval(refreshDVR, 5000);
+applyManagementPermissions();
+bootstrapManagementRole();
+switchTab("streams");
 
 // Show self-signed cert banner when using HTTPS with auto-generated cert.
 if (location.protocol === "https:") {

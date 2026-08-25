@@ -1,11 +1,14 @@
 package rtmp
 
 import (
+	"fmt"
 	"net"
 	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+var publisherSequence atomic.Uint64
 
 // Publisher implements core.Publisher for RTMP connections.
 //
@@ -22,7 +25,7 @@ type Publisher struct {
 // NewPublisher creates a new RTMP publisher.
 func NewPublisher(streamKey string, conn net.Conn) *Publisher {
 	p := &Publisher{
-		id:   "rtmp-pub-" + streamKey,
+		id:   fmt.Sprintf("rtmp-pub-%s-%d", streamKey, publisherSequence.Add(1)),
 		conn: conn,
 	}
 	p.info.Store(&avframe.MediaInfo{})

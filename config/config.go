@@ -4,26 +4,68 @@ import "time"
 
 // Config is the root configuration for the streaming server.
 type Config struct {
-	Server ServerConfig `yaml:"server"`
-	TLS    TLSConfig    `yaml:"tls"`
-	Limits LimitsConfig `yaml:"limits"`
-	RTMP   RTMPConfig   `yaml:"rtmp"`
-	RTSP   RTSPConfig   `yaml:"rtsp"`
-	HTTP   HTTPConfig   `yaml:"http_stream"`
-	WS     WSConfig     `yaml:"websocket"`
-	WebRTC WebRTCConfig `yaml:"webrtc"`
-	SRT    SRTConfig    `yaml:"srt"`
-	SIP     SIPConfig     `yaml:"sip"`
-	GB28181 GB28181Config `yaml:"gb28181"`
-	Stream  StreamConfig  `yaml:"stream"`
-	Auth   AuthConfig   `yaml:"auth"`
-	Notify NotifyConfig `yaml:"notify"`
-	Cluster ClusterConfig `yaml:"cluster"`
-	Record  RecordConfig  `yaml:"record"`
-	DVR     DVRConfig     `yaml:"dvr"`
-	API     APIConfig     `yaml:"api"`
+	Server     ServerConfig     `yaml:"server"`
+	TLS        TLSConfig        `yaml:"tls"`
+	Limits     LimitsConfig     `yaml:"limits"`
+	RTMP       RTMPConfig       `yaml:"rtmp"`
+	RTSP       RTSPConfig       `yaml:"rtsp"`
+	HTTP       HTTPConfig       `yaml:"http_stream"`
+	WS         WSConfig         `yaml:"websocket"`
+	WebRTC     WebRTCConfig     `yaml:"webrtc"`
+	SRT        SRTConfig        `yaml:"srt"`
+	SIP        SIPConfig        `yaml:"sip"`
+	GB28181    GB28181Config    `yaml:"gb28181"`
+	Stream     StreamConfig     `yaml:"stream"`
+	Auth       AuthConfig       `yaml:"auth"`
+	Notify     NotifyConfig     `yaml:"notify"`
+	Cluster    ClusterConfig    `yaml:"cluster"`
+	Record     RecordConfig     `yaml:"record"`
+	DVR        DVRConfig        `yaml:"dvr"`
+	API        APIConfig        `yaml:"api"`
 	Metrics    MetricsConfig    `yaml:"metrics"`
 	AudioCodec AudioCodecConfig `yaml:"audio_codec"`
+	Runtime    RuntimeConfig    `yaml:"runtime"`
+}
+
+// RuntimeConfig controls the background configuration source and refresh loop.
+// The bootstrap file is loaded first; remote sources replace it only after a
+// valid snapshot has been parsed and published.
+type RuntimeConfig struct {
+	Source       string                    `yaml:"source"`
+	PollInterval time.Duration             `yaml:"poll_interval"`
+	LoadTimeout  time.Duration             `yaml:"load_timeout"`
+	File         RuntimeFileSourceConfig   `yaml:"file"`
+	HTTP         RuntimeHTTPSourceConfig   `yaml:"http"`
+	Consul       RuntimeConsulSourceConfig `yaml:"consul"`
+	Redis        RuntimeRedisSourceConfig  `yaml:"redis"`
+}
+
+type RuntimeFileSourceConfig struct {
+	Path string `yaml:"path"`
+}
+
+type RuntimeHTTPSourceConfig struct {
+	URL      string `yaml:"url"`
+	Token    string `yaml:"token"`
+	MaxBytes int64  `yaml:"max_bytes"`
+}
+
+type RuntimeConsulSourceConfig struct {
+	Address  string `yaml:"address"`
+	Prefix   string `yaml:"prefix"`
+	Token    string `yaml:"token"`
+	MaxBytes int64  `yaml:"max_bytes"`
+}
+
+type RuntimeRedisSourceConfig struct {
+	Addr       string `yaml:"addr"`
+	Username   string `yaml:"username"`
+	Password   string `yaml:"password"`
+	DB         int    `yaml:"db"`
+	Prefix     string `yaml:"prefix"`
+	Hash       string `yaml:"hash"`
+	VersionKey string `yaml:"version_key"`
+	TLS        bool   `yaml:"tls"`
 }
 
 // AudioCodecConfig controls audio transcoding between protocols.
@@ -52,10 +94,10 @@ func (t TLSConfig) Configured() bool {
 
 // LimitsConfig holds resource limits.
 type LimitsConfig struct {
-	MaxStreams              int            `yaml:"max_streams"`
-	MaxSubscribersPerStream int            `yaml:"max_subscribers_per_stream"`
-	MaxConnections          int            `yaml:"max_connections"`
-	MaxBitratePerStream     int            `yaml:"max_bitrate_per_stream"`
+	MaxStreams              int             `yaml:"max_streams"`
+	MaxSubscribersPerStream int             `yaml:"max_subscribers_per_stream"`
+	MaxConnections          int             `yaml:"max_connections"`
+	MaxBitratePerStream     int             `yaml:"max_bitrate_per_stream"`
 	RateLimit               RateLimitConfig `yaml:"rate_limit"`
 }
 
@@ -88,18 +130,18 @@ type RTSPConfig struct {
 // MulticastConfig holds RTSP multicast delivery settings.
 type MulticastConfig struct {
 	Enabled   bool   `yaml:"enabled"`
-	Address   string `yaml:"address"`    // multicast group IP (e.g., "239.0.0.1")
-	BasePort  int    `yaml:"base_port"`  // starting port for multicast RTP (even number)
-	TTL       int    `yaml:"ttl"`        // multicast TTL (default 16)
-	Interface string `yaml:"interface"`  // network interface name (empty = default route)
+	Address   string `yaml:"address"`   // multicast group IP (e.g., "239.0.0.1")
+	BasePort  int    `yaml:"base_port"` // starting port for multicast RTP (even number)
+	TTL       int    `yaml:"ttl"`       // multicast TTL (default 16)
+	Interface string `yaml:"interface"` // network interface name (empty = default route)
 }
 
 // HTTPConfig holds HTTP-FLV/TS/FMP4/HLS/DASH module settings.
 type HTTPConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Listen  string `yaml:"listen"`
-	CORS    bool   `yaml:"cors"`
-	TLS     *bool  `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	Enabled bool        `yaml:"enabled"`
+	Listen  string      `yaml:"listen"`
+	CORS    bool        `yaml:"cors"`
+	TLS     *bool       `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
 	HLS     HLSConfig   `yaml:"hls"`
 	DASH    DASHConfig  `yaml:"dash"`
 	LLHLS   LLHLSConfig `yaml:"llhls"`
@@ -163,21 +205,21 @@ type ICEServer struct {
 type SRTConfig struct {
 	Enabled     bool               `yaml:"enabled"`
 	Listen      string             `yaml:"listen"`
-	Latency     int                `yaml:"latency"`     // ms, receiver latency (default 120)
-	Passphrase  string             `yaml:"passphrase"`  // AES encryption passphrase (empty = no encryption)
-	PBKeyLen    int                `yaml:"pbkeylen"`    // crypto key length: 0, 16, 24, or 32
+	Latency     int                `yaml:"latency"`    // ms, receiver latency (default 120)
+	Passphrase  string             `yaml:"passphrase"` // AES encryption passphrase (empty = no encryption)
+	PBKeyLen    int                `yaml:"pbkeylen"`   // crypto key length: 0, 16, 24, or 32
 	SkipTracker *SkipTrackerConfig `yaml:"skip_tracker,omitempty"`
 }
 
 // SIPConfig holds SIP module settings.
 type SIPConfig struct {
-	Enabled   bool              `yaml:"enabled"`
-	Listen    string            `yaml:"listen"`
-	Transport []string          `yaml:"transport"`
-	ServerID  string            `yaml:"server_id"`
-	Domain    string            `yaml:"domain"`
-	Auth      SIPAuth           `yaml:"auth"`
-	Gateway   SIPGatewayConfig  `yaml:"gateway"`
+	Enabled   bool             `yaml:"enabled"`
+	Listen    string           `yaml:"listen"`
+	Transport []string         `yaml:"transport"`
+	ServerID  string           `yaml:"server_id"`
+	Domain    string           `yaml:"domain"`
+	Auth      SIPAuth          `yaml:"auth"`
+	Gateway   SIPGatewayConfig `yaml:"gateway"`
 }
 
 // SIPAuth holds SIP digest authentication settings.
@@ -197,14 +239,14 @@ type SIPGatewayConfig struct {
 
 // GB28181Config holds GB28181 module settings.
 type GB28181Config struct {
-	Enabled         bool          `yaml:"enabled"`
-	StreamPrefix    string        `yaml:"stream_prefix"`
-	RTPPortRange    []int         `yaml:"rtp_port_range"`
-	SSRC            SSRCConfig    `yaml:"ssrc"`
+	Enabled         bool            `yaml:"enabled"`
+	StreamPrefix    string          `yaml:"stream_prefix"`
+	RTPPortRange    []int           `yaml:"rtp_port_range"`
+	SSRC            SSRCConfig      `yaml:"ssrc"`
 	Keepalive       KeepaliveConfig `yaml:"keepalive"`
-	AutoInvite      bool          `yaml:"auto_invite"`
-	CatalogInterval time.Duration `yaml:"catalog_interval"`
-	DumpFile        string        `yaml:"dump_file"`
+	AutoInvite      bool            `yaml:"auto_invite"`
+	CatalogInterval time.Duration   `yaml:"catalog_interval"`
+	DumpFile        string          `yaml:"dump_file"`
 }
 
 // SSRCConfig holds SSRC generation settings for GB28181.
@@ -229,26 +271,26 @@ type SkipTrackerConfig struct {
 
 // SlowConsumerConfig holds slow consumer frame dropping settings.
 type SlowConsumerConfig struct {
-	Enabled          bool               `yaml:"enabled"`
-	LagWarnRatio     float64            `yaml:"lag_warn_ratio"`
-	LagDropRatio     float64            `yaml:"lag_drop_ratio"`
-	LagCriticalRatio float64            `yaml:"lag_critical_ratio"`
-	LagRecoverRatio  float64            `yaml:"lag_recover_ratio"`
-	EWMAAlpha        float64            `yaml:"ewma_alpha"`
-	SendTimeRatio    float64            `yaml:"send_time_ratio"`
+	Enabled          bool    `yaml:"enabled"`
+	LagWarnRatio     float64 `yaml:"lag_warn_ratio"`
+	LagDropRatio     float64 `yaml:"lag_drop_ratio"`
+	LagCriticalRatio float64 `yaml:"lag_critical_ratio"`
+	LagRecoverRatio  float64 `yaml:"lag_recover_ratio"`
+	EWMAAlpha        float64 `yaml:"ewma_alpha"`
+	SendTimeRatio    float64 `yaml:"send_time_ratio"`
 }
 
 // StreamConfig holds stream-level settings.
 type StreamConfig struct {
-	GOPCache         bool              `yaml:"gop_cache"`
-	GOPCacheNum      int               `yaml:"gop_cache_num"`
-	AudioCacheMs     int               `yaml:"audio_cache_ms"`
-	RingBufferSize   int               `yaml:"ring_buffer_size"`
-	IdleTimeout      time.Duration     `yaml:"idle_timeout"`
-	NoPublisherTimeout time.Duration   `yaml:"no_publisher_timeout"`
-	SlowConsumer     SlowConsumerConfig  `yaml:"slow_consumer"`
-	Simulcast        SimulcastConfig     `yaml:"simulcast"`
-	Feedback         FeedbackConfig      `yaml:"feedback"`
+	GOPCache           bool               `yaml:"gop_cache"`
+	GOPCacheNum        int                `yaml:"gop_cache_num"`
+	AudioCacheMs       int                `yaml:"audio_cache_ms"`
+	RingBufferSize     int                `yaml:"ring_buffer_size"`
+	IdleTimeout        time.Duration      `yaml:"idle_timeout"`
+	NoPublisherTimeout time.Duration      `yaml:"no_publisher_timeout"`
+	SlowConsumer       SlowConsumerConfig `yaml:"slow_consumer"`
+	Simulcast          SimulcastConfig    `yaml:"simulcast"`
+	Feedback           FeedbackConfig     `yaml:"feedback"`
 }
 
 // SimulcastConfig holds simulcast layer settings.
@@ -266,7 +308,7 @@ type LayerConfig struct {
 
 // FeedbackConfig holds feedback routing settings.
 type FeedbackConfig struct {
-	DefaultMode    string              `yaml:"default_mode"`
+	DefaultMode    string               `yaml:"default_mode"`
 	AutoThresholds AutoThresholdsConfig `yaml:"auto_thresholds"`
 }
 
@@ -278,17 +320,19 @@ type AutoThresholdsConfig struct {
 
 // AuthConfig holds authentication settings.
 type AuthConfig struct {
-	Enabled   bool            `yaml:"enabled"`
-	Publish   AuthRuleConfig  `yaml:"publish"`
-	Subscribe AuthRuleConfig  `yaml:"subscribe"`
-	API       APIAuthConfig   `yaml:"api"`
+	Enabled   bool           `yaml:"enabled"`
+	Publish   AuthRuleConfig `yaml:"publish"`
+	Subscribe AuthRuleConfig `yaml:"subscribe"`
+	// API is the deprecated pre-api.auth management token location. Normalize
+	// migrates it when the current API auth path is not configured.
+	API APIAuthConfig `yaml:"api"`
 }
 
 // AuthRuleConfig holds auth rule for publish or subscribe.
 type AuthRuleConfig struct {
-	Mode     string          `yaml:"mode"`
-	Token    TokenConfig     `yaml:"token"`
-	Callback CallbackConfig  `yaml:"callback"`
+	Mode     string         `yaml:"mode"`
+	Token    TokenConfig    `yaml:"token"`
+	Callback CallbackConfig `yaml:"callback"`
 }
 
 // TokenConfig holds JWT token settings.
@@ -305,20 +349,28 @@ type CallbackConfig struct {
 
 // APIAuthConfig holds API auth settings.
 type APIAuthConfig struct {
-	BearerToken string `yaml:"bearer_token"`
+	BearerToken string         `yaml:"bearer_token"`
+	Tokens      []APIAuthToken `yaml:"tokens"`
+}
+
+// APIAuthToken binds a named management token to a fixed RBAC role.
+type APIAuthToken struct {
+	Name  string `yaml:"name"`
+	Token string `yaml:"token"`
+	Role  string `yaml:"role"`
 }
 
 // NotifyConfig holds notification settings.
 type NotifyConfig struct {
-	HTTP          NotifyHTTPConfig      `yaml:"http"`
-	WebSocket     NotifyWSConfig        `yaml:"websocket"`
-	AliveInterval time.Duration         `yaml:"alive_interval"`
+	HTTP          NotifyHTTPConfig `yaml:"http"`
+	WebSocket     NotifyWSConfig   `yaml:"websocket"`
+	AliveInterval time.Duration    `yaml:"alive_interval"`
 }
 
 // NotifyHTTPConfig holds HTTP webhook notification settings.
 type NotifyHTTPConfig struct {
-	Enabled   bool                    `yaml:"enabled"`
-	Endpoints []NotifyEndpointConfig  `yaml:"endpoints"`
+	Enabled   bool                   `yaml:"enabled"`
+	Endpoints []NotifyEndpointConfig `yaml:"endpoints"`
 }
 
 // NotifyEndpointConfig holds a single webhook endpoint.
@@ -350,10 +402,10 @@ type ClusterConfig struct {
 
 // HealthCheckConfig holds cluster node health monitoring settings.
 type HealthCheckConfig struct {
-	Enabled         bool          `yaml:"enabled"`
-	Interval        time.Duration `yaml:"interval"`         // probe interval for evicted nodes
-	Timeout         time.Duration `yaml:"timeout"`           // TCP dial timeout per probe
-	EvictThreshold  int           `yaml:"evict_threshold"`   // consecutive failures before eviction
+	Enabled        bool          `yaml:"enabled"`
+	Interval       time.Duration `yaml:"interval"`        // probe interval for evicted nodes
+	Timeout        time.Duration `yaml:"timeout"`         // TCP dial timeout per probe
+	EvictThreshold int           `yaml:"evict_threshold"` // consecutive failures before eviction
 }
 
 // RelayPoolConfig holds cluster relay connection pool settings.
@@ -454,15 +506,23 @@ type MetricsConfig struct {
 
 // APIConfig holds the management API settings.
 type APIConfig struct {
-	Enabled bool            `yaml:"enabled"`
-	Listen  string          `yaml:"listen"`
-	TLS     *bool           `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
-	Auth    APIAuthConfig   `yaml:"auth"`
-	Console ConsoleConfig   `yaml:"console"`
+	Enabled bool          `yaml:"enabled"`
+	Listen  string        `yaml:"listen"`
+	TLS     *bool         `yaml:"tls,omitempty"` // nil=follow global, true=force on, false=force off
+	Auth    APIAuthConfig `yaml:"auth"`
+	Console ConsoleConfig `yaml:"console"`
+	Audit   AuditConfig   `yaml:"audit"`
 }
 
 // ConsoleConfig holds console login credentials.
 type ConsoleConfig struct {
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	Role     string `yaml:"role"`
+}
+
+// AuditConfig controls the bounded in-memory management audit trail. Audit
+// entries are also emitted as structured logs.
+type AuditConfig struct {
+	MaxEntries int `yaml:"max_entries"`
 }

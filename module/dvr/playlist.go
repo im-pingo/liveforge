@@ -8,6 +8,12 @@ import (
 
 // GeneratePlaylist builds an HLS m3u8 playlist from the segment index.
 func GeneratePlaylist(index *SegmentIndex, streamKey string, live bool) string {
+	return GeneratePlaylistWithQuery(index, streamKey, live, "")
+}
+
+// GeneratePlaylistWithQuery appends an already URL-encoded query string to
+// segment URIs so token-authenticated playlist requests remain authorized.
+func GeneratePlaylistWithQuery(index *SegmentIndex, streamKey string, live bool, rawQuery string) string {
 	segments := index.Segments()
 	if len(segments) == 0 {
 		return ""
@@ -34,7 +40,11 @@ func GeneratePlaylist(index *SegmentIndex, streamKey string, live bool) string {
 	for _, seg := range segments {
 		b.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", seg.StartTime.UTC().Format("2006-01-02T15:04:05.000Z")))
 		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration))
-		b.WriteString(fmt.Sprintf("%s/%s\n", key, seg.Filename))
+		segmentURI := fmt.Sprintf("%s/%s", key, seg.Filename)
+		if rawQuery != "" {
+			segmentURI += "?" + rawQuery
+		}
+		b.WriteString(segmentURI + "\n")
 	}
 
 	if !live {

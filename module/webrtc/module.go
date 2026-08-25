@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/ratelimit"
 	"github.com/pion/interceptor"
@@ -18,16 +19,21 @@ import (
 
 // Module implements the WebRTC WHIP/WHEP module.
 type Module struct {
-	server   *core.Server
-	api      *webrtc.API
-	sessions sync.Map // sessionID -> *Session
-	listener net.Listener
-	httpSrv  *http.Server
-	limiter   *ratelimit.Limiter
-	wg        sync.WaitGroup
-	latestBWE              chan cc.BandwidthEstimator
-	nextInitialBitrate     int64 // per-session override, set before NewPeerConnection
-	nextInitialBitrateMu   sync.Mutex
+	server               *core.Server
+	api                  *webrtc.API
+	sessions             sync.Map // sessionID -> *Session
+	listener             net.Listener
+	httpSrv              *http.Server
+	limiter              *ratelimit.Limiter
+	limiterMu            sync.RWMutex
+	rateCfg              config.RateLimitConfig
+	wg                   sync.WaitGroup
+	admissionMu          sync.Mutex
+	closing              bool
+	setupWG              sync.WaitGroup
+	latestBWE            chan cc.BandwidthEstimator
+	nextInitialBitrate   int64 // per-session override, set before NewPeerConnection
+	nextInitialBitrateMu sync.Mutex
 }
 
 // NewModule creates a new WebRTC module.
@@ -70,7 +76,6 @@ func (m *Module) Init(s *core.Server) error {
 	// connect via loopback UDP instead of the LAN interface, avoiding packet loss.
 	se.SetIncludeLoopbackCandidate(true)
 
-
 	me := &webrtc.MediaEngine{}
 	if err := registerCodecs(me); err != nil {
 		return err
@@ -98,9 +103,10 @@ func (m *Module) Init(s *core.Server) error {
 	// registered AFTER GCC (closer to app in the chain).
 	if cfg.WebRTC.GCC.Enabled {
 		bweFactory, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			gccCfg := m.gccConfig()
 			// Use per-session override if set by WHEP handler (based on
 			// the stream's actual bitrate), otherwise fall back to config.
-			initialBitrate := cfg.WebRTC.GCC.InitialBitrate
+			initialBitrate := gccCfg.InitialBitrate
 			m.nextInitialBitrateMu.Lock()
 			if m.nextInitialBitrate > 0 {
 				initialBitrate = int(m.nextInitialBitrate)
@@ -110,8 +116,8 @@ func (m *Module) Init(s *core.Server) error {
 
 			return gcc.NewSendSideBWE(
 				gcc.SendSideBWEInitialBitrate(initialBitrate),
-				gcc.SendSideBWEMinBitrate(cfg.WebRTC.GCC.MinBitrate),
-				gcc.SendSideBWEMaxBitrate(cfg.WebRTC.GCC.MaxBitrate),
+				gcc.SendSideBWEMinBitrate(gccCfg.MinBitrate),
+				gcc.SendSideBWEMaxBitrate(gccCfg.MaxBitrate),
 			)
 		})
 		if err != nil {
@@ -162,12 +168,21 @@ func (m *Module) Init(s *core.Server) error {
 	mux.HandleFunc("PATCH /webrtc/session/{id}", m.handlePatch)
 	mux.HandleFunc("OPTIONS /{path...}", m.handleOptions)
 
-	var handler http.Handler = corsMiddleware(mux)
+	handler := corsMiddleware(mux)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
 		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
-		handler = m.limiter.Wrap(handler)
 	}
-	m.httpSrv = &http.Server{Handler: handler}
+	m.rateCfg = cfg.Limits.RateLimit
+	m.httpSrv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.limiterMu.RLock()
+		limiter := m.limiter
+		m.limiterMu.RUnlock()
+		if limiter != nil && !limiter.AllowRequest(r) {
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.WebRTC.TLS == nil || *cfg.WebRTC.TLS) {
@@ -189,9 +204,51 @@ func (m *Module) Init(s *core.Server) error {
 // Hooks returns the module's event hooks (none for WebRTC).
 func (m *Module) Hooks() []core.HookRegistration { return nil }
 
+// OnReload makes updated GCC bitrate bounds and ICE server credentials
+// available to new sessions. GCC enablement, listener, ICE mode, candidates,
+// and port ranges remain restart-required because they shape the Pion API.
+func (m *Module) OnReload(s *core.Server) error {
+	rl := s.Config().Limits.RateLimit
+	m.limiterMu.RLock()
+	unchanged := m.rateCfg == rl
+	m.limiterMu.RUnlock()
+	if unchanged {
+		return nil
+	}
+	var next *ratelimit.Limiter
+	if rl.Enabled && rl.Rate > 0 {
+		next = ratelimit.New(rl.Rate, rl.Burst)
+	}
+	m.limiterMu.Lock()
+	old := m.limiter
+	m.limiter = next
+	m.rateCfg = rl
+	m.limiterMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	return nil
+}
+
+func (m *Module) gccConfig() config.GCCConfig {
+	if m.server == nil {
+		return config.GCCConfig{}
+	}
+	return m.server.Config().WebRTC.GCC
+}
+
 // Close shuts down all sessions and the HTTP server.
 func (m *Module) Close() error {
-	// Close all active sessions.
+	m.admissionMu.Lock()
+	m.closing = true
+	m.admissionMu.Unlock()
+
+	if m.httpSrv != nil {
+		_ = m.httpSrv.Close()
+	}
+	m.setupWG.Wait()
+
+	// No setup handler can add a session after this final drain begins.
 	m.sessions.Range(func(key, value any) bool {
 		if sess, ok := value.(*Session); ok {
 			sess.Close()
@@ -199,15 +256,36 @@ func (m *Module) Close() error {
 		return true
 	})
 
-	if m.httpSrv != nil {
-		m.httpSrv.Close()
-	}
-	if m.limiter != nil {
-		m.limiter.Close()
+	m.limiterMu.Lock()
+	limiter := m.limiter
+	m.limiter = nil
+	m.limiterMu.Unlock()
+	if limiter != nil {
+		limiter.Close()
 	}
 	m.wg.Wait()
 	slog.Info("stopped", "module", "webrtc")
 	return nil
+}
+
+func (m *Module) beginSetup() bool {
+	m.admissionMu.Lock()
+	defer m.admissionMu.Unlock()
+	if m.closing {
+		return false
+	}
+	m.setupWG.Add(1)
+	return true
+}
+
+func (m *Module) endSetup() {
+	m.setupWG.Done()
+}
+
+func (m *Module) isClosing() bool {
+	m.admissionMu.Lock()
+	defer m.admissionMu.Unlock()
+	return m.closing
 }
 
 // Addr returns the listener address (useful for tests).
@@ -218,9 +296,17 @@ func (m *Module) Addr() net.Addr {
 	return nil
 }
 
-// storeSession stores a session in the session map.
-func (m *Module) storeSession(s *Session) {
+// storeSession stores a fully initialized session unless shutdown has started.
+func (m *Module) storeSession(s *Session) bool {
+	m.admissionMu.Lock()
+	defer m.admissionMu.Unlock()
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	if m.closing || s.closed {
+		return false
+	}
 	m.sessions.Store(s.id, s)
+	return true
 }
 
 // removeSession removes a session from the session map.
@@ -317,10 +403,10 @@ func registerCodecs(me *webrtc.MediaEngine) error {
 
 	// Video codecs: one entry per codec + RTX.
 	videoCodecs := []struct {
-		mime    string
-		pt      webrtc.PayloadType
-		rtxPT   webrtc.PayloadType
-		fmtp    string
+		mime  string
+		pt    webrtc.PayloadType
+		rtxPT webrtc.PayloadType
+		fmtp  string
 	}{
 		{webrtc.MimeTypeVP8, 96, 97, ""},
 		{webrtc.MimeTypeVP9, 98, 99, "profile-id=0"},

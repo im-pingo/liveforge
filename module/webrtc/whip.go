@@ -2,7 +2,6 @@ package webrtc
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -14,15 +13,27 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 	"github.com/pion/webrtc/v4"
 )
 
 // handleWHIP handles POST /webrtc/whip/{path...} for WHIP publish.
 func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
+	if !m.beginSetup() {
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.endSetup()
+
 	streamKey := r.PathValue("path")
 	if streamKey == "" {
 		http.Error(w, "missing stream key", http.StatusBadRequest)
+		return
+	}
+	publishCtx := eventContextFromRequest(r, streamKey)
+	if err := m.server.GetEventBus().EmitSync(core.EventPublish, publishCtx); err != nil {
+		rejectUnauthorized(w)
 		return
 	}
 
@@ -30,12 +41,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
 		return
 	}
-	connAcquired := true
+	var releaseConnOnce sync.Once
 	releaseConn := func() {
-		if connAcquired {
-			connAcquired = false
-			m.server.ReleaseConn()
-		}
+		releaseConnOnce.Do(m.server.ReleaseConn)
 	}
 
 	contentType := r.Header.Get("Content-Type")
@@ -45,10 +53,14 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offerBytes, err := io.ReadAll(r.Body)
-	if err != nil {
+	offerBytes, ok := readSDPOffer(w, r)
+	if !ok {
 		releaseConn()
-		http.Error(w, "failed to read offer", http.StatusBadRequest)
+		return
+	}
+	if m.isClosing() {
+		releaseConn()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -84,7 +96,6 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	pub.info.Store(&avframe.MediaInfo{})
 
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
-	m.storeSession(sess)
 
 	var (
 		videoDetected bool
@@ -92,11 +103,29 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		publisherSet  bool
 		pubMu         sync.Mutex
 	)
+	mediaClock := newWHIPMediaClock()
+	sess.setCleanup(func() {
+		pubMu.Lock()
+		wasPublisher := publisherSet
+		pubMu.Unlock()
+		if wasPublisher {
+			stream.RemovePublisherIf(pub)
+		}
+		lifecycleCtx := *publishCtx
+		lifecycleCtx.PublisherID = pub.ID()
+		sess.stopLifecycle(m.server.GetEventBus(), core.EventPublishStop, &lifecycleCtx)
+		releaseConn()
+	})
+	if !m.storeSession(sess) {
+		sess.Close()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 
 	setPublisherOnce := func() {
 		pubMu.Lock()
 		defer pubMu.Unlock()
-		if publisherSet || (!videoDetected && !audioDetected) {
+		if publisherSet || (!videoDetected && !audioDetected) || sess.isClosed() {
 			return
 		}
 		if err := stream.SetPublisher(pub); err != nil {
@@ -104,11 +133,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		publisherSet = true
-		m.server.GetEventBus().Emit(core.EventPublish, &core.EventContext{
-			StreamKey:  streamKey,
-			Protocol:   "webrtc",
-			RemoteAddr: r.RemoteAddr,
-		})
+		lifecycleCtx := *publishCtx
+		lifecycleCtx.PublisherID = pub.ID()
+		sess.startLifecycle(m.server.GetEventBus(), core.EventPublish, &lifecycleCtx)
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -142,32 +169,22 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			slog.Error("WHIP depacketizer error", "module", "webrtc", "error", err)
 			return
 		}
+		if avCodec.IsVideo() {
+			go requestWHIPKeyframes(pc, uint32(track.SSRC()), sess.done, 2*time.Second)
+		}
 
-		readTrackLoop(track, dp, stream, pub.done, avCodec)
+		readTrackLoop(track, dp, stream, pub.done, avCodec, mediaClock)
 	})
 
 	// Cleanup on ICE disconnect.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
-			pubMu.Lock()
-			wasPublisher := publisherSet
-			pubMu.Unlock()
-
-			if wasPublisher {
-				stream.RemovePublisher()
-				m.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-					StreamKey:  streamKey,
-					Protocol:   "webrtc",
-					RemoteAddr: r.RemoteAddr,
-				})
-			}
-			releaseConn()
+			sess.Close()
 		}
 	})
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		sess.Close()
-		releaseConn()
 		http.Error(w, fmt.Sprintf("set remote description: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -175,14 +192,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		sess.Close()
-		releaseConn()
 		http.Error(w, fmt.Sprintf("create answer: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		sess.Close()
-		releaseConn()
 		http.Error(w, fmt.Sprintf("set local description: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -214,22 +229,47 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	slog.Info("WHIP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
 }
 
+func requestWHIPKeyframes(pc *webrtc.PeerConnection, mediaSSRC uint32, done <-chan struct{}, interval time.Duration) {
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	request := func() bool {
+		if err := pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: mediaSSRC}}); err != nil {
+			return false
+		}
+		return true
+	}
+	if !request() {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			if !request() {
+				return
+			}
+		}
+	}
+}
+
 // readTrackLoop reads RTP packets from a WebRTC track, depacketizes them,
 // and writes AVFrames to the stream.
 //
-// Key invariant for H.264: SPS/PPS arrive as SequenceHeader frames and may
-// be interleaved with IDR NALs in the same Marker-delimited window. We handle
-// them as separate AVFrames so the ring buffer and GOP cache stay consistent:
+// Key invariant for H.264/H.265: parameter sets may be interleaved with IDR
+// NALs in the same Marker-delimited window. We handle them as separate
+// AVFrames so the ring buffer and GOP cache stay consistent:
 //   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
 //   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
-func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType) {
+func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType, mediaClock *whipMediaClock) {
 	var (
 		accPayload    []byte
 		accFrame      avframe.FrameType
 		accMedia      avframe.MediaType
 		accSeqPayload []byte // accumulated SPS/PPS to write as SequenceHeader
-		tsBase        uint32
-		tsBaseSet     bool
 	)
 
 	if codec.IsVideo() {
@@ -238,16 +278,12 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 		accMedia = avframe.MediaTypeAudio
 	}
 
-	computeDTS := func(ts uint32) int64 {
-		if !tsBaseSet {
-			tsBase = ts
-			tsBaseSet = true
-		}
-		clockRate := int64(90000)
-		if codec.IsAudio() {
-			clockRate = int64(track.Codec().ClockRate)
-		}
-		return int64(ts-tsBase) * 1000 / clockRate
+	clockRate := int64(90000)
+	if codec.IsAudio() {
+		clockRate = int64(track.Codec().ClockRate)
+	}
+	if mediaClock == nil {
+		mediaClock = newWHIPMediaClock()
 	}
 
 	buf := make([]byte, 1500)
@@ -256,6 +292,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 		if readErr != nil {
 			return
 		}
+		packetArrival := time.Now()
 
 		// Parse raw bytes into pion/rtp/v2 Packet (our depacketizers' expected type).
 		var pkt pionrtp.Packet
@@ -263,29 +300,48 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 			continue
 		}
 
-		frame, err := dp.Depacketize(&pkt)
+		frames, err := pkgrtp.DepacketizeFrames(dp, &pkt)
 		if err != nil {
 			continue
 		}
 
-		if frame != nil {
+		for _, frame := range frames {
+			if frame == nil {
+				continue
+			}
+			if !codec.IsVideo() {
+				dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
+				frameType := frame.FrameType
+				if frameType == 0 {
+					frameType = avframe.FrameTypeInterframe
+				}
+				stream.WriteFrame(avframe.NewAVFrame(
+					avframe.MediaTypeAudio,
+					codec,
+					frameType,
+					dts,
+					dts,
+					frame.Payload,
+				))
+				continue
+			}
 			if frame.FrameType == avframe.FrameTypeSequenceHeader {
 				// SPS/PPS: accumulate separately. If there is already pending
 				// media data (unlikely but possible), flush it first.
 				if len(accPayload) > 0 {
-					dts := computeDTS(pkt.Timestamp)
+					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 					avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
 					stream.WriteFrame(avF)
 					accPayload = nil
 					accFrame = 0
 				}
-				accSeqPayload = append(accSeqPayload, frame.Payload...)
+				accSeqPayload = append(accSeqPayload[:0], frame.Payload...)
 			} else {
 				// Media frame: if we have buffered SPS/PPS, flush them now as
 				// SequenceHeader before the IDR so the ring buffer sees the
 				// parameter sets first.
 				if len(accSeqPayload) > 0 {
-					dts := computeDTS(pkt.Timestamp)
+					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 					seqF := avframe.NewAVFrame(accMedia, codec, avframe.FrameTypeSequenceHeader, dts, dts, accSeqPayload)
 					stream.WriteFrame(seqF)
 					accSeqPayload = nil
@@ -301,7 +357,7 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 
 		// Flush accumulated media payload on the Marker bit (end of access unit).
 		if pkt.Marker && len(accPayload) > 0 {
-			dts := computeDTS(pkt.Timestamp)
+			dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 			avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
 			stream.WriteFrame(avF)
 			accPayload = nil

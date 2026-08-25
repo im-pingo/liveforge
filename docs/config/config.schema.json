@@ -1,56 +1,273 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/im-pingo/liveforge/blob/main/docs/config/config.schema.json",
+  "$id": "https://github.com/im-pingo/liveforge/docs/config/config.schema.json",
   "title": "LiveForge configuration",
-  "description": "Schema for configs/liveforge.yaml. Duration values use Go duration strings such as 30s or 2h.",
+  "description": "Schema for bootstrap and runtime documents. x-liveforge-reload matches config/runtime: hot_reload applies in process, restart_required remains pending until restart, and immutable rejects the candidate.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "server": {"$ref": "#/$defs/server"},
-    "tls": {"$ref": "#/$defs/tls"},
-    "limits": {"$ref": "#/$defs/limits"},
-    "rtmp": {"$ref": "#/$defs/listener"},
-    "rtsp": {"$ref": "#/$defs/rtsp"},
+    "tls": {"$ref": "#/$defs/tls", "x-liveforge-reload": "restart_required"},
+    "limits": {"$ref": "#/$defs/limits", "x-liveforge-reload": "hot_reload"},
+    "rtmp": {"$ref": "#/$defs/rtmp", "x-liveforge-reload": "restart_required"},
+    "rtsp": {"$ref": "#/$defs/rtsp", "x-liveforge-reload": "restart_required"},
     "http_stream": {"$ref": "#/$defs/http_stream"},
-    "websocket": {"$ref": "#/$defs/websocket"},
+    "websocket": {"$ref": "#/$defs/websocket", "x-liveforge-reload": "restart_required"},
     "webrtc": {"$ref": "#/$defs/webrtc"},
-    "srt": {"$ref": "#/$defs/srt"},
-    "sip": {"$ref": "#/$defs/sip"},
-    "gb28181": {"$ref": "#/$defs/gb28181"},
-    "audio_codec": {"$ref": "#/$defs/enabled"},
+    "srt": {"$ref": "#/$defs/srt", "x-liveforge-reload": "restart_required"},
+    "sip": {"$ref": "#/$defs/sip", "x-liveforge-reload": "restart_required"},
+    "gb28181": {"$ref": "#/$defs/gb28181", "x-liveforge-reload": "restart_required"},
+    "audio_codec": {"$ref": "#/$defs/audio_codec", "x-liveforge-reload": "restart_required"},
     "stream": {"$ref": "#/$defs/stream"},
     "auth": {"$ref": "#/$defs/auth"},
     "notify": {"$ref": "#/$defs/notify"},
     "cluster": {"$ref": "#/$defs/cluster"},
     "record": {"$ref": "#/$defs/record"},
     "dvr": {"$ref": "#/$defs/dvr"},
-    "metrics": {"$ref": "#/$defs/metrics"},
-    "api": {"$ref": "#/$defs/api"}
+    "metrics": {"$ref": "#/$defs/metrics", "x-liveforge-reload": "restart_required"},
+    "api": {"$ref": "#/$defs/api"},
+    "runtime": {"$ref": "#/$defs/runtime", "x-liveforge-reload": "restart_required"}
   },
   "$defs": {
-    "duration": {"type": "string", "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"},
-    "enabled": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}}},
-    "server": {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string"}, "log_level": {"type": "string", "enum": ["debug", "info", "warn", "error"]}, "drain_timeout": {"$ref": "#/$defs/duration"}}},
-    "tls": {"type": "object", "additionalProperties": false, "properties": {"cert_file": {"type": "string"}, "key_file": {"type": "string"}, "auto": {"type": "boolean"}}},
-    "limits": {"type": "object", "additionalProperties": false, "properties": {"max_streams": {"type": "integer", "minimum": 0}, "max_subscribers_per_stream": {"type": "integer", "minimum": 0}, "max_connections": {"type": "integer", "minimum": 0}, "max_bitrate_per_stream": {"type": "integer", "minimum": 0}, "rate_limit": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "rate": {"type": "number", "minimum": 0}, "burst": {"type": "integer", "minimum": 0}}}}},
-    "listener": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "chunk_size": {"type": "integer", "minimum": 1}, "tls": {"type": ["boolean", "null"]}, "skip_tracker": {"$ref": "#/$defs/skip_tracker"}}},
-    "rtsp": {"allOf": [{"$ref": "#/$defs/listener"}, {"type": "object", "properties": {"rtp_port_range": {"$ref": "#/$defs/port_range"}, "multicast": {"$ref": "#/$defs/multicast"}}}]},
-    "http_stream": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "cors": {"type": "boolean"}, "tls": {"type": ["boolean", "null"]}, "hls": {"$ref": "#/$defs/segmenter"}, "dash": {"$ref": "#/$defs/segmenter"}, "llhls": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "part_duration": {"type": "number", "exclusiveMinimum": 0}, "segment_count": {"type": "integer", "minimum": 1}, "container": {"type": "string", "enum": ["fmp4", "ts"]}}}}},
-    "segmenter": {"type": "object", "additionalProperties": false, "properties": {"segment_duration": {"type": "number", "exclusiveMinimum": 0}, "playlist_size": {"type": "integer", "minimum": 1}}},
-    "websocket": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "path": {"type": "string"}}},
-    "webrtc": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "ice_lite": {"type": "boolean"}, "ice_servers": {"type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"urls": {"type": "array", "items": {"type": "string"}}, "username": {"type": "string"}, "credential": {"type": "string"}}}}, "udp_port_range": {"$ref": "#/$defs/port_range"}, "candidates": {"type": "array", "items": {"type": "string"}}, "tls": {"type": ["boolean", "null"]}, "gcc": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "initial_bitrate": {"type": "integer", "minimum": 0}, "min_bitrate": {"type": "integer", "minimum": 0}, "max_bitrate": {"type": "integer", "minimum": 0}}}}},
-    "srt": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "latency": {"type": "integer", "minimum": 0}, "passphrase": {"type": "string"}, "pbkeylen": {"type": "integer", "enum": [0, 16, 24, 32]}, "skip_tracker": {"$ref": "#/$defs/skip_tracker"}}},
-    "sip": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "transport": {"type": "array", "items": {"type": "string", "enum": ["udp", "tcp"]}}, "server_id": {"type": "string"}, "domain": {"type": "string"}, "auth": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "password": {"type": "string"}}}, "gateway": {"type": "object", "additionalProperties": true}}},
-    "gb28181": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "stream_prefix": {"type": "string"}, "rtp_port_range": {"$ref": "#/$defs/port_range"}, "ssrc": {"type": "object", "additionalProperties": false, "properties": {"prefix": {"type": "string"}}}, "keepalive": {"type": "object", "additionalProperties": false, "properties": {"interval": {"$ref": "#/$defs/duration"}, "timeout": {"$ref": "#/$defs/duration"}}}, "auto_invite": {"type": "boolean"}, "catalog_interval": {"$ref": "#/$defs/duration"}, "dump_file": {"type": "string"}}},
-    "stream": {"type": "object", "additionalProperties": true, "properties": {"gop_cache": {"type": "boolean"}, "gop_cache_num": {"type": "integer", "minimum": 0}, "audio_cache_ms": {"type": "integer", "minimum": 0}, "ring_buffer_size": {"type": "integer", "minimum": 1}, "idle_timeout": {"$ref": "#/$defs/duration"}, "no_publisher_timeout": {"$ref": "#/$defs/duration"}, "slow_consumer": {"type": "object", "additionalProperties": true}, "simulcast": {"type": "object", "additionalProperties": true}, "feedback": {"type": "object", "additionalProperties": true}}},
-    "auth": {"type": "object", "additionalProperties": true, "properties": {"enabled": {"type": "boolean"}, "publish": {"type": "object", "additionalProperties": true}, "subscribe": {"type": "object", "additionalProperties": true}, "api": {"type": "object", "additionalProperties": false, "properties": {"bearer_token": {"type": "string"}}}}},
-    "notify": {"type": "object", "additionalProperties": true, "properties": {"http": {"type": "object", "additionalProperties": true}, "websocket": {"type": "object", "additionalProperties": true}, "alive_interval": {"$ref": "#/$defs/duration"}}},
-    "cluster": {"type": "object", "additionalProperties": true, "properties": {"forward": {"type": "object", "additionalProperties": true}, "origin": {"type": "object", "additionalProperties": true}}},
-    "record": {"type": "object", "additionalProperties": true, "properties": {"enabled": {"type": "boolean"}, "stream_pattern": {"type": "string"}, "format": {"type": "string"}, "path": {"type": "string"}}},
-    "dvr": {"type": "object", "additionalProperties": true, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "path": {"type": "string"}, "window": {"$ref": "#/$defs/duration"}}},
+    "duration": {"type": "string", "pattern": "^-?(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$", "description": "Go time.Duration, for example 200ms, 30s, or 1h30m."},
+    "nonnegative_duration": {"type": "string", "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$", "description": "Non-negative Go time.Duration."},
+    "nullable_boolean": {"type": ["boolean", "null"]},
+    "port_range": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [{"type": "integer", "minimum": 1, "maximum": 65535}, {"type": "integer", "minimum": 1, "maximum": 65535}],
+      "items": false,
+      "description": "Inclusive ordered [minimum, maximum] range; runtime validation also checks ordering."
+    },
+    "defaultable_port_range": {
+      "type": "array",
+      "prefixItems": [{"type": "integer", "minimum": 1, "maximum": 65535}, {"type": "integer", "minimum": 1, "maximum": 65535}],
+      "items": false,
+      "anyOf": [{"maxItems": 0}, {"minItems": 2, "maxItems": 2}],
+      "description": "Either an empty list to select the owning module's fallback behavior or an inclusive ordered [minimum, maximum] range; runtime validation also checks ordering."
+    },
+    "skip_tracker": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"max_count": {"type": "integer"}, "window": {"$ref": "#/$defs/duration"}}
+    },
+    "server": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "x-liveforge-reload": "immutable"},
+        "log_level": {"type": "string", "enum": ["debug", "info", "warn", "error"], "x-liveforge-reload": "hot_reload"},
+        "drain_timeout": {"$ref": "#/$defs/nonnegative_duration", "x-liveforge-reload": "hot_reload"}
+      }
+    },
+    "tls": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "cert_file": {"type": "string"},
+        "key_file": {"type": "string", "writeOnly": true, "x-liveforge-secret": true},
+        "auto": {"type": "boolean"}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "max_streams": {"type": "integer", "minimum": 0},
+        "max_subscribers_per_stream": {"type": "integer", "minimum": 0},
+        "max_connections": {"type": "integer", "minimum": 0},
+        "max_bitrate_per_stream": {"type": "integer", "minimum": 0},
+        "rate_limit": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"enabled": {"type": "boolean"}, "rate": {"type": "number", "minimum": 0}, "burst": {"type": "integer", "minimum": 0}}
+        }
+      }
+    },
+    "rtmp": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "chunk_size": {"type": "integer", "minimum": 1}, "tls": {"$ref": "#/$defs/nullable_boolean"}, "skip_tracker": {"$ref": "#/$defs/skip_tracker"}}
+    },
+    "rtsp": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}, "listen": {"type": "string"}, "rtp_port_range": {"$ref": "#/$defs/defaultable_port_range", "description": "When omitted, the bootstrap default is 10000-20000. An explicit empty list selects the RTSP module fallback 30000-40000."}, "tls": {"$ref": "#/$defs/nullable_boolean"}, "skip_tracker": {"$ref": "#/$defs/skip_tracker"},
+        "multicast": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"enabled": {"type": "boolean"}, "address": {"type": "string"}, "base_port": {"type": "integer", "minimum": 1, "maximum": 65535}, "ttl": {"type": "integer", "minimum": 0, "maximum": 255}, "interface": {"type": "string"}}
+        }
+      }
+    },
+    "segment_playlist": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"segment_duration": {"type": "number", "exclusiveMinimum": 0}, "playlist_size": {"type": "integer", "minimum": 1}}
+    },
+    "http_stream": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"},
+        "listen": {"type": "string", "x-liveforge-reload": "restart_required"},
+        "cors": {"type": "boolean", "x-liveforge-reload": "restart_required"},
+        "tls": {"$ref": "#/$defs/nullable_boolean", "x-liveforge-reload": "restart_required"},
+        "hls": {"$ref": "#/$defs/segment_playlist", "x-liveforge-reload": "hot_reload"},
+        "dash": {"$ref": "#/$defs/segment_playlist", "x-liveforge-reload": "hot_reload"},
+        "llhls": {
+          "type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload",
+          "properties": {"enabled": {"type": "boolean"}, "part_duration": {"type": "number", "exclusiveMinimum": 0}, "segment_count": {"type": "integer", "minimum": 1}, "container": {"type": "string", "enum": ["fmp4", "ts"]}}
+        }
+      }
+    },
+    "websocket": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "path": {"type": "string"}}
+    },
+    "webrtc": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "listen": {"type": "string", "x-liveforge-reload": "restart_required"}, "ice_lite": {"type": "boolean", "x-liveforge-reload": "restart_required"},
+        "ice_servers": {
+          "type": "array", "x-liveforge-reload": "restart_required",
+          "items": {"type": "object", "additionalProperties": false, "properties": {"urls": {"type": "array", "items": {"type": "string"}}, "username": {"type": "string"}, "credential": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}}}
+        },
+        "udp_port_range": {"$ref": "#/$defs/defaultable_port_range", "description": "When omitted, the bootstrap default is 20000-30000. An explicit empty list leaves ICE UDP port selection to Pion and the operating system.", "x-liveforge-reload": "restart_required"},
+        "candidates": {"type": "array", "items": {"type": "string"}, "x-liveforge-reload": "restart_required"},
+        "tls": {"$ref": "#/$defs/nullable_boolean", "x-liveforge-reload": "restart_required"},
+        "gcc": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "initial_bitrate": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "min_bitrate": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "max_bitrate": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}}
+        }
+      }
+    },
+    "srt": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "latency": {"type": "integer", "minimum": 0}, "passphrase": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "pbkeylen": {"type": "integer", "enum": [0, 16, 24, 32]}, "skip_tracker": {"$ref": "#/$defs/skip_tracker"}}
+    },
+    "sip": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}, "listen": {"type": "string"}, "transport": {"type": "array", "items": {"type": "string", "enum": ["udp", "tcp"]}}, "server_id": {"type": "string"}, "domain": {"type": "string"},
+        "auth": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}}},
+        "gateway": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "stream_prefix": {"type": "string"}, "rtp_port_range": {"$ref": "#/$defs/port_range"}, "codecs": {"type": "array", "items": {"type": "string"}}, "max_calls": {"type": "integer", "description": "Maximum concurrent calls; any non-positive value selects the gateway default of 100."}}}
+      }
+    },
+    "gb28181": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}, "stream_prefix": {"type": "string"}, "rtp_port_range": {"$ref": "#/$defs/defaultable_port_range", "description": "An empty list selects the GB28181 module fallback range 40000-50000."},
+        "ssrc": {"type": "object", "additionalProperties": false, "properties": {"prefix": {"type": "string"}}},
+        "keepalive": {"type": "object", "additionalProperties": false, "properties": {"interval": {"$ref": "#/$defs/duration"}, "timeout": {"$ref": "#/$defs/duration"}}},
+        "auto_invite": {"type": "boolean"}, "catalog_interval": {"$ref": "#/$defs/duration"}, "dump_file": {"type": "string"}
+      }
+    },
+    "audio_codec": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}}},
+    "slow_consumer": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}, "lag_warn_ratio": {"type": "number", "minimum": 0, "maximum": 1}, "lag_drop_ratio": {"type": "number", "minimum": 0, "maximum": 1}, "lag_critical_ratio": {"type": "number", "minimum": 0, "maximum": 1}, "lag_recover_ratio": {"type": "number", "minimum": 0, "maximum": 1}, "ewma_alpha": {"type": "number", "minimum": 0, "maximum": 1}, "send_time_ratio": {"type": "number", "minimum": 0}}
+    },
+    "feedback": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"default_mode": {"type": "string", "enum": ["auto", "passthrough", "aggregate", "drop"]}, "auto_thresholds": {"type": "object", "additionalProperties": false, "properties": {"passthrough_max": {"type": "integer", "minimum": 0}, "aggregate_max": {"type": "integer", "minimum": 0}}}}
+    },
+    "simulcast": {
+      "type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred",
+      "description": "Reserved configuration only; runtime layer selection and auto-pause are not implemented.",
+      "properties": {
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"},
+        "auto_pause_layer": {"type": "boolean", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"},
+        "layers": {"type": "array", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred", "items": {"type": "object", "additionalProperties": false, "properties": {"rid": {"type": "string", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}, "max_bitrate": {"type": "integer", "minimum": 0, "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}}}}
+      }
+    },
+    "stream": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "gop_cache": {"type": "boolean", "x-liveforge-reload": "hot_reload"}, "gop_cache_num": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "audio_cache_ms": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"},
+        "ring_buffer_size": {"type": "integer", "minimum": 1, "x-liveforge-reload": "restart_required"}, "idle_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "no_publisher_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"},
+        "slow_consumer": {"$ref": "#/$defs/slow_consumer", "x-liveforge-reload": "hot_reload"}, "feedback": {"$ref": "#/$defs/feedback", "x-liveforge-reload": "hot_reload"},
+        "simulcast": {"$ref": "#/$defs/simulcast", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}
+      }
+    },
+    "auth_rule": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "mode": {"type": "string", "enum": ["none", "token", "callback", "token+callback"]},
+        "token": {"type": "object", "additionalProperties": false, "properties": {"secret": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "algorithm": {"type": "string"}}},
+        "callback": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string"}, "timeout": {"$ref": "#/$defs/duration"}}}
+      }
+    },
+    "auth": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"},
+        "publish": {"$ref": "#/$defs/auth_rule", "x-liveforge-reload": "hot_reload"},
+        "subscribe": {"$ref": "#/$defs/auth_rule", "x-liveforge-reload": "hot_reload"},
+        "api": {
+          "type": "object", "additionalProperties": false, "deprecated": true, "x-liveforge-reload": "hot_reload",
+          "description": "Deprecated. Move auth.api.bearer_token to api.auth.bearer_token; the current api.auth path wins when both exist.",
+          "properties": {"bearer_token": {"type": "string", "writeOnly": true, "deprecated": true, "x-liveforge-secret": true}}
+        }
+      }
+    },
+    "notify": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "http": {"type": "object", "additionalProperties": false, "properties": {
+          "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"},
+          "endpoints": {"type": "array", "x-liveforge-reload": "hot_reload", "items": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string"}, "events": {"type": "array", "items": {"type": "string"}}, "secret": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "retry": {"type": "integer", "minimum": 0}, "timeout": {"$ref": "#/$defs/duration"}}}}
+        }},
+        "websocket": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "properties": {"enabled": {"type": "boolean"}, "path": {"type": "string"}}},
+        "alive_interval": {"$ref": "#/$defs/duration", "x-liveforge-reload": "restart_required"}
+      }
+    },
+    "cluster_forward": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "targets": {"type": "array", "items": {"type": "string"}, "x-liveforge-reload": "hot_reload"}, "schedule_url": {"type": "string", "x-liveforge-reload": "hot_reload"}, "schedule_priority": {"type": "string", "x-liveforge-reload": "hot_reload"}, "schedule_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "retry_max": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "retry_interval": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}}
+    },
+    "cluster_origin": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "servers": {"type": "array", "items": {"type": "string"}, "x-liveforge-reload": "hot_reload"}, "schedule_url": {"type": "string", "x-liveforge-reload": "hot_reload"}, "schedule_priority": {"type": "string", "x-liveforge-reload": "hot_reload"}, "schedule_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "idle_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "retry_max": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "retry_delay": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}}
+    },
+    "cluster_health": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "interval": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "evict_threshold": {"type": "integer", "description": "Consecutive failures before eviction; any non-positive value selects the health tracker default of 3.", "x-liveforge-reload": "hot_reload"}}
+    },
+    "cluster_relay_pool": {"type": "object", "additionalProperties": false, "properties": {"max_per_host": {"type": "integer", "minimum": 1}}},
+    "cluster_srt": {"type": "object", "additionalProperties": false, "properties": {"latency": {"$ref": "#/$defs/duration"}, "passphrase": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "pbkeylen": {"type": "integer", "enum": [0, 16, 24, 32]}}},
+    "cluster_rtsp": {"type": "object", "additionalProperties": false, "properties": {"transport": {"type": "string", "enum": ["tcp", "udp"]}}},
+    "cluster_rtp": {"type": "object", "additionalProperties": false, "properties": {"port_range": {"type": "string"}, "signaling_path": {"type": "string"}, "rtcp_interval": {"$ref": "#/$defs/duration"}, "timeout": {"$ref": "#/$defs/duration"}}},
+    "cluster_gb": {"type": "object", "additionalProperties": false, "properties": {"port_range": {"$ref": "#/$defs/port_range"}, "signaling_path": {"type": "string"}, "rtcp_interval": {"$ref": "#/$defs/duration"}, "timeout": {"$ref": "#/$defs/duration"}}},
+    "cluster": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"forward": {"$ref": "#/$defs/cluster_forward"}, "origin": {"$ref": "#/$defs/cluster_origin"}, "health_check": {"$ref": "#/$defs/cluster_health"}, "relay_pool": {"$ref": "#/$defs/cluster_relay_pool", "x-liveforge-reload": "restart_required"}, "srt": {"$ref": "#/$defs/cluster_srt", "x-liveforge-reload": "restart_required"}, "rtsp": {"$ref": "#/$defs/cluster_rtsp", "x-liveforge-reload": "restart_required"}, "rtp": {"$ref": "#/$defs/cluster_rtp", "x-liveforge-reload": "restart_required"}, "gb28181": {"$ref": "#/$defs/cluster_gb", "x-liveforge-reload": "restart_required"}}
+    },
+    "record": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "stream_pattern": {"type": "string", "x-liveforge-reload": "hot_reload"}, "format": {"type": "string", "enum": ["flv", "fmp4", "mp4", "ts", "hls"], "x-liveforge-reload": "hot_reload"}, "path": {"type": "string", "description": "Recording path template. Supported placeholders are {stream_key}, {date}, {time}, and {ext}.", "x-liveforge-reload": "restart_required"},
+        "segment": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload", "properties": {"mode": {"type": "string", "description": "Operator label; segmentation is activated by positive duration and/or max_size values."}, "duration": {"$ref": "#/$defs/duration"}, "max_size": {"type": "string"}}},
+        "on_file_complete": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload", "properties": {"url": {"type": "string"}}}
+      }
+    },
+    "dvr": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "listen": {"type": "string", "x-liveforge-reload": "restart_required"}, "stream_pattern": {"type": "string", "x-liveforge-reload": "hot_reload"}, "path": {"type": "string", "x-liveforge-reload": "restart_required"}, "window": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "segment_duration": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "cleanup_interval": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}}
+    },
     "metrics": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "path": {"type": "string"}}},
-    "api": {"type": "object", "additionalProperties": false, "properties": {"enabled": {"type": "boolean"}, "listen": {"type": "string"}, "tls": {"type": ["boolean", "null"]}, "auth": {"type": "object", "additionalProperties": false, "properties": {"bearer_token": {"type": "string"}}}, "console": {"type": "object", "additionalProperties": false, "properties": {"username": {"type": "string"}, "password": {"type": "string"}}}}},
-    "skip_tracker": {"type": "object", "additionalProperties": false, "properties": {"max_count": {"type": "integer"}, "window": {"$ref": "#/$defs/duration"}}},
-    "port_range": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 1}}
+    "api": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"}, "listen": {"type": "string", "x-liveforge-reload": "restart_required"}, "tls": {"$ref": "#/$defs/nullable_boolean", "x-liveforge-reload": "restart_required"},
+        "auth": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload", "properties": {
+          "bearer_token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true, "description": "Current legacy-admin bearer path. It wins over deprecated auth.api.bearer_token when both exist."},
+          "tokens": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["token", "role"], "properties": {"name": {"type": "string"}, "token": {"type": "string", "minLength": 1, "writeOnly": true, "x-liveforge-secret": true}, "role": {"type": "string", "enum": ["viewer", "operator", "admin"]}}}}
+        }},
+        "console": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload", "properties": {"username": {"type": "string"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "role": {"type": "string", "enum": ["viewer", "operator", "admin"]}}},
+        "audit": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "properties": {"max_entries": {"type": "integer", "description": "Bounded in-memory audit capacity; any non-positive value selects the default of 1000 entries."}}}
+      }
+    },
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "description": "Bootstrap-controlled background source. Source I/O runs on the manager worker; snapshot and typed-key reads are atomic and non-blocking.",
+      "properties": {
+        "source": {"type": "string", "enum": ["file", "http", "https", "consul", "redis"]}, "poll_interval": {"$ref": "#/$defs/duration"}, "load_timeout": {"$ref": "#/$defs/duration"},
+        "file": {"type": "object", "additionalProperties": false, "properties": {"path": {"type": "string"}}},
+        "http": {"type": "object", "additionalProperties": false, "description": "HTTP configuration source. runtime.source=http requires an http:// URL and runtime.source=https requires an https:// URL. Scheme mismatches are rejected before dispatch, and redirects are disabled, including same-host and same-scheme redirects. ETag and Last-Modified validators advance only after a document is accepted.", "properties": {"url": {"type": "string", "description": "Complete source URL whose scheme must exactly match the selected http or https runtime.source."}, "token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "max_bytes": {"type": "integer", "description": "Maximum response bytes; any non-positive value selects the 4 MiB source default."}}},
+        "consul": {"type": "object", "additionalProperties": false, "properties": {"address": {"type": "string"}, "prefix": {"type": "string", "minLength": 1}, "token": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "max_bytes": {"type": "integer", "description": "Maximum response bytes; any non-positive value selects the 4 MiB source default."}}},
+        "redis": {"type": "object", "additionalProperties": false, "properties": {"addr": {"type": "string"}, "username": {"type": "string"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "db": {"type": "integer", "minimum": 0}, "prefix": {"type": "string"}, "hash": {"type": "string"}, "version_key": {"type": "string"}, "tls": {"type": "boolean"}}}
+      }
+    }
   }
 }

@@ -8,15 +8,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 )
 
 type mockModule struct {
@@ -26,7 +29,7 @@ type mockModule struct {
 	hooks  []HookRegistration
 }
 
-func (m *mockModule) Name() string             { return m.name }
+func (m *mockModule) Name() string              { return m.name }
 func (m *mockModule) Init(s *Server) error      { m.inited = true; return nil }
 func (m *mockModule) Hooks() []HookRegistration { return m.hooks }
 func (m *mockModule) Close() error              { m.closed = true; return nil }
@@ -73,10 +76,45 @@ type orderTrackModule struct {
 	order *[]string
 }
 
-func (m *orderTrackModule) Name() string             { return m.name }
+func (m *orderTrackModule) Name() string              { return m.name }
 func (m *orderTrackModule) Init(s *Server) error      { return nil }
 func (m *orderTrackModule) Hooks() []HookRegistration { return nil }
 func (m *orderTrackModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
+
+type failingInitModule struct {
+	name  string
+	order *[]string
+}
+
+func (m *failingInitModule) Name() string              { return m.name }
+func (m *failingInitModule) Init(*Server) error        { return errors.New("init failed") }
+func (m *failingInitModule) Hooks() []HookRegistration { return nil }
+func (m *failingInitModule) Close() error              { *m.order = append(*m.order, m.name); return nil }
+
+func TestServerShutdownAfterInitFailureClosesOnlyAttemptedModules(t *testing.T) {
+	cfg := &config.Config{}
+	s := NewServer(cfg)
+
+	var order []string
+	first := &orderTrackModule{name: "first", order: &order}
+	failing := &failingInitModule{name: "failing", order: &order}
+	neverAttempted := &mockModule{name: "never-attempted"}
+	s.RegisterModule(first)
+	s.RegisterModule(failing)
+	s.RegisterModule(neverAttempted)
+
+	if err := s.Init(); err == nil {
+		t.Fatal("expected module initialization to fail")
+	}
+	s.Shutdown()
+
+	if got := strings.Join(order, ","); got != "failing,first" {
+		t.Fatalf("close order = %q, want attempted modules only in reverse order", got)
+	}
+	if neverAttempted.inited || neverAttempted.closed {
+		t.Fatalf("unattempted module lifecycle = inited:%v closed:%v", neverAttempted.inited, neverAttempted.closed)
+	}
+}
 
 func TestServerStreamHub(t *testing.T) {
 	cfg := &config.Config{}
@@ -402,5 +440,114 @@ func TestServerUpdateConfig(t *testing.T) {
 	}
 	if rm.reloadCfgName != "reloaded" {
 		t.Errorf("expected reloadable module to see 'reloaded', got %q", rm.reloadCfgName)
+	}
+}
+
+func TestServerUpdateConfigSnapshotRecordsPendingRestart(t *testing.T) {
+	s := NewServer(&config.Config{Server: config.ServerConfig{Name: "initial"}})
+	next := &config.Config{Server: config.ServerConfig{Name: "next"}}
+	s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{
+		Config:         next,
+		PendingRestart: []string{"rtmp.listen"},
+	})
+	if s.Config() != next {
+		t.Fatal("server did not publish config snapshot")
+	}
+	paths := s.PendingRestartChanges()
+	if len(paths) != 1 || paths[0] != "rtmp.listen" {
+		t.Fatalf("pending restart paths = %v", paths)
+	}
+}
+
+type failingReloadModule struct{}
+
+func (failingReloadModule) Name() string              { return "failing-reload" }
+func (failingReloadModule) Init(*Server) error        { return nil }
+func (failingReloadModule) Hooks() []HookRegistration { return nil }
+func (failingReloadModule) Close() error              { return nil }
+func (failingReloadModule) OnReload(*Server) error    { return errors.New("policy rejected") }
+
+type configAppliedModule struct {
+	mockModule
+	applied int
+}
+
+type countingReloadModule struct {
+	mockModule
+	reloads int
+}
+
+func (m *countingReloadModule) OnReload(*Server) error { m.reloads++; return nil }
+
+type prepareRejectModule struct{ mockModule }
+
+func (m *prepareRejectModule) OnReload(*Server) error { return errors.New("must not apply") }
+func (m *prepareRejectModule) PrepareReload(*Server) (func(), error) {
+	return nil, errors.New("prepare rejected")
+}
+
+func TestServerPrepareFailureDoesNotMutateAnyReloadableModule(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(cfg)
+	first := &countingReloadModule{mockModule: mockModule{name: "first"}}
+	s.RegisterModule(first)
+	s.RegisterModule(&prepareRejectModule{mockModule: mockModule{name: "reject-in-prepare"}})
+	next := config.Defaults()
+	next.Limits.MaxStreams = 11
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: next}); err == nil || !strings.Contains(err.Error(), "prepare rejected") {
+		t.Fatalf("prepare error=%v", err)
+	}
+	if first.reloads != 0 {
+		t.Fatalf("module mutated before prepare phase completed: reloads=%d", first.reloads)
+	}
+	if s.Config() != cfg {
+		t.Fatal("prepare-rejected config was published")
+	}
+}
+
+func (m *configAppliedModule) OnConfigApplied(*configruntime.ConfigSnapshot) { m.applied++ }
+
+func TestServerNotifiesConfigAppliedOnlyAfterSuccessfulCommit(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(cfg)
+	notifier := &configAppliedModule{mockModule: mockModule{name: "config-applied"}}
+	s.RegisterModule(notifier)
+	next := config.Defaults()
+	next.Limits.MaxStreams = 3
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: next}); err != nil {
+		t.Fatal(err)
+	}
+	if notifier.applied != 1 {
+		t.Fatalf("successful commit notifications=%d want=1", notifier.applied)
+	}
+
+	failing := NewServer(next)
+	failingNotifier := &configAppliedModule{mockModule: mockModule{name: "config-applied"}}
+	failing.RegisterModule(failingReloadModule{})
+	failing.RegisterModule(failingNotifier)
+	rejected := config.Defaults()
+	rejected.Limits.MaxStreams = 4
+	if err := failing.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: rejected}); err == nil {
+		t.Fatal("expected reload failure")
+	}
+	if failingNotifier.applied != 0 {
+		t.Fatalf("rejected commit notifications=%d want=0", failingNotifier.applied)
+	}
+}
+
+func TestServerUpdateConfigSnapshotReturnsReloadFailure(t *testing.T) {
+	cfg := config.Defaults()
+	s := NewServer(cfg)
+	s.RegisterModule(failingReloadModule{})
+	next := config.Defaults()
+	next.Limits.MaxStreams = 17
+	if err := s.UpdateConfigSnapshot(&configruntime.ConfigSnapshot{Config: next, PendingRestart: []string{"rtmp.listen"}}); err == nil || !strings.Contains(err.Error(), "failing-reload") {
+		t.Fatalf("reload error = %v", err)
+	}
+	if s.Config() != cfg || s.Config().Limits.MaxStreams != cfg.Limits.MaxStreams {
+		t.Fatalf("rejected config was published: %+v", s.Config().Limits)
+	}
+	if pending := s.PendingRestartChanges(); len(pending) != 0 {
+		t.Fatalf("rejected pending restart paths were published: %v", pending)
 	}
 }

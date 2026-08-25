@@ -48,6 +48,7 @@ func NewLLHLSManager(streamKey, basePath string, partDuration float64, segmentCo
 		OnInit: func(data []byte) {
 			m.mu.Lock()
 			m.initSegment = data
+			m.playlist.initVersion = initSegmentVersion(data)
 			m.mu.Unlock()
 		},
 		OnPart: func(part *LLHLSPart) {
@@ -128,7 +129,49 @@ func (m *LLHLSManager) GeneratePlaylist(ctx context.Context, targetMSN, targetPa
 		}
 	}
 
-	return m.playlist.Generate(m.segments, m.currentParts, m.currentMSN, skip), nil
+	return m.playlist.Generate(m.segments, m.currentParts, m.currentMSN, skip, targetMSN >= 0), nil
+}
+
+// WaitForCompletedSegment blocks until the playlist contains one complete
+// segment. The bundled Hls.js treats a part-only initial manifest as an empty
+// level, even though it consumes low-latency parts after startup.
+func (m *LLHLSManager) WaitForCompletedSegment(ctx context.Context, maxWait time.Duration) bool {
+	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hasCompletedSegment() {
+		return true
+	}
+
+	wakeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-waitCtx.Done():
+		case <-m.done:
+		case <-wakeDone:
+			return
+		}
+		m.mu.Lock()
+		m.cond.Broadcast()
+		m.mu.Unlock()
+	}()
+	defer close(wakeDone)
+
+	for !m.hasCompletedSegment() && waitCtx.Err() == nil {
+		select {
+		case <-m.done:
+			return false
+		default:
+		}
+		m.cond.Wait()
+	}
+	return m.hasCompletedSegment()
+}
+
+func (m *LLHLSManager) hasCompletedSegment() bool {
+	return len(m.segments) > 0
 }
 
 func (m *LLHLSManager) hasContent(targetMSN, targetPart int) bool {

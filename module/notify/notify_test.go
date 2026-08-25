@@ -1,13 +1,17 @@
 package notify
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +19,35 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestWebhookFailureLogsRedactedEndpoint(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("network failure included secret-query-value")
+	})}
+	ep := config.NotifyEndpointConfig{
+		URL: "https://webhook-user:webhook-password@example.test/private/signature-value?token=secret-query-value&signature=query-signature",
+	}
+	NewHTTPSender(nil).deliverToEndpoint(client, ep, []byte(`{"event":"test"}`), 1)
+
+	output := logs.String()
+	if !strings.Contains(output, "https://example.test") {
+		t.Fatalf("sanitized endpoint origin missing from log: %s", output)
+	}
+	for _, secret := range []string{"webhook-user", "webhook-password", "private", "signature-value", "secret-query-value", "query-signature", "token="} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("webhook log exposed %q: %s", secret, output)
+		}
+	}
+}
 
 func TestBuildPayload(t *testing.T) {
 	ctx := &core.EventContext{
@@ -543,5 +576,122 @@ func TestHTTPSenderMultipleEndpointsWithFilters(t *testing.T) {
 	// all_events should receive both
 	if len(received["all_events"]) != 2 {
 		t.Errorf("all_events expected 2 events, got %d: %v", len(received["all_events"]), received["all_events"])
+	}
+}
+
+func TestHTTPSenderStopWaitsForQueuedAndInFlightDeliveryAndIsIdempotent(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	deliveries := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		mu.Lock()
+		deliveries++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sender := NewHTTPSender([]config.NotifyEndpointConfig{{URL: server.URL, Retry: 1, Timeout: time.Second}})
+	sender.Start()
+	sender.Send(&NotifyPayload{Event: "on_publish", StreamKey: "live/one"})
+	sender.Send(&NotifyPayload{Event: "on_publish", StreamKey: "live/two"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first delivery did not start")
+	}
+
+	stopped := make(chan struct{}, 2)
+	go func() { sender.Stop(); stopped <- struct{}{} }()
+	go func() { sender.Stop(); stopped <- struct{}{} }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a delivery was in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatal("idempotent Stop did not return after queue drain")
+		}
+	}
+	mu.Lock()
+	got := deliveries
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("deliveries = %d, want queued and in-flight events", got)
+	}
+}
+
+func TestHTTPSenderStopWithTimeoutIsBounded(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sender := NewHTTPSender([]config.NotifyEndpointConfig{{URL: server.URL, Retry: 1, Timeout: time.Second}})
+	sender.Start()
+	sender.Send(&NotifyPayload{Event: "on_publish", StreamKey: "live/blocked"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not start")
+	}
+
+	start := time.Now()
+	if sender.StopWithTimeout(20 * time.Millisecond) {
+		t.Fatal("bounded stop reported completion while delivery remained blocked")
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded stop exceeded timeout: %v", elapsed)
+	}
+	close(release)
+	if !sender.StopWithTimeout(time.Second) {
+		t.Fatal("second stop did not observe worker completion")
+	}
+}
+
+func TestModuleCloseUsesConfiguredDrainTimeout(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sender := NewHTTPSender([]config.NotifyEndpointConfig{{URL: server.URL, Retry: 1, Timeout: time.Second}})
+	sender.Start()
+	sender.Send(&NotifyPayload{Event: "on_publish", StreamKey: "live/module-close"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not start")
+	}
+	module := &Module{sender: sender, drainTimeout: 20 * time.Millisecond}
+
+	start := time.Now()
+	if err := module.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("module close exceeded configured drain timeout: %v", elapsed)
+	}
+	close(release)
+	if !sender.StopWithTimeout(time.Second) {
+		t.Fatal("sender did not finish after blocked delivery was released")
 	}
 }

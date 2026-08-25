@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,6 +97,89 @@ auth:
 	}
 	if cfg.Auth.Publish.Token.Secret != "mysecret123" {
 		t.Errorf("expected expanded secret mysecret123, got %s", cfg.Auth.Publish.Token.Secret)
+	}
+}
+
+func TestLoadMigratesLegacyManagementBearerToken(t *testing.T) {
+	yaml := `
+auth:
+  api:
+    bearer_token: legacy-token
+`
+	path := filepath.Join(t.TempDir(), "legacy-auth.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.BearerToken != "legacy-token" {
+		t.Fatalf("migrated bearer token=%q", cfg.API.Auth.BearerToken)
+	}
+}
+
+func TestLoadPrefersCurrentManagementBearerTokenPath(t *testing.T) {
+	yaml := `
+auth:
+  api:
+    bearer_token: legacy-token
+api:
+  auth:
+    bearer_token: current-token
+`
+	path := filepath.Join(t.TempDir(), "current-auth.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.API.Auth.BearerToken != "current-token" {
+		t.Fatalf("current bearer token was overridden: %q", cfg.API.Auth.BearerToken)
+	}
+}
+
+func TestLoadRejectsIncompleteConsoleCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "username only", username: "admin"},
+		{name: "password only", password: "secret"},
+		{name: "blank password", username: "admin", password: "   "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "liveforge.yaml")
+			doc := fmt.Sprintf("api:\n  console:\n    username: %q\n    password: %q\n", tt.username, tt.password)
+			if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("expected incomplete console credentials to be rejected at startup")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsLegacyAndNamedTokenCollision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "liveforge.yaml")
+	doc := `api:
+  auth:
+    bearer_token: shared-secret
+    tokens:
+      - name: readonly
+        token: shared-secret
+        role: viewer
+`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected legacy and named bearer collision to be rejected at startup")
 	}
 }
 

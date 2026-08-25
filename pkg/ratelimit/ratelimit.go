@@ -74,6 +74,11 @@ func (l *Limiter) Wrap(next http.Handler) http.Handler {
 	})
 }
 
+// AllowRequest applies the limiter to the request's resolved client address.
+func (l *Limiter) AllowRequest(r *http.Request) bool {
+	return l.Allow(extractIP(r))
+}
+
 // Close stops the background cleanup goroutine.
 func (l *Limiter) Close() {
 	close(l.stopCh)

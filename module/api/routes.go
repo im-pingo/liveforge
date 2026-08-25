@@ -10,12 +10,30 @@ import (
 // RegisterRoutes registers all API and console routes on the given mux.
 // This allows any HTTP server (httpstream, standalone API, etc.) to serve the management API.
 func RegisterRoutes(mux *http.ServeMux, s *core.Server) {
-	h := NewHandlers(s)
+	registerRoutes(mux, s, nil)
+}
+
+func registerRoutes(mux *http.ServeMux, s *core.Server, audit *AuditStore) {
+	h := newHandlersWithAudit(s, audit)
 	mux.HandleFunc("GET /api/v1/streams", h.handleStreams)
 	mux.HandleFunc("GET /api/v1/server/info", h.handleServerInfo)
 	mux.HandleFunc("GET /api/v1/server/stats", h.handleServerStats)
+	mux.HandleFunc("GET /api/v1/server/config", h.handleConfigStatus)
+	mux.HandleFunc("POST /api/v1/server/config/refresh", h.handleConfigRefresh)
 	mux.HandleFunc("GET /api/v1/server/health", h.handleHealth)
+	mux.HandleFunc("GET /api/v1/audit", h.handleAudit)
+	mux.HandleFunc("GET /api/v1/security/status", h.handleSecurityStatus)
+	mux.HandleFunc("GET /api/v1/sipgateway/calls", h.handleSIPGatewayCalls)
+	mux.HandleFunc("POST /api/v1/sipgateway/calls", h.handleSIPGatewayDial)
+	mux.HandleFunc("GET /api/v1/sipgateway/calls/{call_id}", h.handleSIPGatewayCall)
+	mux.HandleFunc("DELETE /api/v1/sipgateway/calls/{call_id}", h.handleSIPGatewayCall)
+	mux.HandleFunc("GET /api/v1/cluster/status", h.handleClusterStatus)
+	mux.HandleFunc("GET /api/v1/recordings", h.handleRecordings)
+	mux.HandleFunc("GET /api/v1/recordings/status", h.handleRecordingStatus)
+	mux.HandleFunc("GET /api/v1/recordings/{recording_path...}", h.handleRecordingRoute)
+	mux.HandleFunc("DELETE /api/v1/recordings/{recording_path...}", h.handleRecordingRoute)
 	mux.HandleFunc("GET /api/v1/dvr/status", h.handleDVRStatus)
+	mux.HandleFunc("GET /api/v1/dvr/sessions/{stream_key...}", h.handleDVRSession)
 	mux.HandleFunc("DELETE /api/v1/streams/", h.handleStreamDelete)
 	mux.HandleFunc("POST /api/v1/streams/", h.handleKick)
 	mux.HandleFunc("GET /api/v1/streams/", h.handleStreamDetail)

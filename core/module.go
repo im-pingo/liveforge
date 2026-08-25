@@ -1,10 +1,12 @@
 package core
 
+import configruntime "github.com/im-pingo/liveforge/config/runtime"
+
 // EventType identifies a lifecycle or media event.
 type EventType uint16
 
 const (
-	EventStreamCreate    EventType = iota + 1
+	EventStreamCreate EventType = iota + 1
 	EventStreamDestroy
 	EventPublish
 	EventPublishStop
@@ -27,17 +29,19 @@ const (
 type HookMode uint8
 
 const (
-	HookSync  HookMode = iota + 1
+	HookSync HookMode = iota + 1
 	HookAsync
 )
 
 // EventContext carries event data passed to hook handlers.
 type EventContext struct {
-	StreamKey  string
-	Protocol   string
-	RemoteAddr string
-	Params     map[string]string // URL query params (e.g. "token" -> "xxx")
-	Extra      map[string]any
+	StreamKey    string
+	PublisherID  string
+	SubscriberID string
+	Protocol     string
+	RemoteAddr   string
+	Params       map[string]string // URL query params (e.g. "token" -> "xxx")
+	Extra        map[string]any
 }
 
 // EventHandler is a function that handles an event.
@@ -48,6 +52,9 @@ type HookRegistration struct {
 	Event    EventType
 	Mode     HookMode
 	Priority int // lower = higher priority, executed first
+	// Consumer pairs lifecycle start/stop hooks that belong to one observer.
+	// Distinct consumers receive independent ordered dispatch lanes.
+	Consumer string
 	Handler  EventHandler
 }
 
@@ -64,4 +71,16 @@ type Module interface {
 // changed need to do anything in OnReload.
 type Reloadable interface {
 	OnReload(s *Server) error
+}
+
+// ReloadPreparer lets a module validate and construct candidate policy state
+// before any reloadable module is mutated. The returned commit must not fail.
+type ReloadPreparer interface {
+	PrepareReload(s *Server) (commit func(), err error)
+}
+
+// ConfigApplied is notified after every reloadable module accepted a runtime
+// snapshot and the server committed it.
+type ConfigApplied interface {
+	OnConfigApplied(snapshot *configruntime.ConfigSnapshot)
 }

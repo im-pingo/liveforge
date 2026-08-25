@@ -107,6 +107,7 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 	}
 
 	slog.Info("rtsp relay push connected", "module", "cluster", "target", targetURL)
+	markRelayConnected(ctx)
 
 	// Build packetizers and sessions
 	var videoSession, audioSession *pkgrtp.Session
@@ -183,6 +184,7 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 				}
 				return fmt.Errorf("write interleaved: %w", err)
 			}
+			recordRelayBytes(ctx, int64(len(raw)+4))
 		}
 	}
 }
@@ -253,6 +255,7 @@ func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 	}
 
 	slog.Info("rtsp relay pull connected", "module", "cluster", "source", sourceURL)
+	markRelayConnected(ctx)
 
 	pub := &originPublisher{
 		id:   fmt.Sprintf("rtsp-pull-%s", stream.Key()),
@@ -261,7 +264,7 @@ func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -285,6 +288,7 @@ func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 		if ch%2 != 0 {
 			continue
 		}
+		recordRelayBytes(ctx, int64(len(data)+4))
 
 		var pkt pionrtp.Packet
 		if err := pkt.Unmarshal(data); err != nil {

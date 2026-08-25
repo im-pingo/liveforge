@@ -42,6 +42,7 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 	defer conn.Close()
 
 	slog.Info("srt relay push connected, waiting for sequence headers", "module", "cluster", "target", targetURL)
+	markRelayConnected(ctx)
 
 	// Wait for sequence headers to be available before creating the muxer.
 	// The forward hook fires on EventPublish, but the first sequence header
@@ -103,9 +104,11 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 			continue
 		}
 
-		if _, err := conn.Write(data); err != nil {
+		n, err := conn.Write(data)
+		if err != nil {
 			return fmt.Errorf("srt write: %w", err)
 		}
+		recordRelayBytes(ctx, int64(n))
 	}
 }
 
@@ -136,6 +139,7 @@ func (t *SRTTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	}()
 
 	slog.Info("srt relay pull connected", "module", "cluster", "source", sourceURL)
+	markRelayConnected(ctx)
 
 	pub := &originPublisher{
 		id:   fmt.Sprintf("srt-pull-%s", stream.Key()),
@@ -144,7 +148,7 @@ func (t *SRTTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisher()
+	defer stream.RemovePublisherIf(pub)
 
 	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -171,6 +175,7 @@ func (t *SRTTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 			return fmt.Errorf("srt read: %w", err)
 		}
 		if n > 0 {
+			recordRelayBytes(ctx, int64(n))
 			demuxer.Feed(buf[:n])
 		}
 	}

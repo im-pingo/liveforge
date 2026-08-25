@@ -76,19 +76,20 @@ func NewDASHManager(streamKey, basePath string, targetDur float64, maxSegments i
 func (d *DASHManager) InitFromStream(stream *core.Stream) {
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
+	audioPlan := selectFMP4Audio(stream)
 
 	if vsh := stream.VideoSeqHeader(); vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
-		audioCodec = ash.Codec
-		audioSeqHeader = ash
+	if audioPlan.hasAudio() {
+		audioCodec = audioPlan.codec
+		audioSeqHeader = audioPlan.sequenceHeader
 	}
 
 	var videoWidth, videoHeight int
-	if videoSeqHeader != nil && videoCodec == avframe.CodecH264 {
-		videoWidth, videoHeight = fmp4.ParseAVCCDimensions(videoSeqHeader.Payload)
+	if videoSeqHeader != nil {
+		videoWidth, videoHeight = fmp4.ParseVideoDimensions(videoCodec, videoSeqHeader.Payload)
 	}
 
 	audioSampleRate := 44100
@@ -129,6 +130,16 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "dash", "stream", d.streamKey)
 	defer slog.Info("manager stopped", "module", "dash", "stream", d.streamKey)
 
+	gopCache, startPos := stream.GOPCacheSnapshot()
+	audioPlan := selectFMP4Audio(stream)
+	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
+	defer release()
+	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
+	go func() {
+		<-d.done
+		reader.Close()
+	}()
+
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
 
@@ -136,9 +147,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
-		audioCodec = ash.Codec
-		audioSeqHeader = ash
+	if audioPlan.hasAudio() {
+		audioCodec = audioPlan.codec
+		audioSeqHeader = audioPlan.sequenceHeader
 	}
 
 	// Create separate muxers for video-only and audio-only segments.
@@ -149,8 +160,8 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	}
 
 	var videoWidth, videoHeight int
-	if videoSeqHeader != nil && videoCodec == avframe.CodecH264 {
-		videoWidth, videoHeight = fmp4.ParseAVCCDimensions(videoSeqHeader.Payload)
+	if videoSeqHeader != nil {
+		videoWidth, videoHeight = fmp4.ParseVideoDimensions(videoCodec, videoSeqHeader.Payload)
 	}
 
 	audioSampleRate := 44100
@@ -191,6 +202,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	var currentAudioFrames []*avframe.AVFrame
 	var segStartDTS int64
 	hasData := false
+	gotFirstKeyframe := !videoCodec.IsVideo()
 
 	// Helper: finalize current segment into separate video and audio segments.
 	// Returns audio frames that belong to the next segment (DTS >= endDTS).
@@ -231,7 +243,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 				rf.PTS -= d.dtsBase
 				rebased[i] = &rf
 			}
-			videoData = videoMuxer.WriteSegment(rebased)
+			videoData = videoMuxer.WriteSegmentUntil(rebased, endDTS-d.dtsBase)
 		}
 
 		// Build audio segment with rebased DTS.
@@ -284,18 +296,24 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		return carryOver
 	}
 
-	// Process GOP cache (atomic snapshot with cursor).
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	var gopEndDTS int64
+	// Process GOP cache using the same audio policy as the live reader.
 	for _, f := range gopCache {
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
+		}
+		if !audioPlan.accepts(f) {
+			continue
+		}
+		if !gotFirstKeyframe {
+			if !f.MediaType.IsVideo() || !f.FrameType.IsKeyframe() {
+				continue
+			}
+			gotFirstKeyframe = true
 		}
 		if !hasData {
 			segStartDTS = f.DTS
 			hasData = true
 		}
-		gopEndDTS = f.DTS
 		if f.MediaType.IsVideo() {
 			currentVideoFrames = append(currentVideoFrames, f)
 		} else if f.MediaType.IsAudio() {
@@ -303,8 +321,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		}
 	}
 
-	// Read live frames
-	reader := stream.RingBuffer().NewReaderAt(startPos)
+	// Read live frames.
 	for {
 		select {
 		case <-d.done:
@@ -321,8 +338,17 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
-		if gopEndDTS > 0 && frame.DTS <= gopEndDTS {
+		if !audioPlan.accepts(frame) {
 			continue
+		}
+		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
+			continue
+		}
+		if !gotFirstKeyframe {
+			if !frame.MediaType.IsVideo() || !frame.FrameType.IsKeyframe() {
+				continue
+			}
+			gotFirstKeyframe = true
 		}
 
 		// Split on video keyframes

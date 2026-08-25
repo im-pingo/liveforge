@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -91,6 +92,7 @@ type Stream struct {
 	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
 	muxerManager *MuxerManager
 	gopCache     [][]*avframe.AVFrame
+	gopStarts    []int64
 	audioCache   []*avframe.AVFrame
 	subscribers  map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 
@@ -130,7 +132,60 @@ func (s *Stream) Key() string {
 
 // Config returns the stream configuration.
 func (s *Stream) Config() config.StreamConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.config
+}
+
+// UpdatePolicy applies runtime-safe stream policy values. The ring buffer and
+// muxer capacity are intentionally not resized in place; new streams receive
+// those structural values from StreamHub.
+func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfig) {
+	s.mu.Lock()
+	s.config = cfg
+	s.limits = limits
+	if !cfg.GOPCache || cfg.GOPCacheNum <= 0 {
+		s.gopCache = nil
+		s.gopStarts = nil
+	} else if len(s.gopCache) > cfg.GOPCacheNum {
+		s.gopCache = append([][]*avframe.AVFrame(nil), s.gopCache[len(s.gopCache)-cfg.GOPCacheNum:]...)
+		s.gopStarts = append([]int64(nil), s.gopStarts[len(s.gopStarts)-cfg.GOPCacheNum:]...)
+	}
+	if cfg.AudioCacheMs <= 0 {
+		s.audioCache = nil
+	} else if len(s.audioCache) > 0 {
+		cutoff := s.audioCache[len(s.audioCache)-1].DTS - int64(cfg.AudioCacheMs)
+		first := 0
+		for first < len(s.audioCache) && s.audioCache[first].DTS < cutoff {
+			first++
+		}
+		if first > 0 {
+			s.audioCache = append([]*avframe.AVFrame(nil), s.audioCache[first:]...)
+		}
+	}
+	if s.noPublisherTimer != nil {
+		s.noPublisherTimer.Stop()
+		s.noPublisherTimer = nil
+	}
+	if s.state == StreamStateNoPublisher && cfg.NoPublisherTimeout > 0 {
+		s.noPublisherTimer = time.AfterFunc(cfg.NoPublisherTimeout, func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.state == StreamStateNoPublisher {
+				s.state = StreamStateDestroying
+			}
+		})
+	}
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+	s.checkIdleTimeout()
+	feedback := s.feedbackRouter
+	s.mu.Unlock()
+	if feedback != nil {
+		feedback.UpdateConfig(cfg.Feedback)
+	}
 }
 
 // State returns the current stream state.
@@ -176,7 +231,22 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 func (s *Stream) RemovePublisher() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.removePublisherLocked()
+}
 
+// RemovePublisherIf detaches pub only when it is still the active publisher.
+// It prevents a delayed connection cleanup from removing a replacement.
+func (s *Stream) RemovePublisherIf(pub Publisher) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !samePublisher(s.publisher, pub) {
+		return false
+	}
+	s.removePublisherLocked()
+	return true
+}
+
+func (s *Stream) removePublisherLocked() {
 	s.publisher = nil
 	s.state = StreamStateNoPublisher
 
@@ -191,6 +261,17 @@ func (s *Stream) RemovePublisher() {
 	}
 
 	s.checkIdleTimeout()
+}
+
+func samePublisher(left, right Publisher) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	leftType := reflect.TypeOf(left)
+	if leftType != reflect.TypeOf(right) || !leftType.Comparable() {
+		return false
+	}
+	return left == right
 }
 
 // Close force-closes the stream: closes the ring buffer, removes the publisher,
@@ -266,9 +347,12 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 		if frame.MediaType.IsVideo() {
 			if frame.FrameType.IsKeyframe() {
 				// Start new GOP
+				gopStart := s.ringBuffer.WriteCursor()
 				s.gopCache = append(s.gopCache, []*avframe.AVFrame{frame})
+				s.gopStarts = append(s.gopStarts, gopStart)
 				if len(s.gopCache) > s.config.GOPCacheNum {
 					s.gopCache = s.gopCache[len(s.gopCache)-s.config.GOPCacheNum:]
+					s.gopStarts = s.gopStarts[len(s.gopStarts)-s.config.GOPCacheNum:]
 				}
 			} else if frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
 				s.gopCache[len(s.gopCache)-1] = append(s.gopCache[len(s.gopCache)-1], frame)
@@ -385,6 +469,19 @@ func (s *Stream) GOPCacheSnapshot() ([]*avframe.AVFrame, int64) {
 		result = append(result, gop...)
 	}
 	return result, s.ringBuffer.WriteCursor()
+}
+
+// GOPCacheSourceStart returns the ring-buffer position of the oldest cached
+// GOP. A snapshot subscriber that needs to transform cached media can start
+// its source reader here, while the normal live reader still starts at the
+// atomic cursor returned by GOPCacheSnapshot.
+func (s *Stream) GOPCacheSourceStart() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.gopStarts) == 0 {
+		return s.ringBuffer.WriteCursor()
+	}
+	return s.gopStarts[0]
 }
 
 // AudioCache returns a copy of the current audio cache.

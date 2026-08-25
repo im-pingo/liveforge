@@ -3,6 +3,8 @@ package notify
 import (
 	"log/slog"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -23,9 +25,11 @@ var eventMapping = map[core.EventType]string{
 
 // Module implements HTTP and WebSocket notifications for stream lifecycle events.
 type Module struct {
-	cfg      config.NotifyConfig
-	sender   *HTTPSender
-	wsSender *WSSender
+	cfg          config.NotifyConfig
+	sender       *HTTPSender
+	senderMu     sync.RWMutex
+	wsSender     *WSSender
+	drainTimeout time.Duration
 }
 
 // NewModule creates a new notify module.
@@ -39,6 +43,7 @@ func (m *Module) Name() string { return "notify" }
 // Init reads config and starts the HTTP and WebSocket senders.
 func (m *Module) Init(s *core.Server) error {
 	m.cfg = s.Config().Notify
+	m.drainTimeout = s.Config().Server.DrainTimeout
 	if m.cfg.HTTP.Enabled && len(m.cfg.HTTP.Endpoints) > 0 {
 		m.sender = NewHTTPSender(m.cfg.HTTP.Endpoints)
 		m.sender.Start()
@@ -55,6 +60,31 @@ func (m *Module) Init(s *core.Server) error {
 	return nil
 }
 
+// OnReload applies webhook endpoint, timeout, secret, retry, and event-filter
+// policy to subsequent deliveries. WebSocket enablement/path changes still
+// require restart because they alter route registration.
+func (m *Module) OnReload(s *core.Server) error {
+	next := s.Config().Notify
+	m.cfg = next
+	m.senderMu.Lock()
+	m.drainTimeout = s.Config().Server.DrainTimeout
+	sender := m.sender
+	created := false
+	if sender == nil && next.HTTP.Enabled && len(next.HTTP.Endpoints) > 0 {
+		sender = NewHTTPSender(next.HTTP.Endpoints)
+		m.sender = sender
+		created = true
+	}
+	m.senderMu.Unlock()
+	if sender != nil {
+		sender.UpdateEndpoints(next.HTTP.Endpoints)
+		if created {
+			sender.Start()
+		}
+	}
+	return nil
+}
+
 // Hooks returns async hooks for all lifecycle events at priority 90.
 func (m *Module) Hooks() []core.HookRegistration {
 	var hooks []core.HookRegistration
@@ -63,6 +93,7 @@ func (m *Module) Hooks() []core.HookRegistration {
 			Event:    eventType,
 			Mode:     core.HookAsync,
 			Priority: 90,
+			Consumer: "notify",
 			Handler:  m.onEvent(eventName),
 		})
 	}
@@ -71,8 +102,15 @@ func (m *Module) Hooks() []core.HookRegistration {
 
 // Close stops the HTTP and WebSocket senders.
 func (m *Module) Close() error {
-	if m.sender != nil {
-		m.sender.Stop()
+	m.senderMu.Lock()
+	sender := m.sender
+	drainTimeout := m.drainTimeout
+	m.sender = nil
+	m.senderMu.Unlock()
+	if sender != nil {
+		if !sender.StopWithTimeout(drainTimeout) {
+			slog.Warn("HTTP notification drain timed out", "module", "notify", "timeout", drainTimeout)
+		}
 	}
 	if m.wsSender != nil {
 		m.wsSender.Close()
@@ -84,8 +122,11 @@ func (m *Module) Close() error {
 func (m *Module) onEvent(eventName string) core.EventHandler {
 	return func(ctx *core.EventContext) error {
 		payload := BuildPayload(eventName, ctx)
-		if m.sender != nil {
-			m.sender.Send(payload)
+		m.senderMu.RLock()
+		sender := m.sender
+		m.senderMu.RUnlock()
+		if sender != nil {
+			sender.Send(payload)
 		}
 		if m.wsSender != nil {
 			m.wsSender.Send(payload)

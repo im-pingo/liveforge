@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
@@ -258,6 +260,15 @@ func TestHandleStreamDelete(t *testing.T) {
 
 func TestHandleKick(t *testing.T) {
 	h, s := newTestHandlers(t)
+	var stoppedPublisherID string
+	s.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventPublishStop,
+		Mode:  core.HookSync,
+		Handler: func(ctx *core.EventContext) error {
+			stoppedPublisherID = ctx.PublisherID
+			return nil
+		},
+	})
 
 	hub := s.StreamHub()
 	stream, err := hub.GetOrCreate("live/kick")
@@ -279,6 +290,9 @@ func TestHandleKick(t *testing.T) {
 	if stream.Publisher() != nil {
 		t.Error("expected publisher to be removed after kick")
 	}
+	if stoppedPublisherID != pub.ID() {
+		t.Fatalf("stop publisher ID = %q, want %q", stoppedPublisherID, pub.ID())
+	}
 }
 
 func TestHandleHealth(t *testing.T) {
@@ -294,7 +308,9 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleServerInfo(t *testing.T) {
-	h, _ := newTestHandlers(t)
+	h, s := newTestHandlers(t)
+	s.Config().DVR.Enabled = true
+	s.Config().DVR.Listen = "127.0.0.1:8070"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/server/info", nil)
 	w := httptest.NewRecorder()
@@ -311,6 +327,9 @@ func TestHandleServerInfo(t *testing.T) {
 	}
 	if info.Version == "" {
 		t.Error("expected non-empty version")
+	}
+	if got := info.Endpoints["dvr"]; got != "127.0.0.1:8070" {
+		t.Errorf("dvr endpoint=%q", got)
 	}
 }
 
@@ -331,3 +350,42 @@ func TestHandleServerStats(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHandleConfigStatus(t *testing.T) {
+	h, server := newTestHandlers(t)
+	source := &testConfigSource{}
+	manager, err := configruntime.NewManager(configruntime.Options{Source: source, Initial: config.Defaults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	server.SetConfigManager(manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/server/config", nil)
+	w := httptest.NewRecorder()
+	h.handleConfigStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var status map[string]any
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["source"] != "custom" {
+		t.Fatalf("status = %v", status)
+	}
+	for _, field := range []string{"config_changes_accepted", "config_changes_rejected", "config_changes_application_failed"} {
+		if _, ok := status[field]; !ok {
+			t.Fatalf("config status omitted %q: %v", field, status)
+		}
+	}
+}
+
+type testConfigSource struct{}
+
+func (testConfigSource) Load(context.Context, configruntime.Version) (configruntime.Snapshot, error) {
+	return configruntime.Snapshot{}, nil
+}
+
+func (testConfigSource) Close() error { return nil }

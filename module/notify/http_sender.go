@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"sync"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -38,34 +40,80 @@ func BuildPayload(eventName string, ctx *core.EventContext) *NotifyPayload {
 
 // HTTPSender delivers webhook notifications to configured endpoints.
 type HTTPSender struct {
-	endpoints []config.NotifyEndpointConfig
-	client    *http.Client
-	queue     chan *NotifyPayload
-	done      chan struct{}
+	mu         sync.RWMutex
+	endpoints  []config.NotifyEndpointConfig
+	client     *http.Client
+	queue      chan *NotifyPayload
+	done       chan struct{}
+	workerDone chan struct{}
+	stateMu    sync.Mutex
+	started    bool
+	stopping   bool
 }
 
 // NewHTTPSender creates a new HTTP webhook sender.
 func NewHTTPSender(endpoints []config.NotifyEndpointConfig) *HTTPSender {
 	return &HTTPSender{
-		endpoints: endpoints,
-		client:    &http.Client{Timeout: 5 * time.Second},
-		queue:     make(chan *NotifyPayload, 1024),
-		done:      make(chan struct{}),
+		endpoints:  endpoints,
+		client:     &http.Client{Timeout: 5 * time.Second},
+		queue:      make(chan *NotifyPayload, 1024),
+		done:       make(chan struct{}),
+		workerDone: make(chan struct{}),
 	}
 }
 
 // Start begins the worker goroutine that drains the queue.
 func (s *HTTPSender) Start() {
+	s.stateMu.Lock()
+	if s.started || s.stopping {
+		s.stateMu.Unlock()
+		return
+	}
+	s.started = true
+	s.stateMu.Unlock()
 	go s.worker()
 }
 
 // Stop signals the worker to exit and waits for drain.
 func (s *HTTPSender) Stop() {
-	close(s.done)
+	s.StopWithTimeout(0)
+}
+
+// StopWithTimeout signals the worker, drains events admitted before the stop,
+// and waits up to timeout. A non-positive timeout waits without a deadline.
+func (s *HTTPSender) StopWithTimeout(timeout time.Duration) bool {
+	s.stateMu.Lock()
+	if !s.stopping {
+		s.stopping = true
+		close(s.done)
+		if !s.started {
+			close(s.workerDone)
+		}
+	}
+	workerDone := s.workerDone
+	s.stateMu.Unlock()
+
+	if timeout <= 0 {
+		<-workerDone
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-workerDone:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // Send enqueues a payload for delivery. Non-blocking; drops if queue is full.
 func (s *HTTPSender) Send(p *NotifyPayload) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.stopping {
+		return
+	}
 	select {
 	case s.queue <- p:
 	default:
@@ -74,6 +122,7 @@ func (s *HTTPSender) Send(p *NotifyPayload) {
 }
 
 func (s *HTTPSender) worker() {
+	defer close(s.workerDone)
 	for {
 		select {
 		case p := <-s.queue:
@@ -99,7 +148,10 @@ func (s *HTTPSender) deliver(p *NotifyPayload) {
 		return
 	}
 
-	for _, ep := range s.endpoints {
+	s.mu.RLock()
+	endpoints := append([]config.NotifyEndpointConfig(nil), s.endpoints...)
+	s.mu.RUnlock()
+	for _, ep := range endpoints {
 		if !matchEvent(ep.Events, p.Event) {
 			continue
 		}
@@ -119,6 +171,20 @@ func (s *HTTPSender) deliver(p *NotifyPayload) {
 	}
 }
 
+// UpdateEndpoints publishes a copied endpoint list for subsequent deliveries.
+func (s *HTTPSender) UpdateEndpoints(endpoints []config.NotifyEndpointConfig) {
+	s.mu.Lock()
+	s.endpoints = append([]config.NotifyEndpointConfig(nil), endpoints...)
+	s.mu.Unlock()
+}
+
+// Endpoints returns a copy of the active webhook policy.
+func (s *HTTPSender) Endpoints() []config.NotifyEndpointConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]config.NotifyEndpointConfig(nil), s.endpoints...)
+}
+
 func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndpointConfig, body []byte, retries int) {
 	for attempt := 0; attempt < retries; attempt++ {
 		if attempt > 0 {
@@ -129,9 +195,10 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 			time.Sleep(backoff)
 		}
 
+		logTarget := webhookLogTarget(ep.URL)
 		req, err := http.NewRequest(http.MethodPost, ep.URL, bytes.NewReader(body))
 		if err != nil {
-			slog.Error("request error", "module", "notify", "error", err)
+			slog.Error("request error", "module", "notify", "endpoint", logTarget, "reason", "invalid endpoint URL")
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -143,7 +210,7 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 
 		resp, err := client.Do(req)
 		if err != nil {
-			slog.Warn("POST failed", "module", "notify", "url", ep.URL, "attempt", attempt+1, "max_retries", retries, "error", err)
+			slog.Warn("POST failed", "module", "notify", "endpoint", logTarget, "attempt", attempt+1, "max_retries", retries, "reason", "delivery failed")
 			continue
 		}
 		resp.Body.Close()
@@ -151,8 +218,16 @@ func (s *HTTPSender) deliverToEndpoint(client *http.Client, ep config.NotifyEndp
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return // success
 		}
-		slog.Warn("POST unexpected status", "module", "notify", "url", ep.URL, "attempt", attempt+1, "max_retries", retries, "status", resp.StatusCode)
+		slog.Warn("POST unexpected status", "module", "notify", "endpoint", logTarget, "attempt", attempt+1, "max_retries", retries, "status", resp.StatusCode)
 	}
+}
+
+func webhookLogTarget(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 // matchEvent checks if the payload event matches the endpoint's event filter.

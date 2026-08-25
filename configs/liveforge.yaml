@@ -3,6 +3,15 @@ server:
   log_level: info
   drain_timeout: 30s
 
+# Runtime refresh reads this file in the background. Remote sources can be
+# selected after bootstrap; credentials should come from environment variables.
+runtime:
+  source: file
+  poll_interval: 30s
+  load_timeout: 10s
+  file:
+    path: ""
+
 tls:
   cert_file: ""
   key_file: ""
@@ -161,9 +170,6 @@ auth:
     mode: "none"
     token:
       secret: "${AUTH_JWT_SECRET}"
-  api:
-    bearer_token: "${API_TOKEN}"
-
 notify:
   http:
     enabled: false
@@ -216,7 +222,7 @@ record:
   enabled: false
   stream_pattern: "live/*"
   format: flv
-  path: "/data/record/{date}/{stream}_{time}.{ext}"
+  path: "/data/record/{date}/{stream_key}_{time}.{ext}"
   segment:
     mode: duration
     duration: 30m
@@ -243,6 +249,15 @@ api:
   listen: ":8090"
   auth:
     bearer_token: "${API_TOKEN}"
+    # Named tokens support viewer, operator, and admin roles. Keep tokens in
+    # environment-expanded private configuration, never in source control.
+    tokens: []
+    # - name: monitoring
+    #   token: "${MONITORING_API_TOKEN}"
+    #   role: viewer
   console:
     username: "admin"
     password: "admin"
+    role: admin
+  audit:
+    max_entries: 1000

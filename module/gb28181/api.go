@@ -3,6 +3,7 @@ package gb28181
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -25,6 +26,7 @@ func registerAPI(s *core.Server, m *Module) {
 	// Channels
 	s.RegisterAPIHandler("GET "+apiPrefix+"/channels", http.HandlerFunc(m.apiListChannels))
 	s.RegisterAPIHandler("POST "+apiPrefix+"/channels/", http.HandlerFunc(m.apiChannelAction))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/channels/", http.HandlerFunc(m.apiChannelAction))
 
 	// Sessions
 	s.RegisterAPIHandler("GET "+apiPrefix+"/sessions", http.HandlerFunc(m.apiListSessions))
@@ -123,7 +125,7 @@ func (m *Module) apiDeleteDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m.sessions.CloseByDevice(deviceID)
+	m.handler.closeSessionsByDevice(deviceID)
 	m.registry.Unregister(deviceID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
 }
@@ -216,15 +218,21 @@ func (m *Module) apiPlay(w http.ResponseWriter, r *http.Request, channelID strin
 		return
 	}
 
-	session, err := m.invite.invite(r.Context(), device, channelID)
+	session, err := m.invite.invite(r.Context(), device, channelID, httpEventParams(r))
 	if err != nil {
+		if errors.Is(err, errPublishUnauthorized) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
+	snapshot := session.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"stream_key": session.StreamKey,
-		"session_id": session.ID,
+		"stream_key": snapshot.StreamKey,
+		"session_id": snapshot.ID,
 	})
 }
 
@@ -235,14 +243,7 @@ func (m *Module) apiStopPlay(w http.ResponseWriter, r *http.Request, channelID s
 		return
 	}
 
-	for _, session := range sessions {
-		session.Close()
-		m.sessions.Remove(session.ID)
-		if session.Stream != nil {
-			session.Stream.RemovePublisher()
-		}
-		m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
-	}
+	m.handler.closeSessionsByChannel(channelID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
@@ -278,15 +279,21 @@ func (m *Module) apiPlayback(w http.ResponseWriter, r *http.Request, channelID s
 		return
 	}
 
-	session, err := m.playback.playback(r.Context(), device, channelID, startTime, endTime)
+	session, err := m.playback.playback(r.Context(), device, channelID, startTime, endTime, httpEventParams(r))
 	if err != nil {
+		if errors.Is(err, errPublishUnauthorized) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
+	snapshot := session.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"stream_key": session.StreamKey,
-		"session_id": session.ID,
+		"stream_key": snapshot.StreamKey,
+		"session_id": snapshot.ID,
 	})
 }
 
@@ -391,19 +398,20 @@ func (m *Module) apiListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]sessionDTO, 0, len(sessions))
 	for _, s := range sessions {
+		snapshot := s.Snapshot()
 		dir := "inbound"
-		if s.Direction == SessionDirectionOutbound {
+		if snapshot.Direction == SessionDirectionOutbound {
 			dir = "outbound"
 		}
 		out = append(out, sessionDTO{
-			ID:        s.ID,
-			DeviceID:  s.DeviceID,
-			ChannelID: s.ChannelID,
-			StreamKey: s.StreamKey,
+			ID:        snapshot.ID,
+			DeviceID:  snapshot.DeviceID,
+			ChannelID: snapshot.ChannelID,
+			StreamKey: snapshot.StreamKey,
 			Direction: dir,
-			State:     s.GetState().String(),
-			LocalPort: s.LocalPort,
-			Transport: s.Transport,
+			State:     snapshot.State.String(),
+			LocalPort: snapshot.LocalPort,
+			Transport: snapshot.Transport,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -422,12 +430,7 @@ func (m *Module) apiDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session.Close()
-	m.sessions.Remove(sessionID)
-	if session.Stream != nil {
-		session.Stream.RemovePublisher()
-	}
-	m.handler.ports.Free(session.LocalPort, session.LocalPort+1)
+	m.handler.closeSession(session, r.RemoteAddr)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
