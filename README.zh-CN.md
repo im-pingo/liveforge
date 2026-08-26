@@ -129,7 +129,8 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
 - **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
-- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性 SDP/编解码/RTP/PS/UDP 自测；SIP Gateway provider 还支持可取消停止/关闭清理的 PCMA/PCMU 持久假设备发布/接收会话，持久 GB28181 实验室仍不可用
+- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久 SDP/编解码/RTP/PS/UDP 假设备检查；两个 provider 都支持可取消停止/关闭清理的持久回环发布/接收会话（SIP 使用 PCMA/PCMU，GB28181 使用 H.264 PS/RTP/RTCP）
+- **GB28181 Lab 流键** — 发布会使用请求中的 `stream_key`（可打印 ASCII、最长 256 字节且不能有首尾空白）；该覆盖只接受 loopback 模拟器请求，真实设备仍使用 `{stream_prefix}/{channel_id}`
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
@@ -290,7 +291,7 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
 - 录制详情/下载/在线预览/删除、DVR 会话/存储状态及 HLS 在线预览、安全状态和有界审计事件
 - 完整脱敏 Config 文档/schema 展示、只读 Validate、按数据源执行 Apply & Refresh，并显示 file、HTTP/HTTPS、Consul、Redis 的可写/只读状态
-- SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；SIP provider 会话支持持久 PCMA/PCMU 回环发布/接收，持久 GB28181 会话不可用
+- SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；两者都支持无需外部平台的持久模拟设备发布/接收，会话显示 RTP/RTCP/PS 计数，停止时清理资源，并可通过已启用的其他输出协议预览
 
 DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
 录制预览复用已认证的管理 API 会话；DVR 预览使用带非凭据 CORS 的独立 `dvr.listen` HLS 监听器，因此仍执行订阅鉴权，控制台不会持久化或拼接 bearer token。

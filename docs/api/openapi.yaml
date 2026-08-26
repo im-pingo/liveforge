@@ -282,6 +282,51 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/sipgateway/lab/sessions:
+    get:
+      tags: [sipgateway]
+      operationId: listSIPGatewayLabSessions
+      summary: List persistent local fake SIP device sessions
+      x-liveforge-permission: sip:read
+      responses:
+        '200': {description: SIP lab sessions and playback metadata, content: {application/json: {schema: {$ref: '#/components/schemas/SIPLabSessionsResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      tags: [sipgateway]
+      operationId: startSIPGatewayLabSession
+      summary: Start a persistent local fake SIP device
+      description: Publish mode sends real PCMA or PCMU RTP/RTCP into LiveForge. Receive mode accepts LiveForge's outbound INVITE and counts received media. No external PBX is required.
+      x-liveforge-permission: sip:calls
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SIPLabRequest'}}}
+      responses:
+        '201': {description: SIP lab session started, content: {application/json: {schema: {$ref: '#/components/schemas/SIPLabSessionResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/sipgateway/lab/sessions/{labSessionId}:
+    parameters:
+      - {$ref: '#/components/parameters/LabSessionId'}
+    delete:
+      tags: [sipgateway]
+      operationId: stopSIPGatewayLabSession
+      summary: Stop a persistent local fake SIP device
+      x-liveforge-permission: sip:calls
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/sipgateway/calls/{callId}:
     parameters:
       - {$ref: '#/components/parameters/CallId'}
@@ -668,6 +713,51 @@ paths:
         '403': {$ref: '#/components/responses/GBForbidden'}
         '429': {$ref: '#/components/responses/GBRateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/gb28181/lab/sessions:
+    get:
+      tags: [gb28181]
+      operationId: listGB28181LabSessions
+      summary: List persistent local fake GB28181 device sessions
+      x-liveforge-permission: gb28181:read
+      responses:
+        '200': {description: GB28181 lab sessions and playback metadata, content: {application/json: {schema: {$ref: '#/components/schemas/GBLabSessionsResponse'}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      tags: [gb28181]
+      operationId: startGB28181LabSession
+      summary: Start a persistent local fake GB28181 device
+      description: Publish mode performs REGISTER, Keepalive, Catalog, INVITE/ACK/BYE and sends deterministic H.264 in PS/RTP with RTCP. Receive mode accepts LiveForge's live-play INVITE and counts PS/RTP/RTCP. No external GB28181 platform is required.
+      x-liveforge-permission: gb28181:control
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GBLabRequest'}}}
+      responses:
+        '201': {description: GB28181 lab session started, content: {application/json: {schema: {$ref: '#/components/schemas/GBLabSessionResponse'}}}}
+        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/gb28181/lab/sessions/{labSessionId}:
+    parameters:
+      - {$ref: '#/components/parameters/LabSessionId'}
+    delete:
+      tags: [gb28181]
+      operationId: stopGB28181LabSession
+      summary: Stop a persistent local fake GB28181 device
+      x-liveforge-permission: gb28181:control
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '404': {$ref: '#/components/responses/GBNotFound'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/relay/push:
     post:
       tags: [internal-cluster]
@@ -848,6 +938,7 @@ components:
     ChannelOrDeviceId: {name: channelOrDeviceId, in: path, required: true, description: A channel ID (resolved to its parent device) or a device ID., schema: {type: string}}
     SessionId: {name: sessionId, in: path, required: true, schema: {type: string}}
     CallId: {name: callId, in: path, required: true, schema: {type: string}}
+    LabSessionId: {name: labSessionId, in: path, required: true, schema: {type: string}}
   responses:
     Success: {description: Successful management operation, content: {application/json: {schema: {$ref: '#/components/schemas/ApiResponse'}}}}
     BadRequest: {description: Invalid or missing input, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
@@ -966,6 +1057,12 @@ components:
       properties: {legacy_bearer_configured: {type: boolean}, tokens: {type: array, items: {type: object, properties: {name: {type: string}, role: {type: string}}}}, console_configured: {type: boolean}, console_role: {type: string}, audit_enabled: {type: boolean}, audit_entries: {type: integer}, audit_events_total: {type: integer, format: int64}}
     SecurityStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SecurityStatus'}}}]}
     SIPDialRequest: {type: object, additionalProperties: false, required: [target_uri, stream_key], properties: {target_uri: {type: string}, stream_key: {type: string}}}
+    SIPLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, stream_key, codec], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string}, stream_key: {type: string}, codec: {type: string, enum: [PCMA, PCMU]}}}
+    ProtocolLabPlayback: {type: object, required: [stream_key, available], properties: {stream_key: {type: string}, available: {type: boolean}, rtmp: {type: string}, rtsp: {type: string}, http_flv: {type: string}, ws_flv: {type: string}, http_ts: {type: string}, fmp4: {type: string}, hls: {type: string}, dash: {type: string}, whep: {type: string}, whep_live: {type: string}}}
+    SIPLabSession: {type: object, properties: {id: {type: string}, identity: {type: string}, device_id: {type: string}, stream_key: {type: string}, mode: {type: string, enum: [publish, receive]}, state: {type: string, enum: [starting, active, contract, stopped, failed]}, direction: {type: string, enum: [inbound, outbound]}, codec: {type: string}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_sent: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64}, started_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}, last_media_at: {type: string, format: date-time}, stopped_at: {type: string, format: date-time}}}
+    SIPLabSessionView: {type: object, required: [session, playback], properties: {session: {$ref: '#/components/schemas/SIPLabSession'}, playback: {$ref: '#/components/schemas/ProtocolLabPlayback'}}}
+    SIPLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/SIPLabSessionView'}}}}}}]}
+    SIPLabSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SIPLabSessionView'}}}]}
     SIPCall:
       type: object
       properties: {call_id: {type: string}, direction: {type: string, enum: [inbound, outbound]}, stream_key: {type: string}, codec: {type: string}, rtp_port: {type: integer}, rtcp_port: {type: integer}, remote_address: {type: string}, started_at: {type: string, format: date-time}, state: {type: string}, last_error: {type: string}, last_rtp_at: {type: string, format: date-time}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}}
@@ -1034,3 +1131,8 @@ components:
     GBPTZRequest: {type: object, required: [command], properties: {command: {type: string, enum: [up, down, left, right, upleft, upright, downleft, downright, zoomin, zoomout, stop]}, h_speed: {type: integer, minimum: 0, maximum: 255}, v_speed: {type: integer, minimum: 0, maximum: 255}}}
     GBSessionStart: {type: object, required: [stream_key, session_id], properties: {stream_key: {type: string}, session_id: {type: string}}}
     GBSession: {type: object, properties: {id: {type: string}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string}, direction: {type: string, enum: [inbound, outbound]}, state: {type: string}, local_port: {type: integer}, transport: {type: string}}}
+    GBLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, channel_id, stream_key], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string, maxLength: 256, description: 'Authoritative publish key for the loopback Lab simulator; printable ASCII without leading/trailing whitespace. Ordinary GB28181 devices publish to {stream_prefix}/{channel_id}.'}}}
+    GBLabSession: {type: object, properties: {id: {type: string}, identity: {type: string}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string}, mode: {type: string, enum: [publish, receive]}, state: {type: string, enum: [starting, active, stopped, failed]}, direction: {type: string, enum: [inbound, outbound]}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_sent: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64}, ps_frames_sent: {type: integer, format: int64}, ps_frames_received: {type: integer, format: int64}, started_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}, last_media_at: {type: string, format: date-time}, stopped_at: {type: string, format: date-time}}}
+    GBLabSessionView: {type: object, required: [session, playback], properties: {session: {$ref: '#/components/schemas/GBLabSession'}, playback: {$ref: '#/components/schemas/ProtocolLabPlayback'}}}
+    GBLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/GBLabSessionView'}}}}}}]}
+    GBLabSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/GBLabSessionView'}}}]}

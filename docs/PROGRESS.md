@@ -23,7 +23,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - WebRTC WHIP/WHEP publish/play with a 1 MiB SDP offer limit and HTTP 413 rejection, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
 - Browser-verified WHIP H.265 + Opus bridging to HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WHEP realtime, and WHEP Live; WHEP uses codec-specific HEVC parameter-set conversion, an atomic GOP/source-ring cursor transition, and an independent target-audio transcode reader.
 - HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback; LL-HLS initial manifests avoid duplicate completed PART delivery, while blocking reloads retain the latest completed PART identity across segment transitions.
-- GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and fast in-process self-test coverage. Persistent local fake-device signaling/media labs are under implementation; do not treat the lab session API as available until its transport and integration verification are complete.
+- GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, fast in-process self-test coverage, and persistent loopback fake-device publish/receive labs with real signaling/media and cleanup verification.
 - SIP TCP/UDP listener cancellation is treated as normal shutdown without ERROR noise; unexpected listener failures while the service context is active remain ERROR with transport metadata.
 - Optional audio transcoding for AAC, Opus, G.711, and MP3 when built with `CGO_ENABLED=1 -tags audiocodec` and FFmpeg libraries.
 

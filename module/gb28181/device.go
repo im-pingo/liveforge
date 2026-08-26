@@ -6,7 +6,7 @@ import "time"
 type DeviceStatus uint8
 
 const (
-	DeviceStatusOnline  DeviceStatus = iota + 1
+	DeviceStatusOnline DeviceStatus = iota + 1
 	DeviceStatusOffline
 )
 
@@ -55,7 +55,7 @@ const (
 type SessionState uint8
 
 const (
-	SessionStateIdle      SessionState = iota
+	SessionStateIdle SessionState = iota
 	SessionStateInviting
 	SessionStateStreaming
 	SessionStateClosed

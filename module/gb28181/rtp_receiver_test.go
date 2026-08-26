@@ -180,7 +180,7 @@ func TestSeqDiff(t *testing.T) {
 		want uint16
 	}{
 		{5, 3, 2},
-		{0, 65535, 1},   // wraparound: 0 - 65535 = 1
+		{0, 65535, 1}, // wraparound: 0 - 65535 = 1
 		{100, 100, 0},
 	}
 

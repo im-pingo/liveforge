@@ -934,6 +934,18 @@ select:focus-visible {
       <div class="ops-section-title"><span>Local Protocol Lab</span><button class="btn" id="gb-self-test" type="button">Run GB28181 Self-Test</button></div>
       <pre class="ops-detail" id="gb-self-test-result">No test run</pre>
     </div>
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">H.264 / PS / RTP loopback</span></div>
+      <form class="ops-form" id="gb-lab-form" onsubmit="startGBLab(event)">
+        <select class="ops-input" id="gb-lab-mode" aria-label="GB28181 lab mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select>
+        <input class="ops-input" id="gb-lab-device" aria-label="GB28181 lab device ID" placeholder="34020000001320000011" required>
+        <input class="ops-input" id="gb-lab-channel" aria-label="GB28181 lab channel ID" placeholder="34020000001320000012" required>
+        <input class="ops-input" id="gb-lab-stream" aria-label="GB28181 lab stream key" placeholder="gb28181/channel" required>
+        <button class="btn btn-play" id="gb-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
+      </form>
+      <div class="ops-error" id="gb-lab-error"></div>
+      <div class="table-wrap"><table><thead><tr><th>Device / Channel</th><th>Mode</th><th>Stream</th><th>State</th><th>RTP</th><th>RTCP</th><th>PS Frames</th><th>Actions</th></tr></thead><tbody id="gb-lab-sessions-tbody"></tbody></table><div id="gb-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent GB28181 lab sessions</div></div></div>
+    </div>
 
     <div class="gb-section-title">Devices</div>
     <div class="table-wrap">
@@ -1055,6 +1067,18 @@ select:focus-visible {
     <div class="ops-section">
       <div class="ops-section-title"><span>Local Protocol Lab</span><button class="btn" id="sip-self-test" type="button">Run SIP Self-Test</button></div>
       <pre class="ops-detail" id="sip-self-test-result">No test run</pre>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">PCMA / PCMU loopback</span></div>
+      <form class="ops-form" id="sip-lab-form" onsubmit="startSIPLab(event)">
+        <select class="ops-input" id="sip-lab-mode" aria-label="SIP lab mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select>
+        <input class="ops-input" id="sip-lab-device" aria-label="SIP lab device ID" placeholder="lab-device" required>
+        <input class="ops-input" id="sip-lab-stream" aria-label="SIP lab stream key" placeholder="sip/lab" required>
+        <select class="ops-input" id="sip-lab-codec" aria-label="SIP lab codec"><option value="PCMA">PCMA</option><option value="PCMU">PCMU</option></select>
+        <button class="btn btn-play" id="sip-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
+      </form>
+      <div class="ops-error" id="sip-lab-error"></div>
+      <div class="table-wrap"><table><thead><tr><th>Device</th><th>Mode</th><th>Stream</th><th>State</th><th>RTP</th><th>RTCP</th><th>Last Media</th><th>Actions</th></tr></thead><tbody id="sip-lab-sessions-tbody"></tbody></table><div id="sip-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent SIP lab sessions</div></div></div>
     </div>
     <div class="table-wrap"><table><thead><tr><th>Call ID</th><th>Direction</th><th>Stream</th><th>Codec</th><th>State</th><th>RTP</th><th>Actions</th></tr></thead><tbody id="sip-calls-tbody"></tbody></table><div id="sip-calls-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No SIP calls</div></div></div>
     <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
@@ -3024,6 +3048,8 @@ function createDynamicActionHandlers() {
     "stream-delete": function(value) { deleteStream(value); },
     "sip-detail": function(value) { loadSIPCall(value); },
     "sip-hangup": function(value) { hangupSIPCall(value); },
+    "sip-lab-preview": function(value) { openPlayer(value); },
+    "sip-lab-stop": function(value) { stopSIPLab(value); },
     "recording-detail": function(value) { loadRecording(value); },
     "recording-play": function(value) { playRecording(value, recordingFormats[value]); },
     "recording-download": function(value) { downloadRecording(value); },
@@ -3038,7 +3064,9 @@ function createDynamicActionHandlers() {
     "gb-ptz": function(value) { openPTZ(value); },
     "gb-playback": function(value) { openPlayback(value); },
     "gb-preview": function(value) { openPlayer(value); },
-    "gb-close-session": function(value) { gbCloseSession(value); }
+    "gb-close-session": function(value) { gbCloseSession(value); },
+    "gb-lab-preview": function(value) { openPlayer(value); },
+    "gb-lab-stop": function(value) { stopGBLab(value); }
   };
 }
 
@@ -3162,7 +3190,8 @@ function refreshCluster(signal) {
 
 function refreshSIPCalls(signal) {
   clearManagementError("sip");
-  return apiFetch("/api/v1/sipgateway/calls", { signal: signal }).then(function(data) {
+  return Promise.all([apiFetch("/api/v1/sipgateway/calls", { signal: signal }), refreshSIPLab(signal)]).then(function(results) {
+    var data = results[0] || {};
     data = data || {};
     var metrics = data.metrics || {};
     var calls = data.calls || [];
@@ -3207,6 +3236,65 @@ function renderSIPCalls(calls) {
     appendActionButton(actions, "Details", "", "sip-detail", call.call_id);
     if (canManage("operator")) appendActionButton(actions, "Hang up", "btn-danger", "sip-hangup", call.call_id);
     actionCell.appendChild(actions);
+  });
+}
+
+function renderSIPLabSessions(views) {
+  views = views || [];
+  var tbody = document.getElementById("sip-lab-sessions-tbody");
+  var empty = document.getElementById("sip-lab-sessions-empty");
+  tbody.replaceChildren();
+  empty.style.display = views.length ? "none" : "block";
+  views.forEach(function(view) {
+    var s = view.session || {};
+    var row = tbody.insertRow();
+    appendTextCell(row, s.device_id || s.identity || "-", "mono");
+    appendTextCell(row, s.mode || "-");
+    appendTextCell(row, s.stream_key || "-", "stream-key");
+    appendTextCell(row, s.state || "-");
+    appendTextCell(row, (s.rtp_packets_sent || 0) + " tx / " + (s.rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, formatDate(s.last_media_at));
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (s.stream_key && view.playback && view.playback.available) appendActionButton(actions, "Preview", "btn-play", "sip-lab-preview", s.stream_key);
+    if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "sip-lab-stop", s.id);
+    actionCell.appendChild(actions);
+  });
+}
+
+function refreshSIPLab(signal) {
+  return apiFetch("/api/v1/sipgateway/lab/sessions", { signal: signal }).then(function(data) {
+    renderSIPLabSessions((data && data.sessions) || []);
+  }).catch(function(err) {
+    document.getElementById("sip-lab-error").textContent = managementErrorMessage(err);
+  });
+}
+
+function startSIPLab(event) {
+  event.preventDefault();
+  if (!canManage("operator")) return;
+  var button = document.getElementById("sip-lab-start");
+  button.disabled = true;
+  document.getElementById("sip-lab-error").textContent = "";
+  var request = {
+    mode: document.getElementById("sip-lab-mode").value,
+    device_id: document.getElementById("sip-lab-device").value.trim(),
+    stream_key: document.getElementById("sip-lab-stream").value.trim(),
+    codec: document.getElementById("sip-lab-codec").value
+  };
+  apiFetch("/api/v1/sipgateway/lab/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })
+    .then(function(data) { showToast("SIP lab started"); renderSIPLabSessions(data ? [data] : []); return refreshSIPLab(); })
+    .catch(function(err) { document.getElementById("sip-lab-error").textContent = managementErrorMessage(err); })
+    .finally(function() { button.disabled = !canManage("operator"); });
+}
+
+function stopSIPLab(id) {
+  showModal("Stop SIP lab", "Stop this local fake SIP device?", function() {
+    return apiFetch("/api/v1/sipgateway/lab/sessions/" + encodeURIComponent(id), { method: "DELETE" })
+      .then(function() { showToast("SIP lab stopped"); return refreshSIPLab(); })
+      .catch(function(err) { document.getElementById("sip-lab-error").textContent = managementErrorMessage(err); });
   });
 }
 
@@ -3613,7 +3701,8 @@ document.getElementById("nav-tabs").addEventListener("keydown", function(event) 
 function refreshGB28181(signal) {
   return Promise.all([
     apiFetch("/api/v1/gb28181/devices", { signal: signal }),
-    apiFetch("/api/v1/gb28181/sessions", { signal: signal })
+    apiFetch("/api/v1/gb28181/sessions", { signal: signal }),
+    refreshGBLab(signal)
   ]).then(function(results) {
     var devices = results[0] || [];
     var sessions = results[1] || [];
@@ -3748,6 +3837,65 @@ function renderSessionsTable(sessions) {
     appendActionButton(actions, "Preview", "btn-play", "gb-preview", s.stream_key);
     if (canManage("admin")) appendActionButton(actions, "Close", "btn-danger", "gb-close-session", s.id);
     actionCell.appendChild(actions);
+  });
+}
+
+function renderGBLabSessions(views) {
+  views = views || [];
+  var tbody = document.getElementById("gb-lab-sessions-tbody");
+  var empty = document.getElementById("gb-lab-sessions-empty");
+  tbody.replaceChildren();
+  empty.style.display = views.length ? "none" : "block";
+  views.forEach(function(view) {
+    var s = view.session || {};
+    var row = tbody.insertRow();
+    appendTextCell(row, (s.device_id || "-") + " / " + (s.channel_id || "-"), "mono");
+    appendTextCell(row, s.mode || "-");
+    appendTextCell(row, s.stream_key || "-", "stream-key");
+    appendTextCell(row, s.state || "-");
+    appendTextCell(row, (s.rtp_packets_sent || 0) + " tx / " + (s.rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.ps_frames_sent || 0) + " tx / " + (s.ps_frames_received || 0) + " rx", "mono");
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (s.stream_key && view.playback && view.playback.available) appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key);
+    if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "gb-lab-stop", s.id);
+    actionCell.appendChild(actions);
+  });
+}
+
+function refreshGBLab(signal) {
+  return apiFetch("/api/v1/gb28181/lab/sessions", { signal: signal }).then(function(data) {
+    renderGBLabSessions((data && data.sessions) || []);
+  }).catch(function(err) {
+    document.getElementById("gb-lab-error").textContent = managementErrorMessage(err);
+  });
+}
+
+function startGBLab(event) {
+  event.preventDefault();
+  if (!canManage("operator")) return;
+  var button = document.getElementById("gb-lab-start");
+  button.disabled = true;
+  document.getElementById("gb-lab-error").textContent = "";
+  var request = {
+    mode: document.getElementById("gb-lab-mode").value,
+    device_id: document.getElementById("gb-lab-device").value.trim(),
+    channel_id: document.getElementById("gb-lab-channel").value.trim(),
+    stream_key: document.getElementById("gb-lab-stream").value.trim()
+  };
+  apiFetch("/api/v1/gb28181/lab/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })
+    .then(function(data) { showToast("GB28181 lab started"); renderGBLabSessions(data ? [data] : []); return refreshGBLab(); })
+    .catch(function(err) { document.getElementById("gb-lab-error").textContent = managementErrorMessage(err); })
+    .finally(function() { button.disabled = !canManage("operator"); });
+}
+
+function stopGBLab(id) {
+  showModal("Stop GB28181 lab", "Stop this local fake GB28181 device?", function() {
+    return apiFetch("/api/v1/gb28181/lab/sessions/" + encodeURIComponent(id), { method: "DELETE" })
+      .then(function() { showToast("GB28181 lab stopped"); return refreshGBLab(); })
+      .catch(function(err) { document.getElementById("gb-lab-error").textContent = managementErrorMessage(err); });
   });
 }
 

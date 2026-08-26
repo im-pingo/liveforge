@@ -33,6 +33,11 @@ func TestRBACRoleMatrix(t *testing.T) {
 		{"viewer", "streams:kick", false},
 		{"operator", "streams:kick", true},
 		{"operator", "gb28181:read", true},
+		{"viewer", "sip:read", true},
+		{"viewer", "sip:calls", false},
+		{"viewer", "gb28181:control", false},
+		{"operator", "sip:calls", true},
+		{"operator", "gb28181:control", true},
 		{"operator", "streams:delete", false},
 		{"admin", "streams:delete", true},
 		{"admin", "recordings:delete", true},
@@ -41,6 +46,24 @@ func TestRBACRoleMatrix(t *testing.T) {
 	for _, tt := range tests {
 		if got := roleAllows(tt.role, tt.permission); got != tt.want {
 			t.Errorf("roleAllows(%q, %q) = %v, want %v", tt.role, tt.permission, got, tt.want)
+		}
+	}
+}
+
+func TestProtocolLabRoutesUseReadAndControlPermissions(t *testing.T) {
+	tests := []struct {
+		method, path, want string
+	}{
+		{http.MethodGet, "/api/v1/sipgateway/lab/sessions", "sip:read"},
+		{http.MethodPost, "/api/v1/sipgateway/lab/sessions", "sip:calls"},
+		{http.MethodDelete, "/api/v1/sipgateway/lab/sessions/lab-1", "sip:calls"},
+		{http.MethodGet, "/api/v1/gb28181/lab/sessions", "gb28181:read"},
+		{http.MethodPost, "/api/v1/gb28181/lab/sessions", "gb28181:control"},
+		{http.MethodDelete, "/api/v1/gb28181/lab/sessions/lab-1", "gb28181:control"},
+	}
+	for _, tt := range tests {
+		if got := permissionForRequest(httptest.NewRequest(tt.method, tt.path, nil)); got != tt.want {
+			t.Errorf("permissionForRequest(%s %s) = %q, want %q", tt.method, tt.path, got, tt.want)
 		}
 	}
 }

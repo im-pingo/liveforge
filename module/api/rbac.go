@@ -96,6 +96,8 @@ func permissionForRequest(r *http.Request) string {
 		return "sip:calls"
 	case p == "/api/v1/sipgateway/test":
 		return "sip:read"
+	case strings.HasPrefix(p, "/api/v1/sipgateway/lab/sessions") && r.Method != http.MethodGet:
+		return "sip:calls"
 	case strings.HasPrefix(p, "/api/v1/sipgateway/"):
 		return "sip:read"
 	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/v1/recordings/"):
@@ -103,6 +105,8 @@ func permissionForRequest(r *http.Request) string {
 	case r.Method == http.MethodDelete && (strings.HasPrefix(p, "/api/v1/gb28181/devices/") || strings.HasPrefix(p, "/api/v1/gb28181/sessions/")):
 		return "gb28181:delete"
 	case r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/gb28181/channels/"):
+		return "gb28181:control"
+	case strings.HasPrefix(p, "/api/v1/gb28181/lab/sessions") && r.Method != http.MethodGet:
 		return "gb28181:control"
 	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/v1/gb28181/channels/") && (strings.HasSuffix(p, "/play") || strings.HasSuffix(p, "/playback")):
 		return "gb28181:control"

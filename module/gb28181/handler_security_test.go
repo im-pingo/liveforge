@@ -57,6 +57,34 @@ func newGBRequest(method sip.RequestMethod, deviceID, channelID string) *sip.Req
 	return req
 }
 
+func TestInboundLabStreamKeyOverrideRequiresLoopback(t *testing.T) {
+	req := newGBRequest(sip.INVITE, "device", "channel")
+	req.AppendHeader(sip.NewHeader(labStreamKeyHeader, "lab/custom-key"))
+
+	req.SetSource("192.0.2.10:5060")
+	if got := inboundStreamKey(req, "gb28181", "channel"); got != "gb28181/channel" {
+		t.Fatalf("non-loopback stream key = %q, want default key", got)
+	}
+
+	req.SetSource("127.0.0.1:5060")
+	if got := inboundStreamKey(req, "gb28181", "channel"); got != "lab/custom-key" {
+		t.Fatalf("loopback stream key = %q, want custom key", got)
+	}
+}
+
+func TestInboundLabStreamKeyOverrideRejectsMalformedValues(t *testing.T) {
+	for _, value := range []string{"", " lab/key", "lab/key\r\nX-Evil: yes", strings.Repeat("x", 257)} {
+		t.Run(fmt.Sprintf("value-%d", len(value)), func(t *testing.T) {
+			req := newGBRequest(sip.INVITE, "device", "channel")
+			req.AppendHeader(sip.NewHeader(labStreamKeyHeader, value))
+			req.SetSource("127.0.0.1:5060")
+			if got := inboundStreamKey(req, "gb28181", "channel"); got != "gb28181/channel" {
+				t.Fatalf("malformed stream key = %q, want default key", got)
+			}
+		})
+	}
+}
+
 func digestResponse(username, realm, password, method, uri, nonce string) string {
 	hash := func(value string) string {
 		sum := md5.Sum([]byte(value))
