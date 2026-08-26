@@ -121,6 +121,36 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 	}
 }
 
+func TestWHEPFeedReadersWakeIndependently(t *testing.T) {
+	stream := core.NewStream("live/whep-independent-wake", config.StreamConfig{
+		RingBufferSize: 16,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	r1 := newWHEPFeedReaders(stream, 0, 0, false, 0)
+	r2 := newWHEPFeedReaders(stream, 0, 0, false, 0)
+	defer r1.Close()
+	defer r2.Close()
+
+	done := make(chan struct{})
+	woke1 := make(chan bool, 1)
+	woke2 := make(chan bool, 1)
+	go func() { woke1 <- r1.wait(done) }()
+	go func() { woke2 <- r2.wait(done) }()
+	time.Sleep(20 * time.Millisecond)
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 1, 1, []byte{1}))
+
+	for i, woke := range []<-chan bool{woke1, woke2} {
+		select {
+		case ok := <-woke:
+			if !ok {
+				t.Fatalf("reader %d wait returned false after write", i+1)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("reader %d did not wake after one source write", i+1)
+		}
+	}
+	close(done)
+}
+
 func TestWHEPInitialKeyframeGateRequiresSentCachedKeyframe(t *testing.T) {
 	if whepInitialKeyframeReady("live", false) {
 		t.Fatal("live mode bypassed keyframe gate without sending a cached keyframe")

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // ErrCodecMismatch is returned when remote node rejects all offered codecs.
@@ -18,19 +19,25 @@ var ErrCodecMismatch = errors.New("codec mismatch: remote rejected all offered c
 type relayObservationContextKey struct{}
 
 type relayObservation struct {
-	started   time.Time
-	metrics   *RelayMetrics
-	direction string
-	protocol  string
-	connected atomic.Bool
+	started      time.Time
+	metrics      *RelayMetrics
+	bytesTotal   prometheus.Counter
+	direction    string
+	protocol     string
+	connected    atomic.Bool
+	firstFlush   atomic.Bool
+	pendingBytes atomic.Int64
 }
+
+const relayMetricsFlushBytes int64 = 64 * 1024
 
 func observeRelay(ctx context.Context, metrics *RelayMetrics, direction, protocol string) context.Context {
 	observation := &relayObservation{
-		started:   time.Now(),
-		metrics:   metrics,
-		direction: direction,
-		protocol:  protocol,
+		started:    time.Now(),
+		metrics:    metrics,
+		bytesTotal: metrics.bytesCounter(direction, protocol),
+		direction:  direction,
+		protocol:   protocol,
 	}
 	return context.WithValue(ctx, relayObservationContextKey{}, observation)
 }
@@ -40,7 +47,35 @@ func recordRelayBytes(ctx context.Context, count int64) {
 		return
 	}
 	if observation, ok := ctx.Value(relayObservationContextKey{}).(*relayObservation); ok {
-		observation.metrics.recordBytes(observation.direction, observation.protocol, count)
+		observation.recordBytes(count)
+	}
+}
+
+func (o *relayObservation) recordBytes(count int64) {
+	if o == nil || o.bytesTotal == nil || count <= 0 {
+		return
+	}
+	if o.firstFlush.CompareAndSwap(false, true) {
+		o.bytesTotal.Add(float64(count))
+		return
+	}
+	if o.pendingBytes.Add(count) >= relayMetricsFlushBytes {
+		o.flushBytes()
+	}
+}
+
+func (o *relayObservation) flushBytes() {
+	if o == nil || o.bytesTotal == nil {
+		return
+	}
+	if pending := o.pendingBytes.Swap(0); pending > 0 {
+		o.bytesTotal.Add(float64(pending))
+	}
+}
+
+func flushRelayBytes(ctx context.Context) {
+	if observation, ok := ctx.Value(relayObservationContextKey{}).(*relayObservation); ok {
+		observation.flushBytes()
 	}
 }
 

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -125,5 +126,24 @@ func TestRelayMetricsPacketLoss(t *testing.T) {
 	`
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "cluster_rtp_packet_loss_ratio"); err != nil {
 		t.Errorf("packet loss mismatch: %v", err)
+	}
+}
+
+func TestRelayObservationBatchesBytesUntilFlush(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewRelayMetricsWithRegistry(reg)
+	ctx := observeRelay(context.Background(), m, relayDirectionForward, "rtmp")
+
+	recordRelayBytes(ctx, 1024)
+	if got := testutil.ToFloat64(m.bytesTotal.WithLabelValues(relayDirectionForward, "rtmp")); got != 1024 {
+		t.Fatalf("first relay bytes = %v, want 1024", got)
+	}
+	recordRelayBytes(ctx, 1024)
+	if got := testutil.ToFloat64(m.bytesTotal.WithLabelValues(relayDirectionForward, "rtmp")); got != 1024 {
+		t.Fatalf("unflushed relay bytes = %v, want 1024", got)
+	}
+	flushRelayBytes(ctx)
+	if got := testutil.ToFloat64(m.bytesTotal.WithLabelValues(relayDirectionForward, "rtmp")); got != 2048 {
+		t.Fatalf("flushed relay bytes = %v, want 2048", got)
 	}
 }

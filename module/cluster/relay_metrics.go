@@ -111,6 +111,13 @@ func (m *RelayMetrics) recordBytes(direction, protocol string, bytes int64) {
 	m.bytesTotal.WithLabelValues(direction, protocol).Add(float64(bytes))
 }
 
+func (m *RelayMetrics) bytesCounter(direction, protocol string) prometheus.Counter {
+	if m == nil {
+		return nil
+	}
+	return m.bytesTotal.WithLabelValues(direction, protocol)
+}
+
 // RecordPush records bytes forwarded and any errors for a push (forward)
 // operation.
 func (m *RelayMetrics) RecordPush(protocol string, bytes int64, err error) {

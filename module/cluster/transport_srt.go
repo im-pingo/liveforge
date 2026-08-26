@@ -50,23 +50,9 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 	var muxer *ts.Muxer
 	reader := stream.RingBuffer().NewReader()
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		frame, ok := reader.TryRead()
+		frame, ok := reader.ReadContext(ctx)
 		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-stream.RingBuffer().Signal():
-			}
-			continue
+			return nil
 		}
 
 		// Lazily create the muxer once we see a keyframe (seq headers are set by then).

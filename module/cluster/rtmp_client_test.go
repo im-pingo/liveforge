@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -259,5 +260,50 @@ func TestBuildRTMPPayloadAudio(t *testing.T) {
 	}
 	if payload == nil {
 		t.Fatal("expected non-nil payload")
+	}
+}
+
+func TestRTMPConnBuildMediaPayloadReusesEncodingState(t *testing.T) {
+	rc := &rtmpConn{muxer: flvpkg.NewMuxer()}
+	frame := &avframe.AVFrame{
+		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
+		FrameType: avframe.FrameTypeKeyframe,
+		DTS:       100,
+		PTS:       100,
+		Payload:   []byte{0x65, 0x01, 0x02},
+	}
+
+	first, err := rc.buildMediaPayload(frame)
+	if err != nil {
+		t.Fatalf("first buildMediaPayload: %v", err)
+	}
+	want := append([]byte(nil), first...)
+	second, err := rc.buildMediaPayload(frame)
+	if err != nil {
+		t.Fatalf("second buildMediaPayload: %v", err)
+	}
+	if !bytes.Equal(first, second) || !bytes.Equal(second, want) {
+		t.Fatalf("reused payload changed: first=%x second=%x want=%x", first, second, want)
+	}
+}
+
+func BenchmarkRTMPConnBuildMediaPayload(b *testing.B) {
+	rc := &rtmpConn{muxer: flvpkg.NewMuxer()}
+	frame := &avframe.AVFrame{
+		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
+		FrameType: avframe.FrameTypeInterframe,
+		DTS:       100,
+		PTS:       100,
+		Payload:   make([]byte, 1200),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		payload, err := rc.buildMediaPayload(frame)
+		if err != nil || len(payload) == 0 {
+			b.Fatal("buildMediaPayload failed")
+		}
 	}
 }

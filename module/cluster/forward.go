@@ -107,6 +107,7 @@ func (ft *ForwardTarget) Run() {
 		relayCtx := observeRelay(ctx, ft.metrics, relayDirectionForward, protocol)
 		ft.metrics.RelayStarted(relayDirectionForward, protocol)
 		err := ft.transport.Push(relayCtx, ft.targetURL, ft.stream)
+		flushRelayBytes(relayCtx)
 		ft.mu.Lock()
 		ft.attemptActive = false
 		ft.mu.Unlock()

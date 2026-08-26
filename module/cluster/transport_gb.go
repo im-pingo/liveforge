@@ -131,23 +131,9 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 
 	reader := stream.RingBuffer().NewReader()
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		frame, ok := reader.TryRead()
+		frame, ok := reader.ReadContext(ctx)
 		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-stream.RingBuffer().Signal():
-			}
-			continue
+			return nil
 		}
 
 		if err := t.sendPSFrameObserved(ctx, conn, muxer, frame, &seq, &ts, ssrc); err != nil {
@@ -458,13 +444,9 @@ func (t *GBTransport) sendPull(stream *core.Stream, remoteAddr string, remotePor
 
 	reader := stream.RingBuffer().NewReader()
 	for {
-		frame, ok := reader.TryRead()
+		frame, ok := reader.Read()
 		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				return
-			}
-			<-stream.RingBuffer().Signal()
-			continue
+			return
 		}
 
 		if err := sendFrame(frame); err != nil {

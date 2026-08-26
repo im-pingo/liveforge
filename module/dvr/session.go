@@ -167,6 +167,15 @@ func (s *Session) Run() {
 		return
 	}
 	defer s.finish()
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	defer cancelRead()
+	go func() {
+		select {
+		case <-s.done:
+			cancelRead()
+		case <-readCtx.Done():
+		}
+	}()
 
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
 		s.videoSeq = append([]byte(nil), vsh.Payload...)
@@ -178,26 +187,11 @@ func (s *Session) Run() {
 	}
 
 	for {
-		select {
-		case <-s.done:
-			return
-		default:
-		}
-		frame, ok := s.reader.TryRead()
-		if ok {
-			s.processFrame(frame)
-			continue
-		}
-
-		if s.stream.RingBuffer().IsClosed() {
+		frame, ok := s.reader.ReadContext(readCtx)
+		if !ok {
 			return
 		}
-
-		select {
-		case <-s.done:
-			return
-		case <-s.stream.RingBuffer().Signal():
-		}
+		s.processFrame(frame)
 	}
 }
 

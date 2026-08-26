@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 )
 
 // WriteInterleaved writes an RTP/RTCP packet using RTSP TCP interleaved framing.
@@ -12,10 +13,7 @@ import (
 func WriteInterleaved(w io.Writer, channel uint8, data []byte) error {
 	header := [4]byte{'$', channel, 0, 0}
 	binary.BigEndian.PutUint16(header[2:], uint16(len(data)))
-	if _, err := w.Write(header[:]); err != nil {
-		return err
-	}
-	_, err := w.Write(data)
+	_, err := (&net.Buffers{header[:], data}).WriteTo(w)
 	return err
 }
 

@@ -1,6 +1,7 @@
 package record
 
 import (
+	"context"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -104,6 +105,15 @@ func (s *RecordSession) WaitUntil(deadline time.Time) bool {
 }
 
 func (s *RecordSession) run() error {
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	defer cancelRead()
+	go func() {
+		select {
+		case <-s.done:
+			cancelRead()
+		case <-readCtx.Done():
+		}
+	}()
 
 	// Write sequence headers first if available
 	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
@@ -120,26 +130,13 @@ func (s *RecordSession) run() error {
 	}
 
 	for {
-		select {
-		case <-s.done:
+		frame, ok := s.reader.ReadContext(readCtx)
+		if !ok {
 			return nil
-		default:
 		}
-		// Non-blocking read + done check to allow clean shutdown
-		frame, ok := s.reader.TryRead()
-		if ok {
-			if err := s.writer.WriteFrame(frame); err != nil {
-				slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
-				return err
-			}
-			continue
-		}
-
-		// No data available — wait for signal or done
-		select {
-		case <-s.done:
-			return nil
-		case <-s.stream.RingBuffer().Signal():
+		if err := s.writer.WriteFrame(frame); err != nil {
+			slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
+			return err
 		}
 	}
 }

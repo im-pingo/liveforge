@@ -315,27 +315,24 @@ func (cs *CallSession) sendLoop() {
 	defer stream.RemoveSubscriber("sipgateway")
 
 	reader := stream.RingBuffer().NewReader()
-	rb := stream.RingBuffer()
-
-	for {
+	readCtx, cancelRead := context.WithCancel(context.Background())
+	defer cancelRead()
+	go func() {
 		select {
 		case <-cs.closed:
-			return
-		default:
+			cancelRead()
+		case <-readCtx.Done():
 		}
+	}()
 
-		frame, ok := reader.TryRead()
+	for {
+		frame, ok := reader.ReadContext(readCtx)
 		if !ok {
-			if rb.IsClosed() {
+			if stream.RingBuffer().IsClosed() {
 				cs.ended()
 				return
 			}
-			select {
-			case <-cs.closed:
-				return
-			case <-rb.Signal():
-			}
-			continue
+			return
 		}
 
 		if frame.MediaType != avframe.MediaTypeAudio {

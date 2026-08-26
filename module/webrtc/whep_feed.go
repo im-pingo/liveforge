@@ -1,7 +1,9 @@
 package webrtc
 
 import (
+	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
@@ -374,9 +376,14 @@ func whepLiveSnapshot(stream *core.Stream, needsTranscode bool) ([]*avframe.AVFr
 }
 
 type whepFeedReaders struct {
-	source      *util.RingReader[*avframe.AVFrame]
-	targetAudio *util.RingReader[*avframe.AVFrame]
-	release     func()
+	source       *util.RingReader[*avframe.AVFrame]
+	targetAudio  *util.RingReader[*avframe.AVFrame]
+	release      func()
+	waitOnce     sync.Once
+	waitCancel   context.CancelFunc
+	sourceWake   chan struct{}
+	audioWake    chan struct{}
+	sourceClosed chan struct{}
 }
 
 func newWHEPFeedReaders(stream *core.Stream, startPos, transcodeStart int64, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
@@ -396,6 +403,9 @@ func newWHEPFeedReaders(stream *core.Stream, startPos, transcodeStart int64, nee
 }
 
 func (r *whepFeedReaders) Close() {
+	if r.waitCancel != nil {
+		r.waitCancel()
+	}
 	if r.release != nil {
 		r.release()
 	}
@@ -416,21 +426,52 @@ func (r *whepFeedReaders) drainTargetAudio(ready bool, targetCodec avframe.Codec
 	}
 }
 
-func (r *whepFeedReaders) wait(done <-chan struct{}) bool {
-	if r.targetAudio == nil {
+func (r *whepFeedReaders) startWaiters(done <-chan struct{}) {
+	r.waitOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		r.waitCancel = cancel
+		r.sourceWake = make(chan struct{}, 1)
+		r.sourceClosed = make(chan struct{})
+		go watchWHEPReader(ctx, r.source, r.sourceWake, r.sourceClosed)
+		if r.targetAudio != nil {
+			r.audioWake = make(chan struct{}, 1)
+			go watchWHEPReader(ctx, r.targetAudio, r.audioWake, nil)
+		}
+		go func() {
+			select {
+			case <-done:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	})
+}
+
+func watchWHEPReader(ctx context.Context, reader *util.RingReader[*avframe.AVFrame], wake chan<- struct{}, closed chan<- struct{}) {
+	defer func() {
+		if closed != nil {
+			close(closed)
+		}
+	}()
+	for reader.WaitContext(ctx) {
 		select {
-		case <-done:
-			return false
-		case <-r.source.Signal():
-			return true
+		case wake <- struct{}{}:
+		case <-ctx.Done():
+			return
 		}
 	}
+}
+
+func (r *whepFeedReaders) wait(done <-chan struct{}) bool {
+	r.startWaiters(done)
 	select {
 	case <-done:
 		return false
-	case <-r.source.Signal():
+	case <-r.sourceClosed:
+		return false
+	case <-r.sourceWake:
 		return true
-	case <-r.targetAudio.Signal():
+	case <-r.audioWake:
 		return true
 	}
 }

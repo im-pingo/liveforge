@@ -23,9 +23,11 @@ const (
 
 // rtmpConn wraps a net.Conn with RTMP chunk reader/writer.
 type rtmpConn struct {
-	conn net.Conn
-	cr   *rtmp.ChunkReader
-	cw   *rtmp.ChunkWriter
+	conn   net.Conn
+	cr     *rtmp.ChunkReader
+	cw     *rtmp.ChunkWriter
+	flvBuf bytes.Buffer
+	muxer  *flvpkg.Muxer
 }
 
 // dialRTMP connects to an RTMP server, performs the handshake,
@@ -42,9 +44,10 @@ func dialRTMP(addr string) (*rtmpConn, error) {
 	}
 
 	return &rtmpConn{
-		conn: conn,
-		cr:   rtmp.NewChunkReader(conn, rtmp.DefaultChunkSize),
-		cw:   rtmp.NewChunkWriter(conn, rtmp.DefaultChunkSize),
+		conn:  conn,
+		cr:    rtmp.NewChunkReader(conn, rtmp.DefaultChunkSize),
+		cw:    rtmp.NewChunkWriter(conn, rtmp.DefaultChunkSize),
+		muxer: flvpkg.NewMuxer(),
 	}, nil
 }
 
@@ -227,7 +230,7 @@ func (rc *rtmpConn) setChunkSize(size int) error {
 
 // sendMediaFrame sends an AVFrame as an RTMP media message.
 func (rc *rtmpConn) sendMediaFrame(frame *avframe.AVFrame) error {
-	payload, err := buildRTMPPayload(frame)
+	payload, err := rc.buildMediaPayload(frame)
 	if err != nil || payload == nil {
 		return err
 	}
@@ -246,6 +249,30 @@ func (rc *rtmpConn) sendMediaFrame(frame *avframe.AVFrame) error {
 		StreamID:  1,
 		Payload:   payload,
 	})
+}
+
+// buildMediaPayload encodes a frame into a reusable FLV tag buffer and
+// returns the tag body. The returned slice is valid until the next call; the
+// chunk writer consumes it synchronously before the buffer is reused.
+func (rc *rtmpConn) buildMediaPayload(frame *avframe.AVFrame) ([]byte, error) {
+	if rc.muxer == nil {
+		rc.muxer = flvpkg.NewMuxer()
+	}
+	rc.flvBuf.Reset()
+	if err := rc.muxer.WriteFrame(&rc.flvBuf, frame); err != nil {
+		return nil, err
+	}
+
+	tagData := rc.flvBuf.Bytes()
+	if len(tagData) < flvpkg.TagHeaderSize+4 {
+		return nil, nil
+	}
+
+	dataSize := len(tagData) - flvpkg.TagHeaderSize - 4
+	if dataSize <= 0 {
+		return nil, nil
+	}
+	return tagData[flvpkg.TagHeaderSize : flvpkg.TagHeaderSize+dataSize], nil
 }
 
 // buildRTMPPayload converts an AVFrame to RTMP FLV tag body (without tag header).
