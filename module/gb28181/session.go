@@ -18,7 +18,7 @@ var (
 	ErrLabDuplicateIdentity = errors.New("GB28181 lab identity is already active")
 	// ErrLabSessionNotFound indicates that a lab session does not exist.
 	ErrLabSessionNotFound = errors.New("GB28181 lab session not found")
-	// ErrLabManagerUnimplemented indicates that the transport-backed manager is not wired yet.
+	// ErrLabManagerUnimplemented indicates that a standalone manager has no transport to attach to.
 	ErrLabManagerUnimplemented = errors.New("GB28181 lab manager is not implemented")
 )
 
@@ -89,7 +89,7 @@ type LabManager interface {
 
 type contractLabManager struct{}
 
-// NewLabManager returns the contract-only manager until GB28181 transport is wired.
+// NewLabManager returns the contract-only manager; an initialized Module owns the transport-backed manager.
 func NewLabManager() LabManager { return contractLabManager{} }
 
 func (contractLabManager) Start(_ context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
@@ -98,7 +98,7 @@ func (contractLabManager) Start(_ context.Context, request LabSessionRequest) (L
 	}
 	if strings.TrimSpace(request.DeviceID) == "" ||
 		strings.TrimSpace(request.ChannelID) == "" ||
-		strings.TrimSpace(request.StreamKey) == "" {
+		!validGBLabStreamKey(request.StreamKey) {
 		return LabSessionSnapshot{}, ErrLabInvalidRequest
 	}
 	return LabSessionSnapshot{}, ErrLabManagerUnimplemented

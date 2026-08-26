@@ -8,7 +8,7 @@
 
 LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-All previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection and persistent GB28181 protocol-lab transport. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP persistent fake-device publish/receive signaling and RTP/RTCP loopback is implemented and verified at the gateway provider; GB28181 persistent fake-device signaling/media remains under implementation and is not a supported capability yet.
+All previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
 
@@ -50,7 +50,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - Audit metadata removes keys containing token, secret, password, or authorization.
 - Permission-aware console tabs, in order: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. Visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security); Config/Security are not peer video-stream tabs. Actions are enabled only for the active role.
 - Config exposes the complete redacted effective/desired YAML document, retains raw source comments/unmapped fields, embeds and displays the complete versioned JSON Schema, and supports source details, writable state, Validate, and Apply & Refresh. `config:read` is available to viewers; `config:reload` is limited to operators/admins. File, HTTP/HTTPS, Consul, and Redis source writers are covered by source-specific tests; read-only sources return 409.
-- SIP and GB28181 console pages expose fast local self-tests at `GET /api/v1/sipgateway/test` and `GET /api/v1/gb28181/test`, with no remote platform dependency. SIP fake-peer checks REGISTER/401/digest, INVITE/200/ACK/BYE, rejection/timeout, RTP, and RTCP; GB28181 fake-device checks REGISTER, Keepalive, Catalog, PS INVITE/SDP/ACK/BYE, rejection/timeout, PS/RTP, and RTCP. SIP persistent publish/receive sessions are now implemented behind the gateway provider; GB28181 persistent sessions remain under implementation and are intentionally unavailable.
+- SIP and GB28181 console pages expose fast local self-tests at `GET /api/v1/sipgateway/test` and `GET /api/v1/gb28181/test`, with no remote platform dependency. SIP fake-peer checks REGISTER/401/digest, INVITE/200/ACK/BYE, rejection/timeout, RTP, and RTCP; GB28181 fake-device checks REGISTER, Keepalive, Catalog, PS INVITE/SDP/ACK/BYE, rejection/timeout, PS/RTP, and RTCP. Both providers also expose persistent publish/receive fake-device sessions with loopback signaling/media, deterministic media counters, duplicate-identity rejection, idempotent stop, and socket/dialog/goroutine cleanup. GB28181 persistent availability is claimed only after `go test ./module/gb28181 -run 'Lab|SelfTest' -v` and its race variant pass.
 - TLS API listeners set `Secure` on the HttpOnly, SameSite=Strict `lf_session` cookie; plain HTTP development listeners leave it unset.
 - Redacted runtime config, security, cluster relay/peer, call, recording, storage, DVR, and audit status.
 
@@ -108,7 +108,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | WHIP H.265 + Opus eight-protocol browser playback | Codec-specific Annex-B tests, atomic WHEP Live snapshot test, and `docs/recipes/whip-h265-opus-playback.md` |
 | Storage recording availability and unified fMP4 playback | `module/record/record_test.go`, `module/api/recording_test.go`, and `RecordingStatusResponse` contract |
 | Config document/schema/validate/apply and five runtime sources | `module/api/config_api_test.go`, `config/runtime/source_test.go`, and `docs/recipes/runtime-config-sources.md` |
-| SIP/GB28181 fast self-tests and RBAC | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, and `docs/recipes/protocol-test-lab.md`; SIP persistent provider loopback is covered by `module/sipgateway/lab_test.go`, while GB28181 persistent sessions remain under implementation |
+| SIP/GB28181 fast self-tests and persistent provider labs | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, `module/sipgateway/lab_test.go`, `module/gb28181/lab_test.go`, and `docs/recipes/protocol-test-lab.md` |
 
 ## Operations Documentation
 

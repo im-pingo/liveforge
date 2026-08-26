@@ -25,6 +25,8 @@ type handler struct {
 	auth     *sipmod.DigestAuth
 }
 
+const labStreamKeyHeader = "X-LiveForge-Lab-Stream-Key"
+
 func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 	from := req.From()
 	if from == nil {
@@ -98,7 +100,7 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	remotePort := parseSDPPort(string(body))
 	remoteIP := extractIP(req.Source())
-	streamKey := fmt.Sprintf("%s/%s", h.prefix, channelID)
+	streamKey := inboundStreamKey(req, h.prefix, channelID)
 	publishCtx := sipPublishContext(req, streamKey, "")
 	if err := h.bus.EmitSync(core.EventPublish, publishCtx); err != nil {
 		resp := sip.NewResponseFromRequest(req, 403, "Forbidden", nil)
@@ -204,6 +206,28 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	slog.Info("invite accepted", "module", "gb28181",
 		"device", deviceID, "channel", channelID,
 		"stream", streamKey, "local_port", rtpPort)
+}
+
+func inboundStreamKey(req *sip.Request, prefix, channelID string) string {
+	defaultKey := fmt.Sprintf("%s/%s", prefix, channelID)
+	if req == nil || !isLoopbackSIPSource(req.Source()) {
+		return defaultKey
+	}
+	header := req.GetHeader(labStreamKeyHeader)
+	if header == nil || !validGBLabStreamKey(header.Value()) {
+		return defaultKey
+	}
+	return header.Value()
+}
+
+func isLoopbackSIPSource(source string) bool {
+	host := source
+	if parsedHost, _, err := net.SplitHostPort(source); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (h *handler) handleBye(req *sip.Request, tx sip.ServerTransaction) {

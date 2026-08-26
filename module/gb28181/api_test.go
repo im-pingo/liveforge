@@ -9,7 +9,6 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
-	apiModule "github.com/im-pingo/liveforge/module/api"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
@@ -17,14 +16,16 @@ func TestChannelLiveAndPlaybackDeleteRoutesReachHandlers(t *testing.T) {
 	server := core.NewServer(config.Defaults())
 	module := &Module{sessions: NewSessionManager()}
 	registerAPI(server, module)
-	mux := http.NewServeMux()
-	apiModule.RegisterRoutes(mux, server)
+	handler := server.APIHandlers()["DELETE "+apiPrefix+"/channels/"]
+	if handler == nil {
+		t.Fatal("DELETE channel API handler was not registered")
+	}
 
 	for _, action := range []string{"play", "playback"} {
 		t.Run(action, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodDelete, apiPrefix+"/channels/channel-1/"+action, nil)
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
+			handler.ServeHTTP(w, req)
 			if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "no active session for channel") {
 				t.Fatalf("DELETE %s status=%d body=%q; handler was not reached", action, w.Code, w.Body.String())
 			}
@@ -40,10 +41,12 @@ func TestSelfTestRouteReturnsLocalProtocolReport(t *testing.T) {
 	server := core.NewServer(config.Defaults())
 	module := &Module{handler: &handler{ports: ports}}
 	registerAPI(server, module)
-	mux := http.NewServeMux()
-	apiModule.RegisterRoutes(mux, server)
+	handler := server.APIHandlers()["GET "+apiPrefix+"/test"]
+	if handler == nil {
+		t.Fatal("self-test API handler was not registered")
+	}
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, apiPrefix+"/test", nil))
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, apiPrefix+"/test", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}

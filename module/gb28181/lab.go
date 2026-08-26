@@ -1,0 +1,923 @@
+package gb28181
+
+import (
+	"context"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"net"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/emiago/sipgo"
+	"github.com/emiago/sipgo/sip"
+	"github.com/google/uuid"
+	"github.com/im-pingo/liveforge/core"
+	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/ps"
+	"github.com/pion/rtcp"
+	pionrtp "github.com/pion/rtp/v2"
+)
+
+const (
+	labRTPPayloadType = 96
+	labSSRC           = 0x4c464742
+	labMTU            = 1200
+)
+
+type labManager struct {
+	mu         sync.RWMutex
+	module     *Module
+	sessions   map[string]*gbLabSession
+	identities map[string]string
+}
+
+func newLabManager(module *Module) *labManager {
+	return &labManager{
+		module:     module,
+		sessions:   make(map[string]*gbLabSession),
+		identities: make(map[string]string),
+	}
+}
+
+func (m *labManager) Start(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if err := validateGBLabRequest(request); err != nil {
+		return LabSessionSnapshot{}, err
+	}
+	identity := request.DeviceID
+	m.mu.Lock()
+	if existingID := m.identities[identity]; existingID != "" {
+		if existing := m.sessions[existingID]; existing != nil && existing.isReserved() {
+			m.mu.Unlock()
+			return LabSessionSnapshot{}, ErrLabDuplicateIdentity
+		}
+		delete(m.identities, identity)
+	}
+	id := uuid.NewString()
+	session := newGBLabSession(id, identity, request, m.module)
+	m.sessions[id] = session
+	m.identities[identity] = id
+	m.mu.Unlock()
+
+	if err := session.start(ctx); err != nil {
+		session.fail(err)
+		m.mu.Lock()
+		if m.identities[identity] == id {
+			delete(m.identities, identity)
+		}
+		m.mu.Unlock()
+		return session.snapshot(), err
+	}
+	return session.snapshot(), nil
+}
+
+func (m *labManager) List() []LabSessionSnapshot {
+	m.mu.RLock()
+	result := make([]LabSessionSnapshot, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		result = append(result, session.snapshot())
+	}
+	m.mu.RUnlock()
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func (m *labManager) Stop(id string) error {
+	m.mu.RLock()
+	session := m.sessions[id]
+	m.mu.RUnlock()
+	if session == nil {
+		return ErrLabSessionNotFound
+	}
+	if err := session.stop(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.identities[session.identity] == id {
+		delete(m.identities, session.identity)
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *labManager) closeAll() {
+	m.mu.RLock()
+	sessions := make([]*gbLabSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.RUnlock()
+	for _, session := range sessions {
+		_ = session.stop()
+	}
+}
+
+func validateGBLabRequest(request LabSessionRequest) error {
+	if request.Mode != LabModePublish && request.Mode != LabModeReceive {
+		return ErrLabInvalidRequest
+	}
+	if !validGBLabIdentity(request.DeviceID) || !validGBLabIdentity(request.ChannelID) || !validGBLabStreamKey(request.StreamKey) {
+		return ErrLabInvalidRequest
+	}
+	return nil
+}
+
+func validGBLabStreamKey(value string) bool {
+	if value == "" || len(value) > 256 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x21 || char > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func validGBLabIdentity(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune("-_.,", char) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+type gbLabSession struct {
+	mu       sync.RWMutex
+	id       string
+	identity string
+	request  LabSessionRequest
+	module   *Module
+
+	state     LabSessionState
+	direction LabDirection
+	startedAt time.Time
+	updatedAt time.Time
+	lastMedia time.Time
+	stoppedAt time.Time
+	closeErr  error
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	startDone   chan struct{}
+	stopDone    chan struct{}
+	stopOnce    sync.Once
+	cleanupOnce sync.Once
+	stopRequest bool
+	mediaWG     sync.WaitGroup
+
+	client     *sipgo.Client
+	ua         *sipgo.UserAgent
+	peer       *sipgo.Server
+	peerConn   net.PacketConn
+	peerCancel context.CancelFunc
+	peerDone   chan struct{}
+
+	inviteRequest  *sip.Request
+	inviteResponse *sip.Response
+	inviteTx       *sipmod.InviteTransaction
+	callID         string
+
+	rtpConn   *net.UDPConn
+	rtcpConn  *net.UDPConn
+	mediaSend *net.UDPConn
+
+	rtpPacketsSent  atomic.Uint64
+	rtpPacketsRecv  atomic.Uint64
+	rtpBytesSent    atomic.Uint64
+	rtpBytesRecv    atomic.Uint64
+	rtcpPacketsSent atomic.Uint64
+	rtcpPacketsRecv atomic.Uint64
+	psFramesSent    atomic.Uint64
+	psFramesRecv    atomic.Uint64
+	catalogSent     atomic.Bool
+}
+
+func newGBLabSession(id, identity string, request LabSessionRequest, module *Module) *gbLabSession {
+	now := time.Now().UTC()
+	ctx, cancel := context.WithCancel(context.Background())
+	direction := LabDirectionInbound
+	if request.Mode == LabModeReceive {
+		direction = LabDirectionOutbound
+	}
+	return &gbLabSession{
+		id:        id,
+		identity:  identity,
+		request:   request,
+		module:    module,
+		state:     LabSessionStateStarting,
+		direction: direction,
+		startedAt: now,
+		updatedAt: now,
+		ctx:       ctx,
+		cancel:    cancel,
+		startDone: make(chan struct{}),
+		stopDone:  make(chan struct{}),
+	}
+}
+
+func (s *gbLabSession) isReserved() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state == LabSessionStateStarting || s.state == LabSessionStateActive
+}
+
+func (s *gbLabSession) start(caller context.Context) error {
+	defer close(s.startDone)
+	if caller == nil {
+		return ErrLabInvalidRequest
+	}
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	ctx, release := s.protocolContext(caller)
+	defer release()
+	if s.request.Mode == LabModePublish {
+		return s.startPublish(ctx)
+	}
+	return s.startReceive(ctx)
+}
+
+func (s *gbLabSession) protocolContext(caller context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(caller)
+	stopWatch := context.AfterFunc(s.ctx, cancel)
+	return ctx, func() {
+		stopWatch()
+		cancel()
+	}
+}
+
+func (s *gbLabSession) startPublish(ctx context.Context) error {
+	if err := s.openMediaPair(); err != nil {
+		return err
+	}
+	if err := s.openClient(); err != nil {
+		return err
+	}
+	serverHost, serverPort, err := sipAddress(s.module.sipService.LocalAddr())
+	if err != nil {
+		return err
+	}
+	if _, err := s.register(ctx, serverHost, serverPort); err != nil {
+		return err
+	}
+	if err := s.sendKeepalive(ctx, serverHost, serverPort); err != nil {
+		return err
+	}
+	if err := s.sendCatalog(ctx, serverHost, serverPort); err != nil {
+		return err
+	}
+
+	callID := uuid.NewString()
+	invite := newGBLabRequest(sip.INVITE, sip.Uri{Scheme: "sip", User: s.request.ChannelID, Host: serverHost, Port: serverPort}, s.request.DeviceID, s.module.sipService.Domain(), callID)
+	invite.SetBody(buildGBLabSDP(s.rtpConn.LocalAddr().(*net.UDPAddr).Port, "sendonly"))
+	invite.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	invite.AppendHeader(sip.NewHeader(labStreamKeyHeader, s.request.StreamKey))
+	invite.SetTransport("udp")
+	s.mu.Lock()
+	s.callID = callID
+	s.mu.Unlock()
+	response, err := sendGBLabInvite(ctx, s.client, invite)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.inviteRequest, s.inviteResponse = invite, response
+	s.mu.Unlock()
+	if err := sendGBLabACK(ctx, s.client, invite, response); err != nil {
+		return err
+	}
+	remotePort := parseSDPPort(string(response.Body()))
+	if remotePort <= 0 {
+		return errors.New("GB28181 lab INVITE answer has no RTP port")
+	}
+	s.setState(LabSessionStateActive)
+	s.mediaWG.Add(1)
+	go s.publishMediaLoop(remotePort)
+	return nil
+}
+
+func (s *gbLabSession) startReceive(ctx context.Context) error {
+	stream, ok := s.module.handler.hub.Find(s.request.StreamKey)
+	if !ok || stream.Publisher() == nil {
+		return fmt.Errorf("%w: receive stream %q", ErrLabInvalidRequest, s.request.StreamKey)
+	}
+	if err := s.openMediaPair(); err != nil {
+		return err
+	}
+	mediaSend, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.mediaSend = mediaSend
+	s.mu.Unlock()
+	if err := s.openPeer(); err != nil {
+		return err
+	}
+	if err := s.openClient(); err != nil {
+		return err
+	}
+	serverHost, serverPort, err := sipAddress(s.module.sipService.LocalAddr())
+	if err != nil {
+		return err
+	}
+	if _, err := s.register(ctx, serverHost, serverPort); err != nil {
+		return err
+	}
+	// REGISTER proves the real device path. The GB handler records the source
+	// address, while a SIP endpoint may advertise a separate Contact address.
+	s.module.registry.Register(s.request.DeviceID, s.peerConn.LocalAddr().String(), "udp")
+	if err := s.sendKeepalive(ctx, serverHost, serverPort); err != nil {
+		return err
+	}
+	if err := s.sendCatalog(ctx, serverHost, serverPort); err != nil {
+		return err
+	}
+
+	callID := uuid.NewString()
+	inviteto := sip.Uri{Scheme: "sip", User: s.request.ChannelID, Host: s.peerConn.LocalAddr().(*net.UDPAddr).IP.String(), Port: s.peerConn.LocalAddr().(*net.UDPAddr).Port}
+	invite := newGBLabRequest(sip.INVITE, inviteto, s.module.sipService.ServerID(), s.module.sipService.Domain(), callID)
+	invite.SetBody(buildGBLabSDP(s.rtpConn.LocalAddr().(*net.UDPAddr).Port, "sendonly"))
+	invite.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	invite.SetTransport("udp")
+	tx, err := s.module.sipService.SendInvite(ctx, invite)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-tx.Done():
+	case <-ctx.Done():
+		tx.Close()
+		return ctx.Err()
+	}
+	response := tx.Response()
+	if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		tx.Close()
+		return errors.New("GB28181 lab receive INVITE was rejected")
+	}
+	if err := tx.SendACK(ctx); err != nil {
+		tx.Close()
+		return err
+	}
+	s.mu.Lock()
+	s.callID, s.inviteRequest, s.inviteResponse, s.inviteTx = callID, invite, response, tx
+	s.mu.Unlock()
+	s.setState(LabSessionStateActive)
+	s.mediaWG.Add(3)
+	go s.receiveMediaLoop()
+	go s.receiveRTCPLoop()
+	go s.sendSourceLoop(stream)
+	return nil
+}
+
+func (s *gbLabSession) openMediaPair() error {
+	rtpConn, rtcpConn, err := listenGBLabUDPPair()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.rtpConn, s.rtcpConn = rtpConn, rtcpConn
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *gbLabSession) openClient() error {
+	ua, err := sipgo.NewUA(sipgo.WithUserAgentHostname("gb-lab.local"))
+	if err != nil {
+		return err
+	}
+	client, err := sipgo.NewClient(ua, sipgo.WithClientConnectionAddr("127.0.0.1:0"))
+	if err != nil {
+		_ = ua.Close()
+		return err
+	}
+	s.mu.Lock()
+	s.ua, s.client = ua, client
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *gbLabSession) openPeer() error {
+	ua, err := sipgo.NewUA(sipgo.WithUserAgentHostname("gb-lab.local"))
+	if err != nil {
+		return err
+	}
+	peer, err := sipgo.NewServer(ua)
+	if err != nil {
+		_ = ua.Close()
+		return err
+	}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		_ = ua.Close()
+		return err
+	}
+	peer.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
+		if req.From() == nil || req.From().Address.User == "" || req.To() == nil || req.To().Address.User != s.request.ChannelID || len(req.Body()) == 0 {
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 400, "Bad Request", nil))
+			return
+		}
+		response := sip.NewResponseFromRequest(req, 200, "OK", buildGBLabSDP(s.rtpConn.LocalAddr().(*net.UDPAddr).Port, "recvonly"))
+		response.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+		if to := response.To(); to != nil {
+			to.Params.Add("tag", "gb-lab-"+s.id[:8])
+		}
+		s.mu.Lock()
+		if s.inviteRequest == nil {
+			s.inviteRequest, s.inviteResponse = req, response
+		}
+		s.mu.Unlock()
+		_ = tx.Respond(response)
+	})
+	peer.OnAck(func(_ *sip.Request, tx sip.ServerTransaction) { _ = tx.Respond(sip.NewResponse(200, "OK")) })
+	peer.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
+	})
+	peer.OnMessage(func(req *sip.Request, tx sip.ServerTransaction) {
+		if ParseMessageType(req.Body()) == "Catalog" {
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
+			return
+		}
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
+	})
+	_, peerCancel := context.WithCancel(s.ctx)
+	peerDone := make(chan struct{})
+	s.mu.Lock()
+	s.ua, s.peer, s.peerConn, s.peerCancel, s.peerDone = ua, peer, conn, peerCancel, peerDone
+	s.mu.Unlock()
+	go func() {
+		defer close(peerDone)
+		_ = peer.ServeUDP(conn)
+	}()
+	return nil
+}
+
+func (s *gbLabSession) register(ctx context.Context, host string, port int) (*sip.Response, error) {
+	req := newGBLabRequest(sip.REGISTER, sip.Uri{Scheme: "sip", User: s.request.DeviceID, Host: host, Port: port}, s.request.DeviceID, s.module.sipService.Domain(), uuid.NewString())
+	req.AppendHeader(sip.NewHeader("Expires", "3600"))
+	return sendGBLabRequest(ctx, s.client, req)
+}
+
+func (s *gbLabSession) sendKeepalive(ctx context.Context, host string, port int) error {
+	body := KeepaliveMessage{CmdType: "Keepalive", SN: 1, DeviceID: s.request.DeviceID, Status: "OK"}
+	data, err := xml.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req := newGBLabRequest(sip.MESSAGE, sip.Uri{Scheme: "sip", User: s.module.sipService.ServerID(), Host: host, Port: port}, s.request.DeviceID, s.module.sipService.Domain(), uuid.NewString())
+	req.AppendHeader(sip.NewHeader("Content-Type", "Application/MANSCDP+xml"))
+	req.SetBody(append([]byte(xml.Header), data...))
+	response, err := sendGBLabRequest(ctx, s.client, req)
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("GB28181 lab keepalive: %w", joinSIPResponseError(err, response))
+	}
+	return nil
+}
+
+func (s *gbLabSession) sendCatalog(ctx context.Context, host string, port int) error {
+	body := CatalogResponse{CmdType: "Catalog", SN: 1, DeviceID: s.request.DeviceID, SumNum: 1, DeviceList: CatalogDeviceList{Num: 1, Items: []CatalogItem{{DeviceID: s.request.ChannelID, Name: "LiveForge GB Lab Camera", Manufacturer: "LiveForge", Status: "ON"}}}}
+	data, err := xml.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req := newGBLabRequest(sip.MESSAGE, sip.Uri{Scheme: "sip", User: s.module.sipService.ServerID(), Host: host, Port: port}, s.request.DeviceID, s.module.sipService.Domain(), uuid.NewString())
+	req.AppendHeader(sip.NewHeader("Content-Type", "Application/MANSCDP+xml"))
+	req.SetBody(append([]byte(xml.Header), data...))
+	response, err := sendGBLabRequest(ctx, s.client, req)
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("GB28181 lab catalog: %w", joinSIPResponseError(err, response))
+	}
+	s.catalogSent.Store(true)
+	return nil
+}
+
+func (s *gbLabSession) publishMediaLoop(remotePort int) {
+	defer s.mediaWG.Done()
+	remoteRTP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort}
+	remoteRTCP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort + 1}
+	muxer := ps.NewMuxer()
+	ticker := time.NewTicker(40 * time.Millisecond)
+	defer ticker.Stop()
+	var timestamp int64
+	for {
+		if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, deterministicGBLabFrame(timestamp)); err != nil && s.ctx.Err() != nil {
+			return
+		}
+		timestamp += 3600
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func deterministicGBLabFrame(timestamp int64) *avframe.AVFrame {
+	startCode := []byte{0, 0, 0, 1}
+	payload := append([]byte{}, startCode...)
+	payload = append(payload, []byte{0x67, 0x42, 0x00, 0x1e, 0xab, 0x40, 0x50}...)
+	payload = append(payload, startCode...)
+	payload = append(payload, []byte{0x68, 0xce, 0x38, 0x80}...)
+	payload = append(payload, startCode...)
+	payload = append(payload, 0x65, 1, 2, 3, 4, 5, 6, 7, 8)
+	return avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, timestamp, timestamp, payload)
+}
+
+func (s *gbLabSession) sendSourceLoop(stream *core.Stream) {
+	defer s.mediaWG.Done()
+	reader := stream.RingBuffer().NewReaderAt(stream.GOPCacheSourceStart())
+	muxer := ps.NewMuxer()
+	for {
+		frame, ok := reader.ReadContext(s.ctx)
+		if !ok {
+			return
+		}
+		if frame == nil || frame.MediaType != avframe.MediaTypeVideo || frame.Codec != avframe.CodecH264 {
+			continue
+		}
+		if err := s.sendFrame(s.rtpConn.LocalAddr().(*net.UDPAddr), s.rtcpConn.LocalAddr().(*net.UDPAddr), muxer, frame); err != nil {
+			if s.ctx.Err() != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *gbLabSession) sendFrame(remoteRTP, remoteRTCP *net.UDPAddr, muxer *ps.Muxer, frame *avframe.AVFrame) error {
+	data, err := muxer.Pack(frame)
+	if err != nil {
+		return err
+	}
+	seq := uint16(s.rtpPacketsSent.Load() + 1)
+	timestamp := uint32(frame.DTS * 90)
+	if timestamp == 0 {
+		timestamp = uint32(seq) * 3600
+	}
+	sender := s.rtpConn
+	s.mu.RLock()
+	if s.mediaSend != nil {
+		sender = s.mediaSend
+	}
+	s.mu.RUnlock()
+	for offset := 0; offset < len(data); {
+		end := offset + labMTU
+		if end > len(data) {
+			end = len(data)
+		}
+		packet := &pionrtp.Packet{Header: pionrtp.Header{Version: 2, PayloadType: labRTPPayloadType, SequenceNumber: seq, Timestamp: timestamp, SSRC: labSSRC, Marker: end == len(data)}, Payload: data[offset:end]}
+		packetData, marshalErr := packet.Marshal()
+		if marshalErr != nil {
+			return marshalErr
+		}
+		n, writeErr := sender.WriteToUDP(packetData, remoteRTP)
+		if writeErr != nil {
+			return writeErr
+		}
+		s.rtpPacketsSent.Add(1)
+		s.rtpBytesSent.Add(uint64(n))
+		seq++
+		offset = end
+	}
+	if rtcpData, marshalErr := (&rtcp.ReceiverReport{SSRC: labSSRC}).Marshal(); marshalErr == nil {
+		if _, writeErr := sender.WriteToUDP(rtcpData, remoteRTCP); writeErr == nil {
+			s.rtcpPacketsSent.Add(1)
+		}
+	}
+	s.psFramesSent.Add(1)
+	s.markMedia()
+	return nil
+}
+
+func (s *gbLabSession) receiveMediaLoop() {
+	defer s.mediaWG.Done()
+	publisher := NewPublisher("gb28181-lab-receiver", func(frame *avframe.AVFrame) {
+		if frame != nil && frame.MediaType == avframe.MediaTypeVideo && frame.Codec == avframe.CodecH264 {
+			s.psFramesRecv.Add(1)
+			s.markMedia()
+		}
+	})
+	buf := make([]byte, 64<<10)
+	for {
+		_ = s.rtpConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, _, err := s.rtpConn.ReadFromUDP(buf)
+		if err != nil {
+			if s.ctx.Err() != nil {
+				return
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return
+		}
+		var packet pionrtp.Packet
+		if packet.Unmarshal(buf[:n]) != nil || packet.PayloadType != labRTPPayloadType {
+			continue
+		}
+		s.rtpPacketsRecv.Add(1)
+		s.rtpBytesRecv.Add(uint64(n))
+		publisher.FeedRTP(&packet)
+	}
+}
+
+func (s *gbLabSession) receiveRTCPLoop() {
+	defer s.mediaWG.Done()
+	buf := make([]byte, 2048)
+	for {
+		_ = s.rtcpConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, _, err := s.rtcpConn.ReadFromUDP(buf)
+		if err != nil {
+			if s.ctx.Err() != nil {
+				return
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return
+		}
+		packets, err := rtcp.Unmarshal(buf[:n])
+		if err == nil {
+			s.rtcpPacketsRecv.Add(uint64(len(packets)))
+			s.markMedia()
+		}
+	}
+}
+
+func (s *gbLabSession) stop() error {
+	s.stopOnce.Do(func() {
+		defer close(s.stopDone)
+		s.mu.Lock()
+		s.stopRequest = true
+		s.mu.Unlock()
+		s.cancel()
+		<-s.startDone
+		s.cleanup()
+		s.mu.Lock()
+		s.state = LabSessionStateStopped
+		s.stoppedAt = time.Now().UTC()
+		s.updatedAt = s.stoppedAt
+		s.mu.Unlock()
+	})
+	<-s.stopDone
+	s.mu.RLock()
+	err := s.closeErr
+	s.mu.RUnlock()
+	return err
+}
+
+func (s *gbLabSession) fail(err error) {
+	s.cancel()
+	<-s.startDone
+	s.cleanup()
+	s.mu.Lock()
+	if !s.stopRequest {
+		s.state = LabSessionStateFailed
+		s.closeErr = err
+		s.updatedAt = time.Now().UTC()
+	}
+	s.mu.Unlock()
+}
+
+func (s *gbLabSession) cleanup() {
+	s.cleanupOnce.Do(func() {
+		s.mu.RLock()
+		client, ua := s.client, s.ua
+		invite, response, inviteTx := s.inviteRequest, s.inviteResponse, s.inviteTx
+		peerCancel, peerConn, peerDone := s.peerCancel, s.peerConn, s.peerDone
+		rtpConn, rtcpConn := s.rtpConn, s.rtcpConn
+		mediaSend := s.mediaSend
+		mode := s.request.Mode
+		deviceID := s.request.DeviceID
+		s.mu.RUnlock()
+
+		var cleanupErr error
+		if mode == LabModePublish && client != nil && invite != nil && response != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			cleanupErr = sendGBLabBYE(ctx, client, invite, response)
+			cancel()
+		}
+		if inviteTx != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			cleanupErr = errors.Join(cleanupErr, inviteTx.SendBYE(ctx))
+			cancel()
+			inviteTx.Close()
+		}
+		if client != nil {
+			if host, port, err := sipAddress(s.module.sipService.LocalAddr()); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				if response, err := s.unregister(ctx, client, host, port, deviceID); err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+					cleanupErr = errors.Join(cleanupErr, err)
+				}
+				cancel()
+			}
+		}
+		if rtpConn != nil {
+			_ = rtpConn.Close()
+		}
+		if rtcpConn != nil {
+			_ = rtcpConn.Close()
+		}
+		if mediaSend != nil {
+			_ = mediaSend.Close()
+		}
+		if peerCancel != nil {
+			peerCancel()
+		}
+		if peerConn != nil {
+			_ = peerConn.Close()
+		}
+		if peerDone != nil {
+			<-peerDone
+		}
+		if ua != nil {
+			_ = ua.Close()
+		}
+		s.mediaWG.Wait()
+		if s.module.registry.Get(deviceID) != nil {
+			s.module.registry.Unregister(deviceID)
+		}
+		if cleanupErr != nil {
+			s.mu.Lock()
+			s.closeErr = cleanupErr
+			s.mu.Unlock()
+		}
+	})
+}
+
+func (s *gbLabSession) unregister(ctx context.Context, client *sipgo.Client, host string, port int, deviceID string) (*sip.Response, error) {
+	req := newGBLabRequest(sip.REGISTER, sip.Uri{Scheme: "sip", User: deviceID, Host: host, Port: port}, deviceID, s.module.sipService.Domain(), uuid.NewString())
+	req.AppendHeader(sip.NewHeader("Expires", "0"))
+	return sendGBLabRequest(ctx, client, req)
+}
+
+func (s *gbLabSession) setState(state LabSessionState) {
+	s.mu.Lock()
+	s.state = state
+	s.updatedAt = time.Now().UTC()
+	s.mu.Unlock()
+}
+
+func (s *gbLabSession) markMedia() {
+	s.mu.Lock()
+	now := time.Now().UTC()
+	s.lastMedia, s.updatedAt = now, now
+	s.mu.Unlock()
+}
+
+func (s *gbLabSession) snapshot() LabSessionSnapshot {
+	s.mu.RLock()
+	result := LabSessionSnapshot{
+		ID: s.id, Identity: s.identity, DeviceID: s.request.DeviceID, ChannelID: s.request.ChannelID,
+		StreamKey: s.request.StreamKey, Mode: s.request.Mode, State: s.state, Direction: s.direction,
+		StartedAt: s.startedAt, UpdatedAt: s.updatedAt, LastMediaAt: s.lastMedia, StoppedAt: s.stoppedAt,
+	}
+	s.mu.RUnlock()
+	result.RTPPacketsSent = s.rtpPacketsSent.Load()
+	result.RTPPacketsRecv = s.rtpPacketsRecv.Load()
+	result.RTPBytesSent = s.rtpBytesSent.Load()
+	result.RTPBytesRecv = s.rtpBytesRecv.Load()
+	result.RTCPPacketsSent = s.rtcpPacketsSent.Load()
+	result.RTCPPacketsRecv = s.rtcpPacketsRecv.Load()
+	result.PSFramesSent = s.psFramesSent.Load()
+	result.PSFramesRecv = s.psFramesRecv.Load()
+	return result
+}
+
+func newGBLabRequest(method sip.RequestMethod, recipient sip.Uri, user, domain, callID string) *sip.Request {
+	req := sip.NewRequest(method, recipient)
+	req.AppendHeader(&sip.FromHeader{Address: sip.Uri{Scheme: "sip", User: user, Host: domain}, Params: sip.NewParams()})
+	req.AppendHeader(&sip.ToHeader{Address: recipient})
+	callIDHeader := sip.CallIDHeader(callID)
+	req.AppendHeader(&callIDHeader)
+	return req
+}
+
+func sendGBLabInvite(ctx context.Context, client *sipgo.Client, invite *sip.Request) (*sip.Response, error) {
+	return sendGBLabFinal(ctx, client, invite, true)
+}
+
+func sendGBLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Request) (*sip.Response, error) {
+	return sendGBLabFinal(ctx, client, request, false)
+}
+
+func sendGBLabFinal(ctx context.Context, client *sipgo.Client, request *sip.Request, invite bool) (*sip.Response, error) {
+	tx, err := client.TransactionRequest(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Terminate()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case response, ok := <-tx.Responses():
+			if !ok {
+				return nil, errors.New("GB28181 lab SIP transaction closed")
+			}
+			if response.StatusCode < 200 {
+				continue
+			}
+			if response.StatusCode >= 300 {
+				return nil, fmt.Errorf("GB28181 lab %s rejected: %d %s", request.Method, response.StatusCode, response.Reason)
+			}
+			return response, nil
+		}
+	}
+}
+
+func sendGBLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response) error {
+	ack := newGBLabDialogRequest(sip.ACK, invite, response, 1)
+	if err := sipgo.ClientRequestBuild(client, ack); err != nil {
+		return err
+	}
+	conn, err := client.TransportLayer().ClientRequestConnection(ctx, ack)
+	if err != nil {
+		return err
+	}
+	defer conn.TryClose()
+	return conn.WriteMsg(ack)
+}
+
+func sendGBLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response) error {
+	bye := newGBLabDialogRequest(sip.BYE, invite, response, 2)
+	response, err := sendGBLabRequest(ctx, client, bye)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("GB28181 lab BYE rejected: %d %s", response.StatusCode, response.Reason)
+	}
+	return nil
+}
+
+func newGBLabDialogRequest(method sip.RequestMethod, invite *sip.Request, response *sip.Response, cseq uint32) *sip.Request {
+	req := sip.NewRequest(method, invite.Recipient)
+	if from := invite.From(); from != nil {
+		req.AppendHeader(sip.HeaderClone(from))
+	}
+	if to := response.To(); to != nil {
+		req.AppendHeader(sip.HeaderClone(to))
+	}
+	if callID := invite.CallID(); callID != nil {
+		req.AppendHeader(sip.HeaderClone(callID))
+	}
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: cseq, MethodName: method})
+	req.SetTransport(invite.Transport())
+	return req
+}
+
+func buildGBLabSDP(port int, direction string) []byte {
+	return []byte(fmt.Sprintf("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=LiveForge GB28181 lab\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video %d RTP/AVP 96\r\na=%s\r\na=rtpmap:96 PS/90000\r\n", port, direction))
+}
+
+func listenGBLabUDPPair() (*net.UDPConn, *net.UDPConn, error) {
+	for attempt := 0; attempt < 20; attempt++ {
+		rtpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+		if err != nil {
+			return nil, nil, err
+		}
+		port := rtpConn.LocalAddr().(*net.UDPAddr).Port
+		rtcpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port + 1})
+		if err == nil {
+			return rtpConn, rtcpConn, nil
+		}
+		_ = rtpConn.Close()
+	}
+	return nil, nil, errors.New("could not allocate GB28181 lab RTP/RTCP pair")
+}
+
+func sipAddress(address string) (string, int, error) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", 0, err
+	}
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil || port <= 0 {
+		return "", 0, fmt.Errorf("invalid SIP service port %q", portText)
+	}
+	return host, port, nil
+}
+
+func joinSIPResponseError(err error, response *sip.Response) error {
+	if err != nil {
+		return err
+	}
+	if response == nil {
+		return errors.New("empty SIP response")
+	}
+	return fmt.Errorf("SIP response %d %s", response.StatusCode, response.Reason)
+}

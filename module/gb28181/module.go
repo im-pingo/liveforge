@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/im-pingo/liveforge/core"
@@ -18,6 +19,7 @@ type Module struct {
 	invite     *inviteClient
 	playback   *playbackClient
 	alarm      *alarmHandler
+	labs       *labManager
 }
 
 // NewModule creates a new GB28181 module.
@@ -101,6 +103,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.alarm = &alarmHandler{
 		registry: m.registry,
 	}
+	m.labs = newLabManager(m)
 
 	// Register SIP handlers
 	m.sipService.OnRegister(m.handler.handleRegister)
@@ -121,8 +124,35 @@ func (m *Module) Init(s *core.Server) error {
 // Hooks returns empty hooks — GB28181 uses SIP events, not stream lifecycle hooks.
 func (m *Module) Hooks() []core.HookRegistration { return nil }
 
+// StartLabSession starts a persistent in-process fake GB28181 device.
+func (m *Module) StartLabSession(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if m.labs == nil {
+		return LabSessionSnapshot{}, ErrLabManagerUnimplemented
+	}
+	return m.labs.Start(ctx, request)
+}
+
+// ListLabSessions returns persistent fake GB28181 device snapshots.
+func (m *Module) ListLabSessions() []LabSessionSnapshot {
+	if m.labs == nil {
+		return []LabSessionSnapshot{}
+	}
+	return m.labs.List()
+}
+
+// StopLabSession stops a persistent fake GB28181 device. Repeated stops are safe.
+func (m *Module) StopLabSession(id string) error {
+	if m.labs == nil {
+		return ErrLabManagerUnimplemented
+	}
+	return m.labs.Stop(id)
+}
+
 // Close stops the GB28181 module.
 func (m *Module) Close() error {
+	if m.labs != nil {
+		m.labs.closeAll()
+	}
 	if m.registry != nil {
 		m.registry.Stop()
 	}
