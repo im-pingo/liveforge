@@ -12,6 +12,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - REST and WebRTC HTTP contract: [docs/api/openapi.yaml](docs/api/openapi.yaml)
 - Configuration schema: [docs/config/config.schema.json](docs/config/config.schema.json)
 - Runtime configuration recipe: [docs/recipes/runtime-config-sources.md](docs/recipes/runtime-config-sources.md)
+- Browser preview and listener troubleshooting: [docs/recipes/rtmp-to-hls.md](docs/recipes/rtmp-to-hls.md)
 - Authentication and RBAC recipes: [docs/recipes/auth-and-tls.md](docs/recipes/auth-and-tls.md), [docs/recipes/rbac-audit.md](docs/recipes/rbac-audit.md)
 - Operations recipes: [WHIP H.265 + Opus playback](docs/recipes/whip-h265-opus-playback.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [release verification](docs/recipes/release-verification.md)
 - Runnable recipes: [docs/recipes/](docs/recipes/)
@@ -44,6 +45,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - HTTP source scheme must match `runtime.source`, redirects are disabled, and conditional validators come only from the last accepted snapshot.
 - Source failures keep the last valid snapshot. `SIGHUP` schedules an asynchronous refresh; listener/module/TLS/port changes remain restart-required.
 - The console tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab.
+- Console preview URLs use the active HTTP/WebRTC listener reported by `/api/v1/server/info`; if another process owns `127.0.0.1:8080`, browser HTTP-FLV/HLS/DASH/FMP4 requests can receive that process's response while RTMP and WHEP remain healthy. Check the response `Server` header and move the HTTP listener or release the conflicting port.
 - Recording supports FLV, FMP4, MP4, TS, and HLS with authenticated metadata/download/inline-range-play/delete APIs and DVR status.
 - The Storage Console can preview completed recordings in-browser and open DVR HLS playback when segments exist. Recording preview reuses the management session; DVR media stays on the separate `dvr.listen` listener with non-credentialed CORS, and the Console never persists or appends bearer tokens.
 - DVR playlist and segment authorization runs only synchronous subscribe hooks and emits no asynchronous subscribe lifecycle work.

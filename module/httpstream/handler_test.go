@@ -1,6 +1,8 @@
 package httpstream
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +13,12 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+type httpTestAuthorizer func(context.Context, core.AuthorizationRequest) error
+
+func (f httpTestAuthorizer) Authorize(ctx context.Context, request core.AuthorizationRequest) error {
+	return f(ctx, request)
+}
 
 func TestParseStreamPath(t *testing.T) {
 	tests := []struct {
@@ -98,6 +106,37 @@ func TestHandlerMethodNotAllowed(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandlerAuthorizesHLSPlaylistAndSegments(t *testing.T) {
+	_, srv, addr := newHTTPTestServer(t)
+	var requests []core.AuthorizationRequest
+	srv.SetAuthorizer(httpTestAuthorizer(func(_ context.Context, request core.AuthorizationRequest) error {
+		requests = append(requests, request)
+		return errors.New("denied")
+	}))
+
+	for _, path := range []string{"/live/test.m3u8", "/live/test/0.ts"} {
+		resp, err := http.Get(addr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want %d", path, resp.StatusCode, http.StatusForbidden)
+		}
+	}
+	if len(requests) != 2 {
+		t.Fatalf("authorization requests = %d, want 2", len(requests))
+	}
+	for _, request := range requests {
+		if request.Action != core.AuthorizationSubscribe || request.Stage != core.AuthorizationPreSession || request.Protocol != "hls" {
+			t.Fatalf("authorization request = %#v", request)
+		}
+		if request.StreamKey != "live/test" {
+			t.Fatalf("authorization stream key = %q", request.StreamKey)
+		}
 	}
 }
 

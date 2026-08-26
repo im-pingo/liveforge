@@ -275,7 +275,7 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 ### Web Console
 
-Open `http://localhost:8090/console` for the real-time management dashboard:
+Open `http://localhost:8090/console` for the real-time management dashboard. Preview URLs use the active HTTP/WebRTC listener reported by the server. If another process (for example nginx or a local helper) owns `127.0.0.1:8080`, RTMP and WHEP can work while HTTP-FLV/HLS/DASH/FMP4 preview requests receive that process's 404; release the port or set `http_stream.listen` to an unused address.
 
 The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
 

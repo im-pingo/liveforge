@@ -32,7 +32,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	publishCtx := eventContextFromRequest(r, streamKey)
-	if err := m.server.GetEventBus().EmitSync(core.EventPublish, publishCtx); err != nil {
+	if err := m.server.Authorize(r.Context(), authorizationRequestFromEvent(
+		core.AuthorizationPublish,
+		core.AuthorizationPreSession,
+		publishCtx,
+	)); err != nil {
 		rejectUnauthorized(w)
 		return
 	}

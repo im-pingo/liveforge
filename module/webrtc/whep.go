@@ -30,7 +30,11 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	subscribeCtx := eventContextFromRequest(r, streamKey)
-	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
+	if err := m.server.Authorize(r.Context(), authorizationRequestFromEvent(
+		core.AuthorizationSubscribe,
+		core.AuthorizationPreSession,
+		subscribeCtx,
+	)); err != nil {
 		rejectUnauthorized(w)
 		return
 	}

@@ -107,6 +107,10 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		switch ext {
 		case "ts":
 			streamKey := app + "/" + key
+			if err := m.authorizeSubscribe(r, streamKey, "hls"); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			// LL-HLS TS partial segment: segName = "MSN.partIdx"
 			if m.server.Config().HTTP.LLHLS.Enabled && m.server.Config().HTTP.LLHLS.Container == "ts" {
 				if strings.Contains(segName, ".") {
@@ -140,6 +144,17 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		case "m4s":
 			streamKey := app + "/" + key
+			protocol := "dash"
+			m.llhlsMu.Lock()
+			_, hasLLHLS := m.llhlsManagers[streamKey]
+			m.llhlsMu.Unlock()
+			if hasLLHLS {
+				protocol = "hls"
+			}
+			if err := m.authorizeSubscribe(r, streamKey, protocol); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			// LL-HLS partial segment: segName = "MSN.partIdx"
 			if strings.Contains(segName, ".") {
 				m4sParts := strings.SplitN(segName, ".", 2)
@@ -154,7 +169,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			// LL-HLS full segment: segName is numeric with no prefix
 			m.llhlsMu.Lock()
-			_, hasLLHLS := m.llhlsManagers[streamKey]
+			_, hasLLHLS = m.llhlsManagers[streamKey]
 			m.llhlsMu.Unlock()
 			if hasLLHLS {
 				if msn, err := strconv.Atoi(segName); err == nil {
@@ -192,6 +207,10 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			//   /app/key/vinit.mp4      — DASH video-only init
 			//   /app/key/audio_init.mp4 — DASH audio-only init
 			streamKey := app + "/" + key
+			if err := m.authorizeSubscribe(r, streamKey, "dash"); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			if segName == "vinit" {
 				m.serveDASHInit(w, r, streamKey)
 				return
@@ -226,9 +245,17 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	switch format {
 	case "m3u8":
+		if err := m.authorizeSubscribe(r, streamKey, "hls"); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		m.serveHLSPlaylist(w, r, streamKey)
 		return
 	case "mpd":
+		if err := m.authorizeSubscribe(r, streamKey, "dash"); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		m.serveDASHManifest(w, r, streamKey)
 		return
 	case "flv", "ts", "mp4":
@@ -246,7 +273,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		RemoteAddr: r.RemoteAddr,
 		Params:     queryToMap(r.URL.Query()),
 	}
-	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
+	if err := m.authorizeSubscribe(r, streamKey, subscribeCtx.Protocol); err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -268,6 +295,17 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
 	m.serveStream(w, r, format, stream)
+}
+
+func (m *Module) authorizeSubscribe(r *http.Request, streamKey, protocol string) error {
+	return m.server.Authorize(r.Context(), core.AuthorizationRequest{
+		Action:     core.AuthorizationSubscribe,
+		Stage:      core.AuthorizationPreSession,
+		StreamKey:  streamKey,
+		Protocol:   protocol,
+		RemoteAddr: r.RemoteAddr,
+		Params:     queryToMap(r.URL.Query()),
+	})
 }
 
 // queryToMap converts url.Values to a flat map (first value wins).
