@@ -8,7 +8,7 @@
 
 LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-All previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime.
+All previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection and the new persistent protocol-lab transport work. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP/GB28181 lab contracts and red tests are present; persistent fake-device signaling/media support remains under implementation and is not yet a supported capability.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
 
@@ -23,7 +23,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - WebRTC WHIP/WHEP publish/play with a 1 MiB SDP offer limit and HTTP 413 rejection, ICE trickle, session DELETE/PATCH, CORS preflight, ICE Lite, GCC, and browser console integration.
 - Browser-verified WHIP H.265 + Opus bridging to HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WHEP realtime, and WHEP Live; WHEP uses codec-specific HEVC parameter-set conversion, an atomic GOP/source-ring cursor transition, and an independent target-audio transcode reader.
 - HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, and WebSocket playback; LL-HLS initial manifests avoid duplicate completed PART delivery, while blocking reloads retain the latest completed PART identity across segment transitions.
-- GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and simulator coverage.
+- GB28181 SIP registration/keepalive/catalog, live view start/stop, playback start/stop, PTZ, alarm handling, session/device management, and fast in-process self-test coverage. Persistent local fake-device signaling/media labs are under implementation; do not treat the lab session API as available until its transport and integration verification are complete.
 - SIP TCP/UDP listener cancellation is treated as normal shutdown without ERROR noise; unexpected listener failures while the service context is active remain ERROR with transport metadata.
 - Optional audio transcoding for AAC, Opus, G.711, and MP3 when built with `CGO_ENABLED=1 -tags audiocodec` and FFmpeg libraries.
 
@@ -50,7 +50,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - Audit metadata removes keys containing token, secret, password, or authorization.
 - Permission-aware console tabs, in order: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. Visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security); Config/Security are not peer video-stream tabs. Actions are enabled only for the active role.
 - Config exposes the complete redacted effective/desired YAML document, retains raw source comments/unmapped fields, embeds and displays the complete versioned JSON Schema, and supports source details, writable state, Validate, and Apply & Refresh. `config:read` is available to viewers; `config:reload` is limited to operators/admins. File, HTTP/HTTPS, Consul, and Redis source writers are covered by source-specific tests; read-only sources return 409.
-- SIP and GB28181 console pages expose local protocol labs at `GET /api/v1/sipgateway/test` and `GET /api/v1/gb28181/test`, with no remote platform dependency. SIP fake-peer checks REGISTER/401/digest, INVITE/200/ACK/BYE, rejection/timeout, RTP, and RTCP; GB28181 fake-device checks REGISTER, Keepalive, Catalog, PS INVITE/SDP/ACK/BYE, rejection/timeout, PS/RTP, and RTCP.
+- SIP and GB28181 console pages expose fast local self-tests at `GET /api/v1/sipgateway/test` and `GET /api/v1/gb28181/test`, with no remote platform dependency. SIP fake-peer checks REGISTER/401/digest, INVITE/200/ACK/BYE, rejection/timeout, RTP, and RTCP; GB28181 fake-device checks REGISTER, Keepalive, Catalog, PS INVITE/SDP/ACK/BYE, rejection/timeout, PS/RTP, and RTCP. Persistent publish/receive lab sessions are under implementation and are intentionally not documented as available yet.
 - TLS API listeners set `Secure` on the HttpOnly, SameSite=Strict `lf_session` cookie; plain HTTP development listeners leave it unset.
 - Redacted runtime config, security, cluster relay/peer, call, recording, storage, DVR, and audit status.
 
@@ -108,7 +108,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | WHIP H.265 + Opus eight-protocol browser playback | Codec-specific Annex-B tests, atomic WHEP Live snapshot test, and `docs/recipes/whip-h265-opus-playback.md` |
 | Storage recording availability and unified fMP4 playback | `module/record/record_test.go`, `module/api/recording_test.go`, and `RecordingStatusResponse` contract |
 | Config document/schema/validate/apply and five runtime sources | `module/api/config_api_test.go`, `config/runtime/source_test.go`, and `docs/recipes/runtime-config-sources.md` |
-| SIP/GB28181 local protocol labs and RBAC | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, and `docs/recipes/protocol-test-lab.md` |
+| SIP/GB28181 fast self-tests and RBAC | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, and `docs/recipes/protocol-test-lab.md`; persistent publish/receive lab sessions remain under implementation |
 
 ## Operations Documentation
 
