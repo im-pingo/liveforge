@@ -251,26 +251,10 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	reader := stream.RingBuffer().NewReader()
 	for {
-		select {
-		case <-ctx.Done():
+		frame, ok := reader.ReadContext(ctx)
+		if !ok {
 			sendBYE(udpConn, videoSession, audioSession)
 			return nil
-		default:
-		}
-
-		frame, ok := reader.TryRead()
-		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				sendBYE(udpConn, videoSession, audioSession)
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				sendBYE(udpConn, videoSession, audioSession)
-				return nil
-			case <-stream.RingBuffer().Signal():
-			}
-			continue
 		}
 
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -817,19 +801,14 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
 	for {
 		frame, ok := reader.TryRead()
 		if !ok {
-			if stream.RingBuffer().IsClosed() {
+			waitCtx, cancel := context.WithTimeout(context.Background(), t.cfg.Timeout)
+			frame, ok = reader.ReadContext(waitCtx)
+			cancel()
+			if !ok {
 				sendBYE(udpConn, videoSession, audioSession)
 				return
 			}
-			select {
-			case <-stream.RingBuffer().Signal():
-			case <-time.After(t.cfg.Timeout):
-				sendBYE(udpConn, videoSession, audioSession)
-				return
-			}
-			continue
 		}
-
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}

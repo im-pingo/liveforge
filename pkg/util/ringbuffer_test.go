@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -239,6 +240,90 @@ func TestRingBufferReadMultipleReadersNonSpin(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("r2 Read did not return")
+	}
+}
+
+func TestRingReaderReadContextWakesIndependentReaders(t *testing.T) {
+	rb := NewRingBuffer[int](8)
+	r1 := rb.NewReader()
+	r2 := rb.NewReader()
+
+	type result struct {
+		value int
+		ok    bool
+	}
+	done := make(chan result, 2)
+	ctx := context.Background()
+	go func() {
+		value, ok := r1.ReadContext(ctx)
+		done <- result{value: value, ok: ok}
+	}()
+	go func() {
+		value, ok := r2.ReadContext(ctx)
+		done <- result{value: value, ok: ok}
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	rb.Write(7)
+
+	for range 2 {
+		select {
+		case got := <-done:
+			if !got.ok || got.value != 7 {
+				t.Fatalf("ReadContext result = (%d, %v), want (7, true)", got.value, got.ok)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("reader did not wake after Write")
+		}
+	}
+}
+
+func TestRingReaderReadContextCancellation(t *testing.T) {
+	rb := NewRingBuffer[int](8)
+	reader := rb.NewReader()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := reader.ReadContext(ctx)
+		done <- ok
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("ReadContext returned a frame after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadContext did not unblock after cancellation")
+	}
+}
+
+func BenchmarkRingReaderTryRead(b *testing.B) {
+	rb := NewRingBuffer[int](1024)
+	reader := rb.NewReader()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rb.Write(i)
+		if _, ok := reader.TryRead(); !ok {
+			b.Fatal("TryRead returned no frame")
+		}
+	}
+}
+
+func BenchmarkRingReaderReadContextImmediate(b *testing.B) {
+	rb := NewRingBuffer[int](1024)
+	reader := rb.NewReader()
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rb.Write(i)
+		if _, ok := reader.ReadContext(ctx); !ok {
+			b.Fatal("ReadContext returned no frame")
+		}
 	}
 }
 

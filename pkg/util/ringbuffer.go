@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
@@ -13,8 +14,8 @@ type RingBuffer[T any] struct {
 	writeCursor atomic.Int64 // next write position (monotonically increasing)
 	signal      chan struct{}
 	closed      atomic.Bool
-	mu          sync.Mutex // protects cond for Read() blocking
-	cond        *sync.Cond // wakes blocked Read() callers on Write/Close
+	mu          sync.Mutex   // protects cond for Read() blocking
+	cond        *sync.Cond   // wakes blocked Read() callers on Write/Close
 	dataMu      sync.RWMutex // protects buf slot access against concurrent read/write
 }
 
@@ -133,6 +134,44 @@ func (r *RingReader[T]) Read() (T, bool) {
 			r.rb.cond.Wait()
 		}
 		r.rb.mu.Unlock()
+	}
+}
+
+// ReadContext returns the next value, blocking until data is available, the
+// reader or buffer is closed, or ctx is cancelled. Unlike Signal, the wait is
+// scoped to this reader and cannot be consumed by another consumer.
+func (r *RingReader[T]) ReadContext(ctx context.Context) (T, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if val, ok := r.TryRead(); ok {
+		return val, true
+	}
+	if r.rb.closed.Load() || r.closed.Load() || ctx.Err() != nil {
+		var zero T
+		return zero, false
+	}
+
+	// A condition variable cannot be selected directly with ctx.Done(). Install
+	// a short-lived cancellation hook only while this reader may be waiting.
+	stop := context.AfterFunc(ctx, r.rb.cond.Broadcast)
+	defer stop()
+
+	for {
+		r.rb.mu.Lock()
+		for r.readCursor >= r.rb.writeCursor.Load() &&
+			!r.rb.closed.Load() && !r.closed.Load() && ctx.Err() == nil {
+			r.rb.cond.Wait()
+		}
+		r.rb.mu.Unlock()
+
+		if val, ok := r.TryRead(); ok {
+			return val, true
+		}
+		if r.rb.closed.Load() || r.closed.Load() || ctx.Err() != nil {
+			var zero T
+			return zero, false
+		}
 	}
 }
 

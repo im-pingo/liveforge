@@ -81,23 +81,9 @@ func (t *RTMPTransport) Push(ctx context.Context, targetURL string, stream *core
 
 	reader := stream.RingBuffer().NewReader()
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		frame, ok := reader.TryRead()
+		frame, ok := reader.ReadContext(ctx)
 		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-stream.RingBuffer().Signal():
-			}
-			continue
+			return nil
 		}
 
 		if err := rc.sendMediaFrame(frame); err != nil {

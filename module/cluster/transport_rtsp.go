@@ -128,23 +128,9 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 
 	reader := stream.RingBuffer().NewReader()
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		frame, ok := reader.TryRead()
+		frame, ok := reader.ReadContext(ctx)
 		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-stream.RingBuffer().Signal():
-			}
-			continue
+			return nil
 		}
 
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -413,10 +399,7 @@ func (rc *rtspClient) readResponse() (*rtspResponse, error) {
 func writeInterleaved(w io.Writer, channel uint8, data []byte) error {
 	header := [4]byte{'$', channel, 0, 0}
 	binary.BigEndian.PutUint16(header[2:], uint16(len(data)))
-	if _, err := w.Write(header[:]); err != nil {
-		return err
-	}
-	_, err := w.Write(data)
+	_, err := (&net.Buffers{header[:], data}).WriteTo(w)
 	return err
 }
 

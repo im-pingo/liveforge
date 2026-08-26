@@ -150,6 +150,7 @@ func (op *OriginPull) pullOnce(sourceURL string) error {
 	relayCtx := observeRelay(ctx, op.metrics, relayDirectionOrigin, protocol)
 	op.metrics.RelayStarted(relayDirectionOrigin, protocol)
 	err = transport.Pull(relayCtx, sourceURL, op.stream)
+	flushRelayBytes(relayCtx)
 	cancelled := ctx.Err() != nil
 	metricErr := err
 	if cancelled {

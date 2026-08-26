@@ -52,4 +52,5 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Console WHIP publishing with H.265 + Opus has a browser verification path across HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WHEP realtime, and WHEP Live. A visible `Playing` label is insufficient: require a decoded frame, non-zero dimensions, an advancing media clock, and no media error.
 - TLS API listeners issue the `lf_session` console cookie with `Secure`; plain HTTP development listeners do not.
 - RTP/GB cluster signaling reads current credentials per request, preferring `api.auth.bearer_token`, then the first named admin token; configured auth without an admin credential fails locally.
+- High-concurrency cluster forwarding uses reader-scoped condition waits, reusable RTMP FLV encoding state, vectored RTSP interleaved writes, and batched relay-byte metrics; benchmark with `go test -bench='BenchmarkRingReader|BenchmarkRTMPConn' -benchmem ./pkg/util ./module/cluster`.
 - Simulcast layer selection is deferred and is not implemented.
