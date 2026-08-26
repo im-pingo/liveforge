@@ -28,6 +28,21 @@ func eventContextFromRequest(r *http.Request, streamKey string) *core.EventConte
 	}
 }
 
+func authorizationRequestFromEvent(action core.AuthorizationAction, stage core.AuthorizationStage, ctx *core.EventContext) core.AuthorizationRequest {
+	if ctx == nil {
+		return core.AuthorizationRequest{Action: action, Stage: stage}
+	}
+	return core.AuthorizationRequest{
+		Action:     action,
+		Stage:      stage,
+		StreamKey:  ctx.StreamKey,
+		Protocol:   ctx.Protocol,
+		RemoteAddr: ctx.RemoteAddr,
+		Params:     ctx.Params,
+		Extra:      ctx.Extra,
+	}
+}
+
 func rejectUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	http.Error(w, "unauthorized", http.StatusUnauthorized)

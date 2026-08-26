@@ -120,29 +120,15 @@ type RingReader[T any] struct {
 	readCursor  atomic.Int64
 	lastSkipped int64
 	closed      atomic.Bool // per-reader close flag
+	contextMu   sync.Mutex
+	contextDone <-chan struct{}
+	stopContext func() bool
 }
 
 // Read returns the next value, blocking until data is available.
 // Returns (value, true) on success, or (zero, false) if the buffer or reader is closed and no data remains.
 func (r *RingReader[T]) Read() (T, bool) {
-	for {
-		val, ok := r.TryRead()
-		if ok {
-			return val, true
-		}
-		if r.rb.closed.Load() || r.closed.Load() {
-			var zero T
-			return zero, false
-		}
-		// Block until writer signals new data via cond.Broadcast().
-		// Using sync.Cond avoids the stale-signal busy-spin that occurred
-		// with the previous channel + re-broadcast approach.
-		r.rb.mu.Lock()
-		for r.readCursor.Load() >= r.rb.writeCursor.Load() && !r.rb.closed.Load() && !r.closed.Load() {
-			r.rb.cond.Wait()
-		}
-		r.rb.mu.Unlock()
-	}
+	return r.readContext(context.Background())
 }
 
 // ReadContext returns the next value, blocking until data is available, the
@@ -150,36 +136,34 @@ func (r *RingReader[T]) Read() (T, bool) {
 // scoped to this reader and cannot be consumed by another consumer.
 func (r *RingReader[T]) ReadContext(ctx context.Context) (T, bool) {
 	if ctx == nil {
-		ctx = context.Background()
+		panic("nil context")
 	}
-	if ctx.Err() != nil {
+	return r.readContext(ctx)
+}
+
+func (r *RingReader[T]) readContext(ctx context.Context) (T, bool) {
+	if r.closed.Load() || contextCanceled(ctx) {
 		var zero T
 		return zero, false
 	}
 	if val, ok := r.TryRead(); ok {
 		return val, true
 	}
-	if r.rb.closed.Load() || r.closed.Load() {
-		var zero T
-		return zero, false
-	}
-
-	// A condition variable cannot be selected directly with ctx.Done(). Install
-	// a short-lived cancellation hook only while this reader may be waiting.
-	stop := context.AfterFunc(ctx, func() {
-		r.rb.broadcast()
-	})
-	defer stop()
+	r.ensureContextWake(ctx)
 
 	for {
+		if r.closed.Load() || contextCanceled(ctx) {
+			var zero T
+			return zero, false
+		}
 		r.rb.mu.Lock()
 		for r.readCursor.Load() >= r.rb.writeCursor.Load() &&
-			!r.rb.closed.Load() && !r.closed.Load() && ctx.Err() == nil {
+			!r.rb.closed.Load() && !r.closed.Load() && !contextCanceled(ctx) {
 			r.rb.cond.Wait()
 		}
 		r.rb.mu.Unlock()
 
-		if ctx.Err() != nil {
+		if contextCanceled(ctx) {
 			var zero T
 			return zero, false
 		}
@@ -190,6 +174,33 @@ func (r *RingReader[T]) ReadContext(ctx context.Context) (T, bool) {
 			var zero T
 			return zero, false
 		}
+	}
+}
+
+func contextCanceled(ctx context.Context) bool {
+	return ctx != nil && ctx.Err() != nil
+}
+
+func (r *RingReader[T]) ensureContextWake(ctx context.Context) {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+	if r.closed.Load() || done == r.contextDone {
+		return
+	}
+	if r.stopContext != nil {
+		r.stopContext()
+		r.stopContext = nil
+	}
+	r.contextDone = done
+	if done != nil {
+		r.stopContext = context.AfterFunc(ctx, func() {
+			r.rb.broadcast()
+		})
 	}
 }
 
@@ -209,10 +220,7 @@ func (r *RingReader[T]) WaitContext(ctx context.Context) bool {
 		return false
 	}
 
-	stop := context.AfterFunc(ctx, func() {
-		r.rb.broadcast()
-	})
-	defer stop()
+	r.ensureContextWake(ctx)
 
 	r.rb.mu.Lock()
 	for r.readCursor.Load() >= r.rb.writeCursor.Load() &&
@@ -228,8 +236,19 @@ func (r *RingReader[T]) WaitContext(ctx context.Context) bool {
 // Close marks this reader as closed, causing any blocking Read() to return (zero, false).
 // Safe to call concurrently and multiple times.
 func (r *RingReader[T]) Close() {
+	r.contextMu.Lock()
+	defer r.contextMu.Unlock()
+	if r.stopContext != nil {
+		r.stopContext()
+		r.stopContext = nil
+	}
+	r.contextDone = nil
+
+	r.rb.mu.Lock()
+	defer r.rb.mu.Unlock()
+
 	r.closed.Store(true)
-	r.rb.broadcast()
+	r.rb.cond.Broadcast()
 }
 
 // Signal returns the notification channel of the underlying ring buffer.

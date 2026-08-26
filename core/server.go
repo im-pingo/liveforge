@@ -28,6 +28,7 @@ var Version = "dev"
 // Server is the main application server that manages modules and lifecycle.
 type Server struct {
 	configPtr     atomic.Pointer[config.Config]
+	authorizer    atomic.Pointer[authorizerHolder]
 	eventBus      *EventBus
 	hub           *StreamHub
 	modules       []Module

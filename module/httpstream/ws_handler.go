@@ -42,7 +42,14 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		RemoteAddr: r.RemoteAddr,
 		Params:     queryToMap(r.URL.Query()),
 	}
-	if err := m.server.GetEventBus().EmitSync(core.EventSubscribe, subscribeCtx); err != nil {
+	if err := m.server.Authorize(r.Context(), core.AuthorizationRequest{
+		Action:     core.AuthorizationSubscribe,
+		Stage:      core.AuthorizationPreSession,
+		StreamKey:  subscribeCtx.StreamKey,
+		Protocol:   subscribeCtx.Protocol,
+		RemoteAddr: subscribeCtx.RemoteAddr,
+		Params:     subscribeCtx.Params,
+	}); err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

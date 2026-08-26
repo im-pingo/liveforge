@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,17 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+type endpointTestModule struct {
+	name string
+	addr net.Addr
+}
+
+func (m *endpointTestModule) Name() string                   { return m.name }
+func (m *endpointTestModule) Init(*core.Server) error        { return nil }
+func (m *endpointTestModule) Hooks() []core.HookRegistration { return nil }
+func (m *endpointTestModule) Close() error                   { return nil }
+func (m *endpointTestModule) Addr() net.Addr                 { return m.addr }
 
 func boolPtr(b bool) *bool { return &b }
 
@@ -330,6 +342,29 @@ func TestHandleServerInfo(t *testing.T) {
 	}
 	if got := info.Endpoints["dvr"]; got != "127.0.0.1:8070" {
 		t.Errorf("dvr endpoint=%q", got)
+	}
+}
+
+func TestHandleServerInfoUsesBoundEndpoint(t *testing.T) {
+	h, s := newTestHandlers(t)
+	bound := &endpointTestModule{name: "httpstream", addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 18080}}
+	s.RegisterModule(bound)
+	s.Config().HTTP.Enabled = true
+	s.Config().HTTP.Listen = ":0"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/server/info", nil)
+	w := httptest.NewRecorder()
+	h.handleServerInfo(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var info ServerInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Endpoints["http"]; got != "127.0.0.1:18080" {
+		t.Fatalf("http endpoint = %q, want bound endpoint", got)
 	}
 }
 

@@ -1,6 +1,10 @@
 package core
 
-import configruntime "github.com/im-pingo/liveforge/config/runtime"
+import (
+	"net"
+
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
+)
 
 // EventType identifies a lifecycle or media event.
 type EventType uint16
@@ -64,6 +68,13 @@ type Module interface {
 	Init(s *Server) error
 	Hooks() []HookRegistration
 	Close() error
+}
+
+// EndpointProvider is implemented by listener-backed modules that can report
+// their bound address after initialization. API discovery uses this value so
+// ephemeral ports and runtime listener allocation are represented accurately.
+type EndpointProvider interface {
+	Addr() net.Addr
 }
 
 // Reloadable is an optional interface modules can implement to support

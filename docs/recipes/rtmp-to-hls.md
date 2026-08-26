@@ -21,3 +21,11 @@ LL-HLS uses the same playlist path when `http_stream.llhls.enabled` is true. Con
 ```bash
 curl http://127.0.0.1:8090/api/v1/streams/live/demo
 ```
+
+The Console reads the active HTTP listener from `GET /api/v1/server/info`. Diagnose browser playback separately from RTMP ingest:
+
+```bash
+curl -sv --noproxy '*' http://127.0.0.1:8080/live/demo.m3u8
+```
+
+The response should be from LiveForge with an HLS content type. A `404` from `nginx` or another server means the loopback media port is occupied by a different process; `ffplay` on RTMP and WHEP on their separate ports can still succeed. Release the conflicting port or change `http_stream.listen`, then reload the Console.

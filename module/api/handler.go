@@ -240,10 +240,10 @@ func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	cfg := h.server.Config()
 	endpoints := make(map[string]string)
 	if cfg.HTTP.Enabled {
-		endpoints["http"] = cfg.HTTP.Listen
+		endpoints["http"] = endpointAddress(h.server, "httpstream", cfg.HTTP.Listen)
 	}
 	if cfg.WebRTC.Enabled {
-		endpoints["webrtc"] = cfg.WebRTC.Listen
+		endpoints["webrtc"] = endpointAddress(h.server, "webrtc", cfg.WebRTC.Listen)
 	}
 	if cfg.RTMP.Enabled {
 		endpoints["rtmp"] = cfg.RTMP.Listen
@@ -260,6 +260,17 @@ func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		Modules:   h.server.ModuleNames(),
 		Endpoints: endpoints,
 	})
+}
+
+func endpointAddress(server *core.Server, moduleName, configured string) string {
+	if module := server.ModuleByName(moduleName); module != nil {
+		if provider, ok := module.(core.EndpointProvider); ok {
+			if addr := provider.Addr(); addr != nil {
+				return addr.String()
+			}
+		}
+	}
+	return configured
 }
 
 // ServerStats is the response for GET /api/v1/server/stats.
