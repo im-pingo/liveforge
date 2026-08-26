@@ -1414,6 +1414,50 @@ function portFromListen(listen) {
   return i >= 0 ? listen.substring(i + 1) : listen;
 }
 
+function endpointAuthority(listen) {
+  var value = String(listen || "").trim();
+  if (!value) return location.host;
+  if (value.charAt(0) === ":") return location.hostname + value;
+
+  // Normalize wildcard listeners to the host that served the console. A
+  // wildcard is a bind address, not a browser-routable hostname.
+  if (value.charAt(0) === "[") {
+    var close = value.indexOf("]");
+    if (close > 0) {
+      var host = value.substring(1, close);
+      var suffix = value.substring(close + 1);
+      if (host === "::" || host === "0:0:0:0:0:0:0:0" || host === "0.0.0.0" || host === "*") {
+        return location.hostname + suffix;
+      }
+      return value;
+    }
+  }
+
+  var separator = value.lastIndexOf(":");
+  if (separator > 0) {
+    var rawHost = value.substring(0, separator);
+    if (rawHost.indexOf(":") >= 0) return "[" + rawHost + "]:" + value.substring(separator + 1);
+    if (rawHost === "0.0.0.0" || rawHost === "::" || rawHost === "*") {
+      return location.hostname + value.substring(separator);
+    }
+  }
+  return value;
+}
+
+function mediaURL(pathname) {
+  var scheme = location.protocol === "https:" ? "https:" : "http:";
+  return scheme + "//" + endpointAuthority(endpoints.http) + pathname;
+}
+
+function websocketMediaURL(pathname) {
+  var scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  return scheme + "//" + endpointAuthority(endpoints.http) + pathname;
+}
+
+function endpointURL(protocol, listen, pathname) {
+  return protocol + "//" + endpointAuthority(listen) + pathname;
+}
+
 function hostFromListen(listen) {
   if (!listen) return location.hostname;
   var value = String(listen);
@@ -1722,8 +1766,7 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
 function playHTTPFLV(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.http);
-  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".flv";
+  var url = mediaURL("/" + streamKey + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1760,9 +1803,7 @@ function playHTTPFLV(streamKey) {
 function playWSFLV(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.http);
-  var proto = location.protocol === "https:" ? "wss:" : "ws:";
-  var url = proto + "//" + location.hostname + ":" + port + "/ws/" + streamKey + ".flv";
+  var url = websocketMediaURL("/ws/" + streamKey + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1799,8 +1840,7 @@ function playWSFLV(streamKey) {
 function playHTTPTS(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.http);
-  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".ts";
+  var url = mediaURL("/" + streamKey + ".ts");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1863,8 +1903,7 @@ function fmp4MimeCandidates(streamKey) {
 function playFMP4(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.http);
-  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".mp4";
+  var url = mediaURL("/" + streamKey + ".mp4");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2023,8 +2062,7 @@ function playFMP4(streamKey) {
 function playHLS(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.http);
-  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".m3u8";
+  var url = mediaURL("/" + streamKey + ".m3u8");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2092,8 +2130,7 @@ function playHLS(streamKey) {
 function playDASH(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.http);
-  var url = location.protocol + "//" + location.hostname + ":" + port + "/" + streamKey + ".mpd";
+  var url = mediaURL("/" + streamKey + ".mpd");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2137,9 +2174,8 @@ function playDASH(streamKey) {
 function playWHEP(streamKey, mode) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var port = portFromListen(endpoints.webrtc);
   var proto = location.protocol === "https:" ? "https://" : "http://";
-  var url = proto + location.hostname + ":" + port + "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime");
+  var url = endpointURL(proto.slice(0, -2), endpoints.webrtc, "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime"));
   setPlayerURL(url);
   setPlayerStatus("Negotiating WebRTC...");
 
