@@ -46,8 +46,10 @@ func (rb *RingBuffer[T]) Write(val T) {
 	rb.writeCursor.Store(pos + 1)
 	rb.dataMu.Unlock()
 
-	// Wake all Read() callers blocked on cond.Wait()
-	rb.cond.Broadcast()
+	// Wake all Read() callers blocked on cond.Wait(). The mutex closes the
+	// check-then-wait window so a writer cannot signal before a waiter is
+	// registered with sync.Cond.
+	rb.broadcast()
 
 	// Non-blocking notify for select-based consumers using Signal()
 	select {
@@ -60,8 +62,8 @@ func (rb *RingBuffer[T]) Write(val T) {
 // After Close, Write is a no-op.
 func (rb *RingBuffer[T]) Close() {
 	rb.closed.Store(true)
-	// Wake all Read() callers blocked on cond.Wait()
-	rb.cond.Broadcast()
+	// Wake all Read() callers blocked on cond.Wait().
+	rb.broadcast()
 	// Wake select-based consumers using Signal()
 	select {
 	case rb.signal <- struct{}{}:
@@ -80,6 +82,12 @@ func (rb *RingBuffer[T]) Signal() <-chan struct{} {
 	return rb.signal
 }
 
+func (rb *RingBuffer[T]) broadcast() {
+	rb.mu.Lock()
+	rb.cond.Broadcast()
+	rb.mu.Unlock()
+}
+
 // WriteCursor returns the current write position (number of items written).
 func (rb *RingBuffer[T]) WriteCursor() int64 {
 	return rb.writeCursor.Load()
@@ -92,24 +100,24 @@ func (rb *RingBuffer[T]) NewReader() *RingReader[T] {
 	if start < 0 {
 		start = 0
 	}
-	return &RingReader[T]{
-		rb:         rb,
-		readCursor: start,
-	}
+	return newRingReader(rb, start)
 }
 
 // NewReaderAt creates a new reader starting at a specific position.
 func (rb *RingBuffer[T]) NewReaderAt(pos int64) *RingReader[T] {
-	return &RingReader[T]{
-		rb:         rb,
-		readCursor: pos,
-	}
+	return newRingReader(rb, pos)
+}
+
+func newRingReader[T any](rb *RingBuffer[T], pos int64) *RingReader[T] {
+	r := &RingReader[T]{rb: rb}
+	r.readCursor.Store(pos)
+	return r
 }
 
 // RingReader is a per-consumer cursor into a RingBuffer.
 type RingReader[T any] struct {
 	rb          *RingBuffer[T]
-	readCursor  int64
+	readCursor  atomic.Int64
 	lastSkipped int64
 	closed      atomic.Bool // per-reader close flag
 }
@@ -130,7 +138,7 @@ func (r *RingReader[T]) Read() (T, bool) {
 		// Using sync.Cond avoids the stale-signal busy-spin that occurred
 		// with the previous channel + re-broadcast approach.
 		r.rb.mu.Lock()
-		for r.readCursor >= r.rb.writeCursor.Load() && !r.rb.closed.Load() && !r.closed.Load() {
+		for r.readCursor.Load() >= r.rb.writeCursor.Load() && !r.rb.closed.Load() && !r.closed.Load() {
 			r.rb.cond.Wait()
 		}
 		r.rb.mu.Unlock()
@@ -144,42 +152,84 @@ func (r *RingReader[T]) ReadContext(ctx context.Context) (T, bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if ctx.Err() != nil {
+		var zero T
+		return zero, false
+	}
 	if val, ok := r.TryRead(); ok {
 		return val, true
 	}
-	if r.rb.closed.Load() || r.closed.Load() || ctx.Err() != nil {
+	if r.rb.closed.Load() || r.closed.Load() {
 		var zero T
 		return zero, false
 	}
 
 	// A condition variable cannot be selected directly with ctx.Done(). Install
 	// a short-lived cancellation hook only while this reader may be waiting.
-	stop := context.AfterFunc(ctx, r.rb.cond.Broadcast)
+	stop := context.AfterFunc(ctx, func() {
+		r.rb.broadcast()
+	})
 	defer stop()
 
 	for {
 		r.rb.mu.Lock()
-		for r.readCursor >= r.rb.writeCursor.Load() &&
+		for r.readCursor.Load() >= r.rb.writeCursor.Load() &&
 			!r.rb.closed.Load() && !r.closed.Load() && ctx.Err() == nil {
 			r.rb.cond.Wait()
 		}
 		r.rb.mu.Unlock()
 
+		if ctx.Err() != nil {
+			var zero T
+			return zero, false
+		}
 		if val, ok := r.TryRead(); ok {
 			return val, true
 		}
-		if r.rb.closed.Load() || r.closed.Load() || ctx.Err() != nil {
+		if r.rb.closed.Load() || r.closed.Load() {
 			var zero T
 			return zero, false
 		}
 	}
 }
 
+// WaitContext blocks until this reader has unread data, the reader or buffer
+// is closed, or ctx is cancelled. It does not consume a value.
+func (r *RingReader[T]) WaitContext(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if r.closed.Load() || ctx.Err() != nil {
+		return false
+	}
+	if r.readCursor.Load() < r.rb.writeCursor.Load() {
+		return true
+	}
+	if r.rb.closed.Load() {
+		return false
+	}
+
+	stop := context.AfterFunc(ctx, func() {
+		r.rb.broadcast()
+	})
+	defer stop()
+
+	r.rb.mu.Lock()
+	for r.readCursor.Load() >= r.rb.writeCursor.Load() &&
+		!r.rb.closed.Load() && !r.closed.Load() && ctx.Err() == nil {
+		r.rb.cond.Wait()
+	}
+	ready := r.readCursor.Load() < r.rb.writeCursor.Load() &&
+		!r.closed.Load() && ctx.Err() == nil
+	r.rb.mu.Unlock()
+	return ready
+}
+
 // Close marks this reader as closed, causing any blocking Read() to return (zero, false).
 // Safe to call concurrently and multiple times.
 func (r *RingReader[T]) Close() {
 	r.closed.Store(true)
-	r.rb.cond.Broadcast()
+	r.rb.broadcast()
 }
 
 // Signal returns the notification channel of the underlying ring buffer.
@@ -194,31 +244,33 @@ func (r *RingReader[T]) TryRead() (T, bool) {
 
 	for {
 		wc := r.rb.writeCursor.Load()
-		if r.readCursor >= wc {
+		readCursor := r.readCursor.Load()
+		if readCursor >= wc {
 			var zero T
 			return zero, false
 		}
 
 		// Check if our position was overwritten (reader too slow)
 		oldest := wc - r.rb.size
-		if r.readCursor < oldest {
-			r.lastSkipped += oldest - r.readCursor
-			r.readCursor = oldest
+		if readCursor < oldest {
+			r.lastSkipped += oldest - readCursor
+			readCursor = oldest
+			r.readCursor.Store(readCursor)
 		}
 
 		r.rb.dataMu.RLock()
-		val := r.rb.buf[r.readCursor%r.rb.size]
+		val := r.rb.buf[readCursor%r.rb.size]
 		// Re-check under the lock: if the writer lapped us between loading
 		// the cursor and acquiring the lock, the slot now holds a newer
 		// frame and returning it would break ordering. Retry from the new
 		// oldest position instead.
-		lapped := r.readCursor < r.rb.writeCursor.Load()-r.rb.size
+		lapped := readCursor < r.rb.writeCursor.Load()-r.rb.size
 		r.rb.dataMu.RUnlock()
 		if lapped {
 			continue
 		}
 
-		r.readCursor++
+		r.readCursor.Store(readCursor + 1)
 		return val, true
 	}
 }
@@ -233,7 +285,7 @@ func (r *RingReader[T]) Skipped() int64 {
 // Returns a value in [0.0, 1.0] where 1.0 means the reader is about to be overwritten.
 func (r *RingReader[T]) Lag() float64 {
 	wc := r.rb.writeCursor.Load()
-	behind := wc - r.readCursor
+	behind := wc - r.readCursor.Load()
 	if behind < 0 {
 		behind = 0
 	}
@@ -245,5 +297,5 @@ func (r *RingReader[T]) Lag() float64 {
 
 // ReadCursor returns the current read position.
 func (r *RingReader[T]) ReadCursor() int64 {
-	return r.readCursor
+	return r.readCursor.Load()
 }

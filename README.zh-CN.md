@@ -104,7 +104,7 @@ go run ./tools/gb28181-sim \
 - **HTTP 调度器** — 通过外部 HTTP 回调动态解析目标节点，或使用静态目标列表
 - **拓扑模式** — 单层（Origin-Edge）、多边缘（Origin-Multi-Edge）、三级级联（Origin-Center-Edge）
 - **重试与容错** — 可配置重试次数、间隔和退避
-- **转发热路径** — Relay reader 使用独立阻塞等待；RTMP 转推复用 FLV 编码缓冲区，RTSP interleaved 使用向量写入，relay 字节指标首包即时提交、后续批量更新，降低逐帧开销
+- **转发热路径** — Relay 和 WHEP reader 使用独立阻塞等待；RTMP 转推复用 FLV 编码缓冲区，RTSP interleaved 使用向量写入，relay 字节指标首包即时提交、后续批量更新，降低逐帧开销
 
 > 详见 [Wiki: 集群部署](../../wiki/Cluster-Deployment-zh)。
 

@@ -104,7 +104,7 @@ Multi-protocol forwarding and on-demand origin pull for building CDN-like topolo
 - **HTTP scheduler** — Dynamic target resolution via external HTTP callback, or static target lists
 - **Topologies** — Origin-edge, origin-multi-edge, origin-center-edge (three-tier)
 - **Retry & resilience** — Configurable retry count, interval, and backoff
-- **Forwarding hot path** — Relay readers use independent blocking waits; RTMP push reuses FLV encoding buffers, RTSP interleaving uses vectored writes, and relay byte metrics batch after the first observation to reduce per-frame overhead
+- **Forwarding hot path** — Relay and WHEP readers use independent blocking waits; RTMP push reuses FLV encoding buffers, RTSP interleaving uses vectored writes, and relay byte metrics batch after the first observation to reduce per-frame overhead
 
 > See [Wiki: Cluster Deployment](../../wiki/Cluster-Deployment) for topology examples and configuration.
 

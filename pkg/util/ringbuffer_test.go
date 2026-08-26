@@ -300,6 +300,35 @@ func TestRingReaderReadContextCancellation(t *testing.T) {
 	}
 }
 
+func TestRingReaderReadContextDoesNotConsumeAfterCancellation(t *testing.T) {
+	rb := NewRingBuffer[int](8)
+	reader := rb.NewReader()
+	rb.Write(42)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, ok := reader.ReadContext(ctx); ok {
+		t.Fatal("ReadContext returned buffered data after cancellation")
+	}
+	if cursor := reader.ReadCursor(); cursor != 0 {
+		t.Fatalf("reader cursor advanced after cancellation: %d", cursor)
+	}
+}
+
+func TestRingReaderReadContextDrainsBufferedFramesAfterRingClose(t *testing.T) {
+	rb := NewRingBuffer[int](8)
+	reader := rb.NewReader()
+	rb.Write(42)
+	rb.Close()
+
+	if value, ok := reader.ReadContext(context.Background()); !ok || value != 42 {
+		t.Fatalf("ReadContext after close = (%d, %v), want (42, true)", value, ok)
+	}
+	if _, ok := reader.ReadContext(context.Background()); ok {
+		t.Fatal("ReadContext returned data after closed buffer was drained")
+	}
+}
+
 func BenchmarkRingReaderTryRead(b *testing.B) {
 	rb := NewRingBuffer[int](1024)
 	reader := rb.NewReader()
