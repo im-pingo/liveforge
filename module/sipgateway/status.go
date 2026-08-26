@@ -36,7 +36,91 @@ var (
 	ErrPortExhausted = errors.New("SIP gateway RTP ports exhausted")
 	// ErrCodecMismatch indicates that the remote side selected no configured codec.
 	ErrCodecMismatch = errors.New("SIP gateway codec mismatch")
+	// ErrLabInvalidRequest indicates that a protocol lab start request is invalid.
+	ErrLabInvalidRequest = errors.New("SIP gateway lab request is invalid")
+	// ErrLabDuplicateIdentity indicates that a lab identity is already active.
+	ErrLabDuplicateIdentity = errors.New("SIP gateway lab identity is already active")
+	// ErrLabSessionNotFound indicates that a lab session does not exist.
+	ErrLabSessionNotFound = errors.New("SIP gateway lab session not found")
+	// ErrLabManagerUnimplemented indicates that the transport-backed manager is not wired yet.
+	ErrLabManagerUnimplemented = errors.New("SIP gateway lab manager is not implemented")
 )
+
+// LabMode selects the direction of a local protocol lab.
+type LabMode string
+
+const (
+	LabModePublish LabMode = "publish"
+	LabModeReceive LabMode = "receive"
+)
+
+// LabDirection describes the media direction relative to LiveForge.
+type LabDirection string
+
+const (
+	LabDirectionInbound  LabDirection = "inbound"
+	LabDirectionOutbound LabDirection = "outbound"
+)
+
+// LabSessionState describes the lifecycle state of a local protocol lab.
+type LabSessionState string
+
+const (
+	LabSessionStateStarting LabSessionState = "starting"
+	LabSessionStateActive   LabSessionState = "active"
+	LabSessionStateStopped  LabSessionState = "stopped"
+	LabSessionStateFailed   LabSessionState = "failed"
+)
+
+// LabSessionRequest contains the protocol-neutral portion of a SIP lab start.
+type LabSessionRequest struct {
+	Mode      LabMode `json:"mode"`
+	DeviceID  string  `json:"device_id"`
+	StreamKey string  `json:"stream_key"`
+	Codec     string  `json:"codec,omitempty"`
+}
+
+// LabSessionSnapshot is an immutable point-in-time view of a SIP lab session.
+type LabSessionSnapshot struct {
+	ID              string          `json:"id"`
+	Identity        string          `json:"identity"`
+	DeviceID        string          `json:"device_id"`
+	StreamKey       string          `json:"stream_key"`
+	Mode            LabMode         `json:"mode"`
+	State           LabSessionState `json:"state"`
+	Direction       LabDirection    `json:"direction"`
+	Codec           string          `json:"codec,omitempty"`
+	RTPPacketsSent  uint64          `json:"rtp_packets_sent"`
+	RTPPacketsRecv  uint64          `json:"rtp_packets_received"`
+	RTPBytesSent    uint64          `json:"rtp_bytes_sent"`
+	RTPBytesRecv    uint64          `json:"rtp_bytes_received"`
+	RTCPPacketsSent uint64          `json:"rtcp_packets_sent"`
+	RTCPPacketsRecv uint64          `json:"rtcp_packets_received"`
+	StartedAt       time.Time       `json:"started_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	LastMediaAt     time.Time       `json:"last_media_at,omitempty"`
+	StoppedAt       time.Time       `json:"stopped_at,omitempty"`
+}
+
+// LabManager owns local SIP lab session lifecycle state.
+type LabManager interface {
+	Start(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error)
+	List() []LabSessionSnapshot
+	Stop(id string) error
+}
+
+type contractLabManager struct{}
+
+// NewLabManager returns the contract-only manager until SIP transport is wired.
+func NewLabManager() LabManager { return contractLabManager{} }
+
+func (contractLabManager) Start(context.Context, LabSessionRequest) (LabSessionSnapshot, error) {
+	return LabSessionSnapshot{}, ErrLabManagerUnimplemented
+}
+
+func (contractLabManager) List() []LabSessionSnapshot { return []LabSessionSnapshot{} }
+
+func (contractLabManager) Stop(string) error { return ErrLabManagerUnimplemented }
 
 // SIPGatewayProvider is the control-plane contract exposed by Module.
 type SIPGatewayProvider interface {
