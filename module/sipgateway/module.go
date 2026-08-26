@@ -6,6 +6,7 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/protocoltest"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -98,6 +99,15 @@ func (m *Module) Metrics() MetricsSnapshot {
 		return MetricsSnapshot{}
 	}
 	return m.gw.Metrics()
+}
+
+// RunSelfTest runs the local protocol lab. It is safe when the gateway is
+// disabled and never contacts a remote SIP endpoint.
+func (m *Module) RunSelfTest(ctx context.Context) (protocoltest.Report, error) {
+	if m.gw == nil {
+		return protocoltest.Report{}, ErrGatewayDisabled
+	}
+	return m.gw.RunSelfTest(ctx), nil
 }
 
 // PrometheusCollectors exposes gateway metrics to the shared metrics module.

@@ -2,7 +2,7 @@
 
 > Source-aligned project status. Update this file only after implementation and a passing verification path exist.
 >
-> Last updated: 2026-08-25
+> Last updated: 2026-08-26
 
 ## Current Status
 
@@ -39,6 +39,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - Prepare/apply/publication ordering with reloader rollback on later application rejection.
 - Status and Prometheus counters for accepted, rejected, application-failed, callback-failed, superseded callback, consecutive failure, and pending restart state.
 - Callback coalescing retains the latest transition and increments `DroppedCallbacks` for superseded pending notifications.
+- Source loads, Config Apply writes, and close are serialized by a cancellable source-I/O gate; Apply returns 202 only after the source write succeeds, while parse/application/publication remain asynchronous.
 
 ### Management, Security, And Console
 
@@ -47,13 +48,15 @@ Release artifacts remain conditional: source builds are available from the repos
 - The deprecated `auth.api.bearer_token` migrates only when `api.auth.bearer_token` is empty; the current path wins when both exist.
 - Bounded in-memory audit plus structured logs for authentication failures, authorization denials, console login failures, rate-limited mutations, mutation outcomes, and accepted config application.
 - Audit metadata removes keys containing token, secret, password, or authorization.
-- Permission-aware console tabs, in order: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. Actions are enabled only for the active role.
+- Permission-aware console tabs, in order: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. Visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security); Config/Security are not peer video-stream tabs. Actions are enabled only for the active role.
+- Config exposes the complete redacted effective/desired YAML document, retains raw source comments/unmapped fields, embeds and displays the complete versioned JSON Schema, and supports source details, writable state, Validate, and Apply & Refresh. `config:read` is available to viewers; `config:reload` is limited to operators/admins. File, HTTP/HTTPS, Consul, and Redis source writers are covered by source-specific tests; read-only sources return 409.
+- SIP and GB28181 console pages expose local protocol labs at `GET /api/v1/sipgateway/test` and `GET /api/v1/gb28181/test`, with no remote platform dependency. SIP fake-peer checks REGISTER/401/digest, INVITE/200/ACK/BYE, rejection/timeout, RTP, and RTCP; GB28181 fake-device checks REGISTER, Keepalive, Catalog, PS INVITE/SDP/ACK/BYE, rejection/timeout, PS/RTP, and RTCP.
 - TLS API listeners set `Secure` on the HttpOnly, SameSite=Strict `lf_session` cookie; plain HTTP development listeners leave it unset.
 - Redacted runtime config, security, cluster relay/peer, call, recording, storage, DVR, and audit status.
 
 ### Recording And DVR
 
-- FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording.
+- FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording. New recordings default to fMP4 with `.mp4` extension, and Storage reports `state=disabled` with HTTP 200 when the record module is absent.
 - Stream pattern selection, duration/size segmentation, path templates, completion callbacks, retry/failure preservation, and storage health.
 - Authenticated recording list/status/detail, HTTP range download, inline browser playback, and admin delete operations.
 - Storage Console actions preview completed recordings and DVR sessions with available segments; recording media uses the management session while DVR media remains on its separate listener without browser bearer-token persistence.
@@ -62,7 +65,7 @@ Release artifacts remain conditional: source builds are available from the repos
 
 ### SIP Gateway
 
-- Inbound and outbound calls, codec negotiation, RTP/RTCP port management, bounded concurrency, call status, dial/detail/hangup API, console operations, and Prometheus metrics.
+- Inbound and outbound calls, codec negotiation, RTP/RTCP port management, bounded concurrency, call status, dial/detail/hangup API, console operations, local self-test, and Prometheus metrics.
 - Stable HTTP mappings for invalid input, missing streams/calls, codec mismatch, capacity/port exhaustion, setup failure, and unavailable module states.
 
 ### Cluster Relay
@@ -103,6 +106,9 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | Runtime callback coalescing counter | `DroppedCallbacks` status/metrics path and manager tests |
 | Cluster credential hot rotation/no-admin failure | RTP/GB transport credential tests and cluster operations recipe |
 | WHIP H.265 + Opus eight-protocol browser playback | Codec-specific Annex-B tests, atomic WHEP Live snapshot test, and `docs/recipes/whip-h265-opus-playback.md` |
+| Storage recording availability and unified fMP4 playback | `module/record/record_test.go`, `module/api/recording_test.go`, and `RecordingStatusResponse` contract |
+| Config document/schema/validate/apply and five runtime sources | `module/api/config_api_test.go`, `config/runtime/source_test.go`, and `docs/recipes/runtime-config-sources.md` |
+| SIP/GB28181 local protocol labs and RBAC | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, and `docs/recipes/protocol-test-lab.md` |
 
 ## Operations Documentation
 
@@ -119,7 +125,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 
 Every operations recipe uses loopback-safe examples, authenticated requests, expected success/failure codes, diagnostics/metrics, rollback, and recovery. Each warns that `configs/liveforge.yaml` disables TLS/auth and uses `admin/admin`, so it must never be publicly exposed unchanged.
 
-The final review synchronization records accepted-only HTTP validators, strict HTTP/HTTPS scheme matching with redirects disabled, pre-allocation RTSP SETUP validation, synchronous-only DVR authorization, TLS-bound secure console cookies, the 1 MiB WHIP/WHEP offer limit, and the canonical seven-tab console contract across the manifest, Agent summaries, user READMEs, schema, OpenAPI, and operations recipes.
+The final review synchronization records accepted-only HTTP validators, strict HTTP/HTTPS scheme matching with redirects disabled, serialized writable/read-only Config source semantics, raw complete redacted Config documents plus embedded schema, pre-allocation RTSP SETUP validation, synchronous-only DVR authorization, TLS-bound secure console cookies, the 1 MiB WHIP/WHEP offer limit, local SIP/GB28181 signaling/media labs, unified fMP4 recording defaults, and the canonical seven-tab console contract across the manifest, Agent summaries, user READMEs, schema, OpenAPI, and operations recipes.
 
 ## Deferred Work
 

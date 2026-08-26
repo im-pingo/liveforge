@@ -18,9 +18,11 @@ import (
 )
 
 var (
-	ErrInvalidRecordingID = errors.New("invalid recording id")
-	ErrRecordingNotFound  = errors.New("recording not found")
-	ErrRecordingNotReady  = errors.New("recording is not ready")
+	ErrInvalidRecordingID   = errors.New("invalid recording id")
+	ErrRecordingNotFound    = errors.New("recording not found")
+	ErrRecordingNotReady    = errors.New("recording is not ready")
+	ErrRecordingNoMedia     = errors.New("recording contains no media frames")
+	ErrRecordingCodecConfig = errors.New("recording codec configuration is incomplete")
 )
 
 type RecordingState string
@@ -103,8 +105,8 @@ func newStorageForConfig(cfg config.RecordConfig) (*LocalStorage, string, error)
 	pattern := cfg.Path
 	if pattern == "" {
 		ext := "flv"
-		switch strings.ToLower(cfg.Format) {
-		case "mp4", "fmp4":
+		switch strings.ToLower(strings.TrimSpace(cfg.Format)) {
+		case "", "mp4", "fmp4":
 			ext = "mp4"
 		case "ts", "hls":
 			ext = "ts"
@@ -197,6 +199,9 @@ func (s *LocalStorage) List(ctx context.Context) ([]RecordingInfo, error) {
 		if strings.HasSuffix(entry.RelPath, metadataSuffix) || strings.HasSuffix(entry.RelPath, ".partial") {
 			continue
 		}
+		if isTSPlaybackArtifact(entry.RelPath) {
+			continue
+		}
 		item := s.readMetadata(entry.RelPath)
 		item.ID = entry.RelPath
 		item.Size = entry.Size
@@ -218,6 +223,11 @@ func (s *LocalStorage) List(ctx context.Context) ([]RecordingInfo, error) {
 		return items[i].StartedAt.After(items[j].StartedAt)
 	})
 	return items, nil
+}
+
+func isTSPlaybackArtifact(id string) bool {
+	base := filepath.Base(filepath.FromSlash(id))
+	return base == "index.m3u8" || (strings.HasPrefix(base, "segment_") && strings.HasSuffix(base, ".ts"))
 }
 
 func (s *LocalStorage) Stat(ctx context.Context, id string) (RecordingInfo, error) {

@@ -110,6 +110,12 @@ sip:
   auth:
     enabled: false
     password: ""
+  gateway:
+    enabled: true
+    stream_prefix: "sip"
+    rtp_port_range: [30000, 30100]
+    codecs: [opus, PCMA, PCMU]
+    max_calls: 100
 
 gb28181:
   enabled: true
@@ -221,7 +227,7 @@ cluster:
 record:
   enabled: false
   stream_pattern: "live/*"
-  format: flv
+  format: fmp4
   path: "/data/record/{date}/{stream_key}_{time}.{ext}"
   segment:
     mode: duration

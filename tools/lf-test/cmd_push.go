@@ -19,6 +19,7 @@ func runPush(args []string) {
 	target := fs.String("target", "", "Target URL (e.g. rtmp://host/live/test)")
 	duration := fs.Duration("duration", 0, "Push duration (e.g. 5s, 1m); 0 = until source exhausted")
 	token := fs.String("token", "", "Auth token")
+	realtime := fs.Bool("realtime", false, "Pace frames by their media timestamps")
 	output := fs.String("output", "", "Output format: human, json (default: auto-detect from TTY)")
 	timeout := fs.Duration("timeout", 30*time.Second, "Overall timeout (e.g. 30s, 1m)")
 
@@ -46,12 +47,7 @@ func runPush(args []string) {
 	}
 
 	// Build push config.
-	cfg := push.PushConfig{
-		Protocol: *protocol,
-		Target:   *target,
-		Duration: *duration,
-		Token:    *token,
-	}
+	cfg := buildPushConfig(*protocol, *target, *duration, *token, *realtime)
 
 	// Run push with timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -94,6 +90,16 @@ func runPush(args []string) {
 	// Exit code: 0 = pass, 1 = assertion failure, 2 = error (handled above).
 	if !topReport.Pass {
 		os.Exit(1)
+	}
+}
+
+func buildPushConfig(protocol, target string, duration time.Duration, token string, realtime bool) push.PushConfig {
+	return push.PushConfig{
+		Protocol: protocol,
+		Target:   target,
+		Duration: duration,
+		Token:    token,
+		Realtime: realtime,
 	}
 }
 

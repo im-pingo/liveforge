@@ -30,6 +30,13 @@ type NamedSource interface {
 	Name() string
 }
 
+// ConfigWriter is an optional source capability used by the management API.
+// The manager serializes writes with source loads and close, and schedules the
+// normal parse/apply/publication refresh after a successful write.
+type ConfigWriter interface {
+	Write(context.Context, []byte) error
+}
+
 // Version identifies the source revision and normalized content hash.
 type Version struct {
 	Value        string
@@ -77,13 +84,17 @@ type ConfigSnapshot struct {
 	Config *config.Config
 	// DesiredConfig retains the latest valid source values, including changes
 	// that are waiting for a restart. Consumers should normally read Config.
-	DesiredConfig  *config.Config
-	Version        Version
-	Source         string
-	LoadedAt       time.Time
-	LastModified   time.Time
-	Changes        []Change
-	PendingRestart []string
+	DesiredConfig *config.Config
+	// DesiredDocument is the latest accepted source document, retained so
+	// editors can preserve comments and fields not represented by Config.
+	// Consumers must treat the bytes as immutable.
+	DesiredDocument []byte
+	Version         Version
+	Source          string
+	LoadedAt        time.Time
+	LastModified    time.Time
+	Changes         []Change
+	PendingRestart  []string
 }
 
 // Status is a point-in-time copy of manager health. Error text is source

@@ -45,6 +45,19 @@ api:
 
 `record.enabled`, `record.path`, `dvr.enabled`, `dvr.listen`, and `dvr.path` require a restart. Recording format, stream pattern, segmentation, DVR window, segment duration, and cleanup interval are hot-reload candidates. Formats are `flv`, `fmp4`, `mp4`, `ts`, and `hls`.
 
+The default recording format is fMP4 and the default extension is `.mp4`. fMP4
+and MP4 are the preferred unified browser playback formats; media tracks are
+initialized lazily so a late audio track is not silently omitted. When the record
+module is not enabled, `GET /api/v1/recordings/status` still returns HTTP 200 with
+`enabled=false`, `available=true`, and `state=disabled`, allowing Storage to render
+an explicit unavailable state. Recording item, download, and play routes return
+503 when the module itself is absent.
+
+A publish session that ends before any media frame arrives is preserved as
+`state=failed` and is never offered as a completed playable recording. This
+prevents sequence-header-only or zero-byte files from returning a misleading
+successful playback response.
+
 DVR playlist and segment GETs run only synchronous `EventSubscribe` authorization hooks. They do not emit asynchronous subscribe lifecycle, notification, or cluster-origin work. Authorization denial keeps the existing 401/403 response behavior.
 
 ## Inspect And Download

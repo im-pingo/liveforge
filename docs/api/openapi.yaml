@@ -81,7 +81,7 @@ paths:
       tags: [server]
       operationId: getRuntimeConfigStatus
       summary: Read redacted runtime source, version, failures, counters, and pending restart paths
-      x-liveforge-permission: server:read
+      x-liveforge-permission: config:read
       responses:
         '200': {description: Runtime configuration status, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigRuntimeStatusResponse'}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
@@ -98,6 +98,66 @@ paths:
         '202': {description: Refresh scheduled, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduledResponse'}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/server/config/document:
+    get:
+      tags: [server]
+      operationId: getRuntimeConfigDocument
+      summary: Read the complete effective and desired configuration document
+      description: Sensitive values are redacted. Desired document text is retained from the accepted source so comments and unmapped fields remain editable. The writable flag describes whether the selected runtime source supports POST apply.
+      x-liveforge-permission: config:read
+      responses:
+        '200': {description: Configuration documents, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigDocumentResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/server/config/schema:
+    get:
+      tags: [server]
+      operationId: getRuntimeConfigSchema
+      summary: Read the complete versioned runtime configuration JSON Schema embedded in the server binary
+      x-liveforge-permission: config:read
+      responses:
+        '200': {description: Configuration field descriptor, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigSchemaResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/server/config/validate:
+    post:
+      tags: [server]
+      operationId: validateRuntimeConfigDocument
+      summary: Validate a complete YAML or JSON configuration document
+      x-liveforge-permission: config:read
+      requestBody:
+        required: true
+        content:
+          application/yaml: {schema: {$ref: '#/components/schemas/ConfigYAMLDocument'}}
+          application/json: {schema: {$ref: '#/components/schemas/ConfigJSONDocumentRequest'}}
+      responses:
+        '200': {description: Valid document, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigValidationResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /api/v1/server/config/apply:
+    post:
+      tags: [server]
+      operationId: applyRuntimeConfigDocument
+      summary: Persist a complete document to a writable runtime source and schedule refresh
+      description: The source write completes and is serialized with source loads before the 202 response; parsing, module application, and publication remain on the background manager worker. Listener, module, TLS, port, and audio-codec topology changes remain restart-required.
+      x-liveforge-permission: config:reload
+      requestBody:
+        required: true
+        content:
+          application/yaml: {schema: {$ref: '#/components/schemas/ConfigYAMLDocument'}}
+          application/json: {schema: {$ref: '#/components/schemas/ConfigJSONDocumentRequest'}}
+      responses:
+        '202': {description: Document written and refresh scheduled, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduledResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/audit:
@@ -209,6 +269,18 @@ paths:
         '422': {$ref: '#/components/responses/Unprocessable'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '502': {$ref: '#/components/responses/BadGateway'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/sipgateway/test:
+    get:
+      tags: [sipgateway]
+      operationId: runSIPGatewaySelfTest
+      summary: Run the local SIP/RTP protocol lab without a remote platform
+      x-liveforge-permission: sip:read
+      responses:
+        '200': {description: Self-test report, content: {application/json: {schema: {$ref: '#/components/schemas/ProtocolTestResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/sipgateway/calls/{callId}:
     parameters:
@@ -584,6 +656,18 @@ paths:
         '403': {$ref: '#/components/responses/GBForbidden'}
         '404': {$ref: '#/components/responses/GBNotFound'}
         '429': {$ref: '#/components/responses/GBRateLimited'}
+  /api/v1/gb28181/test:
+    get:
+      tags: [gb28181]
+      operationId: runGB28181SelfTest
+      summary: Run the local GB28181 RTP/PS protocol lab without a remote platform
+      x-liveforge-permission: gb28181:read
+      responses:
+        '200': {description: Self-test report, content: {application/json: {schema: {$ref: '#/components/schemas/ProtocolTestReport'}}}}
+        '401': {$ref: '#/components/responses/GBUnauthorized'}
+        '403': {$ref: '#/components/responses/GBForbidden'}
+        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/relay/push:
     post:
       tags: [internal-cluster]
@@ -837,6 +921,34 @@ components:
         config_changes_rejected: {type: integer, format: int64}
         config_changes_application_failed: {type: integer, format: int64}
     ConfigRuntimeStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ConfigRuntimeStatus'}}}]}
+    ConfigYAMLDocument:
+      type: string
+      minLength: 1
+      description: Raw complete YAML document.
+    ConfigJSONDocumentRequest:
+      type: object
+      required: [document]
+      additionalProperties: false
+      description: JSON envelope carrying the complete YAML/JSON document text.
+      properties: {document: {type: string, minLength: 1}}
+    ConfigDocument:
+      type: object
+      required: [effective, desired, effective_document, desired_document, source_details, schema, writable]
+      properties:
+        effective: {type: object, additionalProperties: true}
+        desired: {type: object, additionalProperties: true}
+        effective_document: {type: string}
+        desired_document: {type: string}
+        source_details: {type: object, additionalProperties: true, description: Credentials are omitted.}
+        schema: {type: object, additionalProperties: true, description: The complete versioned docs/config/config.schema.json object.}
+        writable: {type: boolean}
+    ConfigDocumentResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ConfigDocument'}}}]}
+    ConfigSchemaResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [$schema, $id, title, type, $defs], additionalProperties: true}}}]}
+    ConfigValidation:
+      type: object
+      required: [valid, config]
+      properties: {valid: {type: boolean, const: true}, config: {type: object, additionalProperties: true}}
+    ConfigValidationResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ConfigValidation'}}}]}
     StreamStats: {type: object, properties: {bytes_in: {type: integer, format: int64}, video_frames: {type: integer, format: int64}, audio_frames: {type: integer, format: int64}, uptime_sec: {type: integer, format: int64}, bitrate_kbps: {type: integer, format: int64}, fps: {type: number}}}
     StreamInfo:
       type: object
@@ -879,6 +991,12 @@ components:
     SIPCallsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {calls: {type: array, items: {$ref: '#/components/schemas/SIPCall'}}, metrics: {$ref: '#/components/schemas/SIPMetrics'}}}}}]}
     SIPCallResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SIPCall'}}}]}
     SIPDialResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {call_id: {type: string}}}}}]}
+    ProtocolTestCheck: {type: object, required: [name, passed], properties: {name: {type: string}, passed: {type: boolean}, detail: {type: string}}}
+    ProtocolTestReport:
+      type: object
+      required: [protocol, passed, ran_at, duration_ms, checks]
+      properties: {protocol: {type: string, enum: [sip, gb28181]}, passed: {type: boolean}, ran_at: {type: string, format: date-time}, duration_ms: {type: integer, minimum: 0, description: Measured local test execution time in milliseconds.}, checks: {type: array, items: {$ref: '#/components/schemas/ProtocolTestCheck'}}}
+    ProtocolTestResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ProtocolTestReport'}}}]}
     RelayStatus: {type: object, properties: {direction: {type: string, enum: [forward, origin]}, protocol: {type: string, enum: [rtmp, srt, rtsp, rtp, gb28181]}, stream_key: {type: string}, endpoint: {type: string}, started_at: {type: string, format: date-time}}}
     PeerStatus: {type: object, properties: {host: {type: string}, consecutive_failures: {type: integer}, last_attempt: {type: string, format: date-time}, last_success: {type: string, format: date-time}, evicted: {type: boolean}}}
     ClusterStatus: {type: object, properties: {enabled: {type: boolean}, active_forwards: {type: integer}, active_origins: {type: integer}, relays: {type: array, items: {$ref: '#/components/schemas/RelayStatus'}}, peers: {type: array, items: {$ref: '#/components/schemas/PeerStatus'}}, truncated: {type: boolean}}}
@@ -891,7 +1009,7 @@ components:
     RecordingMetrics: {type: object, properties: {files_completed: {type: integer}, files_failed: {type: integer}, write_retries: {type: integer}, write_failures: {type: integer}, files_deleted: {type: integer}, bytes_written: {type: integer}, storage_errors: {type: integer}}}
     RecordingsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/Recording'}}}}]}
     RecordingResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/Recording'}}}]}
-    RecordingStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {sessions: {type: array, items: {$ref: '#/components/schemas/RecordingSession'}}, storage: {$ref: '#/components/schemas/StorageHealth'}, metrics: {$ref: '#/components/schemas/RecordingMetrics'}}}}}]}
+    RecordingStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {enabled: {type: boolean}, available: {type: boolean}, state: {type: string, enum: [disabled, ready, degraded, unavailable]}, reason: {type: string}, sessions: {type: array, items: {$ref: '#/components/schemas/RecordingSession'}}, storage: {$ref: '#/components/schemas/StorageHealth'}, metrics: {$ref: '#/components/schemas/RecordingMetrics'}}}}}]}
     DVRSession: {type: object, properties: {stream_key: {type: string}, live: {type: boolean}, segments: {type: integer}, duration_sec: {type: number}, bytes: {type: integer, format: int64}, started_at: {type: string, format: date-time}, oldest_segment: {type: string, format: date-time}, newest_segment: {type: string, format: date-time}, last_error: {type: string}}}
     DVRStorageHealth: {type: object, properties: {root: {type: string}, healthy: {type: boolean}, low_space: {type: boolean}, total_bytes: {type: integer}, available_bytes: {type: integer}, error: {type: string}}}
     DVRMetrics: {type: object, properties: {segments_written: {type: integer}, segment_bytes: {type: integer}, write_retries: {type: integer}, write_failures: {type: integer}, cleanup_deleted: {type: integer}, cleanup_bytes: {type: integer}, cleanup_failures: {type: integer}}}

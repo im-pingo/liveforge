@@ -31,7 +31,7 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 | 📡 | **GB28181 视频监控** | 完整 SIP 信令栈，设备注册、实时拉流、录像回放、云台控制、报警处理 —— 附带内置设备模拟器 |
 | 🌐 | **多协议集群** | 支持 RTMP / SRT / RTSP / RTP / GB28181 的 Origin-Edge 级联，支持 HTTP 调度回调动态拓扑 |
 | ⚡ | **LL-HLS 低延迟** | fMP4 部分分片、阻塞式播放列表刷新（`_HLS_msn`/`_HLS_part`）、增量播放列表 |
-| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；支持浏览器预览/推流 |
+| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；按 Workspace、Operations、System 分组，Config/Security 不再与视频流页面平级；支持浏览器预览/推流 |
 | 🛡️ | **生产级可靠性** | 慢消费者保护（EWMA 丢帧）、GCC 拥塞控制、IP 级限流、Prometheus 监控 |
 
 ## 特性
@@ -126,7 +126,8 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
-- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制，分段、存储健康、下载/Range/在线预览/删除管理和时移状态
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
+- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行 SDP/编解码/RTP/PS/UDP 自测
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
@@ -277,7 +278,7 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 访问 `http://localhost:8090/console` 打开实时管理仪表盘。预览 URL 使用服务端报告的实际 HTTP/WebRTC 监听地址。如果 nginx 或其他本地进程占用了 `127.0.0.1:8080`，RTMP 和 WHEP 可能正常，但 HTTP-FLV/HLS/DASH/FMP4 预览会收到占用进程的 404；请释放该端口，或将 `http_stream.listen` 改为未占用的地址。
 
-标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
+标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。视觉分组为 Workspace（Streams、GB28181、SIP Calls、Storage）、Operations（Cluster）和 System（Config、Security）。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
 
 - 流列表：状态、编解码器、码率、帧率
 - GOP 缓存可视化
@@ -286,13 +287,15 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 - 权限感知的踢流、删流和运行时配置刷新
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
 - 录制详情/下载/在线预览/删除、DVR 会话/存储状态及 HLS 在线预览、安全状态和有界审计事件
+- 完整脱敏 Config 文档/schema 展示、只读 Validate、按数据源执行 Apply & Refresh，并显示 file、HTTP/HTTPS、Consul、Redis 的可写/只读状态
+- SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态
 
 DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
 录制预览复用已认证的管理 API 会话；DVR 预览使用带非凭据 CORS 的独立 `dvr.listen` HLS 监听器，因此仍执行订阅鉴权，控制台不会持久化或拼接 bearer token。
 
 ## 配置
 
-LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.yaml`](configs/liveforge.yaml)。
+LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读取配置。完整参考见 [`configs/liveforge.yaml`](configs/liveforge.yaml)。Config 页面会展示完整脱敏的 effective/desired 文档和 schema，支持校验，并在 file、HTTP/HTTPS、Consul、Redis 数据源可写时执行 Apply；只读数据源返回 409。详见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 仓库内示例配置仅用于本地开发：它关闭 TLS 和鉴权，并使用 `admin/admin`。禁止不做修改就暴露到公网。
 
@@ -305,7 +308,7 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 | `http_stream` | HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket（默认 `:8080`） |
 | `webrtc` | WHIP/WHEP，ICE 服务器和 UDP 端口范围（默认 `:8443`） |
 | `srt` | SRT 推拉流，AES 加密（默认 `:6000`） |
-| `sip` | GB28181 SIP 信令服务器（默认 `:5060`） |
+| `sip` | GB28181 SIP 信令服务器和本地 SIP Gateway 实验室（默认 `:5060`） |
 | `gb28181` | GB28181 设备管理、RTP 端口范围、心跳、自动拉流 |
 | `audio_codec` | 启用/禁用按需音频转码 |
 | `api` | REST API 和 Web 控制台（默认 `:8090`） |
@@ -318,13 +321,13 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 | `limits` | 全局连接数、流数、订阅者数限制 |
 | `tls` | TLS 证书和密钥配置 |
 | `stream` | GOP 缓存、环形缓冲区、空闲超时、慢消费者、反馈；Simulcast 字段仍延期 |
-| `runtime` | 后台配置刷新源：文件、HTTP、Consul 或 Redis |
+| `runtime` | 后台配置刷新源：文件、HTTP/HTTPS、Consul 或 Redis |
 
 支持环境变量展开：`${API_TOKEN}`、`${AUTH_JWT_SECRET}`。
 
 ### 运行时配置刷新
 
-进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
+进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。源加载、Config Apply 写入和关闭操作会串行执行；Apply 会等待数据源写入完成后返回 202，再异步执行解析、模块应用和发布。Config 页面展示完整的版本化 JSON Schema，并保留 source 原始 desired YAML，包括注释和 typed runtime struct 未映射的字段。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 以及 Config Validate/Apply 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
 
@@ -336,7 +339,7 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 
 ```bash
 # 推流测试（支持：rtmp, rtsp, srt, whip, gb28181）
-go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test
+go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test --realtime
 
 # 拉流测试（支持：rtmp, rtsp, srt, whep, httpflv, wsflv, hls, llhls, dash）
 go run ./tools/lf-test play --protocol hls --url http://localhost:8080/live/test.m3u8
@@ -444,7 +447,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 
 面向 AI Agent 的入口是 [`AGENTS.md`](AGENTS.md)、[`agent-manifest.json`](agent-manifest.json) 和 [`llms.txt`](llms.txt)。API 契约、配置 schema 和可执行场景文档位于 `docs/`，并由 CI 校验同步状态。
 
-运维 recipes：[运行时配置](docs/recipes/runtime-config-sources.md)、[鉴权/TLS](docs/recipes/auth-and-tls.md)、[录制/DVR](docs/recipes/recording-dvr-management.md)、[SIP Gateway](docs/recipes/sipgateway-management.md)、[集群 relay](docs/recipes/cluster-relay-operations.md)、[RBAC/审计](docs/recipes/rbac-audit.md) 和[发布验证](docs/recipes/release-verification.md)。
+运维 recipes：[运行时配置](docs/recipes/runtime-config-sources.md)、[鉴权/TLS](docs/recipes/auth-and-tls.md)、[录制/DVR](docs/recipes/recording-dvr-management.md)、[SIP Gateway](docs/recipes/sipgateway-management.md)、[SIP/GB28181 协议实验室](docs/recipes/protocol-test-lab.md)、[集群 relay](docs/recipes/cluster-relay-operations.md)、[RBAC/审计](docs/recipes/rbac-audit.md) 和[发布验证](docs/recipes/release-verification.md)。
 
 | 主题 | 中文 | EN |
 |------|------|-----|

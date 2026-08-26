@@ -20,7 +20,7 @@ func (h *Handlers) recordingProvider() (record.RecordingProvider, bool) {
 func (h *Handlers) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	provider, ok := h.recordingProvider()
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "recording module unavailable")
+		writeJSON(w, http.StatusOK, []record.RecordingInfo{})
 		return
 	}
 	items, err := provider.ListRecordings(r.Context())
@@ -34,7 +34,13 @@ func (h *Handlers) handleRecordings(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleRecordingStatus(w http.ResponseWriter, r *http.Request) {
 	provider, ok := h.recordingProvider()
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "recording module unavailable")
+		writeJSON(w, http.StatusOK, record.RecordingStatusSnapshot{
+			Enabled:   false,
+			Available: true,
+			State:     record.RecordingDisabled,
+			Reason:    "recording disabled",
+			Sessions:  []record.RecordingSessionStatus{},
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, provider.RecordingStatus(r.Context()))
@@ -143,6 +149,14 @@ func (h *Handlers) handleRecordingPlay(w http.ResponseWriter, r *http.Request) {
 }
 
 func recordingMediaType(info record.RecordingInfo) string {
+	switch strings.ToLower(info.Format) {
+	case "flv":
+		return "video/x-flv"
+	case "mp4", "fmp4":
+		return "video/mp4"
+	case "ts", "hls":
+		return "video/mp2t"
+	}
 	ext := strings.ToLower(path.Ext(info.ID))
 	switch ext {
 	case ".flv":
@@ -153,14 +167,6 @@ func recordingMediaType(info record.RecordingInfo) string {
 		return "video/mp2t"
 	case ".m3u8":
 		return "application/vnd.apple.mpegurl"
-	}
-	switch strings.ToLower(info.Format) {
-	case "flv":
-		return "video/x-flv"
-	case "mp4", "fmp4":
-		return "video/mp4"
-	case "ts", "hls":
-		return "video/mp2t"
 	}
 	if mediaType := mime.TypeByExtension(ext); mediaType != "" {
 		return mediaType

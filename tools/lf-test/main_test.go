@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStringSliceSetAndString(t *testing.T) {
@@ -27,6 +28,16 @@ func TestOutputFormatHonorsExplicitValue(t *testing.T) {
 	}
 	if got := outputFormat("json"); got != "json" {
 		t.Fatalf("json output=%q", got)
+	}
+}
+
+func TestBuildPushConfigPreservesRealtimeMode(t *testing.T) {
+	cfg := buildPushConfig("rtmp", "rtmp://127.0.0.1:1935/live/test", 5*time.Second, "token", true)
+	if !cfg.Realtime {
+		t.Fatal("realtime push mode was not preserved")
+	}
+	if cfg.Duration != 5*time.Second || cfg.Token != "token" {
+		t.Fatalf("push config = %+v", cfg)
 	}
 }
 

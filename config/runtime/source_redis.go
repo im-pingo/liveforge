@@ -102,6 +102,22 @@ func (s *RedisSource) Load(ctx context.Context, previous Version) (Snapshot, err
 
 func (s *RedisSource) Close() error { return s.client.Close() }
 
+func (s *RedisSource) Write(ctx context.Context, data []byte) error {
+	if s.hash != "" {
+		if err := s.client.HSet(ctx, s.hash, "config.yaml", string(data)).Err(); err != nil {
+			return fmt.Errorf("write redis config hash: %w", err)
+		}
+	} else if err := s.client.Set(ctx, s.prefix+"config.yaml", data, 0).Err(); err != nil {
+		return fmt.Errorf("write redis config key: %w", err)
+	}
+	if s.versionKey != "" {
+		if err := s.client.Incr(ctx, s.versionKey).Err(); err != nil {
+			return fmt.Errorf("write redis config version: %w", err)
+		}
+	}
+	return nil
+}
+
 func marshalDeterministic(value any) ([]byte, error) {
 	// yaml.v3 sorts string map keys, producing stable bytes for hashing.
 	b, err := yaml.Marshal(value)

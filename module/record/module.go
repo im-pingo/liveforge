@@ -309,9 +309,28 @@ func (m *Module) RecordingStatus(ctx context.Context) RecordingStatusSnapshot {
 	}
 	sessions = append(sessions, m.history...)
 	m.mu.Unlock()
-	status := RecordingStatusSnapshot{Sessions: sessions, Metrics: m.metrics.Snapshot()}
+	status := RecordingStatusSnapshot{
+		Enabled:   true,
+		Available: true,
+		State:     RecordingReady,
+		Sessions:  sessions,
+		Metrics:   m.metrics.Snapshot(),
+	}
 	if runtime := m.runtime.Load(); runtime != nil && runtime.storage != nil {
 		status.Storage = runtime.storage.Health(ctx)
+		switch {
+		case status.Storage.Error != "":
+			status.Available = false
+			status.State = RecordingUnavailable
+			status.Reason = status.Storage.Error
+		case status.Storage.LowSpace:
+			status.State = RecordingDegraded
+			status.Reason = "recording storage is low on space"
+		}
+	} else {
+		status.Available = false
+		status.State = RecordingUnavailable
+		status.Reason = "recording storage unavailable"
 	}
 	return status
 }

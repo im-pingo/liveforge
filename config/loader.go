@@ -119,6 +119,7 @@ func defaults() *Config {
 			PollInterval: 30 * time.Second,
 			LoadTimeout:  10 * time.Second,
 		},
+		Record: RecordConfig{Format: "fmp4"},
 		DVR: DVRConfig{
 			Listen:          ":8070",
 			Path:            "./dvr/{stream_key}",

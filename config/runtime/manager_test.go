@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,109 @@ func (s *blockingSource) Load(ctx context.Context, previous Version) (Snapshot, 
 }
 
 func (s *blockingSource) Close() error { return nil }
+
+type serializedWriterSource struct {
+	active  atomic.Int32
+	overlap atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *serializedWriterSource) Load(context.Context, Version) (Snapshot, error) {
+	return Snapshot{Data: []byte("server:\n  name: initial\n"), Version: "initial"}, nil
+}
+
+func (s *serializedWriterSource) Close() error { return nil }
+
+func (s *serializedWriterSource) Write(ctx context.Context, _ []byte) error {
+	if s.active.Add(1) != 1 {
+		s.overlap.Store(true)
+	}
+	s.entered <- struct{}{}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		s.active.Add(-1)
+		return ctx.Err()
+	}
+	s.active.Add(-1)
+	return nil
+}
+
+func TestManagerSerializesSourceWrites(t *testing.T) {
+	source := &serializedWriterSource{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(source.release) }) }
+	m, err := NewManager(Options{Source: source, Initial: config.Defaults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	defer release()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- m.Write(context.Background(), []byte("server:\n  name: first\n")) }()
+	select {
+	case <-source.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first source write did not start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- m.Write(context.Background(), []byte("server:\n  name: second\n")) }()
+	time.Sleep(30 * time.Millisecond)
+	if source.overlap.Load() {
+		t.Fatal("source writes entered concurrently")
+	}
+	release()
+
+	for name, done := range map[string]<-chan error{"first": firstDone, "second": secondDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s write failed: %v", name, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s write did not finish", name)
+		}
+	}
+}
+
+func TestManagerWriteHonorsContextWhileWaitingForSourceIO(t *testing.T) {
+	source := &serializedWriterSource{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(source.release) }) }
+	m, err := NewManager(Options{Source: source, Initial: config.Defaults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	defer release()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- m.Write(context.Background(), []byte("server:\n  name: first\n")) }()
+	select {
+	case <-source.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first source write did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := m.Write(ctx, []byte("server:\n  name: second\n")); err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting write error=%v, want context deadline", err)
+	}
+	release()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+}
 
 func TestSnapshotReadDoesNotWaitForRefresh(t *testing.T) {
 	source := &blockingSource{release: make(chan struct{})}
@@ -154,6 +258,28 @@ func TestManagerPublishesEffectiveConfigAndKeepsDesiredRestartValuesPending(t *t
 	}
 	if got := m.Status().PendingRestart; len(got) != 1 || got[0] != "rtmp.listen" {
 		t.Fatalf("pending restart was lost after hot refresh: %v", got)
+	}
+}
+
+func TestManagerRetainsAcceptedSourceDocument(t *testing.T) {
+	document := []byte("# source comment\nserver:\n  name: liveforge\n  # nested comment\n  log_level: info\n")
+	source := &mutableSource{snapshot: Snapshot{Data: document, Version: "document-1"}}
+	m, err := NewManager(Options{Source: source, Initial: config.Defaults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := m.Snapshot().DesiredDocument
+	original := string(document)
+	if string(got) != original {
+		t.Fatalf("desired document = %q, want original source document %q", got, document)
+	}
+	document[0] = 'x'
+	if string(m.Snapshot().DesiredDocument) != original {
+		t.Fatal("published desired document retained source-owned bytes")
 	}
 }
 

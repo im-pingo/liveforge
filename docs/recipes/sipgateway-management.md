@@ -42,6 +42,11 @@ api:
 
 SIP module and gateway configuration is restart-required.
 
+For a local protocol check that does not require a remote SIP peer, run the
+[SIP and GB28181 Protocol Test Lab](protocol-test-lab.md) or use the Test Lab
+section on the Console SIP page. The SIP self-test validates SDP/codec selection,
+RTP/RTCP allocation, and localhost UDP loopback before any dial attempt.
+
 ## List And Dial
 
 ```bash

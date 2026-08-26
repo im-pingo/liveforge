@@ -56,6 +56,11 @@ func newRecordSessionWithWriter(streamKey string, stream *core.Stream, cfg confi
 		finished:  make(chan struct{}),
 		startedAt: time.Now().UTC(),
 	}
+	if publisher := stream.Publisher(); publisher != nil {
+		if info := publisher.MediaInfo(); info != nil {
+			writer.SetExpectedTracks(info.VideoCodec, info.AudioCodec)
+		}
+	}
 	session.updateStatus(RecordingActive, nil)
 	if publisher := stream.Publisher(); publisher != nil {
 		session.publisherID = publisher.ID()
@@ -132,10 +137,35 @@ func (s *RecordSession) run() error {
 	for {
 		frame, ok := s.reader.ReadContext(readCtx)
 		if !ok {
+			if isRecordStopRequested(s.done) {
+				return s.drainPendingFrames()
+			}
 			return nil
 		}
 		if err := s.writer.WriteFrame(frame); err != nil {
 			slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
+			return err
+		}
+	}
+}
+
+func isRecordStopRequested(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *RecordSession) drainPendingFrames() error {
+	for {
+		frame, ok := s.reader.TryRead()
+		if !ok {
+			return nil
+		}
+		if err := s.writer.WriteFrame(frame); err != nil {
+			slog.Error("write drained frame error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
 		}
 	}

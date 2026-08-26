@@ -2,6 +2,8 @@ package record
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -239,10 +241,10 @@ func TestNewFrameWriterFLV(t *testing.T) {
 		t.Errorf("expected flvFrameWriter, got %T", w)
 	}
 
-	// Default should also be FLV
+	// New recordings default to fMP4 so audio/video playback uses one browser-friendly format.
 	w = newFrameWriter("")
-	if _, ok := w.(*flvFrameWriter); !ok {
-		t.Errorf("default should be flvFrameWriter, got %T", w)
+	if _, ok := w.(*fmp4FrameWriter); !ok {
+		t.Errorf("default should be fmp4FrameWriter, got %T", w)
 	}
 }
 
@@ -293,6 +295,7 @@ func TestFileWriterExpandsConfiguredExtensionPlaceholder(t *testing.T) {
 		format string
 		ext    string
 	}{
+		{format: "", ext: ".mp4"},
 		{format: "flv", ext: ".flv"},
 		{format: "mp4", ext: ".mp4"},
 		{format: "fmp4", ext: ".mp4"},
@@ -313,6 +316,20 @@ func TestFileWriterExpandsConfiguredExtensionPlaceholder(t *testing.T) {
 				t.Fatalf("recording id = %q, want suffix %q", got, test.ext)
 			}
 		})
+	}
+}
+
+func TestFileWriterNormalizesKnownPathExtensionToFormat(t *testing.T) {
+	writer, err := NewFileWriter("live/mismatch", config.RecordConfig{
+		Format: "fmp4",
+		Path:   filepath.Join(t.TempDir(), "{stream_key}.flv"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if got := filepath.Ext(writer.RecordingID()); got != ".mp4" {
+		t.Fatalf("recording extension = %q, want .mp4", got)
 	}
 }
 
@@ -338,6 +355,12 @@ func TestFileCompleteCallbackFailureLogsRedactedEndpoint(t *testing.T) {
 		OnFileComplete: config.FileCompleteConfig{URL: callback.String()},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x01},
+	)); err != nil {
 		t.Fatal(err)
 	}
 	writer.Close()
@@ -414,6 +437,112 @@ func TestFMP4FileWriterCreatesFile(t *testing.T) {
 		t.Error("expected non-empty fMP4 file")
 	}
 	t.Logf("fMP4 recorded %d bytes to %s", info.Size(), w.FilePath())
+}
+
+func TestFileWriterRejectsSequenceHeaderOnlyRecording(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	w, err := newFileWriterWithStorage("live/empty", config.RecordConfig{Format: "fmp4"}, local, "live/empty.mp4", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CloseWithError(nil); err == nil || !strings.Contains(err.Error(), "no media frames") {
+		t.Fatalf("close error = %v, want no-media error", err)
+	}
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].State != RecordingFailed || items[0].Size != 0 {
+		t.Fatalf("sequence-only recording = %+v, want one failed zero-byte artifact", items)
+	}
+}
+
+func TestFileWriterDoesNotRotateOnSequenceHeader(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	w, err := newFileWriterWithStorage("live/header", config.RecordConfig{
+		Format:  "ts",
+		Segment: config.SegmentConfig{Duration: time.Millisecond},
+	}, local, "live/header.ts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.startTime = time.Now().Add(-time.Second)
+	if err := w.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28},
+	)); err != nil {
+		t.Fatalf("sequence header should not rotate an empty segment: %v", err)
+	}
+	if w.segmentIndex != 0 {
+		t.Fatalf("sequence header rotated segment: index=%d", w.segmentIndex)
+	}
+	if err := w.CloseWithError(ErrRecordingNoMedia); !errors.Is(err, ErrRecordingNoMedia) {
+		t.Fatalf("close error = %v, want no-media error", err)
+	}
+}
+
+func TestFMP4WriterWaitsForAllKnownSequenceHeaders(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.RecordConfig{
+		Format: "fmp4",
+		Path:   filepath.Join(dir, "{stream_key}", "{date}_{time}.mp4"),
+	}
+	w, err := NewFileWriter("live/av", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	videoSeq := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xee, 0x3c, 0x80},
+	)
+	audioSeq := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x12, 0x10},
+	)
+	if err := w.WriteFrame(videoSeq); err != nil {
+		t.Fatal(err)
+	}
+	if writer, ok := w.format.(*fmp4FrameWriter); !ok || writer.initDone {
+		t.Fatalf("fMP4 initialized before audio sequence header: %#v", w.format)
+	}
+	if err := w.WriteFrame(audioSeq); err != nil {
+		t.Fatal(err)
+	}
+	if writer := w.format.(*fmp4FrameWriter); writer.initDone {
+		t.Fatal("fMP4 initialized on sequence header; media must trigger init")
+	}
+	if err := w.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x88, 0x00, 0x01},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if writer := w.format.(*fmp4FrameWriter); !writer.initDone {
+		t.Fatal("fMP4 did not initialize when media arrived")
+	}
+	w.Close()
+	data, err := os.ReadFile(w.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("mp4a")) {
+		t.Fatal("fMP4 init segment does not contain the AAC track")
+	}
 }
 
 func TestFMP4RecordSessionEndToEnd(t *testing.T) {
@@ -496,6 +625,82 @@ func TestFMP4RecordSessionEndToEnd(t *testing.T) {
 		t.Error("expected non-empty fMP4 recording file")
 	}
 	t.Logf("fMP4 recorded %d bytes to %s", info.Size(), filePath)
+}
+
+func TestFMP4RecordSessionIncludesLateAudioTrack(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Record: config.RecordConfig{
+			Enabled:       true,
+			StreamPattern: "*",
+			Format:        "fmp4",
+			Path:          filepath.Join(dir, "{stream_key}", "{date}_{time}.mp4"),
+		},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 256},
+	}
+	server := core.NewServer(cfg)
+	stream, err := server.StreamHub().GetOrCreate("live/late-audio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&testPublisher{
+		id:   "pub-late-audio",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewRecordSession("live/late-audio", stream, cfg.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	videoSeq := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xee, 0x3c, 0x80},
+	)
+	stream.WriteFrame(videoSeq)
+	done := make(chan struct{})
+	go func() {
+		session.Run()
+		close(done)
+	}()
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x88, 0x00, 0x01},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		33, 33, []byte{0x41, 0x9a, 0x00, 0x01},
+	))
+	deadline := time.Now().Add(2 * time.Second)
+	for session.writer.BytesWritten() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if session.writer.BytesWritten() == 0 {
+		t.Fatal("video-only fMP4 init segment was not written")
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x12, 0x10},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+		0, 0, []byte{0xff, 0xf1, 0x50, 0x80},
+	))
+	session.Stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("late-audio recording session did not stop")
+	}
+
+	data, err := os.ReadFile(session.writer.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("mp4a")) {
+		t.Fatal("fMP4 recording omitted the late AAC track")
+	}
 }
 
 func TestModuleName(t *testing.T) {
@@ -676,6 +881,34 @@ func TestNewFrameWriterTS(t *testing.T) {
 	}
 }
 
+func TestLocalStorageListOmitsTSPlaylistArtifacts(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "live", "ts")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"record.ts":        []byte("primary"),
+		"segment_00000.ts": []byte("segment"),
+		"index.m3u8":       []byte("#EXTM3U"),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := storage.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "live/ts/record.ts" {
+		t.Fatalf("playlist artifacts leaked into recording list: %+v", items)
+	}
+}
+
 func TestTSRecordingCreatesSegmentsAndPlaylist(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.RecordConfig{
@@ -739,6 +972,13 @@ func TestTSRecordingCreatesSegmentsAndPlaylist(t *testing.T) {
 	}
 
 	w.Close()
+	mainInfo, err := os.Stat(w.FilePath())
+	if err != nil {
+		t.Fatalf("stat primary TS recording: %v", err)
+	}
+	if mainInfo.Size() == 0 {
+		t.Fatal("primary TS recording is a zero-byte placeholder")
+	}
 
 	// Verify: the TS writer should have created segment files and a playlist
 	parentDir := filepath.Dir(w.FilePath())

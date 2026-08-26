@@ -31,7 +31,7 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 | 📡 | **GB28181 video surveillance** | Full SIP signaling stack, device registration, live invite, playback, PTZ control, alarm handling — plus a built-in device simulator for testing |
 | 🌐 | **Multi-protocol cluster** | Origin-edge cascading via RTMP / SRT / RTSP / RTP / GB28181 with HTTP scheduler callback for dynamic topology |
 | ⚡ | **LL-HLS** | Low-Latency HLS with fMP4 partial segments, blocking playlist reload (`_HLS_msn`/`_HLS_part`), and delta playlist updates |
-| 🖥️ | **Web console** | Permission-aware tabs for Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security; Recent Audit is inside Security; includes browser preview/publish |
+| 🖥️ | **Web console** | Permission-aware tabs for Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security; Recent Audit is inside Security; grouped as Workspace, Operations, and System so Config/Security are not peer stream pages; includes browser preview/publish |
 | 🛡️ | **Production-ready** | Slow consumer protection (EWMA frame dropping), GCC congestion control, per-IP rate limiting, Prometheus metrics |
 
 ## Features
@@ -126,7 +126,8 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **Web console** — Seven permission-aware tabs with multi-protocol preview and WHIP publish: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab.
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
-- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; segmentation, storage health, download/range/inline-play/delete management, and time-shift status
+- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; new recordings default to fMP4/`.mp4`; segmentation, storage health, download/range/inline-play/delete management, zero-byte session protection, and time-shift status
+- **Local protocol labs** — SIP and GB28181 pages run SDP/codec/RTP/PS/UDP checks locally without requiring another platform or device
 - **Startup rollback** — Listener or module initialization failures report the original error, close only modules whose initialization was attempted, and do not panic while rolling back later uninitialized modules
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
@@ -277,7 +278,7 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 Open `http://localhost:8090/console` for the real-time management dashboard. Preview URLs use the active HTTP/WebRTC listener reported by the server. If another process (for example nginx or a local helper) owns `127.0.0.1:8080`, RTMP and WHEP can work while HTTP-FLV/HLS/DASH/FMP4 preview requests receive that process's 404; release the port or set `http_stream.listen` to an unused address.
 
-The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
+The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. The visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security). When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
 
 - Live stream list with state, codecs, bitrate, FPS
 - GOP cache visualization
@@ -286,13 +287,15 @@ The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, a
 - Permission-aware stream kick/delete and runtime config refresh
 - Cluster relay/peer status and SIP call dial/detail/hangup
 - Recording metadata/download/inline-play/delete, DVR session/storage status and online HLS preview, security posture, and bounded audit events
+- Complete redacted Config document/schema display, read-only Validate, source-aware Apply & Refresh, and writable/read-only status for file, HTTP/HTTPS, Consul, and Redis
+- SIP and GB28181 local protocol Test Lab results, including unavailable-module states
 
 DVR playlist and segment GETs run synchronous subscribe authorization hooks only; they do not emit asynchronous subscribe lifecycle events.
 Recording preview uses the authenticated management API session. DVR preview uses the separate `dvr.listen` HLS listener with non-credentialed CORS, so its subscribe authorization still applies; the Console does not persist or append bearer tokens.
 
 ## Configuration
 
-LiveForge uses a single YAML configuration file. See [`configs/liveforge.yaml`](configs/liveforge.yaml) for the full reference.
+LiveForge uses a bootstrap YAML configuration plus an optional runtime source. See [`configs/liveforge.yaml`](configs/liveforge.yaml) for the full reference. The Config page displays the complete redacted effective/desired document and schema, validates candidates, and applies them through file, HTTP/HTTPS, Consul, or Redis when the source is writable; read-only sources return 409. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md).
 
 The checked-in sample is for local development only: it disables TLS and authentication and uses `admin/admin`. Never expose it publicly unchanged.
 
@@ -305,7 +308,7 @@ Key sections:
 | `http_stream` | HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket (default `:8080`) |
 | `webrtc` | WHIP/WHEP with ICE servers and UDP port range (default `:8443`) |
 | `srt` | SRT ingest/playback with AES encryption (default `:6000`) |
-| `sip` | SIP signaling server for GB28181 (default `:5060`) |
+| `sip` | SIP signaling server and local SIP Gateway lab (default `:5060`) |
 | `gb28181` | GB28181 device management, RTP port range, keepalive, auto-invite |
 | `audio_codec` | Enable/disable on-demand audio transcoding |
 | `api` | REST API and web console (default `:8090`) |
@@ -318,13 +321,13 @@ Key sections:
 | `limits` | Global connection, stream, and subscriber limits |
 | `tls` | TLS certificate and key for HTTPS/secure protocols |
 | `stream` | GOP cache, ring buffer, idle timeout, slow consumer, feedback; Simulcast fields are deferred |
-| `runtime` | Background configuration refresh source: file, HTTP, Consul, or Redis |
+| `runtime` | Background configuration refresh source: file, HTTP/HTTPS, Consul, or Redis |
 
 Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}`.
 
 ### Runtime configuration refresh
 
-The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. For HTTP sources, the selected `http` or `https` source must match the URL scheme, redirects are disabled, and ETag/Last-Modified validators advance only after a document is accepted; `X-Config-Version` is separate version metadata. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, HTTPS, Consul, and Redis examples.
+The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source loads, Config Apply writes, and source close are serialized; Apply waits for the source write before returning 202 and schedules parsing/application/publication asynchronously. The Config page shows the complete versioned JSON Schema and retains raw desired source YAML, including comments and fields not represented by the typed runtime struct. Source failures retain the last valid snapshot. For HTTP sources, the selected `http` or `https` source must match the URL scheme, redirects are disabled, and ETag/Last-Modified validators advance only after a document is accepted; `X-Config-Version` is separate version metadata. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, HTTPS, Consul, Redis, Config Validate, and Config Apply examples.
 
 Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
 
@@ -336,7 +339,7 @@ A comprehensive integration testing tool (`tools/lf-test`) for validating all se
 
 ```bash
 # Push test (supports: rtmp, rtsp, srt, whip, gb28181)
-go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test
+go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test --realtime
 
 # Play test (supports: rtmp, rtsp, srt, whep, httpflv, wsflv, hls, llhls, dash)
 go run ./tools/lf-test play --protocol hls --url http://localhost:8080/live/test.m3u8
@@ -444,7 +447,7 @@ The first command skips FFmpeg-tagged transcoding integration tests. The second 
 
 For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](agent-manifest.json), and [`llms.txt`](llms.txt). The API contract, configuration schema, and runnable recipes are kept in `docs/` and checked by CI.
 
-Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [authentication/TLS](docs/recipes/auth-and-tls.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [RBAC/audit](docs/recipes/rbac-audit.md), and [release verification](docs/recipes/release-verification.md).
+Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [authentication/TLS](docs/recipes/auth-and-tls.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [SIP/GB28181 protocol test lab](docs/recipes/protocol-test-lab.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [RBAC/audit](docs/recipes/rbac-audit.md), and [release verification](docs/recipes/release-verification.md).
 
 | Topic | EN | 中文 |
 |-------|-----|------|

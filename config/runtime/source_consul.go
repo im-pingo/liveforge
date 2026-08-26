@@ -104,3 +104,23 @@ func (s *ConsulSource) Load(ctx context.Context, previous Version) (Snapshot, er
 }
 
 func (s *ConsulSource) Close() error { return nil }
+
+func (s *ConsulSource) Write(ctx context.Context, data []byte) error {
+	endpoint := s.address + "/v1/kv/" + s.prefix + "/config.yaml"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(string(data)))
+	if err != nil {
+		return fmt.Errorf("create consul write request: %w", err)
+	}
+	if s.token != "" {
+		req.Header.Set("X-Consul-Token", s.token)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("write consul config: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("consul returned HTTP %d for write", resp.StatusCode)
+	}
+	return nil
+}

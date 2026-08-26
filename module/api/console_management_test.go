@@ -102,6 +102,9 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 	elements := consoleElementsByID(doc)
 	for _, id := range []string{
 		"nav-tabs",
+		"nav-workspace",
+		"nav-operations",
+		"nav-system",
 		"view-streams",
 		"view-gb28181",
 		"view-config",
@@ -110,10 +113,14 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 		"view-storage",
 		"view-security",
 		"config-refresh",
+		"config-editor",
+		"config-validate",
+		"config-apply",
 		"sip-target-uri",
 		"sip-stream-key",
 		"recordings-tbody",
 		"recording-detail",
+		"recording-capability",
 		"dvr-tbody",
 		"audit-tbody",
 	} {
@@ -121,9 +128,37 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 			t.Errorf("management console is missing element %q", id)
 		}
 	}
+	for _, group := range []struct {
+		id   string
+		view string
+	}{
+		{"nav-workspace", "streams"},
+		{"nav-workspace", "gb28181"},
+		{"nav-workspace", "sip"},
+		{"nav-workspace", "storage"},
+		{"nav-operations", "cluster"},
+		{"nav-system", "config"},
+		{"nav-system", "security"},
+	} {
+		groupNode := elements[group.id]
+		found := false
+		var walkGroup func(*html.Node)
+		walkGroup = func(node *html.Node) {
+			if node.Type == html.ElementNode && node.Data == "button" && consoleAttribute(node, "data-view") == group.view {
+				found = true
+			}
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				walkGroup(child)
+			}
+		}
+		walkGroup(groupNode)
+		if !found {
+			t.Errorf("navigation group %q does not contain %q", group.id, group.view)
+		}
+	}
 
 	views := consoleNavigationViews(doc)
-	wantViews := []string{"streams", "gb28181", "config", "cluster", "sip", "storage", "security"}
+	wantViews := []string{"streams", "gb28181", "sip", "storage", "cluster", "config", "security"}
 	if strings.Join(views, ",") != strings.Join(wantViews, ",") {
 		t.Fatalf("navigation views = %v, want %v", views, wantViews)
 	}
@@ -155,9 +190,12 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 }
 
 func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
-	_, script := consoleDocument(t)
+	doc, script := consoleDocument(t)
+	elements := consoleElementsByID(doc)
 	for _, call := range []string{
 		`apiFetch("/api/v1/server/config"`,
+		`apiFetch("/api/v1/server/config/document"`,
+		`apiFetch("/api/v1/server/config/schema"`,
 		`apiFetch("/api/v1/server/config/refresh"`,
 		`apiFetch("/api/v1/cluster/status"`,
 		`apiFetch("/api/v1/sipgateway/calls"`,
@@ -184,6 +222,15 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 	}
 	if !strings.Contains(script, `credentials: "same-origin"`) {
 		t.Error("apiFetch does not explicitly use the same-origin console session")
+	}
+	if consoleAttribute(elements["config-validate"], "data-permission") != "viewer" {
+		t.Error("config Validate must remain available to read-only viewer roles")
+	}
+	if !strings.Contains(script, "documentData.desired_document || documentData.effective_document") {
+		t.Error("config editor must prefer desired values so restart-required settings are not overwritten")
+	}
+	if !strings.Contains(script, "config-schema") || !strings.Contains(script, "JSON.stringify(schemaData, null, 2)") {
+		t.Error("config page must render the complete runtime JSON Schema")
 	}
 	for _, forbidden := range []string{"localStorage", "sessionStorage", "Authorization"} {
 		if strings.Contains(script, forbidden) {
@@ -430,7 +477,7 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 		}
 		interaction.SettledDisabled = settled.Disabled
 		interaction.SettledOpen = settled.Open
-		if interaction.ArrowSelected != "config" || interaction.ArrowFocus != "tab-config" || interaction.HomeSelected != "streams" || interaction.EndSelected != "security" {
+		if interaction.ArrowSelected != "sip" || interaction.ArrowFocus != "tab-sip" || interaction.HomeSelected != "streams" || interaction.EndSelected != "security" {
 			t.Errorf("tab keyboard behavior = %#v", interaction)
 		}
 		if interaction.InitialModalFocus != "modal-confirm" || interaction.TabWrapFocus != "modal-cancel" || interaction.ShiftTabWrapFocus != "modal-confirm" || interaction.ContainedModalFocus != "modal-confirm" || !interaction.EscapeClosed || interaction.RestoredFocus != "config-refresh" {
