@@ -128,7 +128,7 @@ type RingReader[T any] struct {
 // Read returns the next value, blocking until data is available.
 // Returns (value, true) on success, or (zero, false) if the buffer or reader is closed and no data remains.
 func (r *RingReader[T]) Read() (T, bool) {
-	return r.readContext(nil)
+	return r.readContext(context.Background())
 }
 
 // ReadContext returns the next value, blocking until data is available, the
