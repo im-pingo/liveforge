@@ -127,7 +127,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
 - **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; new recordings default to fMP4/`.mp4`; segmentation, storage health, download/range/inline-play/delete management, zero-byte session protection, and time-shift status
-- **Local protocol labs** — SIP and GB28181 pages run SDP/codec/RTP/PS/UDP checks locally without requiring another platform or device
+- **Local protocol labs** — SIP and GB28181 pages run one-shot SDP/codec/RTP/PS/UDP checks locally without requiring another platform or device; the SIP gateway provider also supports persistent PCMA/PCMU fake-device publish/receive sessions with cancellable stop/close cleanup, while persistent GB28181 lab sessions remain unavailable
 - **Startup rollback** — Listener or module initialization failures report the original error, close only modules whose initialization was attempted, and do not panic while rolling back later uninitialized modules
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
@@ -288,7 +288,7 @@ The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, a
 - Cluster relay/peer status and SIP call dial/detail/hangup
 - Recording metadata/download/inline-play/delete, DVR session/storage status and online HLS preview, security posture, and bounded audit events
 - Complete redacted Config document/schema display, read-only Validate, source-aware Apply & Refresh, and writable/read-only status for file, HTTP/HTTPS, Consul, and Redis
-- SIP and GB28181 local protocol Test Lab results, including unavailable-module states
+- SIP and GB28181 local protocol Test Lab results, including unavailable-module states; SIP provider sessions can publish or receive persistent PCMA/PCMU loopback media, while persistent GB28181 sessions are unavailable
 
 DVR playlist and segment GETs run synchronous subscribe authorization hooks only; they do not emit asynchronous subscribe lifecycle events.
 Recording preview uses the authenticated management API session. DVR preview uses the separate `dvr.listen` HLS listener with non-credentialed CORS, so its subscribe authorization still applies; the Console does not persist or append bearer tokens.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,7 +92,15 @@ type contractLabManager struct{}
 // NewLabManager returns the contract-only manager until GB28181 transport is wired.
 func NewLabManager() LabManager { return contractLabManager{} }
 
-func (contractLabManager) Start(context.Context, LabSessionRequest) (LabSessionSnapshot, error) {
+func (contractLabManager) Start(_ context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if request.Mode != LabModePublish && request.Mode != LabModeReceive {
+		return LabSessionSnapshot{}, ErrLabInvalidRequest
+	}
+	if strings.TrimSpace(request.DeviceID) == "" ||
+		strings.TrimSpace(request.ChannelID) == "" ||
+		strings.TrimSpace(request.StreamKey) == "" {
+		return LabSessionSnapshot{}, ErrLabInvalidRequest
+	}
 	return LabSessionSnapshot{}, ErrLabManagerUnimplemented
 }
 

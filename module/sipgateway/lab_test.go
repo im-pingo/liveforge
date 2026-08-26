@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo"
+	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
@@ -46,6 +48,21 @@ func TestLabManagerListsStartedSession(t *testing.T) {
 	}
 	if listed[0].DeviceID != want.DeviceID || listed[0].StreamKey != want.StreamKey {
 		t.Fatalf("listed session identity = %+v, want device=%q stream=%q", listed[0], want.DeviceID, want.StreamKey)
+	}
+}
+
+func TestLabManagerMarksTransportlessSessionAsContractOnly(t *testing.T) {
+	manager := NewLabManager()
+	session, err := manager.Start(context.Background(), validSIPLabRequest())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	const contractState LabSessionState = "contract"
+	if session.State != contractState {
+		t.Fatalf("transportless session state = %s, want %s", session.State, contractState)
+	}
+	if session.State == LabSessionStateActive {
+		t.Fatal("transportless session was reported as active")
 	}
 }
 
@@ -115,6 +132,130 @@ func TestSIPLabPublishUsesRealSignalingAndCleansUp(t *testing.T) {
 	if _, err := h.module.StartLabSession(context.Background(), request); err != nil {
 		t.Fatalf("reusing stopped publish identity: %v", err)
 	}
+}
+
+func TestSIPLabGatewayCloseCancelsBlockedStart(t *testing.T) {
+	target := freeSIPLabUDPAddress(t)
+	svc := &mockSIPService{localAddr: target, serverID: "test", domain: "test.local"}
+	gw, err := NewGateway(newTestGatewayConfig(), svc, newTestHub(), core.NewEventBus())
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "blocked-start-device",
+		StreamKey: "sip/blocked-start",
+		Codec:     "PCMA",
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		_, startErr := gw.StartLabSession(context.Background(), request)
+		startDone <- startErr
+	}()
+
+	var session *sipLabSession
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gw.labs.mu.RLock()
+		for _, candidate := range gw.labs.sessions {
+			if candidate.identity == request.DeviceID {
+				session = candidate
+				break
+			}
+		}
+		gw.labs.mu.RUnlock()
+		if session != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if session == nil {
+		t.Fatal("blocked lab start did not create a session")
+	}
+	var rtpAddr, rtcpAddr net.UDPAddr
+	deadline = time.Now().Add(time.Second)
+	socketsCaptured := false
+	for time.Now().Before(deadline) {
+		session.mu.RLock()
+		rtpConn, rtcpConn := session.rtpConn, session.rtcpConn
+		if rtpConn != nil && rtcpConn != nil {
+			rtpAddr = *rtpConn.LocalAddr().(*net.UDPAddr)
+			rtcpAddr = *rtcpConn.LocalAddr().(*net.UDPAddr)
+			socketsCaptured = true
+			session.mu.RUnlock()
+			break
+		}
+		session.mu.RUnlock()
+		time.Sleep(time.Millisecond)
+	}
+	if !socketsCaptured {
+		t.Fatal("blocked lab start did not allocate its RTP/RTCP sockets")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		gw.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Gateway.Close blocked behind an unanswered Background-context lab INVITE")
+	}
+	select {
+	case startErr := <-startDone:
+		if startErr == nil {
+			t.Fatal("blocked lab start returned nil error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("lab start goroutine remained blocked after Gateway.Close")
+	}
+
+	snapshot := session.snapshot()
+	if snapshot.State != LabSessionStateStopped {
+		t.Fatalf("blocked lab session state = %s, want stopped", snapshot.State)
+	}
+	for _, addr := range []*net.UDPAddr{&rtpAddr, &rtcpAddr} {
+		conn, bindErr := net.ListenUDP("udp4", addr)
+		if bindErr != nil {
+			t.Fatalf("rebind released lab UDP socket %s: %v", addr, bindErr)
+		}
+		_ = conn.Close()
+	}
+}
+
+func TestSIPLabBYEConsumesProvisionalResponseBeforeFinal(t *testing.T) {
+	ua, err := sipgo.NewUA()
+	if err != nil {
+		t.Fatalf("NewUA: %v", err)
+	}
+	t.Cleanup(func() { _ = ua.Close() })
+	client, err := sipgo.NewClient(ua)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	tx := &offeredFinalClientTx{
+		responses: make(chan *sip.Response, 2),
+		done:      make(chan struct{}),
+	}
+	client.TxRequester = labClientTxRequesterFunc(func(context.Context, *sip.Request) (sip.ClientTransaction, error) {
+		tx.responses <- sip.NewResponse(100, "Trying")
+		tx.responses <- sip.NewResponse(200, "OK")
+		return tx, nil
+	})
+
+	invite := newLabInvite(sip.INVITE, sip.Uri{Scheme: "sip", User: "device", Host: "lab.local"}, "device", "lab.local", "bye-regression")
+	response := sip.NewResponseFromRequest(invite, 200, "OK", nil)
+	if err := sendLabBYE(context.Background(), client, invite, response); err != nil {
+		t.Fatalf("sendLabBYE returned false error for provisional response: %v", err)
+	}
+}
+
+type labClientTxRequesterFunc func(context.Context, *sip.Request) (sip.ClientTransaction, error)
+
+func (f labClientTxRequesterFunc) Request(ctx context.Context, req *sip.Request) (sip.ClientTransaction, error) {
+	return f(ctx, req)
 }
 
 func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {

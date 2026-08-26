@@ -69,6 +69,9 @@ type LabSessionState string
 const (
 	LabSessionStateStarting LabSessionState = "starting"
 	LabSessionStateActive   LabSessionState = "active"
+	// LabSessionStateContract identifies a transportless contract-only manager
+	// session; it has no SIP signaling, media, sockets, or availability.
+	LabSessionStateContract LabSessionState = "contract"
 	LabSessionStateStopped  LabSessionState = "stopped"
 	LabSessionStateFailed   LabSessionState = "failed"
 )

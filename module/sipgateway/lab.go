@@ -52,7 +52,7 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 	m.mu.Lock()
 	if existingID, ok := m.identities[identity]; ok {
 		existing := m.sessions[existingID]
-		if existing != nil && existing.isRunning() {
+		if existing != nil && existing.isReserved() {
 			m.mu.Unlock()
 			return LabSessionSnapshot{}, ErrLabDuplicateIdentity
 		}
@@ -165,17 +165,19 @@ type sipLabSession struct {
 	ua        *sipgo.UserAgent
 	peer      *sipgo.Server
 
-	ctx         context.Context
-	cancel      context.CancelFunc
-	peerCancel  context.CancelFunc
-	peerDone    chan struct{}
-	stopDone    chan struct{}
-	stopOnce    sync.Once
-	lifecycleMu sync.Mutex
-	closeErr    error
-	mediaWG     sync.WaitGroup
-	rtpConn     *net.UDPConn
-	rtcpConn    *net.UDPConn
+	ctx           context.Context
+	cancel        context.CancelFunc
+	peerCancel    context.CancelFunc
+	peerDone      chan struct{}
+	startDone     chan struct{}
+	stopDone      chan struct{}
+	stopOnce      sync.Once
+	cleanupOnce   sync.Once
+	stopRequested bool
+	closeErr      error
+	mediaWG       sync.WaitGroup
+	rtpConn       *net.UDPConn
+	rtcpConn      *net.UDPConn
 
 	rtpPacketsSent  atomic.Uint64
 	rtpPacketsRecv  atomic.Uint64
@@ -187,6 +189,7 @@ type sipLabSession struct {
 
 func newSIPLabSession(id, identity string, request LabSessionRequest, gateway *Gateway) *sipLabSession {
 	now := time.Now().UTC()
+	ctx, cancel := context.WithCancel(context.Background())
 	direction := LabDirectionInbound
 	if request.Mode == LabModeReceive {
 		direction = LabDirectionOutbound
@@ -200,34 +203,56 @@ func newSIPLabSession(id, identity string, request LabSessionRequest, gateway *G
 		direction: direction,
 		startedAt: now,
 		updatedAt: now,
+		ctx:       ctx,
+		cancel:    cancel,
+		startDone: make(chan struct{}),
 		stopDone:  make(chan struct{}),
 	}
 }
 
-func (s *sipLabSession) isRunning() bool {
+func (s *sipLabSession) isReserved() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.state == LabSessionStateStarting || s.state == LabSessionStateActive
+	return s.state == LabSessionStateStarting || s.state == LabSessionStateActive || s.state == LabSessionStateContract
 }
 
 func (s *sipLabSession) start(requestContext context.Context) error {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer close(s.startDone)
 	if requestContext == nil {
 		return ErrLabInvalidRequest
 	}
+	s.mu.RLock()
+	state := s.state
+	ctxErr := s.ctx.Err()
+	s.mu.RUnlock()
+	if state != LabSessionStateStarting {
+		return ErrLabSessionNotFound
+	}
+	if ctxErr != nil {
+		return ctxErr
+	}
+	protocolContext, release := s.protocolContext(requestContext)
+	defer release()
 	if s.gateway == nil {
-		s.setState(LabSessionStateActive)
+		s.setState(LabSessionStateContract)
 		return nil
 	}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
 	switch s.request.Mode {
 	case LabModePublish:
-		return s.startPublish(requestContext)
+		return s.startPublish(protocolContext)
 	case LabModeReceive:
-		return s.startReceive(requestContext)
+		return s.startReceive(protocolContext)
 	default:
 		return ErrLabInvalidRequest
+	}
+}
+
+func (s *sipLabSession) protocolContext(caller context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(caller)
+	stopWatch := context.AfterFunc(s.ctx, cancel)
+	return ctx, func() {
+		stopWatch()
+		cancel()
 	}
 }
 
@@ -236,12 +261,16 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.rtpConn, s.rtcpConn = rtpConn, rtcpConn
+	s.mu.Unlock()
 	ua, client, err := newLabClient()
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.ua, s.client = ua, client
+	s.mu.Unlock()
 
 	host, port, err := gatewaySIPAddress(s.gateway.sipService.LocalAddr())
 	if err != nil {
@@ -298,7 +327,9 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.rtpConn, s.rtcpConn = rtpConn, rtcpConn
+	s.mu.Unlock()
 	ua, err := sipgo.NewUA(sipgo.WithUserAgentHostname("lab.local"))
 	if err != nil {
 		return err
@@ -308,7 +339,9 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 		_ = ua.Close()
 		return err
 	}
+	s.mu.Lock()
 	s.ua, s.peer = ua, peer
+	s.mu.Unlock()
 	peerPort, err := freeLabPort()
 	if err != nil {
 		return err
@@ -348,9 +381,12 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
 	})
 	peerCtx, peerCancel := context.WithCancel(s.ctx)
+	s.mu.Lock()
 	s.peerCancel, s.peerDone = peerCancel, make(chan struct{})
+	peerDone := s.peerDone
+	s.mu.Unlock()
 	go func() {
-		defer close(s.peerDone)
+		defer close(peerDone)
 		_ = peer.ListenAndServe(peerCtx, "udp4", peerAddr)
 	}()
 	time.Sleep(15 * time.Millisecond)
@@ -484,34 +520,51 @@ func deterministicAudioPayload() []byte {
 }
 
 func (s *sipLabSession) stop() error {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
 	s.stopOnce.Do(func() {
 		defer close(s.stopDone)
-		if s.cancel != nil {
-			s.cancel()
-		}
+		s.mu.Lock()
+		s.stopRequested = true
+		cancel := s.cancel
+		s.mu.Unlock()
+		cancel()
+		<-s.startDone
+		s.cleanup()
+		s.mu.Lock()
+		s.state = LabSessionStateStopped
+		s.stoppedAt = time.Now().UTC()
+		s.updatedAt = s.stoppedAt
+		s.mu.Unlock()
+	})
+	<-s.stopDone
+	s.mu.RLock()
+	err := s.closeErr
+	s.mu.RUnlock()
+	return err
+}
+
+func (s *sipLabSession) cleanup() {
+	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
 		callID, mode := s.callID, s.request.Mode
 		invite, response, client := s.invite, s.response, s.client
 		peerCancel, peerDone, ua := s.peerCancel, s.peerDone, s.ua
+		rtpConn, rtcpConn := s.rtpConn, s.rtcpConn
 		s.mu.RUnlock()
-		if s.rtpConn != nil {
-			_ = s.rtpConn.Close()
+		if rtpConn != nil {
+			_ = rtpConn.Close()
 		}
-		if s.rtcpConn != nil {
-			_ = s.rtcpConn.Close()
+		if rtcpConn != nil {
+			_ = rtcpConn.Close()
 		}
+		var closeErr error
 		if mode == LabModePublish && client != nil && invite != nil && response != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			s.closeErr = sendLabBYE(ctx, client, invite, response)
+			closeErr = sendLabBYE(ctx, client, invite, response)
 			cancel()
 		}
 		if s.gateway != nil && callID != "" {
 			if err := s.gateway.Hangup(callID); err != nil && !errors.Is(err, ErrCallNotFound) {
-				if s.closeErr == nil {
-					s.closeErr = err
-				}
+				closeErr = errors.Join(closeErr, err)
 			}
 		}
 		if peerCancel != nil {
@@ -524,46 +577,21 @@ func (s *sipLabSession) stop() error {
 			<-peerDone
 		}
 		s.mediaWG.Wait()
-		s.mu.Lock()
-		s.state = LabSessionStateStopped
-		s.stoppedAt = time.Now().UTC()
-		s.updatedAt = s.stoppedAt
-		s.mu.Unlock()
+		if closeErr != nil {
+			s.mu.Lock()
+			s.closeErr = closeErr
+			s.mu.Unlock()
+		}
 	})
-	<-s.stopDone
-	return s.closeErr
 }
 
 func (s *sipLabSession) fail(err error) {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	s.mu.RLock()
-	callID := s.callID
-	s.mu.RUnlock()
-	if s.cancel != nil {
-		s.cancel()
-	}
-	if s.rtpConn != nil {
-		_ = s.rtpConn.Close()
-	}
-	if s.rtcpConn != nil {
-		_ = s.rtcpConn.Close()
-	}
-	if s.peerCancel != nil {
-		s.peerCancel()
-	}
-	if s.ua != nil {
-		_ = s.ua.Close()
-	}
-	if s.peerDone != nil {
-		<-s.peerDone
-	}
-	if s.gateway != nil && callID != "" {
-		_ = s.gateway.Hangup(callID)
-	}
-	s.mediaWG.Wait()
+	s.cancel()
+	<-s.startDone
+	s.cleanup()
 	s.mu.Lock()
-	if s.state == LabSessionStateStopped {
+	if s.stopRequested || s.state == LabSessionStateStopped {
+		s.mu.Unlock()
 		return
 	}
 	s.state = LabSessionStateFailed
@@ -702,14 +730,18 @@ func sendLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Requ
 		return nil, err
 	}
 	defer tx.Terminate()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case response, ok := <-tx.Responses():
-		if !ok {
-			return nil, errors.New("lab SIP transaction closed")
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case response, ok := <-tx.Responses():
+			if !ok {
+				return nil, errors.New("lab SIP transaction closed")
+			}
+			if response.StatusCode >= 200 {
+				return response, nil
+			}
 		}
-		return response, nil
 	}
 }
 

@@ -158,6 +158,9 @@ func (s *service) init(cfg config.SIPConfig) error {
 	srv.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		s.dispatchInvite(req, tx)
 	})
+	// A 2xx INVITE ACK is a dialog message, not a server transaction that
+	// needs a response. Consume it at the transport boundary by default.
+	srv.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {})
 	srv.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
 		s.dispatchBye(req, tx)
 	})

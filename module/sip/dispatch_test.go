@@ -12,6 +12,7 @@ import (
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/im-pingo/liveforge/config"
 )
 
 type offeredResponseClientTx struct {
@@ -282,6 +283,21 @@ func TestSendInviteCollectorStopsWhenClientTransactionTerminates(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Handler Registration
 // ---------------------------------------------------------------------------
+
+func TestSIPServiceRegistersDialogACKConsumer(t *testing.T) {
+	s := newService()
+	if err := s.init(config.SIPConfig{Listen: "127.0.0.1:0", Transport: []string{"udp"}, Domain: "test.local"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(s.close)
+
+	for _, method := range s.server.RegisteredMethods() {
+		if method == sip.ACK.String() {
+			return
+		}
+	}
+	t.Fatal("initialized SIP service did not register an ACK consumer")
+}
 
 func TestOnRegisterRegistersHandler(t *testing.T) {
 	s := newService()

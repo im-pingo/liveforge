@@ -24,48 +24,31 @@ func TestLabManagerRejectsInvalidStartRequest(t *testing.T) {
 	}
 }
 
-func TestLabManagerListsStartedSession(t *testing.T) {
+func TestLabManagerRejectsValidStartAsUnavailable(t *testing.T) {
 	manager := NewLabManager()
-	want := validGBLabRequest()
 
-	session, err := manager.Start(context.Background(), want)
-	if err != nil {
-		t.Fatalf("Start: %v", err)
+	_, err := manager.Start(context.Background(), validGBLabRequest())
+	if !errors.Is(err, ErrLabManagerUnimplemented) {
+		t.Fatalf("valid Start error = %v, want ErrLabManagerUnimplemented", err)
 	}
-
-	listed := manager.List()
-	if len(listed) != 1 || listed[0] != session {
-		t.Fatalf("List = %+v, want [%+v]", listed, session)
-	}
-	if listed[0].DeviceID != want.DeviceID || listed[0].ChannelID != want.ChannelID || listed[0].StreamKey != want.StreamKey {
-		t.Fatalf("listed session identity = %+v, want device=%q channel=%q stream=%q", listed[0], want.DeviceID, want.ChannelID, want.StreamKey)
+	if listed := manager.List(); len(listed) != 0 {
+		t.Fatalf("List = %+v, want no transportless sessions", listed)
 	}
 }
 
-func TestLabManagerRejectsDuplicateIdentity(t *testing.T) {
+func TestLabManagerDoesNotReserveUnavailableIdentity(t *testing.T) {
 	manager := NewLabManager()
 	want := validGBLabRequest()
-	if _, err := manager.Start(context.Background(), want); err != nil {
-		t.Fatalf("first Start: %v", err)
-	}
-
-	_, err := manager.Start(context.Background(), want)
-	if !errors.Is(err, ErrLabDuplicateIdentity) {
-		t.Fatalf("duplicate Start error = %v, want ErrLabDuplicateIdentity", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := manager.Start(context.Background(), want); !errors.Is(err, ErrLabManagerUnimplemented) {
+			t.Fatalf("Start attempt %d error = %v, want ErrLabManagerUnimplemented", attempt+1, err)
+		}
 	}
 }
 
-func TestLabManagerStopIsIdempotent(t *testing.T) {
+func TestLabManagerStopReportsUnavailable(t *testing.T) {
 	manager := NewLabManager()
-	session, err := manager.Start(context.Background(), validGBLabRequest())
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	if err := manager.Stop(session.ID); err != nil {
-		t.Fatalf("first Stop: %v", err)
-	}
-	if err := manager.Stop(session.ID); err != nil {
-		t.Fatalf("second Stop: %v, want nil", err)
+	if err := manager.Stop("unavailable"); !errors.Is(err, ErrLabManagerUnimplemented) {
+		t.Fatalf("Stop error = %v, want ErrLabManagerUnimplemented", err)
 	}
 }
