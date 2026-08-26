@@ -51,6 +51,7 @@ type Gateway struct {
 	closed         bool
 	rtpIdleTimeout time.Duration
 	metrics        gatewayMetrics
+	labs           *labManager
 }
 
 // NewGateway creates and starts a SIP gateway.
@@ -94,6 +95,7 @@ func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core
 		pending:        make(map[string]struct{}),
 		rtpIdleTimeout: 30 * time.Second,
 	}
+	gw.labs = newLabManager(gw)
 	gw.sendInvite = func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
 		return sipSvc.SendInvite(ctx, req)
 	}
@@ -620,9 +622,36 @@ func (gw *Gateway) Close() {
 	}
 	gw.mu.Unlock()
 
+	if gw.labs != nil {
+		gw.labs.closeAll()
+	}
 	for _, session := range sessions {
 		gw.finishSession(session, CallStateEnded, nil)
 	}
+}
+
+// StartLabSession starts a persistent in-process fake SIP device.
+func (gw *Gateway) StartLabSession(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if gw.labs == nil {
+		return LabSessionSnapshot{}, ErrLabManagerUnimplemented
+	}
+	return gw.labs.start(ctx, request)
+}
+
+// ListLabSessions returns stable snapshots of all current and terminal lab sessions.
+func (gw *Gateway) ListLabSessions() []LabSessionSnapshot {
+	if gw.labs == nil {
+		return []LabSessionSnapshot{}
+	}
+	return gw.labs.list()
+}
+
+// StopLabSession stops a persistent fake SIP device. Repeated stops are safe.
+func (gw *Gateway) StopLabSession(id string) error {
+	if gw.labs == nil {
+		return ErrLabManagerUnimplemented
+	}
+	return gw.labs.stop(id)
 }
 
 func (gw *Gateway) reserveCall(callID string) error {

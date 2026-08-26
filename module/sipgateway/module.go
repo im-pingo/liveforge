@@ -93,6 +93,30 @@ func (m *Module) Hangup(callID string) error {
 	return m.gw.Hangup(callID)
 }
 
+// StartLabSession starts a persistent in-process fake SIP device.
+func (m *Module) StartLabSession(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if m.gw == nil {
+		return LabSessionSnapshot{}, ErrGatewayDisabled
+	}
+	return m.gw.StartLabSession(ctx, request)
+}
+
+// ListLabSessions returns persistent fake SIP device snapshots.
+func (m *Module) ListLabSessions() []LabSessionSnapshot {
+	if m.gw == nil {
+		return []LabSessionSnapshot{}
+	}
+	return m.gw.ListLabSessions()
+}
+
+// StopLabSession stops a persistent fake SIP device. Repeated stops are safe.
+func (m *Module) StopLabSession(id string) error {
+	if m.gw == nil {
+		return ErrGatewayDisabled
+	}
+	return m.gw.StopLabSession(id)
+}
+
 // Metrics returns bounded-cardinality gateway metrics.
 func (m *Module) Metrics() MetricsSnapshot {
 	if m.gw == nil {

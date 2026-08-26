@@ -50,6 +50,7 @@ type CallSession struct {
 	established     atomic.Bool
 	terminateOnce   sync.Once
 	stopOnce        sync.Once
+	rtcpSendOnce    sync.Once
 	closed          chan struct{}
 }
 
@@ -357,8 +358,34 @@ func (cs *CallSession) sendLoop() {
 				return
 			}
 			cs.recordRTPSent(n)
+			cs.sendSenderReport(remoteAddr, pkt.Timestamp)
 		}
 	}
+}
+
+func (cs *CallSession) sendSenderReport(remoteAddr *net.UDPAddr, rtpTimestamp uint32) {
+	if remoteAddr == nil || remoteAddr.Port >= 65535 {
+		return
+	}
+	cs.rtcpSendOnce.Do(func() {
+		cs.mu.RLock()
+		conn := cs.rtcpConn
+		cs.mu.RUnlock()
+		if conn == nil {
+			return
+		}
+		data, err := (&rtcp.SenderReport{
+			SSRC:        0x4c465247,
+			NTPTime:     uint64(time.Now().UnixNano()),
+			RTPTime:     rtpTimestamp,
+			PacketCount: uint32(cs.rtpPacketsSent.Load()),
+			OctetCount:  uint32(cs.rtpBytesSent.Load()),
+		}).Marshal()
+		if err != nil {
+			return
+		}
+		_, _ = conn.WriteToUDP(data, &net.UDPAddr{IP: remoteAddr.IP, Port: remoteAddr.Port + 1})
+	})
 }
 
 // Close terminates a session and notifies its gateway owner exactly once.

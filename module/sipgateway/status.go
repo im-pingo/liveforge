@@ -42,7 +42,8 @@ var (
 	ErrLabDuplicateIdentity = errors.New("SIP gateway lab identity is already active")
 	// ErrLabSessionNotFound indicates that a lab session does not exist.
 	ErrLabSessionNotFound = errors.New("SIP gateway lab session not found")
-	// ErrLabManagerUnimplemented indicates that the transport-backed manager is not wired yet.
+	// ErrLabManagerUnimplemented indicates that a standalone contract manager has
+	// no SIP gateway to attach a transport session to.
 	ErrLabManagerUnimplemented = errors.New("SIP gateway lab manager is not implemented")
 )
 
@@ -109,18 +110,10 @@ type LabManager interface {
 	Stop(id string) error
 }
 
-type contractLabManager struct{}
-
-// NewLabManager returns the contract-only manager until SIP transport is wired.
-func NewLabManager() LabManager { return contractLabManager{} }
-
-func (contractLabManager) Start(context.Context, LabSessionRequest) (LabSessionSnapshot, error) {
-	return LabSessionSnapshot{}, ErrLabManagerUnimplemented
-}
-
-func (contractLabManager) List() []LabSessionSnapshot { return []LabSessionSnapshot{} }
-
-func (contractLabManager) Stop(string) error { return ErrLabManagerUnimplemented }
+// NewLabManager returns a lifecycle manager for callers that need the
+// protocol-neutral contract without a running gateway. Gateway instances use
+// their transport-backed manager internally.
+func NewLabManager() LabManager { return newLabManager(nil) }
 
 // SIPGatewayProvider is the control-plane contract exposed by Module.
 type SIPGatewayProvider interface {
@@ -128,6 +121,9 @@ type SIPGatewayProvider interface {
 	Call(callID string) (CallSnapshot, bool)
 	Dial(ctx context.Context, targetURI, streamKey string) (string, error)
 	Hangup(callID string) error
+	StartLabSession(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error)
+	ListLabSessions() []LabSessionSnapshot
+	StopLabSession(id string) error
 	Metrics() MetricsSnapshot
 }
 
