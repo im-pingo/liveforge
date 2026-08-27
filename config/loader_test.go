@@ -23,6 +23,21 @@ func TestLoadRejectsRemovedStreamSetting(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsEnabledLLHLSNonPositiveSegmentDuration(t *testing.T) {
+	for _, value := range []string{"0", "-0.1"} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "liveforge.yaml")
+			document := "http_stream:\n  llhls:\n    enabled: true\n    segment_duration: " + value + "\n"
+			if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "http_stream.llhls.segment_duration must be greater than zero") {
+				t.Fatalf("Load segment_duration=%s error = %v", value, err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsRemovedStreamSettingThroughYAMLIndirection(t *testing.T) {
 	paths, err := filepath.Glob(filepath.Join("testdata", "removed-settings", "*.yaml"))
 	if err != nil {

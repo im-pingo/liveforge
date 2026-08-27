@@ -24,18 +24,20 @@ type LLHLSSegment struct {
 
 // LLHLSPlaylist generates m3u8 playlists with LL-HLS tags.
 type LLHLSPlaylist struct {
-	partTarget  float64 // EXT-X-PART-INF PART-TARGET
-	basePath    string  // URL prefix for segments, e.g. "/live/stream1"
-	container   string  // "fmp4" or "ts"
-	initVersion string  // content-derived cache key for the current init segment
+	partTarget    float64 // EXT-X-PART-INF PART-TARGET
+	segmentTarget float64 // configured full-segment target duration
+	basePath      string  // URL prefix for segments, e.g. "/live/stream1"
+	container     string  // "fmp4" or "ts"
+	initVersion   string  // content-derived cache key for the current init segment
 }
 
 // NewLLHLSPlaylist creates a new playlist generator.
-func NewLLHLSPlaylist(partTarget float64, basePath, container string) *LLHLSPlaylist {
+func NewLLHLSPlaylist(partTarget, segmentTarget float64, basePath, container string) *LLHLSPlaylist {
 	return &LLHLSPlaylist{
-		partTarget: partTarget,
-		basePath:   basePath,
-		container:  container,
+		partTarget:    partTarget,
+		segmentTarget: segmentTarget,
+		basePath:      basePath,
+		container:     container,
 	}
 }
 
@@ -62,7 +64,7 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 		}
 	}
 	if maxDur == 0 {
-		maxDur = 6.0 // fallback when no completed segments yet
+		maxDur = p.segmentTarget
 	}
 	targetDur := int(math.Ceil(maxDur))
 	fmt.Fprintf(&sb, "#EXT-X-TARGETDURATION:%d\n", targetDur)

@@ -671,7 +671,7 @@ func TestHandlerLLHLSInitialPlaylistWaitsForCompletedSegment(t *testing.T) {
 	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
 		t.Fatal(err)
 	}
-	mgr := NewLLHLSManager("live/llhls-part", "/live/llhls-part", 0.2, 5, "fmp4")
+	mgr := NewLLHLSManager("live/llhls-part", "/live/llhls-part", 0.2, 1.0, 5, "fmp4")
 	m.llhlsMu.Lock()
 	m.llhlsManagers["live/llhls-part"] = mgr
 	m.llhlsMu.Unlock()
@@ -1083,7 +1083,7 @@ func TestHandlerLLHLSInitIsNotCachedAcrossPublishers(t *testing.T) {
 	srv.Config().HTTP.LLHLS.Enabled = true
 	srv.Config().HTTP.LLHLS.Container = "fmp4"
 
-	mgr := NewLLHLSManager("live/llhls-init", "/live/llhls-init", 0.2, 5, "fmp4")
+	mgr := NewLLHLSManager("live/llhls-init", "/live/llhls-init", 0.2, 1.0, 5, "fmp4")
 	mgr.mu.Lock()
 	mgr.initSegment = []byte("llhls-init")
 	mgr.mu.Unlock()

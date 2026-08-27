@@ -276,6 +276,16 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 | FMP4 | `http://localhost:8080/live/stream1.mp4` |
 | WebRTC | Open console → Preview → WebRTC tab |
 
+Pure-audio AAC publishers produce completed HLS, DASH, and LL-HLS segments while
+the source is still live. For stream key `live/audio`, inspect the HLS or LL-HLS
+playlist at `/live/audio.m3u8` and a full segment at `/live/audio/0.ts` or
+`/live/audio/0.m4s`; inspect DASH at `/live/audio.mpd`, with audio init
+`/live/audio/audio_init.mp4` and media `/live/audio/a1.m4s`. LL-HLS
+`part_duration` controls partial segments, while `segment_duration` controls
+completed full segments and defaults to `1.0` seconds. Without video keyframes,
+the first full segment completes near the configured segment target instead of
+waiting for source shutdown.
+
 ### Web Console
 
 Open `http://localhost:8090/console` for the real-time management dashboard. Preview URLs use the active HTTP/WebRTC listener reported by the server. If another process (for example nginx or a local helper) owns `127.0.0.1:8080`, RTMP and WHEP can work while HTTP-FLV/HLS/DASH/FMP4 preview requests receive that process's 404; release the port or set `http_stream.listen` to an unused address.

@@ -19,9 +19,10 @@ type LLHLSSegmenterCallbacks struct {
 
 // LLHLSSegmenter reads AVFrames from a stream and produces LL-HLS segments.
 type LLHLSSegmenter struct {
-	partDuration float64
-	container    string
-	callbacks    LLHLSSegmenterCallbacks
+	partDuration    float64
+	segmentDuration float64
+	container       string
+	callbacks       LLHLSSegmenterCallbacks
 
 	fmp4Muxer  *fmp4.Muxer
 	tsMuxer    *ts.Muxer
@@ -47,12 +48,13 @@ type LLHLSSegmenter struct {
 }
 
 // NewLLHLSSegmenter creates a new segmenter.
-func NewLLHLSSegmenter(partDuration float64, container string, cb LLHLSSegmenterCallbacks) *LLHLSSegmenter {
+func NewLLHLSSegmenter(partDuration, segmentDuration float64, container string, cb LLHLSSegmenterCallbacks) *LLHLSSegmenter {
 	return &LLHLSSegmenter{
-		partDuration: partDuration,
-		container:    container,
-		callbacks:    cb,
-		done:         make(chan struct{}),
+		partDuration:    partDuration,
+		segmentDuration: segmentDuration,
+		container:       container,
+		callbacks:       cb,
+		done:            make(chan struct{}),
 	}
 }
 
@@ -211,11 +213,11 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 		s.flushCurrentSegment()
 	}
 
-	// Audio-only streams: time-based full segment split (~6s). Audio frames in
+	// Audio-only streams: time-based full segment split. Audio frames in
 	// a video stream must never terminate a keyframe-bounded video segment.
 	if !s.hasVideo && s.segHasData && !frame.MediaType.IsVideo() {
 		segElapsed := float64(frame.DTS-s.segStartDTS) / 1000.0
-		if segElapsed >= 6.0 {
+		if segElapsed >= s.segmentDuration {
 			s.flushCurrentPart(frame.DTS)
 			s.flushCurrentSegment()
 		}

@@ -19,32 +19,34 @@ type LLHLSManager struct {
 	currentMSN   int
 	initSegment  []byte
 
-	segmenter    *LLHLSSegmenter
-	playlist     *LLHLSPlaylist
-	streamKey    string
-	basePath     string
-	container    string
-	segmentCount int
-	partDuration float64
+	segmenter       *LLHLSSegmenter
+	playlist        *LLHLSPlaylist
+	streamKey       string
+	basePath        string
+	container       string
+	segmentCount    int
+	partDuration    float64
+	segmentDuration float64
 
 	done chan struct{}
 }
 
 // NewLLHLSManager creates a new LL-HLS manager.
-func NewLLHLSManager(streamKey, basePath string, partDuration float64, segmentCount int, container string) *LLHLSManager {
+func NewLLHLSManager(streamKey, basePath string, partDuration, segmentDuration float64, segmentCount int, container string) *LLHLSManager {
 	m := &LLHLSManager{
-		streamKey:    streamKey,
-		basePath:     basePath,
-		container:    container,
-		segmentCount: segmentCount,
-		partDuration: partDuration,
-		done:         make(chan struct{}),
+		streamKey:       streamKey,
+		basePath:        basePath,
+		container:       container,
+		segmentCount:    segmentCount,
+		partDuration:    partDuration,
+		segmentDuration: segmentDuration,
+		done:            make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
 
-	m.playlist = NewLLHLSPlaylist(partDuration, basePath, container)
+	m.playlist = NewLLHLSPlaylist(partDuration, segmentDuration, basePath, container)
 
-	m.segmenter = NewLLHLSSegmenter(partDuration, container, LLHLSSegmenterCallbacks{
+	m.segmenter = NewLLHLSSegmenter(partDuration, segmentDuration, container, LLHLSSegmenterCallbacks{
 		OnInit: func(data []byte) {
 			m.mu.Lock()
 			m.initSegment = data

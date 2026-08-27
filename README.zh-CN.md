@@ -278,6 +278,15 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 | FMP4 | `http://localhost:8080/live/stream1.mp4` |
 | WebRTC | 打开控制台 → 点击 Preview → 选择 WebRTC 标签页 |
 
+纯 AAC 音频源在推流仍进行时就会产生完整的 HLS、DASH 和 LL-HLS
+分片。以 `live/audio` 为流 key 时，HLS/LL-HLS 播放列表为
+`/live/audio.m3u8`，完整分片为 `/live/audio/0.ts` 或
+`/live/audio/0.m4s`；DASH MPD 为 `/live/audio.mpd`，音频 init 为
+`/live/audio/audio_init.mp4`，媒体分片为 `/live/audio/a1.m4s`。LL-HLS
+的 `part_duration` 控制 part，`segment_duration` 控制完整 segment 且
+默认为 `1.0` 秒。没有视频关键帧时，首个完整分片会在配置目标时长
+附近完成，无需等待源停止。
+
 ### Web 控制台
 
 访问 `http://localhost:8090/console` 打开实时管理仪表盘。预览 URL 使用服务端报告的实际 HTTP/WebRTC 监听地址。如果 nginx 或其他本地进程占用了 `127.0.0.1:8080`，RTMP 和 WHEP 可能正常，但 HTTP-FLV/HLS/DASH/FMP4 预览会收到占用进程的 404；请释放该端口，或将 `http_stream.listen` 改为未占用的地址。

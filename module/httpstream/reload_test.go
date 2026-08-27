@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 )
 
@@ -44,7 +45,7 @@ func TestOnReloadStopsSegmentManagersSoNewPolicyIsUsed(t *testing.T) {
 	m.server = server
 	hls := NewHLSManager("live/test", "/live/test", 6, 5)
 	dash := NewDASHManager("live/test", "/live/test", 6, 5)
-	llhls := NewLLHLSManager("live/test", "/live/test", 0.2, 4, "fmp4")
+	llhls := NewLLHLSManager("live/test", "/live/test", 0.2, 1.0, 4, "fmp4")
 	m.hlsManagers["live/test"] = hls
 	m.dashManagers["live/test"] = dash
 	m.llhlsManagers["live/test"] = llhls
@@ -64,6 +65,28 @@ func TestOnReloadStopsSegmentManagersSoNewPolicyIsUsed(t *testing.T) {
 	case <-hls.done:
 	case <-time.After(time.Second):
 		t.Fatal("HLS manager was not stopped")
+	}
+}
+
+func TestOnReloadStopsLLHLSManagerForSegmentDurationChange(t *testing.T) {
+	cfg := config.Defaults()
+	server := core.NewServer(cfg)
+	m := NewModule()
+	m.server = server
+	m.policy = cfg.HTTP
+	manager := NewLLHLSManager("live/test", "/live/test", 0.2, 1.0, 4, "fmp4")
+	m.llhlsManagers["live/test"] = manager
+
+	next, err := configruntime.ParseDocument([]byte("http_stream:\n  llhls:\n    segment_duration: 0.5\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.UpdateConfig(next)
+	if err := m.OnReload(server); err != nil {
+		t.Fatal(err)
+	}
+	if m.llhlsManagers["live/test"] != nil {
+		t.Fatal("LL-HLS manager using the old full-segment duration was retained")
 	}
 }
 

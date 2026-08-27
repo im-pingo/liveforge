@@ -17,6 +17,8 @@ http_stream:
   enabled: true
   listen: ":8082"
   cors: true
+  llhls:
+    segment_duration: 1.0
 
 webrtc:
   enabled: true

@@ -160,6 +160,48 @@ Each Lab manager retains all active sessions plus the newest 16 terminal
 records. Starting and stopping more sessions prunes only the oldest terminal
 records; active sessions are never removed by history maintenance.
 
+## Pure-Audio HTTP Segments
+
+An AAC-only publisher does not have video keyframes to close HTTP media
+segments. HLS, DASH, and LL-HLS therefore close audio-only segments by elapsed
+media time while the source remains live. The frame at the duration boundary
+starts the next segment and is included once. Video-bearing streams remain
+keyframe-bounded.
+
+For LL-HLS, `part_duration` controls the target duration of low-latency parts,
+while `segment_duration` controls completed full segments. The default full
+segment target is `1.0` second and values below `0.1` are rejected by the
+configuration schema. Both settings are hot-reloadable; existing segment
+managers stop and later requests recreate them with the new policy.
+
+```yaml
+http_stream:
+  llhls:
+    enabled: true
+    part_duration: 0.2
+    segment_duration: 1.0
+    segment_count: 4
+    container: fmp4
+```
+
+For an AAC-only stream key `live/audio`, inspect the live outputs before
+stopping the publisher:
+
+```bash
+curl -fsS http://127.0.0.1:8080/live/audio.m3u8
+curl -fsS -o /tmp/liveforge-audio-0.ts http://127.0.0.1:8080/live/audio/0.ts
+curl -fsS -o /tmp/liveforge-audio-0.m4s http://127.0.0.1:8080/live/audio/0.m4s
+curl -fsS http://127.0.0.1:8080/live/audio.mpd
+curl -fsS -o /tmp/liveforge-audio-init.mp4 http://127.0.0.1:8080/live/audio/audio_init.mp4
+curl -fsS -o /tmp/liveforge-audio-a1.m4s http://127.0.0.1:8080/live/audio/a1.m4s
+```
+
+The `.m3u8` route serves HLS or LL-HLS according to the active module policy;
+LL-HLS full segments use `.ts` or `.m4s` according to `container`, while HLS
+uses `.ts`. DASH uses the audio init and `a$Number$.m4s` media routes. The first
+full audio-only segment should become available near its configured target
+duration, without waiting for source shutdown or a video keyframe.
+
 The startup cache is the video-keyframe-bounded GOP. `GOP #N` is a
 stream-lifetime generation that increments for every keyframe, so replacement
 remains visible even when the polling interval repeatedly samples the same point

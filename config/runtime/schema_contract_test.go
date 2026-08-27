@@ -58,6 +58,26 @@ runtime:
 	}
 }
 
+func TestConfigSchemaRequiresPracticalLLHLSSegmentDuration(t *testing.T) {
+	schema := loadConfigSchema(t)
+	valid := map[string]any{
+		"http_stream": map[string]any{
+			"llhls": map[string]any{"segment_duration": 0.1},
+		},
+	}
+	if err := validateSchemaValue(schema, schema, valid, "$"); err != nil {
+		t.Fatalf("schema rejected LL-HLS segment_duration=0.1: %v", err)
+	}
+	invalid := map[string]any{
+		"http_stream": map[string]any{
+			"llhls": map[string]any{"segment_duration": 0.099},
+		},
+	}
+	if err := validateSchemaValue(schema, schema, invalid, "$"); err == nil {
+		t.Fatal("schema accepted LL-HLS segment_duration below 0.1")
+	}
+}
+
 func TestConfigSchemaAcceptsNegativeScalarDefaultSentinels(t *testing.T) {
 	schema := loadConfigSchema(t)
 	document := map[string]any{

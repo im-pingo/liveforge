@@ -172,6 +172,10 @@ func (h *HLSManager) Run(stream *core.Stream) {
 			}
 			gotFirstKeyframe = true
 		}
+		if !videoCodec.IsVideo() && hasData && float64(frame.DTS-segStartDTS)/1000.0 >= h.targetDur {
+			finalize(frame.DTS)
+			segStartDTS = frame.DTS
+		}
 		// Split on video keyframes (but not the very first frame)
 		if frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && hasData && buf.Len() > 0 {
 			finalize(frame.DTS)
@@ -183,6 +187,9 @@ func (h *HLSManager) Run(stream *core.Stream) {
 			hasData = true
 		}
 
+		if !videoCodec.IsVideo() && buf.Len() == 0 {
+			buf.Write(muxer.WritePATAndPMT())
+		}
 		if data := muxer.WriteFrame(frame); len(data) > 0 {
 			buf.Write(data)
 		}

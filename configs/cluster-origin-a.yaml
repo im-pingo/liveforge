@@ -12,6 +12,8 @@ http_stream:
   enabled: true
   listen: ":8080"
   cors: true
+  llhls:
+    segment_duration: 1.0
 
 stream:
   gop_cache: true

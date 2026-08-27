@@ -269,7 +269,7 @@ func (m *Module) getOrCreateLLHLS(streamKey string, stream *core.Stream) *LLHLSM
 
 	cfg := m.server.Config().HTTP.LLHLS
 	basePath := "/" + escapeStreamKeyPath(streamKey)
-	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentCount, cfg.Container)
+	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentDuration, cfg.SegmentCount, cfg.Container)
 	m.llhlsManagers[streamKey] = mgr
 	go mgr.Run(stream)
 	return mgr

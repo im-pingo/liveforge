@@ -40,6 +40,7 @@ type DASHManager struct {
 	timeBase   float64   // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
 	streamKey  string
 	basePath   string // e.g., "/live/stream1"
+	hasVideo   bool   // whether video track is present
 	hasAudio   bool   // whether audio track is present
 	audioCodec string // e.g., "mp4a.40.2" for MPD codecs attribute
 	done       chan struct{}
@@ -114,6 +115,7 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 	d.mu.Lock()
 	d.videoInitSeg = videoInit
 	d.audioInitSeg = audioInit
+	d.hasVideo = videoCodec.IsVideo()
 	d.hasAudio = audioCodec != 0
 	d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
 	d.videoWidth = videoWidth
@@ -187,6 +189,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		if d.videoInitSeg == nil {
 			d.videoInitSeg = videoInit
 			d.audioInitSeg = audioInit
+			d.hasVideo = videoCodec.IsVideo()
 			d.hasAudio = audioCodec != 0
 			d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
 		}
@@ -286,7 +289,14 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			d.seqBase += excess
 		}
 		if len(d.audioSegments) > keepCount {
-			d.audioSegments = d.audioSegments[len(d.audioSegments)-keepCount:]
+			excess := len(d.audioSegments) - keepCount
+			if len(d.videoSegments) == 0 {
+				for _, seg := range d.audioSegments[:excess] {
+					d.timeBase += seg.Duration
+				}
+				d.seqBase += excess
+			}
+			d.audioSegments = d.audioSegments[excess:]
 		}
 		d.mu.Unlock()
 
@@ -349,6 +359,11 @@ func (d *DASHManager) Run(stream *core.Stream) {
 				continue
 			}
 			gotFirstKeyframe = true
+		}
+		if !videoCodec.IsVideo() && hasData && float64(frame.DTS-segStartDTS)/1000.0 >= d.targetDur {
+			carryOver := finalize(frame.DTS)
+			segStartDTS = frame.DTS
+			currentAudioFrames = append(currentAudioFrames, carryOver...)
 		}
 
 		// Split on video keyframes

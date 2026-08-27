@@ -116,6 +116,64 @@ func TestDASHManagerGetSegmentAndAudioSegment(t *testing.T) {
 	}
 }
 
+func TestDASHManagerAudioOnlyProducesLiveSegments(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/dash-audio-only")
+	mgr := NewDASHManager(stream.Key(), "/live/dash-audio-only", 0.2, 5)
+	mgr.InitFromStream(stream)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	payloads := writeLiveAACFrames(stream, 22, 20)
+	waitForSegmentCount(t, mgr.SegmentCount, 2)
+	select {
+	case <-done:
+		t.Fatal("DASH manager stopped before the live source")
+	default:
+	}
+
+	initData, ok := mgr.GetAudioInitSegment()
+	if !ok {
+		t.Fatal("audio-only DASH init segment is unavailable while source is live")
+	}
+	demuxer, err := fmp4.NewDemuxer(initData)
+	if err != nil {
+		t.Fatalf("create audio-only DASH demuxer: %v", err)
+	}
+	firstData, ok := mgr.GetAudioSegment(0)
+	if !ok {
+		t.Fatal("first audio-only DASH segment is unavailable while source is live")
+	}
+	secondData, ok := mgr.GetAudioSegment(1)
+	if !ok {
+		t.Fatal("second audio-only DASH segment is unavailable while source is live")
+	}
+	firstFrames, err := demuxer.Parse(firstData)
+	if err != nil {
+		t.Fatalf("demux first audio-only DASH segment: %v", err)
+	}
+	secondFrames, err := demuxer.Parse(secondData)
+	if err != nil {
+		t.Fatalf("demux second audio-only DASH segment: %v", err)
+	}
+	if len(firstFrames) == 0 || len(secondFrames) == 0 {
+		t.Fatalf("audio-only DASH demuxed frames = %d/%d, want audio in both segments", len(firstFrames), len(secondFrames))
+	}
+	assertBoundaryPayloadStartsNextSegmentOnce(t, firstFrames, secondFrames, payloads[10])
+	mpd := mgr.GenerateMPD()
+	if !strings.Contains(mpd, `contentType="audio"`) || strings.Contains(mpd, `contentType="video"`) {
+		t.Fatalf("audio-only DASH MPD advertised the wrong adaptations:\n%s", mpd)
+	}
+}
+
 func TestDASHManagerGenerateMPD(t *testing.T) {
 	mgr := NewDASHManager("live/test", "/live/test", 6.0, 5)
 
@@ -262,6 +320,7 @@ func TestDASHManagerVersionsInitSegmentURLs(t *testing.T) {
 	mgr.mu.Lock()
 	mgr.videoInitSeg = []byte("video configuration")
 	mgr.audioInitSeg = []byte("audio configuration")
+	mgr.hasVideo = true
 	mgr.videoCodecStr = "hvc1.1.6.L90.B0"
 	mgr.videoWidth = 640
 	mgr.videoHeight = 480

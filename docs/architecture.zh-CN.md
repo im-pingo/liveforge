@@ -296,11 +296,11 @@ SRT stream ID 决定 publish 或 subscribe。订阅端从一个启动快照创�
 
 ### HLS、LL-HLS、DASH
 
-HLS/LL-HLS/DASH 在 HTTP 模块中消费 muxer 输出并按关键帧边界切段：
+HLS/LL-HLS/DASH 在 HTTP 模块中消费 muxer 输出。有视频时仍只按关键帧边界切段；纯音频时按配置的媒体时长在边界帧写入前完成当前分段，边界帧只进入下一段一次，不需等待源结束：
 
 - HLS 保留滑动窗口；
-- LL-HLS 输出 part，支持 blocking playlist reload、`_HLS_msn` 和 `_HLS_part`；冷启动先等待一个完整 segment，避免只公布 part 导致播放器重复 append；
-- DASH 分离音视频 init 和 segment，使用精确 `SegmentTimeline`，MPD 返回前至少形成一个完整关键帧分段。
+- LL-HLS 输出 part，支持 blocking playlist reload、`_HLS_msn` 和 `_HLS_part`；`part_duration` 控制 part，`segment_duration` 控制完整 segment，默认 1.0 秒且支持热更新；冷启动先等待一个完整 segment，避免只公布 part 导致播放器重复 append；
+- DASH 分离音视频 init 和 segment，使用精确 `SegmentTimeline`；纯音频 MPD 不公布伪视频 adaptation，首个完整分段产生后即可返回。
 
 ### WebRTC WHEP
 

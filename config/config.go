@@ -161,10 +161,11 @@ type DASHConfig struct {
 
 // LLHLSConfig holds Low-Latency HLS settings.
 type LLHLSConfig struct {
-	Enabled      bool    `yaml:"enabled"`
-	PartDuration float64 `yaml:"part_duration"` // partial segment target duration in seconds (default 0.2)
-	SegmentCount int     `yaml:"segment_count"` // full segments in playlist window (default 4)
-	Container    string  `yaml:"container"`     // "fmp4" or "ts" (default "fmp4")
+	Enabled         bool    `yaml:"enabled"`
+	PartDuration    float64 `yaml:"part_duration"`    // partial segment target duration in seconds (default 0.2)
+	SegmentDuration float64 `yaml:"segment_duration"` // full segment target duration in seconds (default 1.0)
+	SegmentCount    int     `yaml:"segment_count"`    // full segments in playlist window (default 4)
+	Container       string  `yaml:"container"`        // "fmp4" or "ts" (default "fmp4")
 }
 
 // WSConfig holds WebSocket module settings.

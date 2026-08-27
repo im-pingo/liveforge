@@ -107,7 +107,7 @@
         "dash": {"$ref": "#/$defs/segment_playlist", "x-liveforge-reload": "hot_reload"},
         "llhls": {
           "type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload",
-          "properties": {"enabled": {"type": "boolean"}, "part_duration": {"type": "number", "exclusiveMinimum": 0}, "segment_count": {"type": "integer", "minimum": 1}, "container": {"type": "string", "enum": ["fmp4", "ts"]}}
+          "properties": {"enabled": {"type": "boolean"}, "part_duration": {"type": "number", "exclusiveMinimum": 0}, "segment_duration": {"type": "number", "minimum": 0.1}, "segment_count": {"type": "integer", "minimum": 1}, "container": {"type": "string", "enum": ["fmp4", "ts"]}}
         }
       }
     },

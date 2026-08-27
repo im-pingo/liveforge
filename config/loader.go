@@ -176,9 +176,10 @@ func defaults() *Config {
 			Listen: ":8080",
 			CORS:   true,
 			LLHLS: LLHLSConfig{
-				PartDuration: 0.2,
-				SegmentCount: 4,
-				Container:    "fmp4",
+				PartDuration:    0.2,
+				SegmentDuration: 1.0,
+				SegmentCount:    4,
+				Container:       "fmp4",
 			},
 		},
 		WS: WSConfig{

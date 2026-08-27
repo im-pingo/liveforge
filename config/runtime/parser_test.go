@@ -17,6 +17,13 @@ func TestParseDocumentRejectsRemovedStreamSetting(t *testing.T) {
 	}
 }
 
+func TestParseDocumentRejectsEnabledLLHLSZeroSegmentDuration(t *testing.T) {
+	_, err := ParseDocument([]byte("http_stream:\n  llhls:\n    enabled: true\n    segment_duration: 0\n"))
+	if err == nil || !strings.Contains(err.Error(), "http_stream.llhls.segment_duration must be greater than zero") {
+		t.Fatalf("zero LL-HLS segment duration error = %v", err)
+	}
+}
+
 func TestParseDocumentRejectsRemovedStreamSettingThroughYAMLIndirection(t *testing.T) {
 	paths, err := filepath.Glob(filepath.Join("..", "testdata", "removed-settings", "*.yaml"))
 	if err != nil {
@@ -185,6 +192,7 @@ func TestClassifyOnlyImplementedRuntimePoliciesAsHot(t *testing.T) {
 		"stream.gop_cache_num", "auth.subscribe.callback.url", "notify.http.endpoints",
 		"dvr.window", "api.auth.tokens", "api.console.role",
 		"http_stream.hls.segment_duration", "http_stream.dash.playlist_size", "http_stream.llhls.container",
+		"http_stream.llhls.segment_duration",
 		"webrtc.gcc.max_bitrate",
 	} {
 		if got := classifyPath(path); got != ChangeHot {
