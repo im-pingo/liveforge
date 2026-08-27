@@ -104,6 +104,7 @@ type Stream struct {
 	publisherGeneration   uint64
 	generationStartCursor int64
 	mediaInfo             avframe.MediaInfo
+	audioCodecEpoch       uint64
 	generationDone        chan struct{}
 	startupStateChanged   chan struct{}
 	startupReady          bool
@@ -232,9 +233,17 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	s.audioSeqHeader = nil
 	s.seqHeaderReady = make(chan struct{})
 	s.mediaInfo = avframe.MediaInfo{}
+	s.audioCodecEpoch = 0
 	s.startupReady = false
 	s.generationDone = make(chan struct{})
 	s.mergePublisherMediaInfoLocked(pub.MediaInfo())
+	if s.mediaInfo.AudioCodec != 0 {
+		s.audioCodecEpoch = 1
+		if s.audioSeqHeader != nil {
+			s.audioSeqHeader.AudioCodecEpoch = s.audioCodecEpoch
+			s.audioSeqHeader.AudioProvenance = avframe.FrameProvenanceSource
+		}
+	}
 	s.publisher = pub
 	s.state = StreamStatePublishing
 	s.startupReady = s.startupReadyLocked()
@@ -492,7 +501,12 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 	if frame.MediaType.IsVideo() {
 		s.mediaInfo.VideoCodec = frame.Codec
 	} else if frame.MediaType.IsAudio() {
+		if s.audioCodecEpoch == 0 || s.mediaInfo.AudioCodec != frame.Codec {
+			s.audioCodecEpoch++
+		}
 		s.mediaInfo.AudioCodec = frame.Codec
+		frame.AudioCodecEpoch = s.audioCodecEpoch
+		frame.AudioProvenance = avframe.FrameProvenanceSource
 	}
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
 		if frame.MediaType.IsVideo() {
@@ -739,6 +753,12 @@ func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.audioSeqHeader
+}
+
+func (s *Stream) audioCodecState() (avframe.CodecType, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mediaInfo.AudioCodec, s.audioCodecEpoch
 }
 
 // SeqHeaderReady returns a channel that is closed when the first sequence header

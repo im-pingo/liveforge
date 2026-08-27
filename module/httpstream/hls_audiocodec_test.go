@@ -144,4 +144,33 @@ func TestHLSManagerCodecSwitchKeepsCombinedVideoReaderPlaying(t *testing.T) {
 	if videoFrames == 0 {
 		t.Fatal("post-switch HLS segment contains no direct video")
 	}
+
+	// Catches tying the shared combined producer lifetime to a worker-local
+	// direct-audio handoff. Returning to G.711 must keep HLS/DASH-style readers
+	// alive and preserve their source-video passthrough.
+	for i := range 12 {
+		dts := int64(2100 + i*20)
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
+			dts, dts, make([]byte, 160),
+		))
+	}
+	for _, dts := range []int64{3000, 4000} {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			dts, dts, []byte{0, 0, 0, 2, 0x65, byte(dts / 1000)},
+		))
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 4 && time.Now().Before(deadline) {
+		select {
+		case <-done:
+			t.Fatalf("HLS combined transform reader stopped after the source returned to G.711 with %d segments", mgr.SegmentCount())
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if mgr.SegmentCount() < 4 {
+		t.Fatalf("HLS segment count = %d, want 4 after the reverse codec switch", mgr.SegmentCount())
+	}
 }

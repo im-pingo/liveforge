@@ -89,7 +89,7 @@ func (tm *TranscodeManager) getOrCreateReaderAt(targetCodec avframe.CodecType, s
 		return nil, func() {}, fmt.Errorf("no publisher on stream")
 	}
 
-	sourceCodec := pub.MediaInfo().AudioCodec
+	sourceCodec, _ := tm.stream.audioCodecState()
 
 	// Zero-overhead path: target matches source, no transcoding needed.
 	if targetCodec == sourceCodec {
@@ -127,7 +127,7 @@ func (tm *TranscodeManager) getOrCreateReaderAt(targetCodec avframe.CodecType, s
 	}
 	tracks[targetCodec] = track
 
-	go tm.transcodeLoop(ctx, track, sourceCodec, sourceStart, audioOnly)
+	go tm.transcodeLoop(ctx, track, sourceStart, audioOnly)
 
 	reader := track.ringBuffer.NewReaderAt(track.ringBuffer.WriteCursor())
 	if fromHistory {
@@ -162,8 +162,142 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnl
 	}
 }
 
+type audioTranscodePipeline struct {
+	registry    *audiocodec.Registry
+	track       *TranscodedTrack
+	sourceCodec avframe.CodecType
+	sourceEpoch uint64
+	decoder     audiocodec.Decoder
+	encoder     audiocodec.Encoder
+	resampler   audiocodec.Resampler
+	resampled   bool
+	ts          audiocodec.TsTracker
+	tsInited    bool
+	pcmBuf      []int16
+}
+
+func (tm *TranscodeManager) newAudioTranscodePipeline(
+	track *TranscodedTrack,
+	sourceCodec avframe.CodecType,
+	sourceEpoch uint64,
+) (*audioTranscodePipeline, error) {
+	decoder, err := tm.registry.NewDecoder(sourceCodec)
+	if err != nil {
+		return nil, err
+	}
+	encoder, err := tm.registry.NewEncoder(track.targetCodec)
+	if err != nil {
+		decoder.Close()
+		return nil, err
+	}
+	pipeline := &audioTranscodePipeline{
+		registry:    tm.registry,
+		track:       track,
+		sourceCodec: sourceCodec,
+		sourceEpoch: sourceEpoch,
+		decoder:     decoder,
+		encoder:     encoder,
+	}
+	if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil &&
+		seqHeader.Codec == sourceCodec &&
+		(seqHeader.AudioCodecEpoch == 0 || seqHeader.AudioCodecEpoch == sourceEpoch) {
+		decoder.SetExtradata(seqHeader.Payload)
+	}
+	return pipeline, nil
+}
+
+func (p *audioTranscodePipeline) close() {
+	if p.resampler != nil {
+		p.resampler.Close()
+	}
+	p.decoder.Close()
+	p.encoder.Close()
+}
+
+func (p *audioTranscodePipeline) writeSequenceHeader(dts int64) {
+	writeTranscodeSequenceHeader(p.registry, p.track, p.sourceEpoch, dts)
+}
+
+func writeTranscodeSequenceHeader(registry *audiocodec.Registry, track *TranscodedTrack, epoch uint64, dts int64) {
+	seqHdr := registry.SequenceHeader(track.targetCodec)
+	if seqHdr == nil {
+		return
+	}
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, track.targetCodec,
+		avframe.FrameTypeSequenceHeader, dts, dts, seqHdr,
+	)
+	frame.AudioCodecEpoch = epoch
+	frame.AudioProvenance = avframe.FrameProvenanceTranscoded
+	track.ringBuffer.Write(frame)
+}
+
+func (p *audioTranscodePipeline) writeEncoded(dts int64, payload []byte) {
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, p.track.targetCodec,
+		avframe.FrameTypeInterframe, dts, dts, payload,
+	)
+	frame.AudioCodecEpoch = p.sourceEpoch
+	frame.AudioProvenance = avframe.FrameProvenanceTranscoded
+	p.track.ringBuffer.Write(frame)
+}
+
+func (p *audioTranscodePipeline) encode(frame *avframe.AVFrame) {
+	if !p.tsInited {
+		p.ts.Init(frame.DTS, p.encoder.SampleRate())
+		p.tsInited = true
+	}
+
+	pcm, err := p.decoder.Decode(frame.Payload)
+	if err != nil {
+		return
+	}
+	if !p.resampled {
+		if pcm.SampleRate != p.encoder.SampleRate() || pcm.Channels != p.encoder.Channels() {
+			p.resampler = p.registry.NewResampler(
+				pcm.SampleRate, pcm.Channels,
+				p.encoder.SampleRate(), p.encoder.Channels(),
+			)
+		}
+		p.resampled = true
+	}
+	if p.resampler != nil {
+		pcm = p.resampler.Resample(pcm)
+	}
+
+	frameSize := p.encoder.FrameSize() * p.encoder.Channels()
+	if frameSize == 0 {
+		encoded, encErr := p.encoder.Encode(&audiocodec.PCMFrame{
+			Samples: pcm.Samples, SampleRate: p.encoder.SampleRate(), Channels: p.encoder.Channels(),
+		})
+		if encErr != nil {
+			return
+		}
+		samplesPerChannel := len(pcm.Samples) / p.encoder.Channels()
+		p.writeEncoded(p.ts.Next(samplesPerChannel), encoded)
+		return
+	}
+
+	p.pcmBuf = append(p.pcmBuf, pcm.Samples...)
+	const maxPCMBufSamples = 48000 * 2
+	if len(p.pcmBuf) > maxPCMBufSamples {
+		p.pcmBuf = p.pcmBuf[len(p.pcmBuf)-maxPCMBufSamples:]
+	}
+	for len(p.pcmBuf) >= frameSize {
+		encoded, encErr := p.encoder.Encode(&audiocodec.PCMFrame{
+			Samples: p.pcmBuf[:frameSize], SampleRate: p.encoder.SampleRate(), Channels: p.encoder.Channels(),
+		})
+		p.pcmBuf = p.pcmBuf[frameSize:]
+		if encErr != nil {
+			continue
+		}
+		p.writeEncoded(p.ts.Next(p.encoder.FrameSize()), encoded)
+	}
+}
+
 // transcodeLoop is the core decode-resample-encode pipeline for a single target codec.
-// sourceCodec is passed in to avoid a TOCTOU race on Publisher().
+// Each source codec epoch owns fresh decoder, encoder, resampler, timestamp,
+// and PCM state while the shared track itself remains reference counted.
 //
 // Architecture: inline processing to minimize audio delivery jitter. Each
 // source audio frame is decoded/resampled/encoded inline. Combined tracks
@@ -177,124 +311,29 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnl
 // irregularities via EWMA, so even small periodic delays compound over
 // minutes into large jitter buffer growth. The ring buffer remains
 // single-producer (this goroutine only), avoiding data races.
-func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack, sourceCodec avframe.CodecType, sourceStart int64, audioOnly bool) {
-	decoder, err := tm.registry.NewDecoder(sourceCodec)
-	if err != nil {
-		slog.Error("transcode: decoder unavailable", "from", sourceCodec, "error", err)
+func (tm *TranscodeManager) transcodeLoop(
+	ctx context.Context,
+	track *TranscodedTrack,
+	sourceStart int64,
+	audioOnly bool,
+) {
+	var pipeline *audioTranscodePipeline
+	var sourceCodec avframe.CodecType
+	var sourceEpoch uint64
+	currentSourceCodec, _ := tm.stream.audioCodecState()
+	if currentSourceCodec != track.targetCodec &&
+		!tm.registry.CanTranscode(currentSourceCodec, track.targetCodec) {
+		slog.Error("transcode: codec pipeline unavailable", "from", currentSourceCodec, "to", track.targetCodec)
 		track.ringBuffer.Close()
 		return
 	}
-	encoder, err := tm.registry.NewEncoder(track.targetCodec)
-	if err != nil {
-		slog.Error("transcode: encoder unavailable", "to", track.targetCodec, "error", err)
-		decoder.Close()
-		track.ringBuffer.Close()
-		return
-	}
-	defer decoder.Close()
-	defer encoder.Close()
-	defer track.ringBuffer.Close()
-
-	// Set extradata for codecs that need it (e.g. AAC AudioSpecificConfig)
-	if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil {
-		decoder.SetExtradata(seqHeader.Payload)
-	}
-
-	// Resampler is created lazily after the first successful decode
-	var resampler audiocodec.Resampler
-	resamplerInited := false
+	writeTranscodeSequenceHeader(tm.registry, track, 0, 0)
 	defer func() {
-		if resampler != nil {
-			resampler.Close()
+		if pipeline != nil {
+			pipeline.close()
 		}
 	}()
-
-	// Emit sequence header for target codec
-	if seqHdr := tm.registry.SequenceHeader(track.targetCodec); seqHdr != nil {
-		track.ringBuffer.Write(avframe.NewAVFrame(
-			avframe.MediaTypeAudio, track.targetCodec,
-			avframe.FrameTypeSequenceHeader, 0, 0, seqHdr,
-		))
-	}
-
-	var ts audiocodec.TsTracker
-	tsInited := false
-	var pcmBuf []int16
-	frameSize := encoder.FrameSize() * encoder.Channels()
-	const maxPCMBufSamples = 48000 * 2 // cap at ~1s of 48kHz stereo
-
-	// encodeAudio processes a single audio frame through the decode-resample-encode pipeline.
-	encodeAudio := func(frame *avframe.AVFrame) {
-		if !tsInited {
-			ts.Init(frame.DTS, encoder.SampleRate())
-			tsInited = true
-		}
-
-		pcm, decErr := decoder.Decode(frame.Payload)
-		if decErr != nil {
-			return
-		}
-
-		if !resamplerInited {
-			if pcm.SampleRate != encoder.SampleRate() ||
-				pcm.Channels != encoder.Channels() {
-				resampler = tm.registry.NewResampler(
-					pcm.SampleRate, pcm.Channels,
-					encoder.SampleRate(), encoder.Channels(),
-				)
-			}
-			resamplerInited = true
-		}
-
-		if resampler != nil {
-			pcm = resampler.Resample(pcm)
-		}
-
-		if frameSize == 0 {
-			chunk := &audiocodec.PCMFrame{
-				Samples:    pcm.Samples,
-				SampleRate: encoder.SampleRate(),
-				Channels:   encoder.Channels(),
-			}
-			encoded, encErr := encoder.Encode(chunk)
-			if encErr != nil {
-				return
-			}
-			samplesPerChannel := len(pcm.Samples) / encoder.Channels()
-			dts := ts.Next(samplesPerChannel)
-			track.ringBuffer.Write(avframe.NewAVFrame(
-				avframe.MediaTypeAudio, track.targetCodec,
-				avframe.FrameTypeInterframe,
-				dts, dts,
-				encoded,
-			))
-		} else {
-			pcmBuf = append(pcmBuf, pcm.Samples...)
-			if len(pcmBuf) > maxPCMBufSamples {
-				pcmBuf = pcmBuf[len(pcmBuf)-maxPCMBufSamples:]
-			}
-			for len(pcmBuf) >= frameSize {
-				chunk := &audiocodec.PCMFrame{
-					Samples:    pcmBuf[:frameSize],
-					SampleRate: encoder.SampleRate(),
-					Channels:   encoder.Channels(),
-				}
-				encoded, encErr := encoder.Encode(chunk)
-				if encErr != nil {
-					pcmBuf = pcmBuf[frameSize:]
-					continue
-				}
-				dts := ts.Next(encoder.FrameSize())
-				track.ringBuffer.Write(avframe.NewAVFrame(
-					avframe.MediaTypeAudio, track.targetCodec,
-					avframe.FrameTypeInterframe,
-					dts, dts,
-					encoded,
-				))
-				pcmBuf = pcmBuf[frameSize:]
-			}
-		}
-	}
+	defer track.ringBuffer.Close()
 
 	reader := tm.stream.RingBuffer().NewReaderAt(sourceStart)
 	// RingBuffer.Signal is a single legacy notification channel shared by all
@@ -330,18 +369,37 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 					// Legacy reader: pass video through without encoding.
 					track.ringBuffer.Write(frame)
 				}
-			} else if frame.Codec != sourceCodec {
-				// A same-generation source can switch codecs. Never feed replacement
-				// codec bytes to the decoder captured for the original source. When
-				// the new source already matches this track's target, keep the shared
-				// producer alive and hand the frame through to every remaining reader.
+			} else if frame.MediaType.IsAudio() {
+				frameEpoch := frame.AudioCodecEpoch
+				if frameEpoch == 0 {
+					frameEpoch = sourceEpoch
+				}
+				if frame.Codec != sourceCodec || frameEpoch != sourceEpoch {
+					firstAudioEpoch := sourceCodec == 0
+					if pipeline != nil {
+						pipeline.close()
+						pipeline = nil
+					}
+					sourceCodec = frame.Codec
+					sourceEpoch = frameEpoch
+					if sourceCodec != track.targetCodec {
+						var pipelineErr error
+						pipeline, pipelineErr = tm.newAudioTranscodePipeline(track, sourceCodec, sourceEpoch)
+						if pipelineErr != nil {
+							slog.Warn("transcode: codec epoch unavailable", "from", sourceCodec, "to", track.targetCodec, "epoch", sourceEpoch, "error", pipelineErr)
+						} else if !firstAudioEpoch {
+							pipeline.writeSequenceHeader(frame.DTS)
+						}
+					}
+				}
+
 				if frame.Codec == track.targetCodec {
 					track.ringBuffer.Write(frame)
+				} else if pipeline != nil && frame.FrameType == avframe.FrameTypeSequenceHeader {
+					pipeline.decoder.SetExtradata(frame.Payload)
+				} else if pipeline != nil {
+					pipeline.encode(frame)
 				}
-			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				// Skip source audio sequence headers.
-			} else {
-				encodeAudio(frame)
 			}
 
 			frame, ok = reader.TryRead()

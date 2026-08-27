@@ -4,6 +4,7 @@ package httpstream
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"testing"
 	"time"
@@ -143,18 +144,38 @@ func TestSharedMuxersSwitchFromTranscodedToDirectAACOnce(t *testing.T) {
 				initData = waitForMuxerInit(t, inst)
 			}
 
-			// Activate the G.711-to-AAC reader without supplying enough source
-			// samples to produce an encoded AAC access unit.
+			// Catches treating the transcoder-generated startup header as a
+			// direct-source handoff marker: real transformed media must flow before
+			// the source publishes its first AAC header.
+			for i := range 20 {
+				dts := int64(20 + i*20)
+				stream.WriteFrame(avframe.NewAVFrame(
+					avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
+					dts, dts, bytes.Repeat([]byte{0xff}, 160),
+				))
+			}
 			stream.WriteFrame(avframe.NewAVFrame(
-				avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
-				20, 20, []byte{0xff},
+				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+				500, 500, []byte{0, 0, 0, 2, 0x41, 0x55},
 			))
+			if format == "fmp4" {
+				time.Sleep(10 * time.Millisecond)
+				stream.WriteFrame(avframe.NewAVFrame(
+					avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+					700, 700, []byte{0, 0, 0, 2, 0x41, 0x57},
+				))
+			}
+			packets := waitForMuxerAudioAt(t, format, initData, reader, startupPackets, func(frame *avframe.AVFrame) bool {
+				return frame.DTS < 1000
+			})
+			preSwitchPacketCount := len(packets)
+
 			stream.WriteFrame(avframe.NewAVFrame(
 				avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
-				40, 40, []byte{0x12, 0x10},
+				1000, 1000, []byte{0x12, 0x10},
 			))
 			for i, payload := range directAAC {
-				dts := int64(60 + i*23)
+				dts := int64(1020 + i*23)
 				stream.WriteFrame(avframe.NewAVFrame(
 					avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
 					dts, dts, payload,
@@ -162,7 +183,7 @@ func TestSharedMuxersSwitchFromTranscodedToDirectAACOnce(t *testing.T) {
 			}
 			stream.WriteFrame(avframe.NewAVFrame(
 				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
-				500, 500, videoPayload,
+				1500, 1500, videoPayload,
 			))
 			stream.RingBuffer().Close()
 			select {
@@ -171,7 +192,6 @@ func TestSharedMuxersSwitchFromTranscodedToDirectAACOnce(t *testing.T) {
 				t.Fatalf("%s muxer did not stop after source closed", format)
 			}
 
-			packets := startupPackets
 			for {
 				packet, ok := reader.TryRead()
 				if !ok {
@@ -180,11 +200,166 @@ func TestSharedMuxersSwitchFromTranscodedToDirectAACOnce(t *testing.T) {
 				packets = append(packets, packet)
 			}
 			frames := demuxMuxerWorkerOutput(t, format, initData, packets)
-			assertSingleDirectAACPath(t, frames, directAAC, videoPayload)
+			assertTranscodedThenSingleDirectAACPath(t, frames, directAAC, 1000, 1500, videoPayload)
 			if format == "ts" {
-				assertLateAACAnnouncementPrecedesMedia(t, packets[len(startupPackets):])
+				assertLateAACAnnouncementPrecedesMedia(t, packets[preSwitchPacketCount:], directAAC)
 			}
 		})
+	}
+}
+
+// Catches making HTTP audio ownership one-way or closing a worker's shared
+// transform subscription at the direct AAC epoch. All three real muxer workers
+// share one producer and must independently reacquire transformed output when
+// the same publisher returns to G.711.
+func TestSharedMuxerWorkersReturnToTransformedAudioPerCodecEpoch(t *testing.T) {
+	stream := core.NewStream("live/shared-bidirectional-audio-owner", config.StreamConfig{
+		GOPCache: true, GOPCacheNum: 1, RingBufferSize: 512,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&muxerWorkerPublisher{info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711U,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 8))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
+	))
+
+	// Keep a peer reader open and age the generated startup header out of the
+	// small transform ring. This isolates the reverse-owner mutation from the
+	// separate generated-header provenance regression above.
+	keeper, releaseKeeper, err := stream.TranscodeManager().GetOrCreateAudioReaderAtFromHistory(
+		avframe.CodecAAC, stream.StartupSnapshot().SourceCursor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		keeper.Close()
+		releaseKeeper()
+	})
+	for i := range 28 {
+		dts := int64(20 + i*20)
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
+			dts, dts, bytes.Repeat([]byte{0x00}, 160),
+		))
+	}
+	readAudioFramesAtOrAfter(t, keeper, 9, 0)
+
+	type runningMuxer struct {
+		format   string
+		inst     *core.MuxerInstance
+		reader   *core.SharedBufferReader
+		initData []byte
+		packets  [][]byte
+		done     chan struct{}
+	}
+	workers := make([]*runningMuxer, 0, 3)
+	for _, format := range []string{"flv", "ts", "fmp4"} {
+		inst, reader := newMuxerWorkerInstance(stream)
+		worker := &runningMuxer{format: format, inst: inst, reader: reader, done: make(chan struct{})}
+		workers = append(workers, worker)
+		go func() {
+			switch worker.format {
+			case "flv":
+				new(Module).runFLVMuxer(worker.inst, stream)
+			case "ts":
+				new(Module).runTSMuxer(worker.inst, stream)
+			case "fmp4":
+				new(Module).runFMP4Muxer(worker.inst, stream)
+			}
+			close(worker.done)
+		}()
+		if format == "ts" {
+			worker.packets = append(worker.packets, readMuxerPacket(t, reader))
+		} else {
+			worker.initData = waitForMuxerInit(t, inst)
+		}
+	}
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		800, 800, []byte{0, 0, 0, 2, 0x41, 0x08},
+	))
+	time.Sleep(10 * time.Millisecond)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		900, 900, []byte{0, 0, 0, 2, 0x41, 0x09},
+	))
+	for _, worker := range workers {
+		worker.packets = waitForMuxerAudioAt(t, worker.format, worker.initData, worker.reader, worker.packets, func(frame *avframe.AVFrame) bool {
+			return frame.DTS < 1000
+		})
+	}
+
+	directAAC := encodeMuxerWorkerAACFrames(t, 4)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		1000, 1000, []byte{0x12, 0x10},
+	))
+	for i, payload := range directAAC {
+		dts := int64(1020 + i*23)
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			dts, dts, payload,
+		))
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		1500, 1500, []byte{0, 0, 0, 2, 0x41, 0x15},
+	))
+	for _, worker := range workers {
+		worker.packets = waitForMuxerPayloads(t, worker.format, worker.initData, worker.reader, worker.packets, directAAC)
+	}
+
+	for i := range 20 {
+		dts := int64(2000 + i*20)
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
+			dts, dts, bytes.Repeat([]byte{0xff}, 160),
+		))
+	}
+	readAudioFramesAtOrAfter(t, keeper, 1, 2000)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		2500, 2500, []byte{0, 0, 0, 2, 0x41, 0x25},
+	))
+	time.Sleep(10 * time.Millisecond)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		2700, 2700, []byte{0, 0, 0, 2, 0x41, 0x27},
+	))
+	for _, worker := range workers {
+		worker.packets = waitForMuxerAudioAt(t, worker.format, worker.initData, worker.reader, worker.packets, func(frame *avframe.AVFrame) bool {
+			return frame.DTS >= 2000
+		})
+	}
+	stream.RingBuffer().Close()
+	for _, worker := range workers {
+		select {
+		case <-worker.done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s muxer did not stop after source closed", worker.format)
+		}
+		for {
+			packet, ok := worker.reader.TryRead()
+			if !ok {
+				break
+			}
+			worker.packets = append(worker.packets, packet)
+		}
+		frames := demuxMuxerWorkerOutput(t, worker.format, worker.initData, worker.packets)
+		assertBidirectionalMuxerAudio(t, frames, directAAC)
 	}
 }
 
@@ -257,28 +432,131 @@ func demuxMuxerWorkerOutput(t *testing.T, format string, initData []byte, packet
 	return frames
 }
 
-func assertSingleDirectAACPath(t *testing.T, frames []*avframe.AVFrame, directAAC [][]byte, videoPayload []byte) {
+func waitForMuxerAudioAt(
+	t *testing.T,
+	format string,
+	initData []byte,
+	reader *core.SharedBufferReader,
+	packets [][]byte,
+	match func(*avframe.AVFrame) bool,
+) [][]byte {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for {
+			packet, ok := reader.TryRead()
+			if !ok {
+				break
+			}
+			packets = append(packets, packet)
+		}
+		for _, frame := range demuxMuxerWorkerOutput(t, format, initData, packets) {
+			if frame != nil && frame.MediaType.IsAudio() &&
+				frame.FrameType != avframe.FrameTypeSequenceHeader && match(frame) {
+				return packets
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%s muxer emitted no matching audio media before timeout", format)
+	return nil
+}
+
+func waitForMuxerPayloads(
+	t *testing.T,
+	format string,
+	initData []byte,
+	reader *core.SharedBufferReader,
+	packets [][]byte,
+	wantPayloads [][]byte,
+) [][]byte {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for {
+			packet, ok := reader.TryRead()
+			if !ok {
+				break
+			}
+			packets = append(packets, packet)
+		}
+		seen := make(map[string]int, len(wantPayloads))
+		for _, frame := range demuxMuxerWorkerOutput(t, format, initData, packets) {
+			if frame != nil && frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+				seen[string(frame.Payload)]++
+			}
+		}
+		allSeen := true
+		for _, payload := range wantPayloads {
+			if seen[string(payload)] != 1 {
+				allSeen = false
+				break
+			}
+		}
+		if allSeen {
+			return packets
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%s muxer did not emit all direct AAC payloads exactly once", format)
+	return nil
+}
+
+func readAudioFramesAtOrAfter(t *testing.T, reader interface {
+	ReadContext(context.Context) (*avframe.AVFrame, bool)
+}, count int, minDTS int64) []*avframe.AVFrame {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	frames := make([]*avframe.AVFrame, 0, count)
+	for len(frames) < count {
+		frame, ok := reader.ReadContext(ctx)
+		if !ok {
+			t.Fatalf("transform reader closed with %d/%d matching audio frames", len(frames), count)
+		}
+		if frame != nil && frame.MediaType.IsAudio() &&
+			frame.FrameType != avframe.FrameTypeSequenceHeader && frame.DTS >= minDTS {
+			frames = append(frames, frame)
+		}
+	}
+	return frames
+}
+
+func assertTranscodedThenSingleDirectAACPath(
+	t *testing.T,
+	frames []*avframe.AVFrame,
+	directAAC [][]byte,
+	switchDTS, videoDTS int64,
+	videoPayload []byte,
+) {
 	t.Helper()
 	want := make(map[string]int, len(directAAC))
 	for _, payload := range directAAC {
 		want[string(payload)]++
 	}
 	got := make(map[string]int, len(directAAC))
-	var audioMedia, liveVideo int
+	var preSwitchAudio, postSwitchAudio, liveVideo int
 	for _, frame := range frames {
 		if frame == nil || frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
 		if frame.MediaType.IsAudio() {
-			audioMedia++
+			if frame.DTS < switchDTS {
+				preSwitchAudio++
+			} else {
+				postSwitchAudio++
+			}
 			got[string(frame.Payload)]++
 		}
-		if frame.MediaType.IsVideo() && frame.DTS == 500 {
+		if frame.MediaType.IsVideo() && frame.DTS == videoDTS {
 			liveVideo++
 		}
 	}
-	if audioMedia != len(directAAC) {
-		t.Fatalf("audio media frame count = %d, want %d direct AAC frames only", audioMedia, len(directAAC))
+	if preSwitchAudio == 0 {
+		t.Fatal("muxer emitted no transformed AAC media before the direct AAC switch")
+	}
+	if postSwitchAudio != len(directAAC) {
+		t.Fatalf("post-switch audio media frame count = %d, want %d direct AAC frames only", postSwitchAudio, len(directAAC))
 	}
 	for payload, count := range want {
 		if got[payload] != count {
@@ -290,19 +568,62 @@ func assertSingleDirectAACPath(t *testing.T, frames []*avframe.AVFrame, directAA
 	}
 }
 
-func assertLateAACAnnouncementPrecedesMedia(t *testing.T, packets [][]byte) {
+func assertBidirectionalMuxerAudio(t *testing.T, frames []*avframe.AVFrame, directAAC [][]byte) {
+	t.Helper()
+	directCounts := make(map[string]int, len(directAAC))
+	postReverseDTS := make(map[int64]int)
+	var preSwitchAudio, postReverseAudio, postReverseVideo int
+	for _, frame := range frames {
+		if frame == nil || frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		if frame.MediaType.IsAudio() {
+			if frame.DTS < 1000 {
+				preSwitchAudio++
+			}
+			if frame.DTS >= 2000 {
+				postReverseAudio++
+				postReverseDTS[frame.DTS]++
+			}
+			directCounts[string(frame.Payload)]++
+		}
+		if frame.MediaType.IsVideo() && frame.DTS == 2500 {
+			postReverseVideo++
+		}
+	}
+	if preSwitchAudio == 0 || postReverseAudio == 0 {
+		t.Fatalf("transformed audio before/after direct epoch = %d/%d, want both non-zero", preSwitchAudio, postReverseAudio)
+	}
+	for _, payload := range directAAC {
+		if got := directCounts[string(payload)]; got != 1 {
+			t.Fatalf("direct AAC payload occurrence count = %d, want 1", got)
+		}
+	}
+	for dts, count := range postReverseDTS {
+		if count != 1 {
+			t.Fatalf("post-reverse transformed AAC DTS %d occurred %d times, want once", dts, count)
+		}
+	}
+	if postReverseVideo != 1 {
+		t.Fatalf("post-reverse direct video count = %d, want 1", postReverseVideo)
+	}
+}
+
+func assertLateAACAnnouncementPrecedesMedia(t *testing.T, packets [][]byte, directAAC [][]byte) {
 	t.Helper()
 	seenAACPMT := false
 	for _, output := range packets {
 		if tsOutputDeclaresStreamType(output, 0x0f) {
 			seenAACPMT = true
 		}
-		if tsOutputContainsPID(output, ts.PIDAudio) {
-			if !seenAACPMT {
-				t.Fatal("TS emitted AAC media before the post-transition AAC PMT")
+		for _, payload := range directAAC {
+			if bytes.Contains(output, payload) {
+				if !seenAACPMT {
+					t.Fatal("TS emitted direct AAC media before the post-transition AAC PMT")
+				}
+				return
 			}
-			return
 		}
 	}
-	t.Fatal("TS emitted no post-transition AAC media")
+	t.Fatal("TS emitted no direct post-transition AAC media")
 }

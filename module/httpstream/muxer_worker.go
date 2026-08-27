@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/audiocodec"
@@ -481,16 +480,28 @@ func selectMuxerAudioSnapshot(stream *core.Stream, snapshot core.StreamStartupSn
 }
 
 type muxerWorkerLiveInput struct {
-	source    *util.RingReader[*avframe.AVFrame]
-	audio     *util.RingReader[*avframe.AVFrame]
-	release   func()
-	frames    chan muxerWorkerFrame
-	cancel    context.CancelFunc
-	allDone   chan struct{}
-	directAAC atomic.Bool
-	audioOnce sync.Once
-	closeOnce sync.Once
+	source               *util.RingReader[*avframe.AVFrame]
+	audio                *util.RingReader[*avframe.AVFrame]
+	release              func()
+	frames               chan muxerWorkerFrame
+	cancel               context.CancelFunc
+	allDone              chan struct{}
+	plan                 muxerAudioPlan
+	audioOwner           muxerWorkerAudioOwner
+	audioEpoch           uint64
+	directEpochSeen      bool
+	startupHeaderHandled bool
+	audioOnce            sync.Once
+	closeOnce            sync.Once
 }
+
+type muxerWorkerAudioOwner uint8
+
+const (
+	muxerWorkerAudioUnknown muxerWorkerAudioOwner = iota
+	muxerWorkerAudioTransformed
+	muxerWorkerAudioDirect
+)
 
 type muxerWorkerFrame struct {
 	frame       *avframe.AVFrame
@@ -503,6 +514,7 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 		release: func() {},
 		frames:  make(chan muxerWorkerFrame),
 		allDone: make(chan struct{}),
+		plan:    plan,
 	}
 	if plan.mode == muxerAudioTranscode {
 		if tm := stream.TranscodeManager(); tm != nil {
@@ -518,6 +530,7 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 			plan = muxerAudioPlan{}
 		}
 	}
+	input.plan = plan
 
 	ctx, cancel := context.WithCancel(context.Background())
 	input.cancel = cancel
@@ -540,28 +553,11 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 		}
 	}
 	pumps.Add(1)
-	go pump(input.source, false, func(frame *avframe.AVFrame) bool {
-		if plan.mode != muxerAudioTranscode || frame == nil || !frame.MediaType.IsAudio() {
-			return true
-		}
-		if frame.FrameType == avframe.FrameTypeSequenceHeader && frame.Codec == plan.codec {
-			input.directAAC.Store(true)
-			input.closeAudio()
-		}
-		return input.directAAC.Load() && frame.Codec == plan.codec
-	})
+	go pump(input.source, false, func(frame *avframe.AVFrame) bool { return frame != nil })
 	if input.audio != nil {
 		pumps.Add(1)
 		go pump(input.audio, true, func(frame *avframe.AVFrame) bool {
-			if frame == nil || !frame.MediaType.IsAudio() || frame.Codec != plan.codec {
-				return false
-			}
-			if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				input.directAAC.Store(true)
-				input.closeAudio()
-				return false
-			}
-			return !input.directAAC.Load()
+			return frame != nil && frame.MediaType.IsAudio() && frame.Codec == plan.codec
 		})
 	}
 	go func() {
@@ -578,10 +574,66 @@ func (r *muxerWorkerLiveInput) Read() (*avframe.AVFrame, bool) {
 		if !ok {
 			return nil, false
 		}
-		if delivery.transformed && r.directAAC.Load() {
+		frame := delivery.frame
+		if r.plan.mode != muxerAudioTranscode || frame == nil || !frame.MediaType.IsAudio() {
+			return frame, true
+		}
+		if !r.acceptAudioDelivery(delivery) {
 			continue
 		}
-		return delivery.frame, true
+		return frame, true
+	}
+}
+
+func (r *muxerWorkerLiveInput) acceptAudioDelivery(delivery muxerWorkerFrame) bool {
+	frame := delivery.frame
+	epoch := frame.AudioCodecEpoch
+	if epoch == 0 {
+		epoch = r.audioEpoch
+		if epoch == 0 {
+			epoch = 1
+		}
+	}
+	if epoch < r.audioEpoch {
+		return false
+	}
+
+	if delivery.transformed {
+		if frame.AudioProvenance == avframe.FrameProvenanceSource {
+			r.setAudioOwner(epoch, muxerWorkerAudioDirect)
+			r.directEpochSeen = true
+			return false
+		}
+		r.setAudioOwner(epoch, muxerWorkerAudioTransformed)
+		if r.audioEpoch != epoch || r.audioOwner != muxerWorkerAudioTransformed {
+			return false
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader &&
+			!r.startupHeaderHandled && !r.directEpochSeen {
+			r.startupHeaderHandled = true
+			return false
+		}
+		return true
+	}
+
+	if frame.Codec == r.plan.codec {
+		r.setAudioOwner(epoch, muxerWorkerAudioDirect)
+		r.directEpochSeen = true
+		return r.audioEpoch == epoch && r.audioOwner == muxerWorkerAudioDirect
+	}
+	r.setAudioOwner(epoch, muxerWorkerAudioTransformed)
+	return false
+}
+
+func (r *muxerWorkerLiveInput) setAudioOwner(epoch uint64, owner muxerWorkerAudioOwner) {
+	if epoch > r.audioEpoch {
+		r.audioEpoch = epoch
+		r.audioOwner = owner
+		return
+	}
+	if epoch == r.audioEpoch &&
+		(r.audioOwner == muxerWorkerAudioUnknown || owner == muxerWorkerAudioDirect) {
+		r.audioOwner = owner
 	}
 }
 
