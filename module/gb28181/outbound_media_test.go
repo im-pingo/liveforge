@@ -2,18 +2,99 @@ package gb28181
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/internal/labmedia"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
+
+func TestGBOutboundNegotiationCancelsWithPublisherGeneration(t *testing.T) {
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/negotiation-generation")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+	ports, err := portalloc.New(42290, 42291)
+	if err != nil {
+		t.Fatalf("New port allocator: %v", err)
+	}
+	h := &handler{sessions: NewSessionManager(), hub: hub, ports: ports}
+	releaseInvite := make(chan struct{})
+	inviteContext := make(chan context.Context, 1)
+	var dialog *successfulInviteDialog
+	var releaseOnce sync.Once
+	m := &Module{
+		sipService: failingInviteService{},
+		handler:    h,
+		sendInvite: func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
+			inviteContext <- ctx
+			<-releaseInvite
+			dialog = newSuccessfulInviteDialog(req)
+			return dialog, nil
+		},
+	}
+	defer releaseOnce.Do(func() { close(releaseInvite) })
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := m.startOutboundMedia(context.Background(), &Device{
+			DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
+		}, "channel", stream.Key())
+		result <- err
+	}()
+
+	var bound context.Context
+	select {
+	case bound = <-inviteContext:
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound INVITE did not start")
+	}
+	stream.RemovePublisher()
+	select {
+	case <-bound.Done():
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound INVITE context was not canceled with publisher generation")
+	}
+	releaseOnce.Do(func() { close(releaseInvite) })
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("GB28181 outbound negotiation activated a retired publisher generation")
+		}
+		if errors.Is(err, context.Canceled) {
+			t.Fatalf("GB28181 generation retirement returned caller cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound negotiation did not terminate after publisher retirement")
+	}
+	if dialog.ackCalls.Load() != 0 {
+		t.Fatalf("GB28181 stale negotiation sent %d ACKs, want none", dialog.ackCalls.Load())
+	}
+	if got := len(h.sessions.All()); got != 0 {
+		t.Fatalf("GB28181 stale negotiation activated %d sessions", got)
+	}
+}
 
 func TestGBOutboundSenderReportsArePeriodicAndCountPayloadOctets(t *testing.T) {
 	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())

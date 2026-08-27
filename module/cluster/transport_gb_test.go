@@ -1,10 +1,15 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
 	pionrtp "github.com/pion/rtp/v2"
@@ -123,6 +128,58 @@ func TestGBTransportPSRoundTrip(t *testing.T) {
 	if len(reassembled) != len(psData) {
 		t.Errorf("reassembled size = %d, original PS size = %d", len(reassembled), len(psData))
 	}
+}
+
+func TestGBTransportPullStopsAfterVideoSequenceHeaderSendError(t *testing.T) {
+	hub := core.NewStreamHub(config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("cluster/gb/header-error")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&originPublisher{info: &avframe.MediaInfo{
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: []byte{0x67, 0x42, 0x00, 0x1e},
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+	snapshot := stream.StartupSnapshot()
+	snapshot.VideoSequenceHeader = avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, nil,
+	)
+	snapshot.ReplayFrames = []*avframe.AVFrame{avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65, 0x01},
+	)}
+
+	recv, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer recv.Close()
+	result := make(chan error, 1)
+	transport := &GBTransport{}
+	go func() {
+		result <- transport.sendPull(stream, snapshot, recv.LocalAddr().String(), recv.LocalAddr().(*net.UDPAddr).Port)
+	}()
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "video sequence header") {
+			t.Fatalf("GB pull sequence-header error = %v, want classified video sequence-header error", err)
+		}
+		if errors.Is(err, context.Canceled) {
+			t.Fatalf("GB pull sequence-header error was misclassified as cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("GB pull did not return after video sequence-header send failure")
+	}
+	if err := recv.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buf := make([]byte, 2048)
+	if _, _, err := recv.ReadFromUDP(buf); err == nil {
+		t.Fatal("GB pull sent replay media after video sequence-header send failure")
+	}
+	stream.RemovePublisher()
 }
 
 func TestGBTransportClose(t *testing.T) {

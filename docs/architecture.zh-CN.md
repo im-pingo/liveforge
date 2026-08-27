@@ -192,6 +192,8 @@ sequenceDiagram
 
 如果 media info、header、缓存和 cursor 分开读取，publisher 可能恰好在调用之间写帧或被替换：订阅者会重复/遗漏边界帧，或者把旧 generation 的初始化状态与新 generation 的媒体混合。原子快照消除了这些窗口。订阅 reader 同时监听 `GenerationDone`；阻塞读取被唤醒后、处理帧前还会调用 `IsPublisherGeneration`，因此 replacement generation 的第一帧不会泄漏给旧订阅者。
 
+SIP Gateway 出站呼叫和 GB28181 出站媒体会把同一个快照贯穿 SDP/codec 选择、INVITE 等待、ACK、subscriber admission 和媒体 reader；generation 在 ACK 或激活前结束时，旧会话不会继续建立，也不会把旧信令和新媒体配对。GB28181 PS 转发发送视频 sequence header 失败时会返回带阶段信息的错误，并在 replay/live 之前停止。
+
 ### 7.3 不同消费者的起点
 
 - 普通 RTMP、RTSP、SRT、共享 HTTP FLV/TS/fMP4 muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
@@ -335,7 +337,7 @@ ForwardManager 监听异步 `EventPublish`：
 1. scheduler 从静态目标列表或 HTTP schedule URL 解析目标；
 2. health filter 过滤不健康节点；
 3. 每个目标建立独立 `ForwardTarget` 和 goroutine；
-4. target 让 transport 从一个原子启动快照读取：协议需要时只发送该快照的 sequence header/GOP，再以 `LiveCursor` 创建 reader；`GenerationDone` 或 generation 校验失败时立即结束，不会从主 ring 的最老位置重放旧 publisher；
+4. target 让 transport 从一个原子启动快照读取：协议需要时只发送该快照的 sequence header/GOP，再以 `LiveCursor` 创建 reader；`GenerationDone` 或 generation 校验失败时立即结束，不会从主 ring 的最老位置重放旧 publisher。GB28181 PS transport 如果视频 sequence header 发送失败会向调用方传播带阶段信息的错误，并且不会继续发送 replay/live；
 5. 失败按指数退避重试，退避上限 30 秒；`ErrCodecMismatch` 不重试；
 6. 关闭 publisher 或模块时关闭 target，释放连接池和 reader。
 

@@ -25,6 +25,18 @@ const (
 	gbOutboundSenderReportInterval = time.Second
 )
 
+func bindGBGeneration(parent context.Context, snapshot core.StreamStartupSnapshot) (context.Context, context.CancelFunc) {
+	bound, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-snapshot.GenerationDone:
+			cancel()
+		case <-bound.Done():
+		}
+	}()
+	return bound, cancel
+}
+
 type outboundMediaSession struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -279,6 +291,8 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil, fmt.Errorf("%w: receive stream %q", ErrLabInvalidRequest, streamKey)
 	}
+	startupCtx, cancelStartup := bindGBGeneration(ctx, snapshot)
+	defer cancelStartup()
 	mediaInfo := &snapshot.MediaInfo
 	if mediaInfo.VideoCodec != avframe.CodecH264 || mediaInfo.AudioCodec != avframe.CodecG711A {
 		return nil, fmt.Errorf("%w: receive stream requires H.264 and G.711A", ErrLabInvalidRequest)
@@ -316,7 +330,7 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	request.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	request.AppendHeader(sip.NewHeader("Subject", fmt.Sprintf("%s:0,%s:0", channelID, m.sipService.ServerID())))
 	request.SetTransport("udp")
-	dialog, err := sendInvite(ctx, m.sipService, nil, request)
+	dialog, err := sendInvite(startupCtx, m.sipService, m.sendInvite, request)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +342,10 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	}()
 	select {
 	case <-dialog.Done():
-	case <-ctx.Done():
+	case <-startupCtx.Done():
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil, errors.New("GB28181 outbound media source generation ended")
+		}
 		return nil, ctx.Err()
 	case <-time.After(10 * time.Second):
 		return nil, errors.New("GB28181 outbound INVITE timeout")
@@ -337,8 +354,15 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, errors.New("GB28181 outbound INVITE rejected")
 	}
-	if err := dialog.SendACK(ctx); err != nil {
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		terminateAcceptedDialog(dialog)
+		return nil, errors.New("GB28181 outbound media source generation ended")
+	}
+	if err := dialog.SendACK(startupCtx); err != nil {
+		terminateAcceptedDialog(dialog)
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil, errors.New("GB28181 outbound media source generation ended")
+		}
 		return nil, err
 	}
 	answerPort := parseSDPPort(string(response.Body()))

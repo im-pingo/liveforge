@@ -292,7 +292,7 @@ func (cs *CallSession) receiveInboundRTCPLoop(conn *net.UDPConn) {
 	}
 }
 
-func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remotePort int) error {
+func (cs *CallSession) startOutbound(stream *core.Stream, startupSnapshot core.StreamStartupSnapshot, remoteIP string, remotePort int) error {
 	cs.lifecycleMu.Lock()
 	defer cs.lifecycleMu.Unlock()
 	select {
@@ -300,7 +300,6 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 		return errors.New("call session is terminated")
 	default:
 	}
-	startupSnapshot := stream.StartupSnapshot()
 	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
 		return errors.New("stream publisher generation is no longer active")
 	}

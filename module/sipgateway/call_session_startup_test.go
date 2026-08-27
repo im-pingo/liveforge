@@ -68,7 +68,7 @@ func TestCallSessionOutboundGenerationStartupSkipsStaleHistory(t *testing.T) {
 	call := newCallSession("startup-call", stream.Key(), codec, "outbound", localRTPPort, localRTCPPort)
 	call.configureVideo(videoCodec, localVideoRTPPort, localVideoRTCPPort, "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port)
 	defer call.Close()
-	if err := call.startOutbound(stream, "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port); err != nil {
+	if err := call.startOutbound(stream, stream.StartupSnapshot(), "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port); err != nil {
 		t.Fatal(err)
 	}
 

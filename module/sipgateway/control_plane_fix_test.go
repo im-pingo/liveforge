@@ -553,6 +553,72 @@ func TestGatewayAcknowledges2xxAfterCallerContextCancellation(t *testing.T) {
 	}
 }
 
+func TestGatewayOutboundNegotiationDoesNotMixPublisherGenerations(t *testing.T) {
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
+	stream, _ := hub.GetOrCreate("live/negotiation-generation")
+	publisherA := &gatewayTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}
+	if err := stream.SetPublisher(publisherA); err != nil {
+		t.Fatalf("SetPublisher publisher A: %v", err)
+	}
+
+	inviteEntered := make(chan struct{})
+	releaseInvite := make(chan struct{})
+	dialog := &fakeInviteDialog{done: make(chan struct{})}
+	gw.sendInvite = func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+		if !strings.Contains(string(req.Body()), "PCMA/8000") {
+			t.Fatalf("SIP offer = %q, want publisher-A PCMA codec", req.Body())
+		}
+		close(inviteEntered)
+		<-releaseInvite
+		dialog.response = sip.NewResponseFromRequest(req, 200, "OK", []byte(testAudioOffer))
+		close(dialog.done)
+		return dialog, nil
+	}
+
+	dialDone := make(chan error, 1)
+	go func() {
+		_, err := gw.Dial(context.Background(), "alice", stream.Key())
+		dialDone <- err
+	}()
+	select {
+	case <-inviteEntered:
+	case <-time.After(time.Second):
+		t.Fatal("SIP outbound negotiation did not start")
+	}
+
+	stream.RemovePublisher()
+	if err := stream.SetPublisher(&gatewayTestPublisher{id: "publisher-b", info: &avframe.MediaInfo{
+		AudioCodec: avframe.CodecG711U,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher publisher B: %v", err)
+	}
+	close(releaseInvite)
+
+	select {
+	case err := <-dialDone:
+		if err == nil {
+			t.Fatal("SIP outbound negotiation succeeded with publisher-A signaling and publisher-B media")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIP outbound negotiation did not terminate after publisher replacement")
+	}
+	dialog.mu.Lock()
+	acks := dialog.acks
+	dialog.mu.Unlock()
+	if acks != 0 {
+		t.Fatalf("stale SIP negotiation sent %d ACKs, want none", acks)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("stale SIP negotiation activated %d calls", got)
+	}
+}
+
 func TestGatewayFinalizesReady2xxWhenCallerAlreadyCanceled(t *testing.T) {
 	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/simultaneous-ready")

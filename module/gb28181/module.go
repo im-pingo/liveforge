@@ -12,6 +12,7 @@ import (
 // Module implements core.Module for GB28181 video surveillance protocol.
 type Module struct {
 	sipService sipmod.SIPService
+	sendInvite inviteSender
 	handler    *handler
 	registry   *DeviceRegistry
 	sessions   *SessionManager

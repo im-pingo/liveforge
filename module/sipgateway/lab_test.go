@@ -535,7 +535,7 @@ func TestSIPOutboundSubscriberAdmissionFailsBeforeActivation(t *testing.T) {
 		Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA",
 	}, "outbound", localRTPPort, localRTCPPort)
 	defer call.Close()
-	err = call.startOutbound(stream, "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port)
+	err = call.startOutbound(stream, stream.StartupSnapshot(), "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port)
 	if err == nil || !strings.Contains(err.Error(), "max subscribers per stream") {
 		t.Fatalf("startOutbound admission error = %v, want synchronous subscriber limit error", err)
 	}

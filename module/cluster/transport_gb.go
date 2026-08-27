@@ -134,7 +134,7 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	// Send sequence headers first
 	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		if err := t.sendPSFrameObserved(relayCtx, conn, muxer, vsh, &seq, &ts, ssrc); err != nil {
-			return fmt.Errorf("send video seq header: %w", err)
+			return fmt.Errorf("send video sequence header: %w", err)
 		}
 	}
 	for _, frame := range snapshot.ReplayFrames {
@@ -383,7 +383,11 @@ func (t *GBTransport) handlePullSignal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start background sender
-	go t.sendPull(stream, snapshot, r.RemoteAddr, remotePort)
+	go func() {
+		if err := t.sendPull(stream, snapshot, r.RemoteAddr, remotePort); err != nil {
+			slog.Warn("gb pull sender stopped", "module", "cluster", "error", err)
+		}
+	}()
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -447,7 +451,7 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 	}
 }
 
-func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupSnapshot, remoteAddr string, remotePort int) {
+func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupSnapshot, remoteAddr string, remotePort int) error {
 	ctx, cancelGeneration := bindRelayGeneration(context.Background(), snapshot)
 	defer cancelGeneration()
 	host, _, _ := net.SplitHostPort(remoteAddr)
@@ -456,7 +460,7 @@ func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupS
 	conn, err := net.DialUDP("udp", nil, remote)
 	if err != nil {
 		slog.Error("gb pull sender dial failed", "module", "cluster", "error", err)
-		return
+		return fmt.Errorf("dial UDP: %w", err)
 	}
 	defer conn.Close()
 
@@ -473,17 +477,19 @@ func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupS
 	}
 
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
-		return
+		return nil
 	}
 	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
-		sendFrame(vsh) //nolint:errcheck
+		if err := sendFrame(vsh); err != nil {
+			return fmt.Errorf("send video sequence header: %w", err)
+		}
 	}
 	for _, frame := range snapshot.ReplayFrames {
 		if !stream.IsPublisherGeneration(snapshot.Generation) {
-			return
+			return nil
 		}
 		if err := sendFrame(frame); err != nil {
-			return
+			return fmt.Errorf("send replay frame: %w", err)
 		}
 	}
 
@@ -491,15 +497,15 @@ func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupS
 	for {
 		frame, ok := reader.ReadContext(ctx)
 		if !ok {
-			return
+			return nil
 		}
 		if !stream.IsPublisherGeneration(snapshot.Generation) {
-			return
+			return nil
 		}
 
 		if err := sendFrame(frame); err != nil {
 			slog.Warn("gb pull send error", "module", "cluster", "error", err)
-			return
+			return fmt.Errorf("send frame: %w", err)
 		}
 	}
 }

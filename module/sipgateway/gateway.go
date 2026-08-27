@@ -280,13 +280,13 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", err
 	}
 
-	publisher := stream.Publisher()
-	if publisher == nil || publisher.MediaInfo() == nil {
+	startupSnapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.codecFailures.Add(1)
 		return "", ErrCodecMismatch
 	}
-	mediaInfo := publisher.MediaInfo()
+	mediaInfo := &startupSnapshot.MediaInfo
 	sourceCodec, ok := configuredCodecForSource(gw.codecs, mediaInfo.AudioCodec)
 	if !ok {
 		gw.metrics.setupFailures.Add(1)
@@ -321,6 +321,8 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 			gw.portAlloc.Free(videoRTPPort, videoRTCPPort)
 		}
 	}()
+	startupCtx, cancelStartup := bindSIPGeneration(ctx, startupSnapshot)
+	defer cancelStartup()
 
 	videoCodec := negotiatedCodec{}
 	if mediaInfo.VideoCodec == avframe.CodecH264 {
@@ -346,10 +348,15 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	callIDHeader := sip.CallIDHeader(callID)
 	inviteReq.AppendHeader(&callIDHeader)
 
-	invTx, err := gw.sendInvite(ctx, inviteReq)
+	invTx, err := gw.sendInvite(startupCtx, inviteReq)
 	if err != nil {
 		gw.metrics.setupFailures.Add(1)
 		return "", fmt.Errorf("send INVITE: %w", err)
+	}
+	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
+		invTx.Close()
+		gw.metrics.setupFailures.Add(1)
+		return "", errors.New("stream publisher generation is no longer active")
 	}
 
 	// Prefer an already-completed transaction over caller cancellation. The
@@ -357,7 +364,12 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	// probes Response to cover that publication window.
 	var resp *sip.Response
 	select {
-	case <-ctx.Done():
+	case <-startupCtx.Done():
+		if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
+			invTx.Close()
+			gw.metrics.setupFailures.Add(1)
+			return "", errors.New("stream publisher generation is no longer active")
+		}
 		select {
 		case <-invTx.Done():
 		default:
@@ -384,6 +396,11 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		}
 		return "", fmt.Errorf("INVITE failed: no response")
 	}
+	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
+		invTx.Close()
+		gw.metrics.setupFailures.Add(1)
+		return "", errors.New("stream publisher generation is no longer active")
+	}
 
 	dialog := newDialogTeardown(invTx)
 	teardownOnReturn := true
@@ -392,16 +409,26 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 			_ = dialog.teardown()
 		}
 	}()
-	ackCtx, cancelACK := context.WithTimeout(context.Background(), 5*time.Second)
+	ackCtx, cancelACK := bindSIPGeneration(context.Background(), startupSnapshot)
+	ackCtx, cancelACKTimeout := context.WithTimeout(ackCtx, 5*time.Second)
 	err = invTx.SendACK(ackCtx)
+	cancelACKTimeout()
 	cancelACK()
 	if err != nil {
+		if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
+			gw.metrics.setupFailures.Add(1)
+			return "", errors.New("stream publisher generation is no longer active")
+		}
 		gw.metrics.setupFailures.Add(1)
 		return "", fmt.Errorf("send ACK: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		gw.metrics.setupFailures.Add(1)
 		return "", err
+	}
+	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
+		gw.metrics.setupFailures.Add(1)
+		return "", errors.New("stream publisher generation is no longer active")
 	}
 
 	answerSDP, err := sdp.Parse(resp.Body())
@@ -454,7 +481,7 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	videoPortsOwned = false
 
 	remoteIP := remoteAddress(answerSDP)
-	if err := cs.startOutbound(stream, remoteIP, audioMedia.Port); err != nil {
+	if err := cs.startOutbound(stream, startupSnapshot, remoteIP, audioMedia.Port); err != nil {
 		gw.metrics.setupFailures.Add(1)
 		gw.finishSession(cs, CallStateEnded, err)
 		return "", fmt.Errorf("start outbound: %w", err)
@@ -466,6 +493,18 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		"call", callID, "stream", streamKey, "codec", nc.EncodingName)
 
 	return callID, nil
+}
+
+func bindSIPGeneration(parent context.Context, snapshot core.StreamStartupSnapshot) (context.Context, context.CancelFunc) {
+	bound, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-snapshot.GenerationDone:
+			cancel()
+		case <-bound.Done():
+		}
+	}()
+	return bound, cancel
 }
 
 func parseTargetURI(target, localDomain string) (sip.Uri, error) {
