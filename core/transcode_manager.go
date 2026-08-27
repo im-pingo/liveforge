@@ -60,17 +60,17 @@ func (tm *TranscodeManager) GetOrCreateReaderAt(targetCodec avframe.CodecType, s
 }
 
 // GetOrCreateReaderAtFromHistory returns a combined audio/video transcode
-// reader that includes the oldest output retained by the shared track. HTTP
-// muxers use this to replay converted audio from the cached GOP before they
-// continue with live frames; ordinary subscribers should use
+// reader that includes the oldest output retained by the shared track. The
+// HLS, LL-HLS, and DASH compatibility paths use this to replay converted audio
+// and source video from the cached GOP; ordinary subscribers should use
 // GetOrCreateReaderAt and start at the current output cursor.
 func (tm *TranscodeManager) GetOrCreateReaderAtFromHistory(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
 	return tm.getOrCreateReaderAt(targetCodec, sourceStart, false, true)
 }
 
 // GetOrCreateAudioReaderAt returns a target-codec audio-only reader starting
-// at sourceStart. WHEP uses it when source video is read from a separate ring
-// cursor and the negotiated audio track needs a different codec.
+// at sourceStart. RTMP and WHEP use it when source video is read from a separate
+// ring cursor and the negotiated audio track needs a different codec.
 func (tm *TranscodeManager) GetOrCreateAudioReaderAt(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
 	return tm.getOrCreateReaderAt(targetCodec, sourceStart, true, false)
 }
@@ -167,9 +167,9 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnl
 //
 // Architecture: inline processing to minimize audio delivery jitter. Each
 // source audio frame is decoded/resampled/encoded inline. Combined tracks
-// retain source video passthrough for container muxers and RTMP subscribers;
-// audio-only tracks are reserved for WebRTC feeds whose video comes from a
-// separate source-ring reader.
+// retain source video passthrough for the segmenter compatibility paths;
+// audio-only tracks serve subscribers and shared muxers whose video comes from
+// a separate source-ring reader.
 //
 // This limits the maximum video delivery delay to one audio encode
 // operation (~0.5ms) rather than batching N encodes which blocks video
@@ -331,10 +331,13 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 					track.ringBuffer.Write(frame)
 				}
 			} else if frame.Codec != sourceCodec {
-				// A same-generation source can switch codecs. This decoder is bound
-				// to the codec captured when the track started, so stop before it
-				// interprets bytes from the replacement codec.
-				return
+				// A same-generation source can switch codecs. Never feed replacement
+				// codec bytes to the decoder captured for the original source. When
+				// the new source already matches this track's target, keep the shared
+				// producer alive and hand the frame through to every remaining reader.
+				if frame.Codec == track.targetCodec {
+					track.ringBuffer.Write(frame)
+				}
 			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
 				// Skip source audio sequence headers.
 			} else {

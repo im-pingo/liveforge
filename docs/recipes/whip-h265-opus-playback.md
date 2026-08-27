@@ -16,7 +16,7 @@ CGO_ENABLED=1 go build -tags audiocodec -o bin/liveforge ./cmd/liveforge
 ./bin/liveforge -c configs/liveforge.yaml
 ```
 
-The `audiocodec` profile is important for FLV- and TS-based outputs: Opus is passed through by compatible fMP4/WHEP paths, while incompatible output containers request a shared AAC transcode. Shared HTTP muxers keep source video on a direct reader starting at the atomic live cursor and start an independent audio-only transcode reader at the cached GOP source position, so converted history cannot duplicate cached or live video. If the same source later switches to AAC, the muxer transfers its single audio owner to the direct reader at the AAC sequence header and stops the old source-codec decoder before it consumes AAC bytes. Without the tag, those outputs may be video-only instead of carrying transcoded audio.
+The `audiocodec` profile is important for FLV- and TS-based outputs: Opus is passed through by compatible fMP4/WHEP paths, while incompatible output containers request a shared AAC transcode. Shared HTTP muxers keep source video on a direct reader starting at the atomic live cursor and start an independent audio-only transcode reader at the cached GOP source position, so converted history cannot duplicate cached or live video. If the same source later switches to AAC, the muxer transfers its single audio owner to the direct reader at the AAC sequence header. The shared target track remains open for RTMP, WHEP, and segmenter readers: it bypasses the old decoder and passes already-target AAC through, while the HTTP worker rejects queued transformed frames and emits its direct header before direct media. Without the tag, those outputs may be video-only instead of carrying transcoded audio.
 
 ## Publish
 

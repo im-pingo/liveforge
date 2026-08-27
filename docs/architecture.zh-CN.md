@@ -195,7 +195,7 @@ sequenceDiagram
 ### 7.3 不同消费者的起点
 
 - 普通 RTMP、RTSP、SRT、共享 HTTP FLV/TS/fMP4 muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
-- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。共享 HTTP muxer 同一时刻只有一个音频 owner：开始时由转码 reader 提供目标 AAC；同一 publisher generation 后续出现可直接复用的 AAC sequence header 时，原子切换到直接 reader，丢弃已经竞争到队列中的旧转码帧，并在旧 source-codec decoder 读取 AAC 数据前终止该转码轨；直接视频 reader 不受切换影响。
+- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。共享 HTTP muxer 同一时刻只有一个音频 owner：开始时由转码 reader 提供目标 AAC；同一 publisher generation 后续出现可直接复用的 AAC sequence header 时，原子切换到直接 reader，并丢弃已经竞争到队列中的旧转码帧。共享目标 codec producer 不在该边界关闭 ring：它不把新 codec 数据交给旧 decoder；新 source codec 已等于 target 时直接透传，否则丢弃不兼容音频。这样 RTMP/WHEP 的 target-audio reader 保持打开，HLS、LL-HLS、DASH 的 combined reader 也继续取得视频。HTTP 转码 pump 把共享轨中的 target sequence header 当作 handoff 标记，后续 header/media 仍由直接 reader 按顺序发送；直接视频 reader 不受切换影响。
 - HLS、LL-HLS、DASH 的兼容路径仍使用 combined 历史转码 reader，并按缓存视频 DTS 范围过滤其中可能重复出现的视频帧；这些 segmenter 尚未迁移到独立 direct/audio reader。
 - SRT 不再用跨音视频的最大 DTS 过滤 replay/live 重叠；cursor 是唯一重复边界，因此缓存视频 DTS 4000 之后的实时音频 DTS 1000 仍会发送。
 

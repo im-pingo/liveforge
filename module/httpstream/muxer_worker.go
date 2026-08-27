@@ -553,8 +553,15 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 	if input.audio != nil {
 		pumps.Add(1)
 		go pump(input.audio, true, func(frame *avframe.AVFrame) bool {
-			return !input.directAAC.Load() && frame != nil && frame.MediaType.IsAudio() && frame.Codec == plan.codec &&
-				frame.FrameType != avframe.FrameTypeSequenceHeader
+			if frame == nil || !frame.MediaType.IsAudio() || frame.Codec != plan.codec {
+				return false
+			}
+			if frame.FrameType == avframe.FrameTypeSequenceHeader {
+				input.directAAC.Store(true)
+				input.closeAudio()
+				return false
+			}
+			return !input.directAAC.Load()
 		})
 	}
 	go func() {
