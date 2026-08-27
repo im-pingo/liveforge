@@ -14,6 +14,8 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
+	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	pionrtp "github.com/pion/rtp/v2"
 )
 
 func TestRTSPPublishLifecycleStopWaitsForBlockedStart(t *testing.T) {
@@ -276,13 +278,48 @@ func TestInterleavedActivityRefreshesSession(t *testing.T) {
 	session.lastTouch = old
 	session.mu.Unlock()
 
-	m.processInterleaved(session, 1, []byte{0x00})
+	if err := m.processInterleaved(session, 1, []byte{0x00}); err != nil {
+		t.Fatalf("process RTCP interleaved activity: %v", err)
+	}
 
 	session.mu.Lock()
 	touched := session.lastTouch
 	session.mu.Unlock()
 	if !touched.After(old) {
 		t.Fatalf("interleaved activity did not refresh session: %v", touched)
+	}
+}
+
+func TestInterleavedStalePublisherErrorStopsActivity(t *testing.T) {
+	m := NewModule()
+	pub := &RTSPPublisher{
+		id:            "stale-tcp",
+		depacketizers: make(map[uint8]pkgrtp.Depacketizer),
+		done:          make(chan struct{}),
+	}
+	if err := pub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	session := NewRTSPSession("tcp-stale", "live/tcp-stale")
+	session.Publisher = pub
+	old := time.Now().Add(-time.Hour)
+	session.mu.Lock()
+	session.lastTouch = old
+	session.mu.Unlock()
+	pkt := &pionrtp.Packet{Header: pionrtp.Header{Version: 2, PayloadType: 96}}
+	data, err := pkt.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.processInterleaved(session, 0, data); err == nil {
+		t.Fatal("stale interleaved publisher returned no error")
+	}
+	session.mu.Lock()
+	touched := session.lastTouch
+	session.mu.Unlock()
+	if !touched.Equal(old) {
+		t.Fatalf("stale interleaved packet refreshed session from %v to %v", old, touched)
 	}
 }
 
@@ -326,5 +363,54 @@ func TestUDPPublishActivityRefreshesSession(t *testing.T) {
 			t.Fatal("successful UDP RTP read did not refresh session")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestUDPPublishLoopStopsForClosedPublisher(t *testing.T) {
+	ports, err := portalloc.New(42202, 42203)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := NewUDPTransport(ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	pub := &RTSPPublisher{
+		id:            "stale-udp",
+		depacketizers: make(map[uint8]pkgrtp.Depacketizer),
+		done:          make(chan struct{}),
+	}
+	if err := pub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	session := NewRTSPSession("udp-stale", "live/udp-stale")
+	session.Publisher = pub
+	m := NewModule()
+	loopDone := make(chan struct{})
+	go func() {
+		m.udpPublishLoop(transport, session)
+		close(loopDone)
+	}()
+
+	pkt := &pionrtp.Packet{Header: pionrtp.Header{Version: 2, PayloadType: 96}}
+	data, err := pkt.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtpPort, _ := transport.ServerPorts()
+	client, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: rtpPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("UDP publish loop did not stop for closed publisher")
 	}
 }

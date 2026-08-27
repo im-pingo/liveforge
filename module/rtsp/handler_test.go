@@ -179,6 +179,58 @@ func TestHandleAnnouncePublishesGenerationAfterStreamDiscovery(t *testing.T) {
 	}
 }
 
+func TestHandleAnnounceFailsCleanlyWhenSyntheticSequenceHeaderIsRejected(t *testing.T) {
+	cfg := &config.Config{Stream: config.StreamConfig{RingBufferSize: 16}}
+	server := core.NewServer(cfg)
+	h := NewHandler(server, nil, nil)
+	var replacement *RTSPPublisher
+	h.writeFrameForPublisher = func(stream *core.Stream, pub core.Publisher, frame *avframe.AVFrame) bool {
+		if !stream.RemovePublisherIf(pub) {
+			t.Fatal("failed to replace announced publisher")
+		}
+		var err error
+		replacement, err = NewRTSPPublisher("replacement", &avframe.MediaInfo{VideoCodec: avframe.CodecH264}, stream, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.SetPublisher(replacement); err != nil {
+			t.Fatal(err)
+		}
+		return stream.WriteFrameForPublisher(pub, frame)
+	}
+	asyncPublish := make(chan struct{}, 1)
+	server.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventPublish,
+		Mode:  core.HookAsync,
+		Handler: func(*core.EventContext) error {
+			asyncPublish <- struct{}{}
+			return nil
+		},
+	})
+	session := NewRTSPSession("stale-sdp", "live/stale-sdp")
+	sdpBody := "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=test\r\nt=0 0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1; sprop-parameter-sets=Z0LADQ==,aMuD\r\n"
+	req := &Request{Method: "ANNOUNCE", URL: "rtsp://host/live/stale-sdp", Headers: make(http.Header), Body: []byte(sdpBody)}
+	req.Headers.Set("CSeq", "1")
+
+	resp := h.HandleAnnounce(req, session, "127.0.0.1:12345")
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("ANNOUNCE succeeded after synthetic sequence header rejection")
+	}
+	snapshot := session.Snapshot()
+	if snapshot.Publisher != nil || snapshot.State != StateInit {
+		t.Fatalf("failed ANNOUNCE left session mutated: publisher=%v state=%v", snapshot.Publisher, snapshot.State)
+	}
+	stream, ok := server.StreamHub().Find("live/stale-sdp")
+	if !ok || stream.Publisher() != replacement {
+		t.Fatal("failed ANNOUNCE removed replacement publisher")
+	}
+	select {
+	case <-asyncPublish:
+		t.Fatal("failed ANNOUNCE emitted asynchronous publish start")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestHandleAnnounceNoBody(t *testing.T) {
 	h := NewHandler(nil, nil, nil)
 	session := NewRTSPSession("test-id", "live/room1")

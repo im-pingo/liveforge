@@ -156,17 +156,20 @@ func (t *SRTTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		n, err := conn.Read(buf)
 		if err != nil {
 			demuxer.Flush()
-			// If context was cancelled, this is a normal shutdown
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("srt read: %w", err)
+			return classifySRTPullReadError(ctx, stream, pub, err)
 		}
 		if n > 0 {
 			recordRelayBytes(ctx, int64(n))
 			demuxer.Feed(buf[:n])
 		}
 	}
+}
+
+func classifySRTPullReadError(ctx context.Context, stream *core.Stream, pub *originPublisher, readErr error) error {
+	if ctx.Err() != nil || stream.Publisher() != pub {
+		return nil
+	}
+	return fmt.Errorf("srt read: %w", readErr)
 }
 
 func (t *SRTTransport) Close() error { return nil }

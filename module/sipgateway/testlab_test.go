@@ -7,7 +7,7 @@ import (
 )
 
 func TestGatewaySelfTestRunsWithoutRemotePeer(t *testing.T) {
-	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	report := gw.RunSelfTest(context.Background())
 	if !report.Passed {
 		t.Fatalf("self-test failed: %+v", report)
@@ -21,7 +21,7 @@ func TestGatewaySelfTestRunsWithoutRemotePeer(t *testing.T) {
 }
 
 func TestGatewaySelfTestCoversLocalSignalingAndMediaLifecycle(t *testing.T) {
-	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	report := gw.RunSelfTest(context.Background())
 	if !report.Passed {
 		t.Fatalf("self-test failed: %+v", report)

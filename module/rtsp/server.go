@@ -244,7 +244,9 @@ func (m *Module) handleConn(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				m.processInterleaved(session, ch, data)
+				if err := m.processInterleaved(session, ch, data); err != nil {
+					return
+				}
 				continue
 			}
 		}
@@ -494,30 +496,36 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 		if err != nil {
 			return
 		}
-		session.Touch()
 		publisher := session.Snapshot().Publisher
 		if publisher != nil {
 			pkt := &pionrtp.Packet{}
 			if err := pkt.Unmarshal(buf[:n]); err == nil {
-				publisher.FeedRTP(pkt)
+				if err := publisher.FeedRTP(pkt); err != nil {
+					return
+				}
 			}
 		}
+		session.Touch()
 	}
 }
 
-func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []byte) {
+func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []byte) error {
 	if session == nil {
-		return
+		return nil
 	}
-	session.Touch()
 	publisher := session.Snapshot().Publisher
 	if channel%2 != 0 || publisher == nil {
-		return
+		session.Touch()
+		return nil
 	}
 	pkt := &pionrtp.Packet{}
 	if err := pkt.Unmarshal(data); err == nil {
-		publisher.FeedRTP(pkt)
+		if err := publisher.FeedRTP(pkt); err != nil {
+			return err
+		}
 	}
+	session.Touch()
+	return nil
 }
 
 func (m *Module) cleanupSession(session *RTSPSession) bool {

@@ -43,7 +43,7 @@ func (d *blockingTerminalDialog) SendBYE(context.Context) error {
 func (d *blockingTerminalDialog) Close() {}
 
 func TestTerminalMetricsPublishAtomicallyWithSessionRemoval(t *testing.T) {
-	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestGatewayFinalizesOffered2xxFromRealSIPAdapterOnCancellation(t *testing.T
 	}
 	realService := realSIPServiceWithRequester(t, requester)
 
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/adapter-cancel-race")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	var inviteDone <-chan struct{}
@@ -298,7 +298,7 @@ func TestGatewayBoundsBlockingRealSIPACKAndStillSendsBYE(t *testing.T) {
 	}
 	realService := realSIPServiceWithRequester(t, requester)
 
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/blocking-ack")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	gw.sendInvite = func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
@@ -351,7 +351,7 @@ func TestGatewayBoundsBlockingRealSIPACKAndStillSendsBYE(t *testing.T) {
 }
 
 func TestGatewayRejectsOutboundSourceCodecMismatchBeforeInvite(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/aac")
 	publishTestAudio(t, stream, avframe.CodecAAC)
 	invites := 0
@@ -373,7 +373,7 @@ func TestGatewayRejectsOutboundSourceCodecMismatchBeforeInvite(t *testing.T) {
 }
 
 func TestGatewayAdvertisesOnlyImplementedSourceCodec(t *testing.T) {
-	cfg := newTestGatewayConfig()
+	cfg := newTestGatewayConfig(t)
 	cfg.Codecs = []string{"G729", "speex", "MPEG4-GENERIC", "PCMA"}
 	gw, _, hub := newControlPlaneGateway(t, cfg)
 	stream, _ := hub.GetOrCreate("live/pcma")
@@ -402,7 +402,7 @@ func TestGatewayAdvertisesOnlyImplementedSourceCodec(t *testing.T) {
 }
 
 func TestGatewayRejectsInboundCodecWithoutPacketizerSupport(t *testing.T) {
-	cfg := newTestGatewayConfig()
+	cfg := newTestGatewayConfig(t)
 	cfg.Codecs = []string{"G729"}
 	gw, svc, _ := newControlPlaneGateway(t, cfg)
 	offer := []byte("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49998 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n")
@@ -430,7 +430,7 @@ func TestGatewayRoutesSIPURIAndBareExtension(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+			gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 			stream, _ := hub.GetOrCreate("live/uri")
 			publishTestAudio(t, stream, avframe.CodecG711A)
 			dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -455,7 +455,7 @@ func TestGatewayRoutesSIPURIAndBareExtension(t *testing.T) {
 }
 
 func TestGatewayRejectsMalformedSIPURI(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/uri-invalid")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	invites := 0
@@ -500,7 +500,7 @@ func TestGatewayAcknowledgesAndTearsDownEveryFailed2xxDialog(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+			gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 			stream, _ := hub.GetOrCreate("live/post-2xx")
 			publishTestAudio(t, stream, avframe.CodecG711A)
 			dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -524,7 +524,7 @@ func TestGatewayAcknowledgesAndTearsDownEveryFailed2xxDialog(t *testing.T) {
 }
 
 func TestGatewayAcknowledges2xxAfterCallerContextCancellation(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/ack-context")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -554,7 +554,7 @@ func TestGatewayAcknowledges2xxAfterCallerContextCancellation(t *testing.T) {
 }
 
 func TestGatewayFinalizesReady2xxWhenCallerAlreadyCanceled(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/simultaneous-ready")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -581,7 +581,7 @@ func TestGatewayFinalizesReady2xxWhenCallerAlreadyCanceled(t *testing.T) {
 }
 
 func TestGatewayTearsDownDialogWhenActivationFailsAfterACK(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/activation-failure")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -604,7 +604,7 @@ func TestGatewayTearsDownDialogWhenActivationFailsAfterACK(t *testing.T) {
 }
 
 func TestGatewayTearsDownDialogWhenMediaStartFailsAfterACK(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/start-failure")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -627,7 +627,7 @@ func TestGatewayTearsDownDialogWhenMediaStartFailsAfterACK(t *testing.T) {
 }
 
 func TestGatewayAndSessionCloseRaceTearsDownOutboundDialogOnce(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/close-race")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -664,7 +664,7 @@ func TestGatewayAndSessionCloseRaceTearsDownOutboundDialogOnce(t *testing.T) {
 }
 
 func TestGatewayRemoteBYEEndsOutboundDialogWithoutSendingBYE(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/remote-bye")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -699,7 +699,7 @@ func TestGatewayRemoteBYEEndsOutboundDialogWithoutSendingBYE(t *testing.T) {
 }
 
 func TestGatewayOutboundRTCPReverseLivenessBecomesNetworkLost(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	gw.rtpIdleTimeout = 40 * time.Millisecond
 	stream, _ := hub.GetOrCreate("live/rtcp-liveness")
 	publishTestAudio(t, stream, avframe.CodecG711A)
@@ -756,7 +756,7 @@ func TestGatewayOutboundRTCPReverseLivenessBecomesNetworkLost(t *testing.T) {
 }
 
 func TestGatewayKeepsBoundedSortedTerminalHistoryOutsideCapacity(t *testing.T) {
-	cfg := newTestGatewayConfig()
+	cfg := newTestGatewayConfig(t)
 	cfg.MaxCalls = 1
 	gw, _, _ := newControlPlaneGateway(t, cfg)
 
@@ -802,7 +802,7 @@ func TestGatewayKeepsBoundedSortedTerminalHistoryOutsideCapacity(t *testing.T) {
 }
 
 func TestGatewayRedactsTerminalCallErrors(t *testing.T) {
-	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
 	if err != nil {
 		t.Fatalf("AllocatePair: %v", err)

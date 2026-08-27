@@ -150,7 +150,7 @@ func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return nil
+		return fmt.Errorf("RTSP publisher %s is closed", p.id)
 	}
 	dp, ok := p.depacketizers[pkt.PayloadType]
 	p.receivedPkts++

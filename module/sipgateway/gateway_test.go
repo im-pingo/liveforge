@@ -2,6 +2,7 @@ package sipgateway
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -14,20 +15,28 @@ import (
 )
 
 type mockSIPService struct {
-	mu              sync.Mutex
-	inviteHandlers  []sipmod.InviteHandler
-	byeHandlers     []sipmod.ByeHandler
-	localAddr       string
-	serverID        string
-	domain          string
+	mu             sync.Mutex
+	inviteHandlers []sipmod.InviteHandler
+	byeHandlers    []sipmod.ByeHandler
+	localAddr      string
+	serverID       string
+	domain         string
 }
 
-func (m *mockSIPService) OnRegister(h sipmod.RegisterHandler)     {}
-func (m *mockSIPService) OnInvite(h sipmod.InviteHandler)         { m.mu.Lock(); m.inviteHandlers = append(m.inviteHandlers, h); m.mu.Unlock() }
-func (m *mockSIPService) OnBye(h sipmod.ByeHandler)               { m.mu.Lock(); m.byeHandlers = append(m.byeHandlers, h); m.mu.Unlock() }
-func (m *mockSIPService) OnMessage(h sipmod.MessageHandler)       {}
-func (m *mockSIPService) OnSubscribe(h sipmod.SubscribeHandler)   {}
-func (m *mockSIPService) OnNotify(h sipmod.NotifyHandler)         {}
+func (m *mockSIPService) OnRegister(h sipmod.RegisterHandler) {}
+func (m *mockSIPService) OnInvite(h sipmod.InviteHandler) {
+	m.mu.Lock()
+	m.inviteHandlers = append(m.inviteHandlers, h)
+	m.mu.Unlock()
+}
+func (m *mockSIPService) OnBye(h sipmod.ByeHandler) {
+	m.mu.Lock()
+	m.byeHandlers = append(m.byeHandlers, h)
+	m.mu.Unlock()
+}
+func (m *mockSIPService) OnMessage(h sipmod.MessageHandler)     {}
+func (m *mockSIPService) OnSubscribe(h sipmod.SubscribeHandler) {}
+func (m *mockSIPService) OnNotify(h sipmod.NotifyHandler)       {}
 func (m *mockSIPService) SendRequest(ctx context.Context, req *sip.Request) (*sip.Response, error) {
 	return nil, nil
 }
@@ -50,12 +59,12 @@ func (tx *mockServerTx) Respond(resp *sip.Response) error {
 	return nil
 }
 
-func (tx *mockServerTx) Acks() <-chan *sip.Request                { return nil }
-func (tx *mockServerTx) Done() <-chan struct{}                    { return nil }
-func (tx *mockServerTx) Terminate()                               {}
-func (tx *mockServerTx) Err() error                               { return nil }
-func (tx *mockServerTx) OnTerminate(f sip.FnTxTerminate) bool     { return true }
-func (tx *mockServerTx) OnCancel(f sip.FnTxCancel) bool           { return true }
+func (tx *mockServerTx) Acks() <-chan *sip.Request            { return nil }
+func (tx *mockServerTx) Done() <-chan struct{}                { return nil }
+func (tx *mockServerTx) Terminate()                           {}
+func (tx *mockServerTx) Err() error                           { return nil }
+func (tx *mockServerTx) OnTerminate(f sip.FnTxTerminate) bool { return true }
+func (tx *mockServerTx) OnCancel(f sip.FnTxCancel) bool       { return true }
 
 func (tx *mockServerTx) getResponse() *sip.Response {
 	tx.mu.Lock()
@@ -68,14 +77,56 @@ func newTestHub() *core.StreamHub {
 	return core.NewStreamHub(config.StreamConfig{RingBufferSize: 256}, config.LimitsConfig{}, bus)
 }
 
-func newTestGatewayConfig() config.SIPGatewayConfig {
+func newTestGatewayConfig(t *testing.T) config.SIPGatewayConfig {
+	t.Helper()
 	return config.SIPGatewayConfig{
 		Enabled:      true,
 		StreamPrefix: "sip",
-		RTPPortRange: []int{40000, 40100},
+		RTPPortRange: freeSIPGatewayRTPPortRange(t, 4),
 		Codecs:       []string{"PCMA", "PCMU"},
 		MaxCalls:     10,
 	}
+}
+
+func freeSIPGatewayRTPPortRange(t *testing.T, pairCount int) []int {
+	t.Helper()
+	const maxAttempts = 128
+	loopback := net.ParseIP("127.0.0.1")
+	portCount := pairCount * 2
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback})
+		if err != nil {
+			t.Fatalf("probe SIP Gateway RTP range: %v", err)
+		}
+		start := probe.LocalAddr().(*net.UDPAddr).Port
+		_ = probe.Close()
+		if start%2 != 0 {
+			start--
+		}
+		end := start + portCount - 1
+		if start < 1024 || end > 65535 {
+			continue
+		}
+
+		reservations := make([]*net.UDPConn, 0, portCount)
+		available := true
+		for port := start; port <= end; port++ {
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
+			if err != nil {
+				available = false
+				break
+			}
+			reservations = append(reservations, conn)
+		}
+		for _, conn := range reservations {
+			_ = conn.Close()
+		}
+		if available {
+			return []int{start, end}
+		}
+	}
+	t.Fatalf("could not find %d free SIP Gateway RTP/RTCP pairs", pairCount)
+	return nil
 }
 
 func TestNewGateway(t *testing.T) {
@@ -83,7 +134,7 @@ func TestNewGateway(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	gw, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus)
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -99,7 +150,7 @@ func TestNewGatewayBadPortRange(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	cfg := newTestGatewayConfig()
+	cfg := newTestGatewayConfig(t)
 	cfg.RTPPortRange = []int{100}
 
 	_, err := NewGateway(cfg, sipSvc, hub, bus)
@@ -196,9 +247,9 @@ func TestNegotiateCodec(t *testing.T) {
 
 func TestBuildAnswerSDP(t *testing.T) {
 	nc := negotiatedCodec{
-		Codec:       8, // CodecG711A
-		PT:          8,
-		ClockRate:   8000,
+		Codec:        8, // CodecG711A
+		PT:           8,
+		ClockRate:    8000,
 		EncodingName: "PCMA",
 	}
 
@@ -253,7 +304,7 @@ func TestGatewayHandleInviteSuccess(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	gw, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus)
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -299,7 +350,7 @@ func TestGatewayHandleInviteNoAudio(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	gw, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus)
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -337,7 +388,7 @@ func TestGatewayHandleBye(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	gw, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus)
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -395,7 +446,7 @@ func TestGatewayMaxCalls(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	cfg := newTestGatewayConfig()
+	cfg := newTestGatewayConfig(t)
 	cfg.MaxCalls = 1
 
 	gw, err := NewGateway(cfg, sipSvc, hub, bus)
@@ -444,7 +495,7 @@ func TestGatewayClose(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	gw, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus)
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -495,7 +546,7 @@ func TestHangupUnknownCall(t *testing.T) {
 	hub := newTestHub()
 	bus := core.NewEventBus()
 
-	gw, err := NewGateway(newTestGatewayConfig(), sipSvc, hub, bus)
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}

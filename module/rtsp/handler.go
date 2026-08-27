@@ -16,14 +16,22 @@ import (
 
 // Handler processes RTSP requests.
 type Handler struct {
-	server    *core.Server
-	ports     *portalloc.PortAllocator
-	multicast *config.MulticastConfig // nil if multicast disabled
+	server                 *core.Server
+	ports                  *portalloc.PortAllocator
+	multicast              *config.MulticastConfig // nil if multicast disabled
+	writeFrameForPublisher func(*core.Stream, core.Publisher, *avframe.AVFrame) bool
 }
 
 // NewHandler creates a new RTSP handler.
 func NewHandler(server *core.Server, ports *portalloc.PortAllocator, multicast *config.MulticastConfig) *Handler {
-	return &Handler{server: server, ports: ports, multicast: multicast}
+	return &Handler{
+		server:    server,
+		ports:     ports,
+		multicast: multicast,
+		writeFrameForPublisher: func(stream *core.Stream, pub core.Publisher, frame *avframe.AVFrame) bool {
+			return stream.WriteFrameForPublisher(pub, frame)
+		},
+	}
 }
 
 // newResponse creates a base response with CSeq from request.
@@ -223,6 +231,26 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 			_ = pub.Close()
 			return newResponse(454, "Session Not Found", req)
 		}
+
+		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
+		// SequenceHeader frame so the stream caches it for late-joining subscribers.
+		if len(mediaInfo.VideoSequenceHeader) > 0 {
+			seqFrame := avframe.NewAVFrame(
+				avframe.MediaTypeVideo,
+				avframe.CodecH264,
+				avframe.FrameTypeSequenceHeader,
+				0, 0,
+				mediaInfo.VideoSequenceHeader,
+			)
+			if !h.writeFrameForPublisher(stream, pub, seqFrame) {
+				session.ClearPublisher(pub)
+				stream.RemovePublisherIf(pub)
+				_ = pub.Close()
+				return newResponse(500, "Internal Server Error", req)
+			}
+			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
+		}
+
 		if err := session.Transition(StateAnnounced); err != nil {
 			session.ClearPublisher(pub)
 			stream.RemovePublisherIf(pub)
@@ -235,20 +263,6 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 		session.startPublishLifecycle(func() {
 			h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
 		})
-
-		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
-		// SequenceHeader frame so the stream caches it for late-joining subscribers.
-		if len(mediaInfo.VideoSequenceHeader) > 0 {
-			seqFrame := avframe.NewAVFrame(
-				avframe.MediaTypeVideo,
-				avframe.CodecH264,
-				avframe.FrameTypeSequenceHeader,
-				0, 0,
-				mediaInfo.VideoSequenceHeader,
-			)
-			stream.WriteFrameForPublisher(pub, seqFrame)
-			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
-		}
 	}
 
 	if session != nil && h.server == nil {

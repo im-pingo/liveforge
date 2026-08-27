@@ -321,7 +321,7 @@ func TestSIPLabStreamKeyOverrideRequiresLoopback(t *testing.T) {
 func TestSIPLabGatewayCloseCancelsBlockedStart(t *testing.T) {
 	target := freeSIPLabUDPAddress(t)
 	svc := &mockSIPService{localAddr: target, serverID: "test", domain: "test.local"}
-	gw, err := NewGateway(newTestGatewayConfig(), svc, newTestHub(), core.NewEventBus())
+	gw, err := NewGateway(newTestGatewayConfig(t), svc, newTestHub(), core.NewEventBus())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}

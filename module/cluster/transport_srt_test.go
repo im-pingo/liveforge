@@ -2,7 +2,10 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 func TestSRTTransportScheme(t *testing.T) {
@@ -39,7 +42,7 @@ func TestParseSRTURL(t *testing.T) {
 		{"srt://host:6000/live/test", "host:6000", "/live/test", false},
 		{"srt://host/live/test", "host:6000", "/live/test", false},
 		{"srt://host:9000?streamid=/live/test", "host:9000", "/live/test", false},
-		{"srt://host", "", "", true},           // no path
+		{"srt://host", "", "", true},            // no path
 		{"rtmp://host/live/test", "", "", true}, // wrong scheme
 	}
 	for _, tt := range tests {
@@ -62,4 +65,31 @@ func TestParseSRTURL(t *testing.T) {
 func TestSRTTransportInterfaceCompliance(t *testing.T) {
 	cfg := defaultClusterSRTConfig()
 	var _ RelayTransport = NewSRTTransport(cfg)
+}
+
+func TestClassifySRTPullReadError(t *testing.T) {
+	hub, _ := newTestHub()
+	stream, err := hub.GetOrCreate("live/srt-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &originPublisher{id: "srt-owner", info: &avframe.MediaInfo{}}
+	if err := stream.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	readErr := errors.New("transport read failed")
+
+	if err := classifySRTPullReadError(context.Background(), stream, pub, readErr); !errors.Is(err, readErr) {
+		t.Fatalf("active publisher read error = %v, want wrapped transport error", err)
+	}
+	if !stream.RemovePublisherIf(pub) {
+		t.Fatal("failed to remove SRT owner")
+	}
+	replacement := &originPublisher{id: "replacement", info: &avframe.MediaInfo{}}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := classifySRTPullReadError(context.Background(), stream, pub, readErr); err != nil {
+		t.Fatalf("replaced publisher read error = %v, want normal termination", err)
+	}
 }
