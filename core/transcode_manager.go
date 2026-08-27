@@ -193,6 +193,7 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 	}
 	defer decoder.Close()
 	defer encoder.Close()
+	defer track.ringBuffer.Close()
 
 	// Set extradata for codecs that need it (e.g. AAC AudioSpecificConfig)
 	if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil {
@@ -202,6 +203,11 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 	// Resampler is created lazily after the first successful decode
 	var resampler audiocodec.Resampler
 	resamplerInited := false
+	defer func() {
+		if resampler != nil {
+			resampler.Close()
+		}
+	}()
 
 	// Emit sequence header for target codec
 	if seqHdr := tm.registry.SequenceHeader(track.targetCodec); seqHdr != nil {
@@ -316,10 +322,6 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 		// encoding compound over minutes into large jitter buffer growth.
 		frame, ok := reader.Read()
 		if !ok {
-			if resampler != nil {
-				resampler.Close()
-			}
-			track.ringBuffer.Close()
 			return
 		}
 		for {
@@ -328,6 +330,11 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 					// Legacy reader: pass video through without encoding.
 					track.ringBuffer.Write(frame)
 				}
+			} else if frame.Codec != sourceCodec {
+				// A same-generation source can switch codecs. This decoder is bound
+				// to the codec captured when the track started, so stop before it
+				// interprets bytes from the replacement codec.
+				return
 			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
 				// Skip source audio sequence headers.
 			} else {

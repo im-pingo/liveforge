@@ -195,7 +195,7 @@ sequenceDiagram
 ### 7.3 不同消费者的起点
 
 - 普通 RTMP、RTSP、SRT、共享 HTTP FLV/TS/fMP4 muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
-- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。
+- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。共享 HTTP muxer 同一时刻只有一个音频 owner：开始时由转码 reader 提供目标 AAC；同一 publisher generation 后续出现可直接复用的 AAC sequence header 时，原子切换到直接 reader，丢弃已经竞争到队列中的旧转码帧，并在旧 source-codec decoder 读取 AAC 数据前终止该转码轨；直接视频 reader 不受切换影响。
 - HLS、LL-HLS、DASH 的兼容路径仍使用 combined 历史转码 reader，并按缓存视频 DTS 范围过滤其中可能重复出现的视频帧；这些 segmenter 尚未迁移到独立 direct/audio reader。
 - SRT 不再用跨音视频的最大 DTS 过滤 replay/live 重叠；cursor 是唯一重复边界，因此缓存视频 DTS 4000 之后的实时音频 DTS 1000 仍会发送。
 
@@ -243,7 +243,7 @@ RingReader:  每个消费者独立的 readCursor
 对每个 stream，`MuxerManager` 按 `flv`、`ts`、`mp4` 保存 `MuxerInstance`：
 
 1. 第一个该格式订阅者到来时，为当前 publisher generation 创建 SharedBuffer、`Done` channel 和 generation-bound `MuxerInstance`，并启动一个 muxer goroutine。
-2. muxer 先捕获与实例 generation 相同的启动快照；尚未 ready 时同时等待该快照的 `GenerationDone`，publisher 被移除就立即退出，不能等待并接入 replacement generation。ready 后向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续直接媒体；转码音频由独立 reader 从 `SourceCursor` 输入。
+2. muxer 先捕获与实例 generation 相同的启动快照；尚未 ready 时同时等待该快照的 `GenerationDone`，publisher 被移除就立即退出，不能等待并接入 replacement generation。ready 后向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续直接媒体；转码音频由独立 reader 从 `SourceCursor` 输入。若 live 音频从需要转码的 codec 切换为 AAC，FLV/TS/fMP4 worker 在 AAC sequence header 处把唯一音频 owner 从转码 reader 交给直接 reader；TS 先刷新 PAT/PMT，再写第一帧直接 AAC。
 3. 后续同格式订阅者从共享 bytes reader 读取，不重新创建 muxer。
 4. HTTP/WS 请求释放自己实际取得的实例。最后一个订阅者释放或该 publisher generation 结束时关闭 `Done`，muxer 关闭 reader 和 SharedBuffer，实例从 manager 删除；旧请求不能递减 replacement generation 的实例。
 

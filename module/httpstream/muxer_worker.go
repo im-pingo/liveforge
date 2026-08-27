@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/audiocodec"
@@ -483,17 +484,24 @@ type muxerWorkerLiveInput struct {
 	source    *util.RingReader[*avframe.AVFrame]
 	audio     *util.RingReader[*avframe.AVFrame]
 	release   func()
-	frames    chan *avframe.AVFrame
+	frames    chan muxerWorkerFrame
 	cancel    context.CancelFunc
 	allDone   chan struct{}
+	directAAC atomic.Bool
+	audioOnce sync.Once
 	closeOnce sync.Once
+}
+
+type muxerWorkerFrame struct {
+	frame       *avframe.AVFrame
+	transformed bool
 }
 
 func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot, plan muxerAudioPlan) (*muxerWorkerLiveInput, muxerAudioPlan) {
 	input := &muxerWorkerLiveInput{
 		source:  stream.RingBuffer().NewReaderAt(snapshot.LiveCursor),
 		release: func() {},
-		frames:  make(chan *avframe.AVFrame),
+		frames:  make(chan muxerWorkerFrame),
 		allDone: make(chan struct{}),
 	}
 	if plan.mode == muxerAudioTranscode {
@@ -514,7 +522,7 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 	ctx, cancel := context.WithCancel(context.Background())
 	input.cancel = cancel
 	var pumps sync.WaitGroup
-	pump := func(reader *util.RingReader[*avframe.AVFrame], accept func(*avframe.AVFrame) bool) {
+	pump := func(reader *util.RingReader[*avframe.AVFrame], transformed bool, accept func(*avframe.AVFrame) bool) {
 		defer pumps.Done()
 		for {
 			frame, ok := reader.ReadContext(ctx)
@@ -525,18 +533,27 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 				continue
 			}
 			select {
-			case input.frames <- frame:
+			case input.frames <- muxerWorkerFrame{frame: frame, transformed: transformed}:
 			case <-ctx.Done():
 				return
 			}
 		}
 	}
 	pumps.Add(1)
-	go pump(input.source, func(*avframe.AVFrame) bool { return true })
+	go pump(input.source, false, func(frame *avframe.AVFrame) bool {
+		if plan.mode != muxerAudioTranscode || frame == nil || !frame.MediaType.IsAudio() {
+			return true
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader && frame.Codec == plan.codec {
+			input.directAAC.Store(true)
+			input.closeAudio()
+		}
+		return input.directAAC.Load() && frame.Codec == plan.codec
+	})
 	if input.audio != nil {
 		pumps.Add(1)
-		go pump(input.audio, func(frame *avframe.AVFrame) bool {
-			return frame != nil && frame.MediaType.IsAudio() && frame.Codec == plan.codec &&
+		go pump(input.audio, true, func(frame *avframe.AVFrame) bool {
+			return !input.directAAC.Load() && frame != nil && frame.MediaType.IsAudio() && frame.Codec == plan.codec &&
 				frame.FrameType != avframe.FrameTypeSequenceHeader
 		})
 	}
@@ -549,18 +566,32 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 }
 
 func (r *muxerWorkerLiveInput) Read() (*avframe.AVFrame, bool) {
-	frame, ok := <-r.frames
-	return frame, ok
+	for {
+		delivery, ok := <-r.frames
+		if !ok {
+			return nil, false
+		}
+		if delivery.transformed && r.directAAC.Load() {
+			continue
+		}
+		return delivery.frame, true
+	}
+}
+
+func (r *muxerWorkerLiveInput) closeAudio() {
+	r.audioOnce.Do(func() {
+		if r.audio != nil {
+			r.audio.Close()
+		}
+		r.release()
+	})
 }
 
 func (r *muxerWorkerLiveInput) Close() {
 	r.closeOnce.Do(func() {
 		r.cancel()
 		r.source.Close()
-		if r.audio != nil {
-			r.audio.Close()
-		}
-		r.release()
+		r.closeAudio()
 		<-r.allDone
 	})
 }
