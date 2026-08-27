@@ -433,8 +433,19 @@ func TestWHEPPlay(t *testing.T) {
 		pushDone <- err
 	}()
 
-	// WebRTC needs extra time for negotiation.
-	time.Sleep(2 * time.Second)
+	readyTimer := time.NewTimer(10 * time.Second)
+	defer readyTimer.Stop()
+	readyTicker := time.NewTicker(10 * time.Millisecond)
+	defer readyTicker.Stop()
+	for !srv.StreamHasVideoGOP("live/test") {
+		select {
+		case err := <-pushDone:
+			t.Fatalf("RTMP pusher stopped before a video GOP was available: %v", err)
+		case <-readyTimer.C:
+			t.Fatal("timed out waiting for RTMP video GOP before WHEP playback")
+		case <-readyTicker.C:
+		}
+	}
 
 	// Play via WHEP.
 	player, err := NewPlayer("whep")
@@ -832,10 +843,10 @@ func TestParseLLHLSPlaylist_TS(t *testing.T) {
 
 func TestParseAttributeValue(t *testing.T) {
 	tests := []struct {
-		name  string
-		line  string
-		attr  string
-		want  string
+		name string
+		line string
+		attr string
+		want string
 	}{
 		{
 			name: "quoted URI",

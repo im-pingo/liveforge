@@ -162,7 +162,7 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 	session.InviteTx = invTx
 	session.SetState(SessionStateStreaming)
 	ic.handler.sessions.Add(session)
-	go receiver.Run()
+	ic.handler.runReceiver(session, receiver)
 
 	publishCtx.PublisherID = pub.ID()
 	publishCtx.Extra = map[string]any{

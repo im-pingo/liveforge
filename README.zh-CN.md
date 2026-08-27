@@ -121,7 +121,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **增量播放列表** — 支持 `_HLS_skip=YES` 减少传输量
 - **fMP4 容器** — 默认 fMP4，可选 TS 回退
 - **兼容旧播放器** — 无 LL-HLS 支持的播放器自动降级为缓冲分片模式
-- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；Hls.js 的初始清单等待一个完整分段但不重复公告其 part，后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新
+- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；Hls.js 的初始清单等待一个完整分段但不重复公告其 part，后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新。HLS、LL-HLS 和 DASH 清单会逐段转义流键，DASH URL 属性同时进行 XML 转义，媒体分片路由可保留任意深度的有效流键
 
 ### 管理与运维
 
@@ -130,8 +130,8 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
 - **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
 - **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式先校验 H.264 加 G.711A，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
-- **GB28181 Lab 流键** — 发布会使用请求中的 `stream_key`（可打印 ASCII、最长 256 字节且不能有首尾空白）；该覆盖只接受 loopback 模拟器请求，真实设备仍使用 `{stream_prefix}/{channel_id}`
-- **实验室诊断** — Manager 保留全部活跃会话和最新 16 条终态记录。失败会话的有界 `last_error` 会先移除 SIP 凭据与 bearer token；会话视图展示接收端 RTCP 及独立音视频计数。播放路径会逐段转义流键，并按实际绑定监听器生成 RTMP/RTSP 绝对地址
+- **协议实验室流键** — SIP 和 GB28181 接受最长 256 字节的可打印 ASCII 流键；以 `/` 分隔的每一段都不能为空，也不能是 `.` 或 `..`。GB28181 发布仅对 loopback 模拟器使用请求中的流键，真实设备仍使用 `{stream_prefix}/{channel_id}`
+- **实验室诊断** — Manager 保留全部活跃会话和最新 16 条终态记录。失败会话的有界 `last_error` 会先移除 SIP 凭据与 bearer token；会话视图展示接收端 RTCP 及独立音视频计数。播放路径会逐段转义流键，并按实际绑定监听器生成 RTMP/RTSP 绝对地址；Console 的 Lab Preview 直接使用这些返回路径
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数

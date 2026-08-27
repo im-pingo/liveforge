@@ -346,6 +346,13 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 		cs.video.conn = videoConn
 		cs.video.rtcpConn = videoRTCPConn
 	}
+	cs.mu.Unlock()
+
+	if err := stream.AddSubscriber("sipgateway"); err != nil {
+		return fmt.Errorf("admit SIP gateway subscriber: %w", err)
+	}
+
+	cs.mu.Lock()
 	cs.state = CallStateActive
 	cs.mu.Unlock()
 	cs.established.Store(true)
@@ -572,10 +579,6 @@ func (cs *CallSession) sendLoop() {
 		}
 	}
 
-	if err := stream.AddSubscriber("sipgateway"); err != nil {
-		cs.networkLost(err)
-		return
-	}
 	defer stream.RemoveSubscriber("sipgateway")
 
 	reader := stream.RingBuffer().NewReader()

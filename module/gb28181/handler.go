@@ -212,7 +212,7 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 	h.sessions.Add(session)
-	go receiver.Run()
+	h.runReceiver(session, receiver)
 
 	// Build SDP answer
 	localIP := getLocalIP()
@@ -354,6 +354,16 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 		})
 	}
 	return true
+}
+
+func (h *handler) runReceiver(session *MediaSession, receiver *RTPReceiver) {
+	go func() {
+		receiver.Run()
+		if err := receiver.Err(); err != nil {
+			slog.Warn("media receiver terminated", "module", "gb28181", "session", session.Snapshot().ID, "error", err)
+			h.closeSession(session, "")
+		}
+	}()
 }
 
 func (h *handler) rollbackSession(session *MediaSession, removeStream bool) {

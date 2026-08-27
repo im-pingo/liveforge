@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
+	"time"
 
 	pionrtp "github.com/pion/rtp/v2"
 )
@@ -189,5 +191,43 @@ func TestSeqDiff(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("seqDiff(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+func TestRTPReceiverUnexpectedSocketFailureStopsBothWorkers(t *testing.T) {
+	receiver, err := NewRTPReceiver(0, NewPublisher("receiver-failure", nil))
+	if err != nil {
+		t.Fatalf("NewRTPReceiver: %v", err)
+	}
+	rtcpAddress := receiver.rtcpConn.LocalAddr().String()
+	go receiver.Run()
+	if err := receiver.conn.Close(); err != nil {
+		t.Fatalf("close RTP socket: %v", err)
+	}
+	select {
+	case <-receiver.Done():
+	case <-time.After(time.Second):
+		t.Fatal("receiver workers did not terminate after RTP socket failure")
+	}
+	if err := receiver.Err(); err == nil || !strings.Contains(err.Error(), "RTP receiver") {
+		t.Fatalf("receiver terminal error = %v, want RTP receiver failure", err)
+	}
+	assertGBLabPortFree(t, rtcpAddress)
+}
+
+func TestRTPReceiverMediaIdleIsTerminal(t *testing.T) {
+	receiver, err := NewRTPReceiver(0, NewPublisher("receiver-idle", nil))
+	if err != nil {
+		t.Fatalf("NewRTPReceiver: %v", err)
+	}
+	receiver.idleTimeout = 30 * time.Millisecond
+	go receiver.Run()
+	select {
+	case <-receiver.Done():
+	case <-time.After(time.Second):
+		t.Fatal("receiver did not terminate after configured media idle timeout")
+	}
+	if err := receiver.Err(); err == nil || !strings.Contains(err.Error(), "media idle timeout") {
+		t.Fatalf("receiver terminal error = %v, want explicit media idle timeout", err)
 	}
 }

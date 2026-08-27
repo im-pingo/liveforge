@@ -146,7 +146,7 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	}
 	session.SetState(SessionStateStreaming)
 	pc.handler.sessions.Add(session)
-	go receiver.Run()
+	pc.handler.runReceiver(session, receiver)
 
 	publishCtx.PublisherID = pub.ID()
 	publishCtx.Extra = map[string]any{

@@ -77,7 +77,33 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 		m.mu.Unlock()
 		return session.snapshot(), err
 	}
+	if call := session.callSession(); call != nil {
+		go m.watchCall(session, call)
+	}
 	return session.snapshot(), nil
+}
+
+func (m *labManager) watchCall(session *sipLabSession, call *CallSession) {
+	select {
+	case <-session.ctx.Done():
+		return
+	case <-call.closed:
+	}
+	if session.ctx.Err() != nil {
+		return
+	}
+	snapshot := call.snapshot()
+	err := errors.New("SIP gateway call ended")
+	if snapshot.LastError != "" {
+		err = errors.New(snapshot.LastError)
+	}
+	session.fail(err)
+	m.mu.Lock()
+	if m.identities[session.identity] == session.id {
+		delete(m.identities, session.identity)
+	}
+	m.pruneTerminalsLocked()
+	m.mu.Unlock()
 }
 
 func (m *labManager) list() []LabSessionSnapshot {
@@ -193,6 +219,7 @@ type sipLabSession struct {
 	lastMedia time.Time
 	stoppedAt time.Time
 	callID    string
+	call      *CallSession
 	invite    *sip.Request
 	response  *sip.Response
 	client    *sipgo.Client
@@ -352,10 +379,13 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	if video == nil || video.Port <= 0 {
 		return errors.New("lab SIP answer has no video RTP port")
 	}
-	call, ok := s.gateway.Call(callID)
-	if !ok || call.State != CallStateActive {
+	call := s.gateway.activeSession(callID)
+	if call == nil || call.snapshot().State != CallStateActive {
 		return errors.New("lab publish call did not become active")
 	}
+	s.mu.Lock()
+	s.call = call
+	s.mu.Unlock()
 	s.setState(LabSessionStateActive)
 	s.mediaWG.Add(2)
 	go s.publishAudioLoop(audio.Port, codec)
@@ -457,12 +487,13 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	if err != nil {
 		return err
 	}
-	call, ok := s.gateway.Call(callID)
-	if !ok || call.State != CallStateActive {
+	call := s.gateway.activeSession(callID)
+	if call == nil || call.snapshot().State != CallStateActive {
 		return errors.New("lab receive call did not become active")
 	}
 	s.mu.Lock()
 	s.callID = callID
+	s.call = call
 	s.mu.Unlock()
 	s.setState(LabSessionStateActive)
 	s.mediaWG.Add(6)
@@ -470,9 +501,16 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	go s.receiveRTPLoop(videoRTPConn, true)
 	go s.receiveRTCPLoop(rtcpConn)
 	go s.receiveRTCPLoop(videoRTCPConn)
-	go s.sendReceiverReportLoop(rtcpConn, call.RTCPPort, 0x4c465241)
-	go s.sendReceiverReportLoop(videoRTCPConn, call.VideoRTCPPort, 0x4c465256)
+	callSnapshot := call.snapshot()
+	go s.sendReceiverReportLoop(rtcpConn, callSnapshot.RTCPPort, 0x4c465241)
+	go s.sendReceiverReportLoop(videoRTCPConn, callSnapshot.VideoRTCPPort, 0x4c465256)
 	return nil
+}
+
+func (s *sipLabSession) callSession() *CallSession {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.call
 }
 
 func (s *sipLabSession) publishAudioLoop(remotePort int, codec string) {

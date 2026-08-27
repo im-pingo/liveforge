@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,18 @@ func TestLabManagerRejectsInvalidStartRequest(t *testing.T) {
 	_, err := manager.Start(context.Background(), LabSessionRequest{})
 	if !errors.Is(err, ErrLabInvalidRequest) {
 		t.Fatalf("Start error = %v, want ErrLabInvalidRequest", err)
+	}
+}
+
+func TestLabManagerRejectsAmbiguousStreamKeySegments(t *testing.T) {
+	for _, streamKey := range []string{"/tenant/cam", "tenant/cam/", "tenant//cam", "tenant/./cam", "tenant/../cam", ".", ".."} {
+		t.Run(streamKey, func(t *testing.T) {
+			request := validSIPLabRequest()
+			request.StreamKey = streamKey
+			if err := validateLabRequest(request); !errors.Is(err, ErrLabInvalidRequest) {
+				t.Fatalf("validateLabRequest(%q) error = %v, want ErrLabInvalidRequest", streamKey, err)
+			}
+		})
 	}
 }
 
@@ -481,6 +494,134 @@ func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {
 	waitForSIPLab(t, func() bool { return h.module.Gateway().ActiveCalls() == 0 })
 }
 
+func TestSIPOutboundSubscriberAdmissionFailsBeforeActivation(t *testing.T) {
+	hub := core.NewStreamHub(
+		config.StreamConfig{RingBufferSize: 16},
+		config.LimitsConfig{MaxSubscribersPerStream: 1},
+		core.NewEventBus(),
+	)
+	stream, err := hub.GetOrCreate("sip/admission-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gatewayTestPublisher{id: "admission-source", info: &avframe.MediaInfo{
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+	if err := stream.AddSubscriber("occupied"); err != nil {
+		t.Fatalf("occupy subscriber capacity: %v", err)
+	}
+	defer stream.RemoveSubscriber("occupied")
+
+	remoteRTP, remoteRTCP, err := listenLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen remote RTP pair: %v", err)
+	}
+	defer remoteRTP.Close()
+	defer remoteRTCP.Close()
+	localRTP, localRTCP, err := listenLabUDPPair()
+	if err != nil {
+		t.Fatalf("reserve local RTP pair: %v", err)
+	}
+	localRTPPort := localRTP.LocalAddr().(*net.UDPAddr).Port
+	localRTCPPort := localRTCP.LocalAddr().(*net.UDPAddr).Port
+	_ = localRTP.Close()
+	_ = localRTCP.Close()
+
+	call := newCallSession("admission-call", stream.Key(), negotiatedCodec{
+		Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA",
+	}, "outbound", localRTPPort, localRTCPPort)
+	defer call.Close()
+	err = call.startOutbound(stream, "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port)
+	if err == nil || !strings.Contains(err.Error(), "max subscribers per stream") {
+		t.Fatalf("startOutbound admission error = %v, want synchronous subscriber limit error", err)
+	}
+	if snapshot := call.snapshot(); snapshot.State == CallStateActive {
+		t.Fatalf("subscriber-rejected call state = %q, must never become active", snapshot.State)
+	}
+	if got := stream.Subscribers()["sipgateway"]; got != 0 {
+		t.Fatalf("subscriber rejection left %d SIP gateway subscribers", got)
+	}
+}
+
+func TestSIPLabPublishCallFailureTransitionsToFailedAndCleansUp(t *testing.T) {
+	h := newRealSIPLabHarness(t)
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "publish-call-failure-device",
+		StreamKey: "sip/publish-call-failure",
+		Codec:     "PCMA",
+	}
+	session, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	lab, call := activeSIPLabCall(t, h.module.Gateway(), session.ID)
+	addresses := sipLabMediaAddresses(lab)
+	call.networkLost(errors.New("forced publish call failure"))
+
+	failed := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateFailed
+	})
+	if !strings.Contains(failed.LastError, "forced publish call failure") {
+		t.Fatalf("publish Lab terminal error = %q", failed.LastError)
+	}
+	waitForSIPLab(t, func() bool {
+		stream, ok := h.hub.Find(request.StreamKey)
+		return h.module.Gateway().ActiveCalls() == 0 && ok && stream.Publisher() == nil
+	})
+	for _, address := range addresses {
+		assertSIPLabPortFree(t, address)
+	}
+}
+
+func TestSIPLabReceiveCallFailureTransitionsToFailedAndCleansUp(t *testing.T) {
+	h := newRealSIPLabHarness(t)
+	stream, err := h.hub.GetOrCreate("sip/receive-call-failure")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	publisher := &gatewayTestPublisher{id: "receive-call-failure-source", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}
+	if err := stream.SetPublisher(publisher); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+	session, err := h.module.StartLabSession(context.Background(), LabSessionRequest{
+		Mode: LabModeReceive, DeviceID: "receive-call-failure-device", StreamKey: stream.Key(), Codec: "PCMA",
+	})
+	if err != nil {
+		t.Fatalf("StartLabSession receive: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	lab, call := activeSIPLabCall(t, h.module.Gateway(), session.ID)
+	addresses := sipLabMediaAddresses(lab)
+	call.networkLost(errors.New("forced receive call failure"))
+
+	failed := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateFailed
+	})
+	if !strings.Contains(failed.LastError, "forced receive call failure") {
+		t.Fatalf("receive Lab terminal error = %q", failed.LastError)
+	}
+	if stream.Publisher() != publisher {
+		t.Fatal("receive Lab failure removed or replaced the source publisher")
+	}
+	if got := stream.Subscribers()["sipgateway"]; got != 0 {
+		t.Fatalf("receive Lab failure left %d SIP gateway subscribers", got)
+	}
+	for _, address := range addresses {
+		assertSIPLabPortFree(t, address)
+	}
+}
+
 func TestSIPLabReceiveDoesNotMutateSourceStream(t *testing.T) {
 	h := newRealSIPLabHarness(t)
 	stream, err := h.hub.GetOrCreate("sip/immutable-receive-source")
@@ -901,4 +1042,52 @@ func waitForSIPLab(t *testing.T, predicate func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("SIP lab condition was not reached")
+}
+
+func activeSIPLabCall(t *testing.T, gateway *Gateway, labID string) (*sipLabSession, *CallSession) {
+	t.Helper()
+	gateway.labs.mu.RLock()
+	lab := gateway.labs.sessions[labID]
+	gateway.labs.mu.RUnlock()
+	if lab == nil {
+		t.Fatalf("SIP Lab %q was not retained", labID)
+	}
+	lab.mu.RLock()
+	callID := lab.callID
+	lab.mu.RUnlock()
+	gateway.mu.RLock()
+	call := gateway.sessions[callID]
+	gateway.mu.RUnlock()
+	if call == nil {
+		t.Fatalf("SIP Lab call %q is not active", callID)
+	}
+	return lab, call
+}
+
+func sipLabMediaAddresses(lab *sipLabSession) []string {
+	lab.mu.RLock()
+	defer lab.mu.RUnlock()
+	addresses := make([]string, 0, 4)
+	for _, conn := range []*net.UDPConn{lab.rtpConn, lab.rtcpConn, lab.videoRTPConn, lab.videoRTCPConn} {
+		if conn != nil {
+			addresses = append(addresses, conn.LocalAddr().String())
+		}
+	}
+	return addresses
+}
+
+func assertSIPLabPortFree(t *testing.T, address string) {
+	t.Helper()
+	if address == "" {
+		return
+	}
+	addr, err := net.ResolveUDPAddr("udp4", address)
+	if err != nil {
+		t.Fatalf("resolve UDP address %q: %v", address, err)
+	}
+	conn, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		t.Fatalf("UDP address %q was not released: %v", address, err)
+	}
+	_ = conn.Close()
 }

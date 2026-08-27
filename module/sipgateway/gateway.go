@@ -763,6 +763,12 @@ func (gw *Gateway) sessionTerminated(session *CallSession, state CallState, err 
 	gw.finishSession(session, state, err)
 }
 
+func (gw *Gateway) activeSession(callID string) *CallSession {
+	gw.mu.RLock()
+	defer gw.mu.RUnlock()
+	return gw.sessions[callID]
+}
+
 func (gw *Gateway) finishSession(session *CallSession, state CallState, err error) bool {
 	gw.mu.Lock()
 	current, ok := gw.sessions[session.callID]
@@ -822,6 +828,11 @@ func (gw *Gateway) streamKeyFromRequest(req *sip.Request) string {
 func validLabStreamKey(value string) bool {
 	if value == "" || len(value) > 256 || strings.TrimSpace(value) != value {
 		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
 	}
 	for _, char := range value {
 		if char < 0x21 || char > 0x7e {

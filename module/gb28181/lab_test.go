@@ -19,6 +19,8 @@ import (
 	sipgateway "github.com/im-pingo/liveforge/module/sipgateway"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/codec/h264"
+	"github.com/im-pingo/liveforge/pkg/muxer/ps"
+	pionrtp "github.com/pion/rtp/v2"
 )
 
 func validGBLabRequest() LabSessionRequest {
@@ -36,6 +38,18 @@ func TestLabManagerRejectsInvalidStartRequest(t *testing.T) {
 	_, err := manager.Start(context.Background(), LabSessionRequest{})
 	if !errors.Is(err, ErrLabInvalidRequest) {
 		t.Fatalf("Start error = %v, want ErrLabInvalidRequest", err)
+	}
+}
+
+func TestLabManagerRejectsAmbiguousStreamKeySegments(t *testing.T) {
+	for _, streamKey := range []string{"/tenant/cam", "tenant/cam/", "tenant//cam", "tenant/./cam", "tenant/../cam", ".", ".."} {
+		t.Run(streamKey, func(t *testing.T) {
+			request := validGBLabRequest()
+			request.StreamKey = streamKey
+			if err := validateGBLabRequest(request); !errors.Is(err, ErrLabInvalidRequest) {
+				t.Fatalf("validateGBLabRequest(%q) error = %v, want ErrLabInvalidRequest", streamKey, err)
+			}
+		})
 	}
 }
 
@@ -504,6 +518,76 @@ func TestDeterministicGBLabFrameContainsDecodableH264ParameterSets(t *testing.T)
 	}
 }
 
+func TestGBLabRTPStartsFromOneOffsetAndRemainsMonotonic(t *testing.T) {
+	remoteRTP, remoteRTCP, err := listenGBLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen remote media pair: %v", err)
+	}
+	defer remoteRTP.Close()
+	defer remoteRTCP.Close()
+	senderRTP, senderRTCP, err := listenGBLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen sender media pair: %v", err)
+	}
+	defer senderRTP.Close()
+	defer senderRTCP.Close()
+	session := newGBLabSession("timestamp-test", "timestamp-test", validGBLabRequest(), nil)
+	defer session.cancel()
+	session.rtpConn = senderRTP
+	session.rtcpConn = senderRTCP
+	muxer := ps.NewMuxer()
+	remoteRTPAddr := remoteRTP.LocalAddr().(*net.UDPAddr)
+	remoteRTCPAddr := remoteRTCP.LocalAddr().(*net.UDPAddr)
+
+	if err := session.sendFrame(remoteRTPAddr, remoteRTCPAddr, muxer, deterministicGBLabFrame(0)); err != nil {
+		t.Fatalf("send first video frame: %v", err)
+	}
+	videoTimestamp, _, _ := readGBRTPFrame(t, remoteRTP)
+	if err := session.sendFrame(remoteRTPAddr, remoteRTCPAddr, muxer, labmedia.G711Frame(avframe.CodecG711A, 0)); err != nil {
+		t.Fatalf("send first audio frame: %v", err)
+	}
+	audioTimestamp, _, _ := readGBRTPFrame(t, remoteRTP)
+	if err := session.sendFrame(remoteRTPAddr, remoteRTCPAddr, muxer, labmedia.G711Frame(avframe.CodecG711A, 20)); err != nil {
+		t.Fatalf("send second audio frame: %v", err)
+	}
+	nextTimestamp, _, _ := readGBRTPFrame(t, remoteRTP)
+
+	if videoTimestamp != audioTimestamp {
+		t.Fatalf("first video/audio RTP timestamps = %d/%d, want one shared offset", videoTimestamp, audioTimestamp)
+	}
+	if delta := nextTimestamp - audioTimestamp; delta != 20*90 {
+		t.Fatalf("next RTP timestamp delta = %d, want %d", delta, 20*90)
+	}
+}
+
+func readGBRTPFrame(t *testing.T, conn *net.UDPConn) (timestamp uint32, packets uint32, payloadOctets uint32) {
+	t.Helper()
+	buf := make([]byte, 2048)
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set RTP read deadline: %v", err)
+	}
+	for {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("read RTP packet: %v", err)
+		}
+		var packet pionrtp.Packet
+		if err := packet.Unmarshal(buf[:n]); err != nil {
+			t.Fatalf("unmarshal RTP packet: %v", err)
+		}
+		if packets == 0 {
+			timestamp = packet.Timestamp
+		} else if packet.Timestamp != timestamp {
+			t.Fatalf("RTP frame changed timestamp from %d to %d", timestamp, packet.Timestamp)
+		}
+		packets++
+		payloadOctets += uint32(len(packet.Payload))
+		if packet.Marker {
+			return timestamp, packets, payloadOctets
+		}
+	}
+}
+
 func TestGBLabReceiveAcceptsRealLivePlayAndCountsMedia(t *testing.T) {
 	h := newRealGBLabHarness(t)
 	stream, err := h.hub.GetOrCreate("gb28181/source")
@@ -746,6 +830,170 @@ func TestGBLabReceiveWorkerFailureTransitionsToFailedAndCleansUp(t *testing.T) {
 		t.Fatalf("worker failure left %d GB28181 subscribers", got)
 	}
 	for _, address := range []string{moduleRTP, moduleRTCP, fakeRTP, fakeRTCP, peerAddress} {
+		assertGBLabPortFree(t, address)
+	}
+	assertGBLabModulePortPairFree(t, h)
+}
+
+func TestGBLabPublishMediaWorkerFailureTransitionsToFailedAndCleansUp(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "34020000001320000111",
+		ChannelID: "34020000001320000112",
+		StreamKey: "gb28181/publish-worker-failure",
+	}
+	active, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(active.ID) })
+	lab := h.module.labs.session(active.ID)
+	if lab == nil {
+		t.Fatal("active publish Lab was not retained")
+	}
+	waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTPPacketsSent > 0
+	})
+	lab.mu.RLock()
+	moduleSession := lab.moduleSession
+	fakeRTP, fakeRTCP := lab.rtpConn.LocalAddr().String(), lab.rtcpConn.LocalAddr().String()
+	peerAddress := lab.peerConn.LocalAddr().String()
+	lab.mu.RUnlock()
+	if moduleSession == nil {
+		t.Fatal("publish Lab has no server receiver session")
+	}
+	modulePort := moduleSession.Snapshot().LocalPort
+	if err := lab.rtpConn.Close(); err != nil {
+		t.Fatalf("close fake-device RTP socket: %v", err)
+	}
+
+	failed := waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateFailed && strings.Contains(snapshot.LastError, "publish media")
+	})
+	if failed.LastError == "" {
+		t.Fatal("publish worker failure has no terminal error")
+	}
+	assertGBLabFailureCleanup(t, h, lab, request.DeviceID, moduleSession, []string{
+		fakeRTP, fakeRTCP, peerAddress,
+		net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort)),
+		net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort+1)),
+	})
+}
+
+func TestGBLabPublishReceiverFailureTransitionsToFailedAndCleansUp(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "34020000001320000121",
+		ChannelID: "34020000001320000122",
+		StreamKey: "gb28181/publish-receiver-failure",
+	}
+	active, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(active.ID) })
+	lab := h.module.labs.session(active.ID)
+	if lab == nil {
+		t.Fatal("active publish Lab was not retained")
+	}
+	lab.mu.RLock()
+	moduleSession := lab.moduleSession
+	fakeRTP, fakeRTCP := lab.rtpConn.LocalAddr().String(), lab.rtcpConn.LocalAddr().String()
+	peerAddress := lab.peerConn.LocalAddr().String()
+	lab.mu.RUnlock()
+	if moduleSession == nil || moduleSession.Snapshot().Receiver == nil {
+		t.Fatal("publish Lab has no real server RTP receiver")
+	}
+	moduleSnapshot := moduleSession.Snapshot()
+	modulePort := moduleSnapshot.LocalPort
+	if err := moduleSnapshot.Receiver.conn.Close(); err != nil {
+		t.Fatalf("close server RTP receiver socket: %v", err)
+	}
+
+	failed := waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateFailed && strings.Contains(snapshot.LastError, "receiver")
+	})
+	if failed.LastError == "" {
+		t.Fatal("receiver failure has no terminal error")
+	}
+	assertGBLabFailureCleanup(t, h, lab, request.DeviceID, moduleSession, []string{
+		fakeRTP, fakeRTCP, peerAddress,
+		net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort)),
+		net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort+1)),
+	})
+}
+
+func TestGBLabReceiveSocketFailureTransitionsToFailedAndCleansUp(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	stream, err := h.hub.GetOrCreate("gb28181/receive-socket-failure-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "receive-socket-failure-source", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecG711A, SampleRate: 8000, Channels: 1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+	request := LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "34020000001320000131",
+		ChannelID: "34020000001320000132",
+		StreamKey: stream.Key(),
+	}
+	active, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession receive: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(active.ID) })
+	lab := h.module.labs.session(active.ID)
+	if lab == nil {
+		t.Fatal("active receive Lab was not retained")
+	}
+	lab.mu.RLock()
+	moduleSession := lab.moduleSession
+	fakeRTP, fakeRTCP := lab.rtpConn.LocalAddr().String(), lab.rtcpConn.LocalAddr().String()
+	peerAddress := lab.peerConn.LocalAddr().String()
+	lab.mu.RUnlock()
+	if moduleSession == nil || moduleSession.Snapshot().Sender == nil {
+		t.Fatal("receive Lab has no module-owned outbound sender")
+	}
+	modulePort := moduleSession.Snapshot().LocalPort
+	if err := lab.rtpConn.Close(); err != nil {
+		t.Fatalf("close fake-device receive socket: %v", err)
+	}
+	stream.WriteFrame(deterministicGBLabTestFrame(0))
+
+	failed := waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateFailed && strings.Contains(snapshot.LastError, "receive media")
+	})
+	if failed.LastError == "" {
+		t.Fatal("receive socket failure has no terminal error")
+	}
+	if got := stream.Subscribers()["gb28181"]; got != 0 {
+		t.Fatalf("receive socket failure left %d GB28181 subscribers", got)
+	}
+	assertGBLabFailureCleanup(t, h, lab, request.DeviceID, moduleSession, []string{
+		fakeRTP, fakeRTCP, peerAddress,
+		net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort)),
+		net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort+1)),
+	})
+}
+
+func assertGBLabFailureCleanup(t *testing.T, h realGBLabHarness, lab *gbLabSession, deviceID string, moduleSession *MediaSession, addresses []string) {
+	t.Helper()
+	if got := len(h.module.sessions.All()); got != 0 {
+		t.Fatalf("Lab failure left %d module sessions", got)
+	}
+	if moduleSession != nil && h.module.sessions.Get(moduleSession.Snapshot().ID) != nil {
+		t.Fatalf("Lab failure left module session %q registered", moduleSession.Snapshot().ID)
+	}
+	waitForGBLab(t, lab.byeReceived.Load)
+	if h.module.registry.Get(deviceID) != nil {
+		t.Fatal("Lab failure left fake device registered")
+	}
+	for _, address := range addresses {
 		assertGBLabPortFree(t, address)
 	}
 	assertGBLabModulePortPairFree(t, h)

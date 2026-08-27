@@ -1933,11 +1933,30 @@ function monitorPlayableMedia(mediaElement, generation, label, streamKey, expect
   checkReady();
 }
 
-function playHTTPFLV(streamKey) {
+function encodedStreamPath(streamKey) {
+  return String(streamKey || "").split("/").map(function(segment) {
+    return encodeURIComponent(segment);
+  }).join("/");
+}
+
+function validProtocolLabStreamKey(streamKey) {
+  var value = String(streamKey || "");
+  if (!value || value.length > 256 || !/^[\x21-\x7e]+$/.test(value)) return false;
+  return value.split("/").every(function(segment) {
+    return segment && segment !== "." && segment !== "..";
+  });
+}
+
+function playerPlaybackPath(playback, field, fallback) {
+  var value = playback && playback[field];
+  return typeof value === "string" && value ? value : fallback;
+}
+
+function playHTTPFLV(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
   var mediaElement = selectStreamMediaElement(streamKey);
-  var url = mediaURL("/" + streamKey + ".flv");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1971,11 +1990,11 @@ function playHTTPFLV(streamKey) {
   currentPlayer = player;
 }
 
-function playWSFLV(streamKey) {
+function playWSFLV(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
   var mediaElement = selectStreamMediaElement(streamKey);
-  var url = websocketMediaURL("/ws/" + streamKey + ".flv");
+  var url = websocketMediaURL(playbackPath || "/ws/" + encodedStreamPath(streamKey) + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2009,11 +2028,11 @@ function playWSFLV(streamKey) {
   currentPlayer = player;
 }
 
-function playHTTPTS(streamKey) {
+function playHTTPTS(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
   var mediaElement = selectStreamMediaElement(streamKey);
-  var url = mediaURL("/" + streamKey + ".ts");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".ts");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2073,10 +2092,10 @@ function fmp4MimeCandidates(streamKey) {
   return ["video/mp4"];
 }
 
-function playFMP4(streamKey) {
+function playFMP4(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".mp4");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".mp4");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2232,10 +2251,10 @@ function playFMP4(streamKey) {
   });
 }
 
-function playHLS(streamKey) {
+function playHLS(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".m3u8");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".m3u8");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2300,10 +2319,10 @@ function playHLS(streamKey) {
   }
 }
 
-function playDASH(streamKey) {
+function playDASH(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".mpd");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".mpd");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -2344,11 +2363,12 @@ function playDASH(streamKey) {
   });
 }
 
-function playWHEP(streamKey, mode) {
+function playWHEP(streamKey, mode, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
   var proto = location.protocol === "https:" ? "https://" : "http://";
-  var url = endpointURL(proto.slice(0, -2), endpoints.webrtc, "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime"));
+  var fallbackPath = "/webrtc/whep/" + encodedStreamPath(streamKey) + "?mode=" + (mode || "realtime");
+  var url = endpointURL(proto.slice(0, -2), endpoints.webrtc, playbackPath || fallbackPath);
   setPlayerURL(url);
   setPlayerStatus("Negotiating WebRTC...");
 
@@ -2454,20 +2474,20 @@ function prefersWHEP(videoCodec) {
   return codec === "vp8" || codec === "vp08" || codec === "vp9" || codec === "vp09" || codec === "av1" || codec === "av01";
 }
 
-function addWHEPProtocols(protocols) {
+function addWHEPProtocols(protocols, playback) {
   if (!endpoints.webrtc) return;
-  protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime"); } });
-  protocols.push({ id: "whep-live", label: "WebRTC-Live", fn: function(k) { playWHEP(k, "live"); } });
+  protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime", playerPlaybackPath(playback, "whep", "")); } });
+  protocols.push({ id: "whep-live", label: "WebRTC-Live", fn: function(k) { playWHEP(k, "live", playerPlaybackPath(playback, "whep_live", "")); } });
 }
 
-function addHTTPProtocols(protocols) {
+function addHTTPProtocols(protocols, playback) {
   if (!endpoints.http) return;
-  protocols.push({ id: "http-flv", label: "HTTP-FLV", fn: playHTTPFLV });
-  protocols.push({ id: "ws-flv", label: "WS-FLV", fn: playWSFLV });
-  protocols.push({ id: "http-ts", label: "HTTP-TS", fn: playHTTPTS });
-  protocols.push({ id: "fmp4", label: "FMP4", fn: playFMP4 });
-  protocols.push({ id: "hls", label: "HLS", fn: playHLS });
-  protocols.push({ id: "dash", label: "DASH", fn: playDASH });
+  protocols.push({ id: "http-flv", label: "HTTP-FLV", fn: function(k) { playHTTPFLV(k, playerPlaybackPath(playback, "http_flv", "")); } });
+  protocols.push({ id: "ws-flv", label: "WS-FLV", fn: function(k) { playWSFLV(k, playerPlaybackPath(playback, "ws_flv", "")); } });
+  protocols.push({ id: "http-ts", label: "HTTP-TS", fn: function(k) { playHTTPTS(k, playerPlaybackPath(playback, "http_ts", "")); } });
+  protocols.push({ id: "fmp4", label: "FMP4", fn: function(k) { playFMP4(k, playerPlaybackPath(playback, "fmp4", "")); } });
+  protocols.push({ id: "hls", label: "HLS", fn: function(k) { playHLS(k, playerPlaybackPath(playback, "hls", "")); } });
+  protocols.push({ id: "dash", label: "DASH", fn: function(k) { playDASH(k, playerPlaybackPath(playback, "dash", "")); } });
 }
 
 function openPlayer(streamKey, mediaHint) {
@@ -2484,6 +2504,7 @@ function openPlayer(streamKey, mediaHint) {
   var tabs = document.getElementById("proto-tabs");
   tabs.innerHTML = "";
   var protocols = [];
+  var playback = arguments.length > 2 ? arguments[2] : null;
   var media = Object.assign({}, streamMedia[streamKey] || {}, mediaHint || {});
   if (mediaHint) streamMedia[streamKey] = media;
   var videoCodec = media.video_codec || "";
@@ -2494,12 +2515,12 @@ function openPlayer(streamKey, mediaHint) {
 
   selectStreamMediaElement(streamKey);
   if (audioOnlyG711) {
-    if (endpoints.webrtc) addWHEPProtocols(protocols);
+    if (endpoints.webrtc) addWHEPProtocols(protocols, playback);
   } else if (whepPreferred) {
-    addWHEPProtocols(protocols);
+    addWHEPProtocols(protocols, playback);
   } else {
-    addHTTPProtocols(protocols);
-    addWHEPProtocols(protocols);
+    addHTTPProtocols(protocols, playback);
+    addWHEPProtocols(protocols, playback);
   }
 
   if (protocols.length === 0) {
@@ -3135,7 +3156,7 @@ function createDynamicActionHandlers() {
     "stream-delete": function(value) { deleteStream(value); },
     "sip-detail": function(value) { loadSIPCall(value); },
     "sip-hangup": function(value) { hangupSIPCall(value); },
-    "sip-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "" }); },
+    "sip-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "" }, button.playbackMetadata); },
     "sip-lab-stop": function(value) { stopSIPLab(value); },
     "recording-detail": function(value) { loadRecording(value); },
     "recording-play": function(value) { playRecording(value, recordingFormats[value]); },
@@ -3152,7 +3173,7 @@ function createDynamicActionHandlers() {
     "gb-playback": function(value) { openPlayback(value); },
     "gb-preview": function(value) { openPlayer(value); },
     "gb-close-session": function(value) { gbCloseSession(value); },
-    "gb-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "G711A" }); },
+    "gb-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "G711A" }, button.playbackMetadata); },
     "gb-lab-stop": function(value) { stopGBLab(value); }
   };
 }
@@ -3352,6 +3373,7 @@ function renderSIPLabSessions(views) {
       var preview = appendActionButton(actions, "Preview", "btn-play", "sip-lab-preview", s.stream_key);
       preview.dataset.videoCodec = "H264";
       preview.dataset.audioCodec = s.codec || "";
+      preview.playbackMetadata = view.playback;
     }
     if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "sip-lab-stop", s.id);
     actionCell.appendChild(actions);
@@ -3378,6 +3400,11 @@ function startSIPLab(event) {
     stream_key: document.getElementById("sip-lab-stream").value.trim(),
     codec: document.getElementById("sip-lab-codec").value
   };
+  if (!validProtocolLabStreamKey(request.stream_key)) {
+    document.getElementById("sip-lab-error").textContent = "Stream key segments must be non-empty and cannot be . or ..";
+    button.disabled = !canManage("operator");
+    return;
+  }
   apiFetch("/api/v1/sipgateway/lab/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })
     .then(function(data) { showToast("SIP lab started"); renderSIPLabSessions(data ? [data] : []); return refreshSIPLab(); })
     .catch(function(err) { document.getElementById("sip-lab-error").textContent = managementErrorMessage(err); })
@@ -3959,6 +3986,7 @@ function renderGBLabSessions(views) {
       var preview = appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key);
       preview.dataset.videoCodec = "H264";
       preview.dataset.audioCodec = "G711A";
+      preview.playbackMetadata = view.playback;
     }
     if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "gb-lab-stop", s.id);
     actionCell.appendChild(actions);
@@ -3985,6 +4013,11 @@ function startGBLab(event) {
     channel_id: document.getElementById("gb-lab-channel").value.trim(),
     stream_key: document.getElementById("gb-lab-stream").value.trim()
   };
+  if (!validProtocolLabStreamKey(request.stream_key)) {
+    document.getElementById("gb-lab-error").textContent = "Stream key segments must be non-empty and cannot be . or ..";
+    button.disabled = !canManage("operator");
+    return;
+  }
   apiFetch("/api/v1/gb28181/lab/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })
     .then(function(data) { showToast("GB28181 lab started"); renderGBLabSessions(data ? [data] : []); return refreshGBLab(); })
     .catch(function(err) { document.getElementById("gb-lab-error").textContent = managementErrorMessage(err); })

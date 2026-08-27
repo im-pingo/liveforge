@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -805,6 +806,165 @@ func TestHandlerHLSSegmentServing(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp2.StatusCode)
+	}
+}
+
+func TestHandlerHLSManifestAndSegmentSupportEscapedDeepStreamKey(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	const streamKey = "tenant/deep/cam?variant#one%raw"
+	const escapedBase = "/tenant/deep/cam%3Fvariant%23one%25raw"
+
+	stream, err := srv.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := m.getOrCreateHLS(streamKey, stream)
+	mgr.mu.Lock()
+	mgr.segments = []*HLSSegment{{SeqNum: 0, Duration: 2, Data: []byte("escaped-hls-segment")}}
+	mgr.nextSeqNum = 1
+	mgr.mu.Unlock()
+
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(addr + escapedBase + ".m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manifest status = %d, want 200: %s", resp.StatusCode, manifest)
+	}
+	if !strings.Contains(string(manifest), escapedBase+"/0.ts") {
+		t.Fatalf("manifest does not preserve escaped deep stream key: %s", manifest)
+	}
+
+	resp, err = (&http.Client{Timeout: 2 * time.Second}).Get(addr + escapedBase + "/0.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	segment, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(segment) != "escaped-hls-segment" {
+		t.Fatalf("segment status/body = %d/%q, want 200/%q", resp.StatusCode, segment, "escaped-hls-segment")
+	}
+}
+
+func TestHandlerDASHManifestAndSegmentsSupportEscapedDeepStreamKey(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	const streamKey = "tenant/deep/cam?variant#one%raw"
+	const escapedBase = "/tenant/deep/cam%3Fvariant%23one%25raw"
+
+	stream, err := srv.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := m.getOrCreateDASH(streamKey, stream)
+	mgr.mu.Lock()
+	mgr.videoInitSeg = []byte("escaped-dash-init")
+	mgr.videoSegments = []*DASHSegment{{SeqNum: 0, Duration: 2, Data: []byte("escaped-dash-segment")}}
+	mgr.nextSeqNum = 1
+	mgr.mu.Unlock()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(addr + escapedBase + ".mpd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manifest status = %d, want 200: %s", resp.StatusCode, manifest)
+	}
+	for _, want := range []string{escapedBase + "/vinit.mp4", escapedBase + "/v$Number$.m4s"} {
+		if !strings.Contains(string(manifest), want) {
+			t.Errorf("manifest is missing escaped path %q: %s", want, manifest)
+		}
+	}
+
+	for path, want := range map[string]string{
+		escapedBase + "/vinit.mp4": "escaped-dash-init",
+		escapedBase + "/v1.m4s":    "escaped-dash-segment",
+	} {
+		resp, err = client.Get(addr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("GET %s status/body = %d/%q, want 200/%q", path, resp.StatusCode, body, want)
+		}
+	}
+}
+
+func TestHandlerDASHManifestEscapesXMLSensitiveStreamKey(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	const streamKey = "tenant/deep/cam&one"
+	const escapedBase = "/tenant/deep/cam&one"
+
+	stream, err := srv.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := m.getOrCreateDASH(streamKey, stream)
+	mgr.mu.Lock()
+	mgr.videoInitSeg = []byte("xml-safe-dash-init")
+	mgr.videoSegments = []*DASHSegment{{SeqNum: 0, Duration: 2, Data: []byte("xml-safe-dash-segment")}}
+	mgr.nextSeqNum = 1
+	mgr.mu.Unlock()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(addr + escapedBase + ".mpd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manifest status = %d, want 200: %s", resp.StatusCode, manifest)
+	}
+	var document struct {
+		Period struct {
+			AdaptationSets []struct {
+				SegmentTemplate struct {
+					Initialization string `xml:"initialization,attr"`
+					Media          string `xml:"media,attr"`
+				} `xml:"SegmentTemplate"`
+			} `xml:"AdaptationSet"`
+		} `xml:"Period"`
+	}
+	if err := xml.Unmarshal(manifest, &document); err != nil {
+		t.Fatalf("parse MPD containing ampersand stream key: %v\n%s", err, manifest)
+	}
+	if len(document.Period.AdaptationSets) == 0 {
+		t.Fatalf("MPD has no adaptation sets: %s", manifest)
+	}
+	template := document.Period.AdaptationSets[0].SegmentTemplate
+	if !strings.HasPrefix(template.Initialization, escapedBase+"/vinit.mp4") || template.Media != escapedBase+"/v$Number$.m4s" {
+		t.Fatalf("decoded MPD paths = init %q media %q, want base %q", template.Initialization, template.Media, escapedBase)
+	}
+
+	for path, want := range map[string]string{
+		template.Initialization:                             "xml-safe-dash-init",
+		strings.Replace(template.Media, "$Number$", "1", 1): "xml-safe-dash-segment",
+	} {
+		resp, err = client.Get(addr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("GET %s status/body = %d/%q, want 200/%q", path, resp.StatusCode, body, want)
+		}
 	}
 }
 

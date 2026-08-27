@@ -285,7 +285,7 @@ func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
 		`audio.srcObject = null`,
 		`audio.src = ""`,
 		`var audioOnlyG711 = !hasVideo && ["g711a", "g711u", "pcma", "pcmu"].indexOf(audioCodec) >= 0`,
-		`addWHEPProtocols(protocols)`,
+		`addWHEPProtocols(protocols, playback)`,
 		`monitorPlayableAudio`,
 		`remoteStream.addTrack(event.track);`,
 		`mediaElement.srcObject = remoteStream;`,
@@ -299,6 +299,8 @@ func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
 		`button.dataset.videoCodec || "H264"`,
 		`button.dataset.audioCodec || ""`,
 		`function openPlayer(streamKey, mediaHint)`,
+		`preview.playbackMetadata = view.playback`,
+		`button.playbackMetadata`,
 	} {
 		if !strings.Contains(script, contract) {
 			t.Errorf("audio-only playback contract is missing %q", contract)
@@ -611,6 +613,104 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 		}
 		if probe.GBVideoCodec != "H264" || probe.GBAudioCodec != "G711A" {
 			t.Errorf("GB28181 media hint = %s/%s, want H264/G711A", probe.GBVideoCodec, probe.GBAudioCodec)
+		}
+	})
+}
+
+func TestConsoleProtocolLabPreviewUsesEscapedPlaybackMetadata(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		const streamKey = "tenant/cam?variant#one%raw"
+		var probe struct {
+			SIPURL      string `json:"sipURL"`
+			GBURL       string `json:"gbURL"`
+			FallbackURL string `json:"fallbackURL"`
+		}
+		expression := `(function() {
+			endpoints.http = location.host;
+			var streamKey = "tenant/cam?variant#one%raw";
+			var playback = {
+				available:true,
+				http_flv:"/tenant/cam%3Fvariant%23one%25raw.flv",
+				ws_flv:"/ws/tenant/cam%3Fvariant%23one%25raw.flv",
+				http_ts:"/tenant/cam%3Fvariant%23one%25raw.ts",
+				fmp4:"/tenant/cam%3Fvariant%23one%25raw.mp4",
+				hls:"/tenant/cam%3Fvariant%23one%25raw.m3u8",
+				dash:"/tenant/cam%3Fvariant%23one%25raw.mpd"
+			};
+			renderSIPLabSessions([{session:{
+				id:"sip-escaped", device_id:"d1", mode:"publish", stream_key:streamKey, state:"active", codec:"PCMA"
+			}, playback:playback}]);
+			document.querySelector('[data-action="sip-lab-preview"]').click();
+			var sipURL = document.getElementById("player-url").textContent;
+			closePlayer();
+
+			renderGBLabSessions([{session:{
+				id:"gb-escaped", device_id:"d2", channel_id:"c1", mode:"publish", stream_key:streamKey, state:"active"
+			}, playback:playback}]);
+			document.querySelector('[data-action="gb-lab-preview"]').click();
+			var gbURL = document.getElementById("player-url").textContent;
+			closePlayer();
+
+			openPlayer(streamKey, {video_codec:"H264", audio_codec:"AAC"});
+			return {
+				sipURL:sipURL,
+				gbURL:gbURL,
+				fallbackURL:document.getElementById("player-url").textContent
+			};
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+			t.Fatalf("probe escaped protocol lab preview URLs: %v", err)
+		}
+		const escapedPath = "/tenant/cam%3Fvariant%23one%25raw.flv"
+		for label, got := range map[string]string{
+			"SIP Lab":  probe.SIPURL,
+			"GB Lab":   probe.GBURL,
+			"fallback": probe.FallbackURL,
+		} {
+			if !strings.HasSuffix(got, escapedPath) {
+				t.Errorf("%s preview URL = %q, want suffix %q", label, got, escapedPath)
+			}
+		}
+	})
+}
+
+func TestConsoleProtocolLabRejectsAmbiguousStreamKeySegmentsBeforeRequest(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Requests      int      `json:"requests"`
+			MissingErrors []string `json:"missingErrors"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			var requests = 0;
+			apiFetch = function() { requests++; return new Promise(function() {}); };
+			document.getElementById("sip-lab-device").value = "d1";
+			document.getElementById("gb-lab-device").value = "34020000001320000001";
+			document.getElementById("gb-lab-channel").value = "34020000001320000002";
+			var invalid = ["/tenant/cam", "tenant/cam/", "tenant//cam", "tenant/./cam", "tenant/../cam", ".", ".."];
+			var missingErrors = [];
+			invalid.forEach(function(streamKey) {
+				document.getElementById("sip-lab-stream").value = streamKey;
+				startSIPLab({preventDefault:function() {}});
+				if (!document.getElementById("sip-lab-error").textContent) missingErrors.push("sip:" + streamKey);
+				document.getElementById("gb-lab-stream").value = streamKey;
+				startGBLab({preventDefault:function() {}});
+				if (!document.getElementById("gb-lab-error").textContent) missingErrors.push("gb:" + streamKey);
+			});
+			document.getElementById("sip-lab-stream").value = "tenant/.../sip";
+			startSIPLab({preventDefault:function() {}});
+			document.getElementById("gb-lab-stream").value = "tenant/.../gb";
+			startGBLab({preventDefault:function() {}});
+			return {requests:requests, missingErrors:missingErrors};
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+			t.Fatalf("probe protocol lab stream-key validation: %v", err)
+		}
+		if probe.Requests != 2 {
+			t.Errorf("protocol lab API requests = %d, want only the two valid stream keys", probe.Requests)
+		}
+		if len(probe.MissingErrors) != 0 {
+			t.Errorf("invalid stream keys without Console errors: %v", probe.MissingErrors)
 		}
 	})
 }

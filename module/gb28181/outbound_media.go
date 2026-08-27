@@ -20,7 +20,10 @@ import (
 	pionrtp "github.com/pion/rtp/v2"
 )
 
-const gbOutboundMTU = 1200
+const (
+	gbOutboundMTU                  = 1200
+	gbOutboundSenderReportInterval = time.Second
+)
 
 type outboundMediaSession struct {
 	ctx    context.Context
@@ -39,13 +42,16 @@ type outboundMediaSession struct {
 	wg        sync.WaitGroup
 	done      chan error
 	admitted  bool
+	rtcpMu    sync.Mutex
+	lastRTCP  time.Time
 
-	rtpPackets  atomic.Uint64
-	rtpBytes    atomic.Uint64
-	rtcpPackets atomic.Uint64
-	mediaFrames atomic.Uint64
-	audioFrames atomic.Uint64
-	videoFrames atomic.Uint64
+	rtpPackets      atomic.Uint64
+	rtpBytes        atomic.Uint64
+	rtpPayloadBytes atomic.Uint64
+	rtcpPackets     atomic.Uint64
+	mediaFrames     atomic.Uint64
+	audioFrames     atomic.Uint64
+	videoFrames     atomic.Uint64
 }
 
 func newOutboundMediaSession(stream *core.Stream, rtpPort, rtcpPort int) (*outboundMediaSession, error) {
@@ -161,6 +167,7 @@ func (s *outboundMediaSession) sendFrame(muxer *ps.Muxer, frame *avframe.AVFrame
 		s.sequence++
 		s.rtpPackets.Add(1)
 		s.rtpBytes.Add(uint64(n))
+		s.rtpPayloadBytes.Add(uint64(len(packet.Payload)))
 		offset = end
 	}
 	s.mediaFrames.Add(1)
@@ -169,22 +176,32 @@ func (s *outboundMediaSession) sendFrame(muxer *ps.Muxer, frame *avframe.AVFrame
 	} else if frame.MediaType.IsVideo() {
 		s.videoFrames.Add(1)
 	}
-	if s.rtcpPackets.Load() == 0 {
-		report := &rtcp.SenderReport{
-			SSRC:        s.ssrc,
-			NTPTime:     gbNTPTime(time.Now()),
-			RTPTime:     timestamp,
-			PacketCount: uint32(s.rtpPackets.Load()),
-			OctetCount:  uint32(s.rtpBytes.Load()),
-		}
-		encoded, err := report.Marshal()
-		if err == nil {
-			if _, err := s.rtcpConn.WriteToUDP(encoded, s.remoteRTCP); err == nil {
-				s.rtcpPackets.Add(1)
-			}
-		}
-	}
+	s.sendSenderReport(timestamp, time.Now())
 	return nil
+}
+
+func (s *outboundMediaSession) sendSenderReport(timestamp uint32, now time.Time) {
+	s.rtcpMu.Lock()
+	defer s.rtcpMu.Unlock()
+	if !s.lastRTCP.IsZero() && now.Sub(s.lastRTCP) < gbOutboundSenderReportInterval {
+		return
+	}
+	report := &rtcp.SenderReport{
+		SSRC:        s.ssrc,
+		NTPTime:     gbNTPTime(now),
+		RTPTime:     timestamp,
+		PacketCount: uint32(s.rtpPackets.Load()),
+		OctetCount:  uint32(s.rtpPayloadBytes.Load()),
+	}
+	encoded, err := report.Marshal()
+	if err != nil {
+		return
+	}
+	if _, err := s.rtcpConn.WriteToUDP(encoded, s.remoteRTCP); err != nil {
+		return
+	}
+	s.lastRTCP = now
+	s.rtcpPackets.Add(1)
 }
 
 func (s *outboundMediaSession) close() {

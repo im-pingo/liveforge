@@ -2,6 +2,8 @@ package gb28181
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -76,15 +78,40 @@ func (m *labManager) Start(ctx context.Context, request LabSessionRequest) (LabS
 		m.mu.Unlock()
 		return session.snapshot(), err
 	}
-	if sender := session.outboundSender(); sender != nil {
-		go m.watchOutbound(session, sender)
-	}
+	go m.watchSession(session)
 	return session.snapshot(), nil
 }
 
-func (m *labManager) watchOutbound(session *gbLabSession, sender *outboundMediaSession) {
-	err := <-sender.done
-	if err == nil {
+func (m *labManager) watchSession(session *gbLabSession) {
+	receiver := session.inboundReceiver()
+	sender := session.outboundSender()
+	var receiverDone <-chan struct{}
+	var senderDone <-chan error
+	if receiver != nil {
+		receiverDone = receiver.Done()
+	}
+	if sender != nil {
+		senderDone = sender.done
+	}
+	var err error
+	select {
+	case <-session.ctx.Done():
+		return
+	case <-receiverDone:
+		err = receiver.Err()
+		if err == nil {
+			err = errors.New("GB28181 server receiver ended")
+		}
+	case err = <-senderDone:
+		if err == nil {
+			err = errors.New("GB28181 outbound media ended")
+		}
+	case err = <-session.workerDone:
+		if err == nil {
+			err = errors.New("GB28181 Lab media worker ended")
+		}
+	}
+	if session.ctx.Err() != nil {
 		return
 	}
 	session.fail(err)
@@ -181,6 +208,11 @@ func validGBLabStreamKey(value string) bool {
 	if value == "" || len(value) > 256 || strings.TrimSpace(value) != value {
 		return false
 	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
 	for _, char := range value {
 		if char < 0x21 || char > 0x7e {
 			return false
@@ -227,6 +259,7 @@ type gbLabSession struct {
 	cleanupOnce sync.Once
 	stopRequest bool
 	mediaWG     sync.WaitGroup
+	workerDone  chan error
 	controlWG   sync.WaitGroup
 
 	client     *sipgo.Client
@@ -244,8 +277,9 @@ type gbLabSession struct {
 	callID         string
 	peerRemotePort int
 
-	rtpConn  *net.UDPConn
-	rtcpConn *net.UDPConn
+	rtpConn            *net.UDPConn
+	rtcpConn           *net.UDPConn
+	rtpTimestampOffset uint32
 
 	rtpPacketsSent  atomic.Uint64
 	rtpPacketsRecv  atomic.Uint64
@@ -273,19 +307,29 @@ func newGBLabSession(id, identity string, request LabSessionRequest, module *Mod
 		direction = LabDirectionOutbound
 	}
 	return &gbLabSession{
-		id:        id,
-		identity:  identity,
-		request:   request,
-		module:    module,
-		state:     LabSessionStateStarting,
-		direction: direction,
-		startedAt: now,
-		updatedAt: now,
-		ctx:       ctx,
-		cancel:    cancel,
-		startDone: make(chan struct{}),
-		stopDone:  make(chan struct{}),
+		id:                 id,
+		identity:           identity,
+		request:            request,
+		module:             module,
+		state:              LabSessionStateStarting,
+		direction:          direction,
+		startedAt:          now,
+		updatedAt:          now,
+		ctx:                ctx,
+		cancel:             cancel,
+		startDone:          make(chan struct{}),
+		stopDone:           make(chan struct{}),
+		workerDone:         make(chan error, 2),
+		rtpTimestampOffset: randomGBLabTimestampOffset(),
 	}
+}
+
+func randomGBLabTimestampOffset() uint32 {
+	var value [4]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return binary.BigEndian.Uint32(value[:])
+	}
+	return uint32(time.Now().UnixNano())
 }
 
 func (s *gbLabSession) isReserved() bool {
@@ -375,8 +419,7 @@ func (s *gbLabSession) startPublish(ctx context.Context) error {
 	}
 	s.setState(LabSessionStateActive)
 	s.startKeepaliveLoop(serverHost, serverPort)
-	s.mediaWG.Add(1)
-	go s.publishMediaLoop(remotePort)
+	s.startMediaWorker("publish media", func() error { return s.publishMediaLoop(remotePort) })
 	return nil
 }
 
@@ -428,10 +471,24 @@ func (s *gbLabSession) startReceive(ctx context.Context) error {
 	s.mu.Unlock()
 	s.setState(LabSessionStateActive)
 	s.startKeepaliveLoop(serverHost, serverPort)
-	s.mediaWG.Add(2)
-	go s.receiveMediaLoop()
-	go s.receiveRTCPLoop()
+	s.startMediaWorker("receive media", s.receiveMediaLoop)
+	s.startMediaWorker("receive RTCP", s.receiveRTCPLoop)
 	return nil
+}
+
+func (s *gbLabSession) startMediaWorker(name string, worker func() error) {
+	s.mediaWG.Add(1)
+	go func() {
+		defer s.mediaWG.Done()
+		err := worker()
+		if err != nil {
+			err = fmt.Errorf("GB28181 Lab %s: %w", name, err)
+		}
+		select {
+		case s.workerDone <- err:
+		default:
+		}
+	}()
 }
 
 func (s *gbLabSession) openMediaPair() error {
@@ -607,8 +664,7 @@ func (s *gbLabSession) sendCatalog(ctx context.Context, host string, port int) e
 	return nil
 }
 
-func (s *gbLabSession) publishMediaLoop(remotePort int) {
-	defer s.mediaWG.Done()
+func (s *gbLabSession) publishMediaLoop(remotePort int) error {
 	remoteRTP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort}
 	remoteRTCP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort + 1}
 	muxer := ps.NewMuxer()
@@ -617,17 +673,23 @@ func (s *gbLabSession) publishMediaLoop(remotePort int) {
 	var timestamp int64
 	for {
 		if timestamp%labmedia.VideoFrameDurationMs == 0 {
-			if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, deterministicGBLabFrame(timestamp)); err != nil && s.ctx.Err() != nil {
-				return
+			if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, deterministicGBLabFrame(timestamp)); err != nil {
+				if s.ctx.Err() != nil {
+					return nil
+				}
+				return err
 			}
 		}
-		if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, labmedia.G711Frame(avframe.CodecG711A, timestamp)); err != nil && s.ctx.Err() != nil {
-			return
+		if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, labmedia.G711Frame(avframe.CodecG711A, timestamp)); err != nil {
+			if s.ctx.Err() != nil {
+				return nil
+			}
+			return err
 		}
 		timestamp += labmedia.AudioFrameDurationMs
 		select {
 		case <-s.ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 		}
 	}
@@ -647,10 +709,7 @@ func (s *gbLabSession) sendFrame(remoteRTP, remoteRTCP *net.UDPAddr, muxer *ps.M
 		return err
 	}
 	seq := uint16(s.rtpPacketsSent.Load() + 1)
-	timestamp := uint32(frame.DTS * 90)
-	if timestamp == 0 {
-		timestamp = uint32(seq) * 3600
-	}
+	timestamp := s.rtpTimestampOffset + uint32(frame.DTS*90)
 	for offset := 0; offset < len(data); {
 		end := offset + labMTU
 		if end > len(data) {
@@ -685,8 +744,7 @@ func (s *gbLabSession) sendFrame(remoteRTP, remoteRTCP *net.UDPAddr, muxer *ps.M
 	return nil
 }
 
-func (s *gbLabSession) receiveMediaLoop() {
-	defer s.mediaWG.Done()
+func (s *gbLabSession) receiveMediaLoop() error {
 	publisher := NewPublisher("gb28181-lab-receiver", func(frame *avframe.AVFrame) {
 		if frame == nil {
 			return
@@ -705,12 +763,12 @@ func (s *gbLabSession) receiveMediaLoop() {
 		n, _, err := s.rtpConn.ReadFromUDP(buf)
 		if err != nil {
 			if s.ctx.Err() != nil {
-				return
+				return nil
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			return
+			return err
 		}
 		var packet pionrtp.Packet
 		if packet.Unmarshal(buf[:n]) != nil || packet.PayloadType != labRTPPayloadType {
@@ -722,20 +780,19 @@ func (s *gbLabSession) receiveMediaLoop() {
 	}
 }
 
-func (s *gbLabSession) receiveRTCPLoop() {
-	defer s.mediaWG.Done()
+func (s *gbLabSession) receiveRTCPLoop() error {
 	buf := make([]byte, 2048)
 	for {
 		_ = s.rtcpConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, _, err := s.rtcpConn.ReadFromUDP(buf)
 		if err != nil {
 			if s.ctx.Err() != nil {
-				return
+				return nil
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			return
+			return err
 		}
 		packets, err := rtcp.Unmarshal(buf[:n])
 		if err == nil {
@@ -787,6 +844,15 @@ func (s *gbLabSession) outboundSender() *outboundMediaSession {
 		return nil
 	}
 	return s.moduleSession.Snapshot().Sender
+}
+
+func (s *gbLabSession) inboundReceiver() *RTPReceiver {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.moduleSession == nil {
+		return nil
+	}
+	return s.moduleSession.Snapshot().Receiver
 }
 
 func (s *gbLabSession) cleanup() {

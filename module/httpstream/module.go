@@ -230,7 +230,7 @@ func (m *Module) getOrCreateHLS(streamKey string, stream *core.Stream) *HLSManag
 	playlistSize := cfg.PlaylistSize
 
 	// basePath is the URL prefix for segment references in the m3u8
-	basePath := "/" + streamKey
+	basePath := "/" + escapeStreamKeyPath(streamKey)
 	mgr := NewHLSManager(streamKey, basePath, targetDur, playlistSize)
 	m.hlsManagers[streamKey] = mgr
 	go mgr.Run(stream)
@@ -250,7 +250,7 @@ func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHMan
 	targetDur := cfg.SegmentDuration
 	playlistSize := cfg.PlaylistSize
 
-	basePath := "/" + streamKey
+	basePath := "/" + escapeStreamKeyPath(streamKey)
 	mgr := NewDASHManager(streamKey, basePath, targetDur, playlistSize)
 	mgr.InitFromStream(stream) // compute init segment synchronously
 	m.dashManagers[streamKey] = mgr
@@ -268,7 +268,7 @@ func (m *Module) getOrCreateLLHLS(streamKey string, stream *core.Stream) *LLHLSM
 	}
 
 	cfg := m.server.Config().HTTP.LLHLS
-	basePath := "/" + streamKey
+	basePath := "/" + escapeStreamKeyPath(streamKey)
 	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentCount, cfg.Container)
 	m.llhlsManagers[streamKey] = mgr
 	go mgr.Run(stream)

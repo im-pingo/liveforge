@@ -49,6 +49,7 @@ type openAPIParameter struct {
 
 type openAPIContractComponents struct {
 	Parameters map[string]openAPIParameter `yaml:"parameters"`
+	Schemas    map[string]map[string]any   `yaml:"schemas"`
 }
 
 func TestOpenAPIListenerOwnership(t *testing.T) {
@@ -140,6 +141,65 @@ func TestOpenAPIGBLabErrorsUseManagementEnvelopes(t *testing.T) {
 		}
 		if got := response["$ref"]; got != test.want {
 			t.Errorf("%s %s response %s ref = %v, want %s", test.method, test.path, test.status, got, test.want)
+		}
+	}
+}
+
+func TestOpenAPISIPLabRequestMatchesRuntimeValidation(t *testing.T) {
+	doc := loadOpenAPIContract(t)
+	const streamKeyPattern = `^(?!/)(?!.*\/$)(?!.*//)(?!\.{1,2}(?:/|$))(?!.*\/\.{1,2}(?:/|$))[\x21-\x7E]+$`
+	schema := doc.Components.Schemas["SIPLabRequest"]
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("SIPLabRequest properties = %#v", schema["properties"])
+	}
+	tests := []struct {
+		field       string
+		maxLength   int
+		wantPattern string
+		wantWords   []string
+	}{
+		{field: "device_id", maxLength: 128, wantPattern: `^[A-Za-z0-9._-]+$`, wantWords: []string{"letters", "digits"}},
+		{field: "stream_key", maxLength: 256, wantPattern: streamKeyPattern, wantWords: []string{"printable", "empty", "dot"}},
+	}
+	for _, test := range tests {
+		property, ok := properties[test.field].(map[string]any)
+		if !ok {
+			t.Fatalf("SIPLabRequest.%s = %#v", test.field, properties[test.field])
+		}
+		if got := property["maxLength"]; got != test.maxLength {
+			t.Errorf("SIPLabRequest.%s maxLength = %v, want %d", test.field, got, test.maxLength)
+		}
+		if got := property["pattern"]; got != test.wantPattern {
+			t.Errorf("SIPLabRequest.%s pattern = %v, want %q", test.field, got, test.wantPattern)
+		}
+		description := strings.ToLower(fmt.Sprint(property["description"]))
+		for _, word := range test.wantWords {
+			if !strings.Contains(description, word) {
+				t.Errorf("SIPLabRequest.%s description %q does not contain %q", test.field, description, word)
+			}
+		}
+	}
+
+	gbSchema := doc.Components.Schemas["GBLabRequest"]
+	gbProperties, ok := gbSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("GBLabRequest properties = %#v", gbSchema["properties"])
+	}
+	streamKey, ok := gbProperties["stream_key"].(map[string]any)
+	if !ok {
+		t.Fatalf("GBLabRequest.stream_key = %#v", gbProperties["stream_key"])
+	}
+	if got := streamKey["maxLength"]; got != 256 {
+		t.Errorf("GBLabRequest.stream_key maxLength = %v, want 256", got)
+	}
+	if got := streamKey["pattern"]; got != streamKeyPattern {
+		t.Errorf("GBLabRequest.stream_key pattern = %v, want %q", got, streamKeyPattern)
+	}
+	description := strings.ToLower(fmt.Sprint(streamKey["description"]))
+	for _, word := range []string{"printable", "empty", "dot"} {
+		if !strings.Contains(description, word) {
+			t.Errorf("GBLabRequest.stream_key description %q does not contain %q", description, word)
 		}
 	}
 }

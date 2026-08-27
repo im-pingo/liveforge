@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"encoding/binary"
+	"encoding/xml"
 	"fmt"
 	"math"
 	"math/bits"
@@ -82,7 +83,7 @@ func (d *DASHManager) GenerateMPD() string {
 		videoInitURL += "?v=" + version
 	}
 	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/v$Number$.m4s">`,
-		startNumber, videoInitURL, d.basePath)
+		startNumber, escapeXMLAttribute(videoInitURL), escapeXMLAttribute(d.basePath))
 	sb.WriteString("\n")
 	sb.WriteString("        <SegmentTimeline>\n")
 	timeMs := int64(math.Round(d.timeBase * 1000))
@@ -128,7 +129,7 @@ func (d *DASHManager) GenerateMPD() string {
 			audioInitURL += "?v=" + version
 		}
 		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/a$Number$.m4s">`,
-			audioStartNumber, audioInitURL, d.basePath)
+			audioStartNumber, escapeXMLAttribute(audioInitURL), escapeXMLAttribute(d.basePath))
 		sb.WriteString("\n")
 		sb.WriteString("        <SegmentTimeline>\n")
 		audioTimeMs := int64(math.Round(d.timeBase * 1000))
@@ -156,6 +157,12 @@ func (d *DASHManager) GenerateMPD() string {
 	sb.WriteString("</MPD>\n")
 
 	return sb.String()
+}
+
+func escapeXMLAttribute(value string) string {
+	var escaped strings.Builder
+	_ = xml.EscapeText(&escaped, []byte(value))
+	return escaped.String()
 }
 
 // SegmentCount returns the number of video segments currently available.

@@ -2,6 +2,7 @@ package gb28181
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,16 +16,21 @@ import (
 
 // RTPReceiver listens for RTP packets over UDP or TCP.
 type RTPReceiver struct {
-	conn      *net.UDPConn
-	rtcpConn  *net.UDPConn
-	publisher *Publisher
-	reorder   *reorderBuffer
-	done      chan struct{}
-	closed    bool
-	mu        sync.Mutex
-	rtcpWG    sync.WaitGroup
-	rtcpRecv  atomic.Uint64
+	conn        *net.UDPConn
+	rtcpConn    *net.UDPConn
+	publisher   *Publisher
+	reorder     *reorderBuffer
+	done        chan struct{}
+	closed      bool
+	mu          sync.Mutex
+	closeOnce   sync.Once
+	finishOnce  sync.Once
+	runErr      error
+	idleTimeout time.Duration
+	rtcpRecv    atomic.Uint64
 }
+
+const gbRTPIdleTimeout = 30 * time.Second
 
 var newRTPReceiver = NewRTPReceiver
 
@@ -42,36 +48,45 @@ func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
 	}
 
 	return &RTPReceiver{
-		conn:      conn,
-		rtcpConn:  rtcpConn,
-		publisher: publisher,
-		reorder:   newReorderBuffer(50),
-		done:      make(chan struct{}),
+		conn:        conn,
+		rtcpConn:    rtcpConn,
+		publisher:   publisher,
+		reorder:     newReorderBuffer(50),
+		done:        make(chan struct{}),
+		idleTimeout: gbRTPIdleTimeout,
 	}, nil
 }
 
 // Run starts the receive loop. Blocks until closed or error.
 func (r *RTPReceiver) Run() {
-	r.rtcpWG.Add(1)
-	go r.runRTCP()
-	defer r.rtcpWG.Wait()
+	results := make(chan error, 2)
+	go func() { results <- r.runRTP() }()
+	go func() { results <- r.runRTCP() }()
+	first := <-results
+	r.closeSockets()
+	second := <-results
+	if first == nil {
+		first = second
+	}
+	r.finish(first)
+}
+
+func (r *RTPReceiver) runRTP() error {
 	buf := make([]byte, 2048)
 	for {
-		r.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		idleTimeout := r.idleTimeout
+		if idleTimeout <= 0 {
+			idleTimeout = gbRTPIdleTimeout
+		}
+		if err := r.conn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
+			return r.readError("RTP", err)
+		}
 		n, _, err := r.conn.ReadFromUDP(buf)
 		if err != nil {
-			r.mu.Lock()
-			closed := r.closed
-			r.mu.Unlock()
-			if closed {
-				return
-			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				slog.Debug("rtp receiver timeout", "module", "gb28181")
-				continue
+				return fmt.Errorf("GB28181 RTP media idle timeout after %s", idleTimeout)
 			}
-			slog.Warn("rtp receiver error", "module", "gb28181", "error", err)
-			return
+			return r.readError("RTP", err)
 		}
 
 		if n < 12 { // minimum RTP header
@@ -90,23 +105,18 @@ func (r *RTPReceiver) Run() {
 	}
 }
 
-func (r *RTPReceiver) runRTCP() {
-	defer r.rtcpWG.Done()
+func (r *RTPReceiver) runRTCP() error {
 	buf := make([]byte, 2048)
 	for {
-		_ = r.rtcpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		if err := r.rtcpConn.SetReadDeadline(time.Now().Add(gbRTPIdleTimeout)); err != nil {
+			return r.readError("RTCP", err)
+		}
 		n, _, err := r.rtcpConn.ReadFromUDP(buf)
 		if err != nil {
-			r.mu.Lock()
-			closed := r.closed
-			r.mu.Unlock()
-			if closed {
-				return
-			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			return
+			return r.readError("RTCP", err)
 		}
 		packets, err := rtcp.Unmarshal(buf[:n])
 		if err == nil {
@@ -115,17 +125,55 @@ func (r *RTPReceiver) runRTCP() {
 	}
 }
 
-// Close stops the receiver.
-func (r *RTPReceiver) Close() {
+func (r *RTPReceiver) readError(track string, err error) error {
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed || errors.Is(err, net.ErrClosed) && r.isStopping() {
+		return nil
+	}
+	slog.Warn("media receiver error", "module", "gb28181", "track", track, "error", err)
+	return fmt.Errorf("GB28181 %s receiver: %w", track, err)
+}
+
+func (r *RTPReceiver) isStopping() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed {
-		return
-	}
+	return r.closed
+}
+
+func (r *RTPReceiver) closeSockets() {
+	r.mu.Lock()
 	r.closed = true
-	close(r.done)
-	_ = r.conn.Close()
-	_ = r.rtcpConn.Close()
+	r.mu.Unlock()
+	r.closeOnce.Do(func() {
+		_ = r.conn.Close()
+		_ = r.rtcpConn.Close()
+	})
+}
+
+func (r *RTPReceiver) finish(err error) {
+	r.finishOnce.Do(func() {
+		r.mu.Lock()
+		r.runErr = err
+		r.mu.Unlock()
+		close(r.done)
+	})
+}
+
+// Close stops the receiver.
+func (r *RTPReceiver) Close() {
+	r.closeSockets()
+}
+
+// Done closes when both RTP and RTCP workers have terminated.
+func (r *RTPReceiver) Done() <-chan struct{} { return r.done }
+
+// Err returns the terminal receive error after Done closes.
+func (r *RTPReceiver) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.runErr
 }
 
 // LocalPort returns the local UDP port.

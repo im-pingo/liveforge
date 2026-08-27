@@ -66,7 +66,11 @@ curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" \
 `GET` requires `sip:read`; `POST` and `DELETE` require `sip:calls`. The response
 contains aggregate counters, separate audio/video RTP counters, and relative
 HTTP-FLV, WS-FLV, TS, fMP4, HLS, DASH, and WHEP playback paths when those
-listeners are enabled. Stream-key path segments are URL-escaped. Absolute
+listeners are enabled. Stream-key path segments are URL-escaped, and the
+Console Preview action consumes these returned paths directly. HLS, LL-HLS,
+and DASH manifests retain the same segment-wise escaping, including media
+segment requests for valid stream keys with more than two path components;
+DASH additionally XML-escapes the generated URL attributes. Absolute
 RTMP/RTSP URLs use the actual bound listeners and replace wildcard bind hosts
 with the management request host. Use the returned
 session ID with `DELETE` to stop it. A failed session remains visible with a
@@ -132,10 +136,12 @@ playback paths. Lab responses and 400/404 errors use the management
 with SIP credentials and bearer tokens removed before truncation; a disabled
 or uninitialized module returns 503.
 
-For `publish`, `stream_key` is authoritative and must be a printable ASCII
-value without leading/trailing whitespace and no longer than 256 bytes. The
-simulator carries it in a private SIP header that the handler honors only for
-loopback requests. Normal network devices continue to publish to
+SIP and GB28181 Lab `stream_key` values must be printable ASCII no longer than
+256 bytes. Every slash-separated segment must be non-empty and cannot be `.` or
+`..`; the API and Console reject ambiguous keys before a session starts. For
+GB28181 `publish`, the accepted key is authoritative. The simulator carries it
+in a private SIP header that the handler honors only for loopback requests.
+Normal network devices continue to publish to
 `{stream_prefix}/{channel_id}`.
 
 Both endpoints require the normal `sip:read` or `gb28181:read` permission. A
