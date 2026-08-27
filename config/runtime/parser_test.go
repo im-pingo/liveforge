@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,31 @@ func TestParseDocumentRejectsRemovedStreamSetting(t *testing.T) {
 	const want = "stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("removed setting error = %v, want %q", err, want)
+	}
+}
+
+func TestParseDocumentRejectsRemovedStreamSettingThroughYAMLIndirection(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "testdata", "removed-settings", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no removed-setting fixtures found")
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ParseDocument(data)
+			const want = "stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("removed setting error = %v, want %q", err, want)
+			}
+		})
 	}
 }
 

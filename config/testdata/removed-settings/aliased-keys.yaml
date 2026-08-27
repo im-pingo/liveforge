@@ -1,0 +1,4 @@
+stream_key: &stream_key stream
+audio_cache_key: &audio_cache_key audio_cache_ms
+*stream_key:
+  *audio_cache_key: 1000

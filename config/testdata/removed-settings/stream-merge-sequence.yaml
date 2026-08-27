@@ -1,0 +1,6 @@
+stream_defaults: &stream_defaults
+  gop_cache: true
+removed_defaults: &removed_defaults
+  audio_cache_ms: 1000
+stream:
+  <<: [*stream_defaults, *removed_defaults]

@@ -47,29 +47,85 @@ func ValidateRemovedSettings(data []byte) error {
 		return nil
 	}
 
-	root := dereferenceYAMLAlias(document.Content[0])
-	if root == nil || root.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value != "stream" {
-			continue
-		}
-		stream := dereferenceYAMLAlias(root.Content[i+1])
-		if stream == nil || stream.Kind != yaml.MappingNode {
-			continue
-		}
-		for j := 0; j+1 < len(stream.Content); j += 2 {
-			if stream.Content[j].Value == "audio_cache_ms" {
-				return errors.New("stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache")
-			}
-		}
+	path := []string{"stream", "audio_cache_ms"}
+	if yamlMappingContainsPath(document.Content[0], path, make(map[yamlTraversalState]bool)) {
+		return errors.New("stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache")
 	}
 	return nil
 }
 
+type yamlTraversalState struct {
+	node      *yaml.Node
+	pathDepth int
+}
+
+func yamlMappingContainsPath(node *yaml.Node, path []string, active map[yamlTraversalState]bool) bool {
+	node = dereferenceYAMLAlias(node)
+	if node == nil || node.Kind != yaml.MappingNode || len(path) == 0 {
+		return false
+	}
+
+	state := yamlTraversalState{node: node, pathDepth: len(path)}
+	if active[state] {
+		return false
+	}
+	active[state] = true
+	defer delete(active, state)
+
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := dereferenceYAMLAlias(node.Content[i])
+		if key != nil && key.Kind == yaml.ScalarNode && key.Value == path[0] {
+			if len(path) == 1 || yamlMappingContainsPath(node.Content[i+1], path[1:], active) {
+				return true
+			}
+		}
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if isYAMLMergeKey(node.Content[i]) && yamlMergeContainsPath(node.Content[i+1], path, active) {
+			return true
+		}
+	}
+	return false
+}
+
+func yamlMergeContainsPath(node *yaml.Node, path []string, active map[yamlTraversalState]bool) bool {
+	node = dereferenceYAMLAlias(node)
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.MappingNode {
+		return yamlMappingContainsPath(node, path, active)
+	}
+	if node.Kind != yaml.SequenceNode {
+		return false
+	}
+
+	state := yamlTraversalState{node: node, pathDepth: len(path)}
+	if active[state] {
+		return false
+	}
+	active[state] = true
+	defer delete(active, state)
+	for _, child := range node.Content {
+		if yamlMergeContainsPath(child, path, active) {
+			return true
+		}
+	}
+	return false
+}
+
+func isYAMLMergeKey(node *yaml.Node) bool {
+	return node != nil && node.Kind == yaml.ScalarNode && node.Value == "<<" &&
+		(node.Tag == "" || node.Tag == "!" || node.ShortTag() == "!!merge")
+}
+
 func dereferenceYAMLAlias(node *yaml.Node) *yaml.Node {
+	seen := make(map[*yaml.Node]bool)
 	for node != nil && node.Kind == yaml.AliasNode {
+		if seen[node] {
+			return nil
+		}
+		seen[node] = true
 		node = node.Alias
 	}
 	return node

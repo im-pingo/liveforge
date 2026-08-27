@@ -1,0 +1,4 @@
+stream_defaults: &stream_defaults
+  audio_cache_ms: 1000
+stream:
+  <<: *stream_defaults
