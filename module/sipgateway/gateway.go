@@ -16,6 +16,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 )
@@ -153,11 +154,12 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	var audioMedia *sdp.MediaDescription
+	var audioMedia, videoMedia *sdp.MediaDescription
 	for _, m := range offerSDP.Media {
 		if m.Type == "audio" {
 			audioMedia = m
-			break
+		} else if m.Type == "video" {
+			videoMedia = m
 		}
 	}
 	if audioMedia == nil {
@@ -185,14 +187,33 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(resp)
 		return
 	}
+	var videoCodec negotiatedCodec
+	var videoRTPPort, videoRTCPPort int
+	if negotiated, ok := negotiateH264(videoMedia); ok {
+		videoCodec = negotiated
+		videoRTPPort, videoRTCPPort, err = gw.portAlloc.AllocatePair()
+		if err != nil {
+			gw.portAlloc.Free(rtpPort, rtcpPort)
+			gw.metrics.setupFailures.Add(1)
+			gw.metrics.portExhaustions.Add(1)
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil))
+			return
+		}
+	}
 
 	streamKey := gw.streamKeyFromRequest(req)
 	stream, _ := gw.hub.GetOrCreate(streamKey)
 
 	cs := newCallSession(callID, streamKey, nc, "inbound", rtpPort, rtcpPort)
+	if videoRTPPort > 0 {
+		cs.configureVideo(videoCodec, videoRTPPort, videoRTCPPort, remoteAddress(offerSDP), videoMedia.Port)
+	}
 	gw.configureSession(cs)
 	if err := gw.activateReservedCall(cs); err != nil {
 		gw.portAlloc.Free(rtpPort, rtcpPort)
+		if videoRTPPort > 0 {
+			gw.portAlloc.Free(videoRTPPort, videoRTCPPort)
+		}
 		gw.metrics.setupFailures.Add(1)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil))
 		return
@@ -210,7 +231,7 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	gw.metrics.callsStarted.Add(1)
 
-	answerBody := buildAnswerSDP(gw.localIP, rtpPort, nc)
+	answerBody := buildAnswerSDPWithVideo(gw.localIP, rtpPort, nc, videoRTPPort, videoCodec)
 	resp := sip.NewResponseFromRequest(req, 200, "OK", answerBody)
 	resp.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	_ = tx.Respond(resp)
@@ -265,7 +286,8 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		gw.metrics.codecFailures.Add(1)
 		return "", ErrCodecMismatch
 	}
-	sourceCodec, ok := configuredCodecForSource(gw.codecs, publisher.MediaInfo().AudioCodec)
+	mediaInfo := publisher.MediaInfo()
+	sourceCodec, ok := configuredCodecForSource(gw.codecs, mediaInfo.AudioCodec)
 	if !ok {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.codecFailures.Add(1)
@@ -289,13 +311,30 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", fmt.Errorf("%w: %v", ErrPortExhausted, err)
 	}
 	portsOwned := true
+	videoPortsOwned := false
+	var videoRTPPort, videoRTCPPort int
 	defer func() {
 		if portsOwned {
 			gw.portAlloc.Free(rtpPort, rtcpPort)
 		}
+		if videoPortsOwned {
+			gw.portAlloc.Free(videoRTPPort, videoRTCPPort)
+		}
 	}()
 
-	offerBody := buildOfferSDP(gw.localIP, rtpPort, []negotiatedCodec{sourceCodec})
+	videoCodec := negotiatedCodec{}
+	if mediaInfo.VideoCodec == avframe.CodecH264 {
+		videoCodec = sipH264Codec
+		videoRTPPort, videoRTCPPort, err = gw.portAlloc.AllocatePair()
+		if err != nil {
+			gw.metrics.setupFailures.Add(1)
+			gw.metrics.portExhaustions.Add(1)
+			return "", fmt.Errorf("%w: %v", ErrPortExhausted, err)
+		}
+		videoPortsOwned = true
+	}
+
+	offerBody := buildOfferSDPWithVideo(gw.localIP, rtpPort, []negotiatedCodec{sourceCodec}, videoRTPPort, videoCodec)
 
 	fromURI := sip.Uri{User: gw.sipService.ServerID(), Host: gw.sipService.Domain()}
 
@@ -371,11 +410,12 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", fmt.Errorf("parse answer SDP: %w", err)
 	}
 
-	var audioMedia *sdp.MediaDescription
+	var audioMedia, videoMedia *sdp.MediaDescription
 	for _, m := range answerSDP.Media {
 		if m.Type == "audio" {
 			audioMedia = m
-			break
+		} else if m.Type == "video" {
+			videoMedia = m
 		}
 	}
 	if audioMedia == nil {
@@ -389,8 +429,21 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		gw.metrics.codecFailures.Add(1)
 		return "", ErrCodecMismatch
 	}
+	var negotiatedVideo negotiatedCodec
+	if videoRTPPort > 0 {
+		var videoOK bool
+		negotiatedVideo, videoOK = negotiateH264(videoMedia)
+		if !videoOK || negotiatedVideo.Codec != avframe.CodecH264 || videoMedia.Port <= 0 {
+			gw.metrics.setupFailures.Add(1)
+			gw.metrics.codecFailures.Add(1)
+			return "", ErrCodecMismatch
+		}
+	}
 
 	cs := newCallSession(callID, streamKey, nc, "outbound", rtpPort, rtcpPort)
+	if videoRTPPort > 0 {
+		cs.configureVideo(negotiatedVideo, videoRTPPort, videoRTCPPort, remoteAddress(answerSDP), videoMedia.Port)
+	}
 	cs.dialog = dialog
 	gw.configureSession(cs)
 	if err := gw.activateReservedCall(cs); err != nil {
@@ -398,6 +451,7 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", err
 	}
 	portsOwned = false
+	videoPortsOwned = false
 
 	remoteIP := remoteAddress(answerSDP)
 	if err := cs.startOutbound(stream, remoteIP, audioMedia.Port); err != nil {
@@ -725,6 +779,9 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 	gw.mu.Unlock()
 
 	gw.portAlloc.Free(session.rtpPort, session.rtcpPort)
+	if session.video != nil {
+		gw.portAlloc.Free(session.video.rtpPort, session.video.rtcpPort)
+	}
 	_ = session.dialog.teardown()
 	if session.direction == "inbound" && session.stream != nil && session.publisher != nil {
 		publisher := session.stream.Publisher()

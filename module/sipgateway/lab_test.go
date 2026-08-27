@@ -13,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	mediarp "github.com/im-pingo/liveforge/pkg/rtp"
 )
 
 func validSIPLabRequest() LabSessionRequest {
@@ -109,7 +110,8 @@ func TestSIPLabPublishUsesRealSignalingAndCleansUp(t *testing.T) {
 	}
 	active := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
 		return snapshot.State == LabSessionStateActive &&
-			snapshot.RTPPacketsSent > 0 && snapshot.RTCPPacketsSent > 0
+			snapshot.AudioRTPPacketsSent > 0 && snapshot.VideoRTPPacketsSent > 0 &&
+			snapshot.RTCPPacketsSent > 0
 	})
 	if active.Direction != LabDirectionInbound || active.Codec != "PCMA" {
 		t.Fatalf("publish snapshot = %+v, want inbound PCMA", active)
@@ -117,6 +119,20 @@ func TestSIPLabPublishUsesRealSignalingAndCleansUp(t *testing.T) {
 	stream, ok := h.hub.Find(request.StreamKey)
 	if !ok || stream.Publisher() == nil {
 		t.Fatalf("publish stream = (%v, %v), want active real publisher", stream, ok)
+	}
+	waitForSIPLab(t, func() bool {
+		stats := stream.Stats()
+		gop := stream.GOPCacheDetail()
+		return stats.VideoFrames >= 10 && stats.AudioFrames >= 10 &&
+			gop.VideoFrames >= 2 && gop.AudioFrames >= 2 && gop.DurationMs >= 40
+	})
+	mediaInfo := stream.Publisher().MediaInfo()
+	if mediaInfo == nil || mediaInfo.VideoCodec != avframe.CodecH264 || mediaInfo.AudioCodec != avframe.CodecG711A {
+		t.Fatalf("publish media info = %+v, want H264/G711A", mediaInfo)
+	}
+	sps, pps := mediarp.ExtractSPSPPS(mediaInfo.VideoSequenceHeader)
+	if len(sps) == 0 || len(pps) == 0 {
+		t.Fatalf("publish media info has no decodable H.264 parameter sets: %x", mediaInfo.VideoSequenceHeader)
 	}
 
 	if err := h.module.StopLabSession(session.ID); err != nil {
@@ -307,7 +323,17 @@ func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreate receive stream: %v", err)
 	}
-	publishTestAudio(t, stream, avframe.CodecG711U)
+	if err := stream.SetPublisher(&gatewayTestPublisher{
+		id: "sip-lab-av-source",
+		info: &avframe.MediaInfo{
+			VideoCodec: avframe.CodecH264,
+			AudioCodec: avframe.CodecG711U,
+			SampleRate: 8000,
+			Channels:   1,
+		},
+	}); err != nil {
+		t.Fatalf("SetPublisher receive source: %v", err)
+	}
 	request := LabSessionRequest{
 		Mode:      LabModeReceive,
 		DeviceID:  "persistent-receive-device",
@@ -321,7 +347,8 @@ func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {
 	}
 	active := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
 		return snapshot.State == LabSessionStateActive &&
-			snapshot.RTPPacketsRecv > 0 && snapshot.RTCPPacketsRecv > 0
+			snapshot.AudioRTPPacketsRecv > 0 && snapshot.VideoRTPPacketsRecv > 0 &&
+			snapshot.RTCPPacketsRecv > 0
 	})
 	if active.Direction != LabDirectionOutbound || active.Codec != "PCMU" {
 		t.Fatalf("receive snapshot = %+v, want outbound PCMU", active)
@@ -374,7 +401,7 @@ func newRealSIPLabHarness(t *testing.T) realSIPLabHarness {
 				MaxCalls:     8,
 			},
 		},
-		Stream: config.StreamConfig{RingBufferSize: 256},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, AudioCacheMs: 1000, RingBufferSize: 256},
 	}
 	cfg.SIP.Gateway.RTPPortRange[1] = cfg.SIP.Gateway.RTPPortRange[0] + 100
 	server := core.NewServer(cfg)

@@ -292,11 +292,12 @@ func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
 		`if (!expectsVideo && mediaElement.readyState >= 2 && mediaTime > 0)`,
 		`markPlaying();`,
 		"var playPromise = mediaElement.play();\n      monitorStreamMedia(mediaElement, generation, \"WebRTC/WHEP\", streamKey);",
-		`streamMedia[s.stream_key] = { video_codec: "", audio_codec: s.codec || "" }`,
-		`streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "" }`,
+		`streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: s.codec || "" }`,
+		`streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "G711A" }`,
 		`appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key)`,
 		`["h264", "avc", "avc1", "h265", "hevc", "hev1", "hvc1", "av1", "av01", "vp8", "vp08", "vp9", "vp09"]`,
-		`button.dataset.mediaCodec || ""`,
+		`button.dataset.videoCodec || "H264"`,
+		`button.dataset.audioCodec || ""`,
 		`function openPlayer(streamKey, mediaHint)`,
 	} {
 		if !strings.Contains(script, contract) {
@@ -387,6 +388,17 @@ type consoleRemovedActionFocusProbe struct {
 	TriggerRemoved     bool   `json:"triggerRemoved"`
 	EscapeClosed       bool   `json:"escapeClosed"`
 	FocusedID          string `json:"focusedId"`
+}
+
+type consoleProtocolLabMediaProbe struct {
+	CacheHeader   string `json:"cacheHeader"`
+	CacheText     string `json:"cacheText"`
+	SIPAudioRTP   string `json:"sipAudioRTP"`
+	SIPVideoRTP   string `json:"sipVideoRTP"`
+	SIPVideoCodec string `json:"sipVideoCodec"`
+	SIPAudioCodec string `json:"sipAudioCodec"`
+	GBVideoCodec  string `json:"gbVideoCodec"`
+	GBAudioCodec  string `json:"gbAudioCodec"`
 }
 
 func withConsoleBrowser(t *testing.T, run func(context.Context)) {
@@ -551,6 +563,54 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 		}
 		if !interaction.PendingDisabled || !interaction.PendingOpen || interaction.SettledDisabled || interaction.SettledOpen {
 			t.Errorf("deferred destructive behavior = %#v", interaction)
+		}
+	})
+}
+
+func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe consoleProtocolLabMediaProbe
+		expression := `(function() {
+			renderStreams([{
+				key:"sip/lab", state:"publishing", publisher:"sip", subscribers:{}, stats:{},
+				gop_cache_len:26, gop_video_frames:25, gop_audio_frames:1, gop_duration_ms:960, gop_generation:7,
+				audio_cache_frames:50, audio_cache_duration_ms:980
+			}]);
+			renderSIPLabSessions([{session:{
+				id:"sip-1", device_id:"d1", mode:"publish", stream_key:"sip/lab", state:"active", codec:"PCMA",
+				audio_rtp_packets_sent:50, audio_rtp_packets_received:2,
+				video_rtp_packets_sent:25, video_rtp_packets_received:1
+			}, playback:{available:true}}]);
+			renderGBLabSessions([{session:{
+				id:"gb-1", device_id:"d2", channel_id:"c1", mode:"publish", stream_key:"gb/lab", state:"active"
+			}, playback:{available:true}}]);
+			var cacheCell = document.querySelector("#tbody tr td:nth-child(8)");
+			var sipCells = document.querySelectorAll("#sip-lab-sessions-tbody tr td");
+			return {
+				cacheHeader: document.querySelector("#view-streams thead th:nth-child(8)").textContent.trim(),
+				cacheText: cacheCell ? cacheCell.textContent : "",
+				sipAudioRTP: sipCells[5] ? sipCells[5].textContent : "",
+				sipVideoRTP: sipCells[6] ? sipCells[6].textContent : "",
+				sipVideoCodec: (streamMedia["sip/lab"] || {}).video_codec || "",
+				sipAudioCodec: (streamMedia["sip/lab"] || {}).audio_codec || "",
+				gbVideoCodec: (streamMedia["gb/lab"] || {}).video_codec || "",
+				gbAudioCodec: (streamMedia["gb/lab"] || {}).audio_codec || ""
+			};
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+			t.Fatalf("probe protocol lab media rendering: %v", err)
+		}
+		if probe.CacheHeader != "Media Cache" || !strings.Contains(probe.CacheText, "GOP #7 26") || !strings.Contains(probe.CacheText, "Audio 50") {
+			t.Errorf("cache rendering = header %q text %q", probe.CacheHeader, probe.CacheText)
+		}
+		if probe.SIPAudioRTP != "50 tx / 2 rx" || probe.SIPVideoRTP != "25 tx / 1 rx" {
+			t.Errorf("SIP track RTP = audio %q video %q", probe.SIPAudioRTP, probe.SIPVideoRTP)
+		}
+		if probe.SIPVideoCodec != "H264" || probe.SIPAudioCodec != "PCMA" {
+			t.Errorf("SIP media hint = %s/%s, want H264/PCMA", probe.SIPVideoCodec, probe.SIPAudioCodec)
+		}
+		if probe.GBVideoCodec != "H264" || probe.GBAudioCodec != "G711A" {
+			t.Errorf("GB28181 media hint = %s/%s, want H264/G711A", probe.GBVideoCodec, probe.GBAudioCodec)
 		}
 	})
 }

@@ -129,9 +129,9 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
 - **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
-- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久 SDP/编解码/RTP/PS/UDP 假设备检查；两个 provider 都支持可取消停止/关闭清理的持久回环发布/接收会话（SIP 使用 PCMA/PCMU，GB28181 使用 H.264 PS/RTP/RTCP）。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive，长时间预览不会因模拟设备过期而中断。SIP PCMA/PCMU 发布是纯音频，会在 Console 使用音频播放器并优先通过 WebRTC/WHEP 预览；GB28181 H.264 发布会使用请求中的 stream key 预览。两者共用 SIP 监听端口时，PCMA/PCMU 音频 INVITE 交给 SIP Gateway，PS/90000 视频 INVITE 交给 GB28181
+- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久 SDP/编解码/RTP/PS/UDP 假设备检查；两个 provider 都支持可取消停止/关闭清理的持久回环发布/接收和跨协议播放。SIP 使用独立 RTP 轨道发布 H.264 加可选 PCMA/PCMU，GB28181 在 PS/RTP 中复用 H.264 加 8 kHz 单声道 G.711A。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
 - **GB28181 Lab 流键** — 发布会使用请求中的 `stream_key`（可打印 ASCII、最长 256 字节且不能有首尾空白）；该覆盖只接受 loopback 模拟器请求，真实设备仍使用 `{stream_prefix}/{channel_id}`
-- **实验室诊断** — 失败的持久 SIP/GB28181 会话仍会显示有界脱敏的 `last_error`；GB28181 发布使用可被浏览器解码的 H.264 SPS/PPS/IDR 样本，便于直接预览
+- **实验室诊断** — 失败的持久 SIP/GB28181 会话仍会显示有界脱敏的 `last_error`；会话显示媒体及分轨计数，Streams 页面同时展示音视频帧总数、随关键帧递增的 GOP generation，以及独立的 GOP/Audio Cache 状态
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
@@ -285,14 +285,14 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。视觉分组为 Workspace（Streams、GB28181、SIP Calls、Storage）、Operations（Cluster）和 System（Config、Security）。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
 
 - 流列表：状态、编解码器、码率、帧率
-- GOP 缓存可视化
+- 媒体缓存可视化，显示随关键帧递增的 GOP generation，并分别显示视频 GOP 和滚动音频缓存的帧数/时长
 - 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、HLS、DASH、WebRTC 实时模式和 WebRTC Live 模式）
 - WebRTC 推流（摄像头/麦克风 + 发送端统计）
 - 权限感知的踢流、删流和运行时配置刷新
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
 - 录制详情/下载/在线预览/删除、DVR 会话/存储状态及 HLS 在线预览、安全状态和有界审计事件
 - 完整脱敏 Config 文档/schema 展示、只读 Validate、按数据源执行 Apply & Refresh，并显示 file、HTTP/HTTPS、Consul、Redis 的可写/只读状态
-- SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；两者都支持无需外部平台的持久模拟设备发布/接收，会话显示 RTP/RTCP/PS 计数，停止时清理资源，并可通过已启用的其他输出协议预览。SIP G.711 纯音频使用 WebRTC/WHEP，GB28181 H.264 使用真实 stream key
+- SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；两者都支持无需外部平台的持久 H.264 加 G.711 模拟设备发布/接收，会话显示分轨 RTP/RTCP/PS 计数，停止时清理资源，并可通过已启用的其他输出协议预览
 
 DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
 录制预览复用已认证的管理 API 会话；DVR 预览使用带非凭据 CORS 的独立 `dvr.listen` HLS 监听器，因此仍执行订阅鉴权，控制台不会持久化或拼接 bearer token。

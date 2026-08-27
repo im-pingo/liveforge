@@ -123,6 +123,12 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	}
 
 	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 0, 0, []byte{0x02},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 20, 20, []byte{0x03},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x00},
 	))
 	stream.WriteFrame(avframe.NewAVFrame(
@@ -134,7 +140,13 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	h.handleStreams(w, req)
 
 	data := decodeAPIData(t, w.Body.Bytes())
-	var resp StreamsResponse
+	var resp struct {
+		Streams []struct {
+			StreamInfo
+			AudioCacheFrames     int   `json:"audio_cache_frames"`
+			AudioCacheDurationMs int64 `json:"audio_cache_duration_ms"`
+		} `json:"streams"`
+	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +172,12 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	}
 	if si.GOPCacheLen != 2 {
 		t.Errorf("expected gop_cache_len 2, got %d", si.GOPCacheLen)
+	}
+	if si.GOPGeneration != 1 {
+		t.Errorf("expected gop_generation 1, got %d", si.GOPGeneration)
+	}
+	if si.AudioCacheFrames != 2 || si.AudioCacheDurationMs != 20 {
+		t.Errorf("audio cache = %d frames/%d ms, want 2 frames/20 ms", si.AudioCacheFrames, si.AudioCacheDurationMs)
 	}
 	if si.Stats == nil {
 		t.Error("expected stats in stream list response")

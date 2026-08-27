@@ -89,12 +89,13 @@ type Stream struct {
 	state     StreamState
 	publisher Publisher
 
-	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
-	muxerManager *MuxerManager
-	gopCache     [][]*avframe.AVFrame
-	gopStarts    []int64
-	audioCache   []*avframe.AVFrame
-	subscribers  map[string]int // protocol -> count (e.g. "rtmp" -> 2)
+	ringBuffer    *util.RingBuffer[*avframe.AVFrame]
+	muxerManager  *MuxerManager
+	gopCache      [][]*avframe.AVFrame
+	gopStarts     []int64
+	gopGeneration uint64
+	audioCache    []*avframe.AVFrame
+	subscribers   map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
@@ -347,6 +348,7 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 		if frame.MediaType.IsVideo() {
 			if frame.FrameType.IsKeyframe() {
 				// Start new GOP
+				s.gopGeneration++
 				gopStart := s.ringBuffer.WriteCursor()
 				s.gopCache = append(s.gopCache, []*avframe.AVFrame{frame})
 				s.gopStarts = append(s.gopStarts, gopStart)
@@ -398,13 +400,14 @@ type GOPCacheDetail struct {
 	VideoFrames int
 	AudioFrames int
 	DurationMs  int64
+	Generation  uint64
 }
 
 func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var d GOPCacheDetail
+	d := GOPCacheDetail{Generation: s.gopGeneration}
 	for _, gop := range s.gopCache {
 		d.TotalFrames += len(gop)
 	}
@@ -492,6 +495,23 @@ func (s *Stream) AudioCache() []*avframe.AVFrame {
 	result := make([]*avframe.AVFrame, len(s.audioCache))
 	copy(result, s.audioCache)
 	return result
+}
+
+// AudioCacheDetail returns audio-cache statistics without copying frames.
+type AudioCacheDetail struct {
+	Frames     int
+	DurationMs int64
+}
+
+func (s *Stream) AudioCacheDetail() AudioCacheDetail {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	detail := AudioCacheDetail{Frames: len(s.audioCache)}
+	if detail.Frames > 1 {
+		detail.DurationMs = s.audioCache[detail.Frames-1].DTS - s.audioCache[0].DTS
+	}
+	return detail
 }
 
 // VideoSeqHeader returns the cached video sequence header (SPS/PPS), if any.

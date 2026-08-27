@@ -17,6 +17,7 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/labmedia"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
@@ -552,14 +553,19 @@ func (s *gbLabSession) publishMediaLoop(remotePort int) {
 	remoteRTP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort}
 	remoteRTCP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort + 1}
 	muxer := ps.NewMuxer()
-	ticker := time.NewTicker(40 * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(labmedia.AudioFrameDurationMs) * time.Millisecond)
 	defer ticker.Stop()
 	var timestamp int64
 	for {
-		if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, deterministicGBLabFrame(timestamp)); err != nil && s.ctx.Err() != nil {
+		if timestamp%labmedia.VideoFrameDurationMs == 0 {
+			if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, deterministicGBLabFrame(timestamp)); err != nil && s.ctx.Err() != nil {
+				return
+			}
+		}
+		if err := s.sendFrame(remoteRTP, remoteRTCP, muxer, labmedia.G711Frame(avframe.CodecG711A, timestamp)); err != nil && s.ctx.Err() != nil {
 			return
 		}
-		timestamp += 3600
+		timestamp += labmedia.AudioFrameDurationMs
 		select {
 		case <-s.ctx.Done():
 			return
@@ -569,19 +575,11 @@ func (s *gbLabSession) publishMediaLoop(remotePort int) {
 }
 
 func deterministicGBLabFrame(timestamp int64) *avframe.AVFrame {
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, timestamp, timestamp, deterministicGBLabH264Payload())
+	return labmedia.VideoFrame(timestamp)
 }
 
 func deterministicGBLabH264Payload() []byte {
-	// A valid constrained-baseline 32x32 SPS/PPS/IDR access unit keeps the
-	// protocol lab playable without requiring FFmpeg or another encoder.
-	return []byte{
-		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x0a, 0xda, 0x25, 0xb0, 0x11,
-		0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x32, 0x8f, 0x12,
-		0x26, 0xa0, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x0f, 0xc8,
-		0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x3a, 0x26, 0x28, 0x00, 0x09, 0x02,
-		0xc9, 0xd7, 0x5e,
-	}
+	return labmedia.VideoFrame(0).Payload
 }
 
 func (s *gbLabSession) sendSourceLoop(stream *core.Stream) {

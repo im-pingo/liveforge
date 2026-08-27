@@ -51,7 +51,18 @@ type CallSession struct {
 	terminateOnce   sync.Once
 	stopOnce        sync.Once
 	rtcpSendOnce    sync.Once
+	video           *sipVideoTrack
 	closed          chan struct{}
+}
+
+type sipVideoTrack struct {
+	codec        negotiatedCodec
+	rtpPort      int
+	rtcpPort     int
+	conn         *net.UDPConn
+	rtcpConn     *net.UDPConn
+	remoteAddr   *net.UDPAddr
+	rtcpSendOnce sync.Once
 }
 
 type dialogTeardown struct {
@@ -87,13 +98,34 @@ func (d *dialogTeardown) endedByRemote() {
 }
 
 type sipPublisher struct {
+	mu   sync.RWMutex
 	id   string
 	info *avframe.MediaInfo
 }
 
-func (p *sipPublisher) ID() string                    { return p.id }
-func (p *sipPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
-func (p *sipPublisher) Close() error                  { return nil }
+func (p *sipPublisher) ID() string { return p.id }
+
+func (p *sipPublisher) MediaInfo() *avframe.MediaInfo {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.info == nil {
+		return nil
+	}
+	info := *p.info
+	info.VideoSequenceHeader = append([]byte(nil), p.info.VideoSequenceHeader...)
+	info.AudioSequenceHeader = append([]byte(nil), p.info.AudioSequenceHeader...)
+	return &info
+}
+
+func (p *sipPublisher) setVideoSequenceHeader(payload []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.info != nil {
+		p.info.VideoSequenceHeader = append(p.info.VideoSequenceHeader[:0], payload...)
+	}
+}
+
+func (p *sipPublisher) Close() error { return nil }
 
 func newCallSession(callID, streamKey string, codec negotiatedCodec, direction string, rtpPort, rtcpPort int) *CallSession {
 	return &CallSession{
@@ -108,6 +140,14 @@ func newCallSession(callID, streamKey string, codec negotiatedCodec, direction s
 		rtpIdleTimeout: 30 * time.Second,
 		closed:         make(chan struct{}),
 	}
+}
+
+func (cs *CallSession) configureVideo(codec negotiatedCodec, rtpPort, rtcpPort int, remoteIP string, remotePort int) {
+	track := &sipVideoTrack{codec: codec, rtpPort: rtpPort, rtcpPort: rtcpPort}
+	if ip := net.ParseIP(remoteIP); ip != nil && remotePort > 0 {
+		track.remoteAddr = &net.UDPAddr{IP: ip, Port: remotePort}
+	}
+	cs.video = track
 }
 
 func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remotePort int) error {
@@ -127,6 +167,9 @@ func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remote
 			Channels:   1,
 		},
 	}
+	if cs.video != nil {
+		publisher.info.VideoCodec = cs.video.codec.Codec
+	}
 	if err := stream.SetPublisher(publisher); err != nil {
 		return fmt.Errorf("set stream publisher: %w", err)
 	}
@@ -140,17 +183,31 @@ func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remote
 	if err != nil {
 		return err
 	}
+	var videoConn *net.UDPConn
+	if cs.video != nil {
+		videoConn, err = net.ListenUDP("udp", &net.UDPAddr{Port: cs.video.rtpPort})
+		if err != nil {
+			_ = conn.Close()
+			return err
+		}
+	}
 
 	cs.mu.Lock()
 	cs.conn = conn
 	if remoteIP != "" && remotePort > 0 {
 		cs.remoteAddr = &net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
 	}
+	if cs.video != nil {
+		cs.video.conn = videoConn
+	}
 	cs.state = CallStateActive
 	cs.mu.Unlock()
 	cs.established.Store(true)
 
 	go cs.receiveLoop()
+	if cs.video != nil {
+		go cs.receiveVideoLoop(cs.video)
+	}
 	return nil
 }
 
@@ -178,18 +235,46 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 		_ = conn.Close()
 		return err
 	}
+	var videoConn, videoRTCPConn *net.UDPConn
+	if cs.video != nil {
+		if cs.video.remoteAddr == nil {
+			_ = conn.Close()
+			_ = rtcpConn.Close()
+			return errors.New("invalid remote video RTP address")
+		}
+		videoConn, err = net.ListenUDP("udp", &net.UDPAddr{Port: cs.video.rtpPort})
+		if err != nil {
+			_ = conn.Close()
+			_ = rtcpConn.Close()
+			return err
+		}
+		videoRTCPConn, err = net.ListenUDP("udp", &net.UDPAddr{Port: cs.video.rtcpPort})
+		if err != nil {
+			_ = conn.Close()
+			_ = rtcpConn.Close()
+			_ = videoConn.Close()
+			return err
+		}
+	}
 
 	cs.mu.Lock()
 	cs.stream = stream
 	cs.remoteAddr = &net.UDPAddr{IP: remoteIPAddr, Port: remotePort}
 	cs.conn = conn
 	cs.rtcpConn = rtcpConn
+	if cs.video != nil {
+		cs.video.conn = videoConn
+		cs.video.rtcpConn = videoRTCPConn
+	}
 	cs.state = CallStateActive
 	cs.mu.Unlock()
 	cs.established.Store(true)
 
 	go cs.sendLoop()
 	go cs.receiveRTCPLoop()
+	if cs.video != nil {
+		go cs.receiveVideoRTCPLoop(cs.video)
+	}
 	return nil
 }
 
@@ -289,25 +374,114 @@ func (cs *CallSession) receiveLoop() {
 		if err != nil || frame == nil {
 			continue
 		}
+		frame.DTS = int64(pkt.Timestamp) * 1000 / int64(cs.codec.ClockRate)
+		frame.PTS = frame.DTS
 
 		cs.stream.WriteFrame(frame)
+	}
+}
+
+func (cs *CallSession) receiveVideoLoop(track *sipVideoTrack) {
+	depacketizer := &rtp.H264Depacketizer{}
+	cs.mu.RLock()
+	publisher := cs.publisher
+	cs.mu.RUnlock()
+	buf := make([]byte, 64*1024)
+	for {
+		if err := track.conn.SetReadDeadline(time.Now().Add(cs.rtpIdleTimeout)); err != nil {
+			cs.networkLost(err)
+			return
+		}
+		n, _, err := track.conn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-cs.closed:
+				return
+			default:
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				cs.networkLost(fmt.Errorf("video RTP idle timeout after %s", cs.rtpIdleTimeout))
+				return
+			}
+			cs.networkLost(err)
+			return
+		}
+		var packet pionrtp.Packet
+		if packet.Unmarshal(buf[:n]) != nil {
+			continue
+		}
+		cs.recordRTPReceived(n)
+		frames, depacketizeErr := rtp.DepacketizeFrames(depacketizer, &packet)
+		if depacketizeErr != nil {
+			continue
+		}
+		dts := int64(packet.Timestamp) * 1000 / int64(track.codec.ClockRate)
+		for _, frame := range frames {
+			if frame == nil {
+				continue
+			}
+			frame.DTS = dts
+			frame.PTS = dts
+			if frame.FrameType == avframe.FrameTypeSequenceHeader && publisher != nil {
+				publisher.setVideoSequenceHeader(frame.Payload)
+			}
+			cs.stream.WriteFrame(frame)
+		}
+	}
+}
+
+func (cs *CallSession) receiveVideoRTCPLoop(track *sipVideoTrack) {
+	buf := make([]byte, 1500)
+	lastValid := time.Now()
+	for {
+		if err := track.rtcpConn.SetReadDeadline(lastValid.Add(cs.rtpIdleTimeout)); err != nil {
+			cs.networkLost(err)
+			return
+		}
+		_, _, err := track.rtcpConn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-cs.closed:
+				return
+			default:
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				cs.networkLost(fmt.Errorf("video RTCP liveness timeout after %s", cs.rtpIdleTimeout))
+				return
+			}
+			cs.networkLost(err)
+			return
+		}
+		lastValid = time.Now()
 	}
 }
 
 func (cs *CallSession) sendLoop() {
 	defer slog.Info("rtp send loop stopped", "module", "sipgateway", "call", cs.callID)
 
-	session := rtp.NewSession(uint8(cs.codec.PT), uint32(cs.codec.ClockRate))
-	packetizer := cs.newPacketizer()
-	if packetizer.inner == nil {
+	audioSession := rtp.NewSession(uint8(cs.codec.PT), uint32(cs.codec.ClockRate))
+	audioPacketizer, err := rtp.NewPacketizer(cs.codec.Codec)
+	if err != nil {
 		cs.networkLost(ErrCodecMismatch)
 		return
 	}
 	cs.mu.RLock()
 	stream := cs.stream
 	conn := cs.conn
+	rtcpConn := cs.rtcpConn
 	remoteAddr := cs.remoteAddr
+	video := cs.video
 	cs.mu.RUnlock()
+	var videoSession *rtp.Session
+	var videoPacketizer rtp.Packetizer
+	if video != nil {
+		videoSession = rtp.NewSession(uint8(video.codec.PT), uint32(video.codec.ClockRate))
+		videoPacketizer, err = rtp.NewPacketizer(video.codec.Codec)
+		if err != nil {
+			cs.networkLost(ErrCodecMismatch)
+			return
+		}
+	}
 
 	if err := stream.AddSubscriber("sipgateway"); err != nil {
 		cs.networkLost(err)
@@ -336,42 +510,47 @@ func (cs *CallSession) sendLoop() {
 			return
 		}
 
-		if frame.MediaType != avframe.MediaTypeAudio {
-			continue
-		}
-
-		pkts, err := packetizer.packetize(frame)
-		if err != nil || len(pkts) == 0 {
-			continue
-		}
-
-		session.WrapPackets(pkts, frame.DTS)
-
-		for _, pkt := range pkts {
-			data, err := pkt.Marshal()
-			if err != nil {
-				continue
-			}
-			n, err := conn.WriteToUDP(data, remoteAddr)
-			if err != nil {
-				cs.networkLost(err)
+		switch {
+		case frame.MediaType == avframe.MediaTypeAudio && frame.Codec == cs.codec.Codec:
+			if !cs.sendFrame(frame, audioPacketizer, audioSession, conn, rtcpConn, remoteAddr, &cs.rtcpSendOnce) {
 				return
 			}
-			cs.recordRTPSent(n)
-			cs.sendSenderReport(remoteAddr, pkt.Timestamp)
+		case video != nil && frame.MediaType == avframe.MediaTypeVideo && frame.Codec == video.codec.Codec:
+			if !cs.sendFrame(frame, videoPacketizer, videoSession, video.conn, video.rtcpConn, video.remoteAddr, &video.rtcpSendOnce) {
+				return
+			}
 		}
 	}
 }
 
-func (cs *CallSession) sendSenderReport(remoteAddr *net.UDPAddr, rtpTimestamp uint32) {
+func (cs *CallSession) sendFrame(frame *avframe.AVFrame, packetizer rtp.Packetizer, session *rtp.Session, conn, rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, reportOnce *sync.Once) bool {
+	packets, err := packetizer.Packetize(frame, 1400)
+	if err != nil || len(packets) == 0 {
+		return true
+	}
+	session.WrapPackets(packets, frame.DTS)
+	for _, packet := range packets {
+		data, marshalErr := packet.Marshal()
+		if marshalErr != nil {
+			continue
+		}
+		n, writeErr := conn.WriteToUDP(data, remoteAddr)
+		if writeErr != nil {
+			cs.networkLost(writeErr)
+			return false
+		}
+		cs.recordRTPSent(n)
+		cs.sendSenderReport(rtcpConn, remoteAddr, packet.Timestamp, reportOnce)
+	}
+	return true
+}
+
+func (cs *CallSession) sendSenderReport(rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, rtpTimestamp uint32, reportOnce *sync.Once) {
 	if remoteAddr == nil || remoteAddr.Port >= 65535 {
 		return
 	}
-	cs.rtcpSendOnce.Do(func() {
-		cs.mu.RLock()
-		conn := cs.rtcpConn
-		cs.mu.RUnlock()
-		if conn == nil {
+	reportOnce.Do(func() {
+		if rtcpConn == nil {
 			return
 		}
 		data, err := (&rtcp.SenderReport{
@@ -384,7 +563,7 @@ func (cs *CallSession) sendSenderReport(remoteAddr *net.UDPAddr, rtpTimestamp ui
 		if err != nil {
 			return
 		}
-		_, _ = conn.WriteToUDP(data, &net.UDPAddr{IP: remoteAddr.IP, Port: remoteAddr.Port + 1})
+		_, _ = rtcpConn.WriteToUDP(data, &net.UDPAddr{IP: remoteAddr.IP, Port: remoteAddr.Port + 1})
 	})
 }
 
@@ -432,12 +611,21 @@ func (cs *CallSession) stop() {
 		cs.mu.RLock()
 		conn := cs.conn
 		rtcpConn := cs.rtcpConn
+		video := cs.video
 		cs.mu.RUnlock()
 		if conn != nil {
 			_ = conn.Close()
 		}
 		if rtcpConn != nil {
 			_ = rtcpConn.Close()
+		}
+		if video != nil {
+			if video.conn != nil {
+				_ = video.conn.Close()
+			}
+			if video.rtcpConn != nil {
+				_ = video.rtcpConn.Close()
+			}
 		}
 	})
 }
@@ -479,6 +667,11 @@ func (cs *CallSession) snapshot() CallSnapshot {
 		StartedAt:     cs.startedAt,
 		State:         cs.state,
 		LastError:     cs.lastError,
+	}
+	if cs.video != nil {
+		snapshot.VideoCodec = cs.video.codec.EncodingName
+		snapshot.VideoRTPPort = cs.video.rtpPort
+		snapshot.VideoRTCPPort = cs.video.rtcpPort
 	}
 	cs.mu.RUnlock()
 

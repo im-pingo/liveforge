@@ -86,25 +86,29 @@ type LabSessionRequest struct {
 
 // LabSessionSnapshot is an immutable point-in-time view of a SIP lab session.
 type LabSessionSnapshot struct {
-	ID              string          `json:"id"`
-	Identity        string          `json:"identity"`
-	DeviceID        string          `json:"device_id"`
-	StreamKey       string          `json:"stream_key"`
-	Mode            LabMode         `json:"mode"`
-	State           LabSessionState `json:"state"`
-	Direction       LabDirection    `json:"direction"`
-	Codec           string          `json:"codec,omitempty"`
-	LastError       string          `json:"last_error,omitempty"`
-	RTPPacketsSent  uint64          `json:"rtp_packets_sent"`
-	RTPPacketsRecv  uint64          `json:"rtp_packets_received"`
-	RTPBytesSent    uint64          `json:"rtp_bytes_sent"`
-	RTPBytesRecv    uint64          `json:"rtp_bytes_received"`
-	RTCPPacketsSent uint64          `json:"rtcp_packets_sent"`
-	RTCPPacketsRecv uint64          `json:"rtcp_packets_received"`
-	StartedAt       time.Time       `json:"started_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	LastMediaAt     time.Time       `json:"last_media_at,omitempty"`
-	StoppedAt       time.Time       `json:"stopped_at,omitempty"`
+	ID                  string          `json:"id"`
+	Identity            string          `json:"identity"`
+	DeviceID            string          `json:"device_id"`
+	StreamKey           string          `json:"stream_key"`
+	Mode                LabMode         `json:"mode"`
+	State               LabSessionState `json:"state"`
+	Direction           LabDirection    `json:"direction"`
+	Codec               string          `json:"codec,omitempty"`
+	LastError           string          `json:"last_error,omitempty"`
+	RTPPacketsSent      uint64          `json:"rtp_packets_sent"`
+	RTPPacketsRecv      uint64          `json:"rtp_packets_received"`
+	AudioRTPPacketsSent uint64          `json:"audio_rtp_packets_sent"`
+	AudioRTPPacketsRecv uint64          `json:"audio_rtp_packets_received"`
+	VideoRTPPacketsSent uint64          `json:"video_rtp_packets_sent"`
+	VideoRTPPacketsRecv uint64          `json:"video_rtp_packets_received"`
+	RTPBytesSent        uint64          `json:"rtp_bytes_sent"`
+	RTPBytesRecv        uint64          `json:"rtp_bytes_received"`
+	RTCPPacketsSent     uint64          `json:"rtcp_packets_sent"`
+	RTCPPacketsRecv     uint64          `json:"rtcp_packets_received"`
+	StartedAt           time.Time       `json:"started_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	LastMediaAt         time.Time       `json:"last_media_at,omitempty"`
+	StoppedAt           time.Time       `json:"stopped_at,omitempty"`
 }
 
 // LabManager owns local SIP lab session lifecycle state.
@@ -149,6 +153,9 @@ type CallSnapshot struct {
 	Codec          string    `json:"codec"`
 	RTPPort        int       `json:"rtp_port"`
 	RTCPPort       int       `json:"rtcp_port"`
+	VideoCodec     string    `json:"video_codec,omitempty"`
+	VideoRTPPort   int       `json:"video_rtp_port,omitempty"`
+	VideoRTCPPort  int       `json:"video_rtcp_port,omitempty"`
 	RemoteAddress  string    `json:"remote_address,omitempty"`
 	StartedAt      time.Time `json:"started_at"`
 	State          CallState `json:"state"`

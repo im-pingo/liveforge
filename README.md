@@ -127,9 +127,9 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
 - **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; new recordings default to fMP4/`.mp4`; segmentation, storage health, download/range/inline-play/delete management, zero-byte session protection, and time-shift status
-- **Local protocol labs** — SIP and GB28181 pages run one-shot and persistent fake-device SDP/codec/RTP/PS/UDP checks locally without requiring another platform or device; both support publish/receive sessions, counters, teardown, and cross-protocol playback metadata. Persistent GB28181 sessions renew Keepalive at roughly one-third of `gb28181.keepalive.timeout` so long-running previews stay online. SIP PCMA/PCMU publish sessions are audio-only and preview through WebRTC/WHEP with the Console audio player; GB28181 H.264 publish sessions preview through the requested stream key. When they share one SIP listener, audio PCMA/PCMU INVITEs route to SIP Gateway and video PS/90000 INVITEs route to GB28181
+- **Local protocol labs** — SIP and GB28181 pages run one-shot and persistent fake-device SDP/codec/RTP/PS/UDP checks locally without requiring another platform or device; both support publish/receive sessions, teardown, and cross-protocol playback. SIP publishes H.264 plus selectable PCMA/PCMU over separate RTP tracks, and GB28181 publishes H.264 plus 8 kHz mono G.711A multiplexed in PS/RTP. The dependency-free moving 160x90 test pattern runs at 25 fps with one IDR per second and audible 20 ms audio frames. Persistent GB28181 sessions renew Keepalive at roughly one-third of `gb28181.keepalive.timeout` so long-running previews stay online. When both modules share one SIP listener, H.264 plus PCMA/PCMU RTP offers route to SIP Gateway while PS/90000 offers route to GB28181
 - **GB28181 Lab stream keys** — Publish uses the requested `stream_key` when it is printable ASCII and at most 256 bytes; the override is accepted only from the loopback simulator, while real devices retain `{stream_prefix}/{channel_id}`
-- **Lab diagnostics** — Failed persistent SIP/GB28181 sessions remain visible with a bounded, redacted `last_error`; GB28181 publish uses a decoder-compatible H.264 SPS/PPS/IDR sample for browser preview
+- **Lab diagnostics** — Failed persistent SIP/GB28181 sessions remain visible with a bounded, redacted `last_error`; session views expose media and per-track counters, while the Streams page reports video/audio frame totals, a keyframe-driven GOP generation, and separate GOP/Audio Cache state
 - **Startup rollback** — Listener or module initialization failures report the original error, close only modules whose initialization was attempted, and do not panic while rolling back later uninitialized modules
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
@@ -283,14 +283,14 @@ Open `http://localhost:8090/console` for the real-time management dashboard. Pre
 The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. The visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security). When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
 
 - Live stream list with state, codecs, bitrate, FPS
-- GOP cache visualization
+- Media cache visualization with a keyframe-driven GOP generation plus separate video GOP and rolling audio-cache frame/duration values
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WebRTC realtime, and WebRTC Live)
 - WebRTC publish with camera/mic and outbound stats
 - Permission-aware stream kick/delete and runtime config refresh
 - Cluster relay/peer status and SIP call dial/detail/hangup
 - Recording metadata/download/inline-play/delete, DVR session/storage status and online HLS preview, security posture, and bounded audit events
 - Complete redacted Config document/schema display, read-only Validate, source-aware Apply & Refresh, and writable/read-only status for file, HTTP/HTTPS, Consul, and Redis
-- SIP and GB28181 local protocol Test Lab results, including unavailable-module states; both provider sessions can publish or receive persistent loopback media, show RTP/RTCP/PS counters, stop cleanly, and preview through the available output protocols
+- SIP and GB28181 local protocol Test Lab results, including unavailable-module states; both provider sessions can publish or receive persistent H.264 plus G.711 loopback media, show per-track RTP/RTCP/PS counters, stop cleanly, and preview through the available output protocols
 
 DVR playlist and segment GETs run synchronous subscribe authorization hooks only; they do not emit asynchronous subscribe lifecycle events.
 Recording preview uses the authenticated management API session. DVR preview uses the separate `dvr.listen` HLS listener with non-credentialed CORS, so its subscribe authorization still applies; the Console does not persist or append bearer tokens.

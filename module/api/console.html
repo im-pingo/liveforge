@@ -124,8 +124,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
 .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 
-/* GOP cache bar */
-.gop-cell { min-width: 100px; }
+/* Media cache bar */
+.gop-cell { min-width: 170px; }
 .gop-bar-wrap {
   width: 100%;
   height: 6px;
@@ -146,6 +146,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   color: var(--text2);
   font-variant-numeric: tabular-nums;
 }
+.gop-label + .gop-label { margin-top: 2px; }
 .gop-label b { color: var(--text); font-weight: 600; }
 
 /* State badge */
@@ -912,7 +913,7 @@ select:focus-visible {
           <th>Bitrate</th>
           <th>FPS</th>
           <th>Uptime</th>
-          <th>GOP Cache</th>
+          <th>Media Cache</th>
           <th>Subscribers</th>
           <th>Actions</th>
         </tr>
@@ -952,7 +953,7 @@ select:focus-visible {
       <pre class="ops-detail" id="gb-self-test-result">No test run</pre>
     </div>
     <div class="ops-section">
-      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">H.264 / PS / RTP loopback</span></div>
+      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">H.264 + G.711A / PS / RTP loopback</span></div>
       <form class="ops-form" id="gb-lab-form" onsubmit="startGBLab(event)">
         <select class="ops-input" id="gb-lab-mode" aria-label="GB28181 lab mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select>
         <input class="ops-input" id="gb-lab-device" aria-label="GB28181 lab device ID" placeholder="34020000001320000011" required>
@@ -1086,7 +1087,7 @@ select:focus-visible {
       <pre class="ops-detail" id="sip-self-test-result">No test run</pre>
     </div>
     <div class="ops-section">
-      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">PCMA / PCMU loopback</span></div>
+      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">H.264 + PCMA / PCMU RTP loopback</span></div>
       <form class="ops-form" id="sip-lab-form" onsubmit="startSIPLab(event)">
         <select class="ops-input" id="sip-lab-mode" aria-label="SIP lab mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select>
         <input class="ops-input" id="sip-lab-device" aria-label="SIP lab device ID" placeholder="lab-device" required>
@@ -1095,7 +1096,7 @@ select:focus-visible {
         <button class="btn btn-play" id="sip-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
       </form>
       <div class="ops-error" id="sip-lab-error"></div>
-      <div class="table-wrap"><table><thead><tr><th>Device</th><th>Mode</th><th>Stream</th><th>State</th><th>Error</th><th>RTP</th><th>RTCP</th><th>Last Media</th><th>Actions</th></tr></thead><tbody id="sip-lab-sessions-tbody"></tbody></table><div id="sip-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent SIP lab sessions</div></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Device</th><th>Mode</th><th>Stream</th><th>State</th><th>Error</th><th>Audio RTP</th><th>Video RTP</th><th>RTCP</th><th>Last Media</th><th>Actions</th></tr></thead><tbody id="sip-lab-sessions-tbody"></tbody></table><div id="sip-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent SIP lab sessions</div></div></div>
     </div>
     <div class="table-wrap"><table><thead><tr><th>Call ID</th><th>Direction</th><th>Stream</th><th>Codec</th><th>State</th><th>RTP</th><th>Actions</th></tr></thead><tbody id="sip-calls-tbody"></tbody></table><div id="sip-calls-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No SIP calls</div></div></div>
     <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
@@ -2656,9 +2657,13 @@ function renderStreams(streams) {
     barWrap.appendChild(bar);
     var gopLabel = document.createElement("div");
     gopLabel.className = "gop-label";
-    gopLabel.textContent = (s.gop_cache_len || 0) + " frames · " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+    gopLabel.textContent = "GOP #" + (s.gop_generation || 0) + " " + (s.gop_cache_len || 0) + " frames / " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+    var audioLabel = document.createElement("div");
+    audioLabel.className = "gop-label";
+    audioLabel.textContent = "Audio " + (s.audio_cache_frames || 0) + " frames / " + ((s.audio_cache_duration_ms || 0) / 1000).toFixed(1) + "s";
     gop.appendChild(barWrap);
     gop.appendChild(gopLabel);
+    gop.appendChild(audioLabel);
     gopCell.appendChild(gop);
 
     var subscriberCell = row.insertCell();
@@ -3130,7 +3135,7 @@ function createDynamicActionHandlers() {
     "stream-delete": function(value) { deleteStream(value); },
     "sip-detail": function(value) { loadSIPCall(value); },
     "sip-hangup": function(value) { hangupSIPCall(value); },
-    "sip-lab-preview": function(value, button) { openPlayer(value, { video_codec: "", audio_codec: button.dataset.mediaCodec || "" }); },
+    "sip-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "" }); },
     "sip-lab-stop": function(value) { stopSIPLab(value); },
     "recording-detail": function(value) { loadRecording(value); },
     "recording-play": function(value) { playRecording(value, recordingFormats[value]); },
@@ -3147,7 +3152,7 @@ function createDynamicActionHandlers() {
     "gb-playback": function(value) { openPlayback(value); },
     "gb-preview": function(value) { openPlayer(value); },
     "gb-close-session": function(value) { gbCloseSession(value); },
-    "gb-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.mediaCodec || "H264", audio_codec: "" }); },
+    "gb-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "G711A" }); },
     "gb-lab-stop": function(value) { stopGBLab(value); }
   };
 }
@@ -3329,14 +3334,15 @@ function renderSIPLabSessions(views) {
   empty.style.display = views.length ? "none" : "block";
   views.forEach(function(view) {
     var s = view.session || {};
-    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "", audio_codec: s.codec || "" };
+    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: s.codec || "" };
     var row = tbody.insertRow();
     appendTextCell(row, s.device_id || s.identity || "-", "mono");
     appendTextCell(row, s.mode || "-");
     appendTextCell(row, s.stream_key || "-", "stream-key");
     appendTextCell(row, s.state || "-");
     appendTextCell(row, s.last_error || "-", "lab-error");
-    appendTextCell(row, (s.rtp_packets_sent || 0) + " tx / " + (s.rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.audio_rtp_packets_sent || 0) + " tx / " + (s.audio_rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.video_rtp_packets_sent || 0) + " tx / " + (s.video_rtp_packets_received || 0) + " rx", "mono");
     appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
     appendTextCell(row, formatDate(s.last_media_at));
     var actionCell = row.insertCell();
@@ -3344,7 +3350,8 @@ function renderSIPLabSessions(views) {
     actions.className = "actions";
     if (s.stream_key && view.playback && view.playback.available) {
       var preview = appendActionButton(actions, "Preview", "btn-play", "sip-lab-preview", s.stream_key);
-      preview.dataset.mediaCodec = s.codec || "";
+      preview.dataset.videoCodec = "H264";
+      preview.dataset.audioCodec = s.codec || "";
     }
     if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "sip-lab-stop", s.id);
     actionCell.appendChild(actions);
@@ -3935,7 +3942,7 @@ function renderGBLabSessions(views) {
   empty.style.display = views.length ? "none" : "block";
   views.forEach(function(view) {
     var s = view.session || {};
-    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "" };
+    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "G711A" };
     var row = tbody.insertRow();
     appendTextCell(row, (s.device_id || "-") + " / " + (s.channel_id || "-"), "mono");
     appendTextCell(row, s.mode || "-");
@@ -3950,7 +3957,8 @@ function renderGBLabSessions(views) {
     actions.className = "actions";
     if (s.stream_key && view.playback && view.playback.available) {
       var preview = appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key);
-      preview.dataset.mediaCodec = s.video_codec || "H264";
+      preview.dataset.videoCodec = "H264";
+      preview.dataset.audioCodec = "G711A";
     }
     if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "gb-lab-stop", s.id);
     actionCell.appendChild(actions);

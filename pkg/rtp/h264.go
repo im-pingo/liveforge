@@ -1,12 +1,13 @@
 package rtp
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
-	pioncodecs "github.com/pion/rtp/v2/codecs"
 	pionrtp "github.com/pion/rtp/v2"
+	pioncodecs "github.com/pion/rtp/v2/codecs"
 )
 
 // H264Packetizer packetizes H.264 NAL units into RTP packets.
@@ -274,13 +275,26 @@ func ExtractSPSPPS(config []byte) (sps, pps []byte) {
 // Delegates to pion's H264Packet for correct Single NAL / STAP-A / FU-A handling.
 // Output is in AVCC format (4-byte length prefix) to match RTMP/FLV conventions.
 type H264Depacketizer struct {
-	pkt pioncodecs.H264Packet // pion's stateful depacketizer (tracks FU-A buffer)
+	pkt        pioncodecs.H264Packet // pion's stateful depacketizer (tracks FU-A buffer)
+	sps        []byte
+	pps        []byte
+	configSent bool
 }
 
 // Depacketize processes one RTP packet and returns an AVFrame when a complete
 // NAL unit (or set of NALs) is available. Returns (nil, nil) for intermediate
 // FU-A fragments. Output payload is in AVCC format.
 func (d *H264Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, error) {
+	frames, err := d.DepacketizeFrames(pkt)
+	if err != nil || len(frames) == 0 {
+		return nil, err
+	}
+	return frames[len(frames)-1], nil
+}
+
+// DepacketizeFrames preserves SPS/PPS received in separate RTP packets and
+// emits the AVC sequence header before the first media frame that uses it.
+func (d *H264Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AVFrame, error) {
 	if len(pkt.Payload) == 0 {
 		return nil, fmt.Errorf("empty RTP payload")
 	}
@@ -294,33 +308,49 @@ func (d *H264Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, e
 		return nil, nil
 	}
 
-	// data is in Annex-B format from pion — classify first, then convert to AVCC
 	frameType := classifyAnnexB(data)
-
-	// For SequenceHeader (SPS/PPS only), build AVCDecoderConfigurationRecord
-	if frameType == avframe.FrameTypeSequenceHeader {
-		config := BuildAVCDecoderConfig(data)
-		if config == nil {
-			return nil, nil
+	hasVCL := false
+	forEachNAL(data, func(nal []byte) {
+		if len(nal) == 0 {
+			return
 		}
-		return avframe.NewAVFrame(
+		switch nal[0] & 0x1f {
+		case 1, 5:
+			hasVCL = true
+		case 7:
+			if !bytes.Equal(d.sps, nal) {
+				d.sps = append(d.sps[:0], nal...)
+				d.configSent = false
+			}
+		case 8:
+			if !bytes.Equal(d.pps, nal) {
+				d.pps = append(d.pps[:0], nal...)
+				d.configSent = false
+			}
+		}
+	})
+
+	var frames []*avframe.AVFrame
+	if !d.configSent && len(d.sps) > 0 && len(d.pps) > 0 {
+		d.configSent = true
+		frames = append(frames, avframe.NewAVFrame(
+			avframe.MediaTypeVideo,
+			avframe.CodecH264,
+			avframe.FrameTypeSequenceHeader,
+			0, 0,
+			buildAVCDecoderConfigFromNALs(d.sps, d.pps),
+		))
+	}
+	if hasVCL {
+		frames = append(frames, avframe.NewAVFrame(
 			avframe.MediaTypeVideo,
 			avframe.CodecH264,
 			frameType,
 			0, 0,
-			config,
-		), nil
+			AnnexBToAVCC(data),
+		))
 	}
-
-	// For regular frames, convert Annex-B to AVCC (4-byte length prefix)
-	avcc := AnnexBToAVCC(data)
-	return avframe.NewAVFrame(
-		avframe.MediaTypeVideo,
-		avframe.CodecH264,
-		frameType,
-		0, 0,
-		avcc,
-	), nil
+	return frames, nil
 }
 
 // classifyAnnexB scans Annex-B data for NAL types and returns the frame type.
@@ -389,4 +419,3 @@ func forEachNAL(data []byte, fn func([]byte)) {
 		}
 	}
 }
-

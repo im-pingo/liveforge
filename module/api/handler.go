@@ -49,17 +49,20 @@ func writeError(w http.ResponseWriter, httpCode int, msg string) {
 
 // StreamInfo represents a single stream in the API response.
 type StreamInfo struct {
-	Key            string             `json:"key"`
-	State          string             `json:"state"`
-	Publisher      string             `json:"publisher"`
-	VideoCodec     string             `json:"video_codec"`
-	AudioCodec     string             `json:"audio_codec"`
-	GOPCacheLen    int                `json:"gop_cache_len"`
-	GOPVideoFrames int                `json:"gop_video_frames"`
-	GOPAudioFrames int                `json:"gop_audio_frames"`
-	GOPDurationMs  int64              `json:"gop_duration_ms"`
-	Subscribers    map[string]int     `json:"subscribers"`
-	Stats          *StreamStatsDetail `json:"stats,omitempty"`
+	Key                  string             `json:"key"`
+	State                string             `json:"state"`
+	Publisher            string             `json:"publisher"`
+	VideoCodec           string             `json:"video_codec"`
+	AudioCodec           string             `json:"audio_codec"`
+	GOPCacheLen          int                `json:"gop_cache_len"`
+	GOPVideoFrames       int                `json:"gop_video_frames"`
+	GOPAudioFrames       int                `json:"gop_audio_frames"`
+	GOPDurationMs        int64              `json:"gop_duration_ms"`
+	GOPGeneration        uint64             `json:"gop_generation"`
+	AudioCacheFrames     int                `json:"audio_cache_frames"`
+	AudioCacheDurationMs int64              `json:"audio_cache_duration_ms"`
+	Subscribers          map[string]int     `json:"subscribers"`
+	Stats                *StreamStatsDetail `json:"stats,omitempty"`
 }
 
 // StreamStatsDetail contains detailed stream statistics.
@@ -93,15 +96,19 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 	}
 
 	gopDetail := stream.GOPCacheDetail()
+	audioDetail := stream.AudioCacheDetail()
 
 	info := StreamInfo{
-		Key:            stream.Key(),
-		State:          state.String(),
-		GOPCacheLen:    gopDetail.TotalFrames,
-		GOPVideoFrames: gopDetail.VideoFrames,
-		GOPAudioFrames: gopDetail.AudioFrames,
-		GOPDurationMs:  gopDetail.DurationMs,
-		Subscribers:    subs,
+		Key:                  stream.Key(),
+		State:                state.String(),
+		GOPCacheLen:          gopDetail.TotalFrames,
+		GOPVideoFrames:       gopDetail.VideoFrames,
+		GOPAudioFrames:       gopDetail.AudioFrames,
+		GOPDurationMs:        gopDetail.DurationMs,
+		GOPGeneration:        gopDetail.Generation,
+		AudioCacheFrames:     audioDetail.Frames,
+		AudioCacheDurationMs: audioDetail.DurationMs,
+		Subscribers:          subs,
 	}
 
 	if pub := stream.Publisher(); pub != nil {

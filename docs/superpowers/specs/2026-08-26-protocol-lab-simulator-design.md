@@ -39,8 +39,8 @@ cannot create one locally.
 ## Non-Goals
 
 - Emulating a complete telephone user experience or camera firmware.
-- SIP video; the current SIP gateway is audio-only and the lab preserves that
-  contract.
+- Full SIP softphone/camera emulation beyond the deterministic H.264 plus
+  PCMA/PCMU dual-track test profile.
 - Requiring FFmpeg, Docker, an external PBX, or an external GB28181 platform.
 - Persisting lab sessions across process restarts.
 
@@ -60,9 +60,11 @@ stable HTTP responses. It does not own protocol state. Console code refreshes
 lab snapshots along with existing SIP calls and GB28181 devices/sessions, and
 uses the same stream preview URL construction as the Streams page.
 
-Deterministic media is generated without native dependencies: SIP uses a
-configured PCMA or PCMU RTP tone; GB28181 uses small periodic H.264 test frames
-wrapped by the existing PS muxer and packetized as RTP payload type 96.
+Deterministic media is generated without native dependencies from one shared
+moving 160x90 constrained-baseline H.264 profile at 25 fps with one IDR per
+second and audible 20 ms G.711 frames. SIP sends H.264 and configured PCMA or
+PCMU on separate RTP tracks. GB28181 muxes H.264 and G.711A through the existing
+PS muxer and packetizes the result as RTP payload type 96.
 
 ## API Contract
 

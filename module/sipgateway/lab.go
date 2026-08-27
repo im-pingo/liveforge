@@ -15,7 +15,9 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/labmedia"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	mediarp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
@@ -178,6 +180,8 @@ type sipLabSession struct {
 	mediaWG       sync.WaitGroup
 	rtpConn       *net.UDPConn
 	rtcpConn      *net.UDPConn
+	videoRTPConn  *net.UDPConn
+	videoRTCPConn *net.UDPConn
 
 	rtpPacketsSent  atomic.Uint64
 	rtpPacketsRecv  atomic.Uint64
@@ -185,6 +189,10 @@ type sipLabSession struct {
 	rtpBytesRecv    atomic.Uint64
 	rtcpPacketsSent atomic.Uint64
 	rtcpPacketsRecv atomic.Uint64
+	audioRTPSent    atomic.Uint64
+	audioRTPRecv    atomic.Uint64
+	videoRTPSent    atomic.Uint64
+	videoRTPRecv    atomic.Uint64
 }
 
 func newSIPLabSession(id, identity string, request LabSessionRequest, gateway *Gateway) *sipLabSession {
@@ -261,8 +269,15 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	if err != nil {
 		return err
 	}
+	videoRTPConn, videoRTCPConn, err := listenLabUDPPair()
+	if err != nil {
+		_ = rtpConn.Close()
+		_ = rtcpConn.Close()
+		return err
+	}
 	s.mu.Lock()
 	s.rtpConn, s.rtcpConn = rtpConn, rtcpConn
+	s.videoRTPConn, s.videoRTCPConn = videoRTPConn, videoRTCPConn
 	s.mu.Unlock()
 	ua, client, err := newLabClient()
 	if err != nil {
@@ -279,7 +294,7 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	codec := strings.ToUpper(strings.TrimSpace(s.request.Codec))
 	callID := uuid.NewString()
 	invite := newLabInvite(sip.INVITE, sip.Uri{Scheme: "sip", User: s.request.DeviceID, Host: host, Port: port}, s.request.DeviceID, s.gateway.sipService.Domain(), callID)
-	invite.SetBody(buildLabSDP(codec, rtpConn.LocalAddr().(*net.UDPAddr).Port))
+	invite.SetBody(buildLabSDP(codec, rtpConn.LocalAddr().(*net.UDPAddr).Port, videoRTPConn.LocalAddr().(*net.UDPAddr).Port))
 	invite.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	invite.AppendHeader(sip.NewHeader(labStreamKeyHeader, s.request.StreamKey))
 	invite.SetTransport("udp")
@@ -301,13 +316,18 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	if audio == nil || audio.Port <= 0 {
 		return errors.New("lab SIP answer has no audio RTP port")
 	}
+	video := firstVideoMedia(answer)
+	if video == nil || video.Port <= 0 {
+		return errors.New("lab SIP answer has no video RTP port")
+	}
 	call, ok := s.gateway.Call(callID)
 	if !ok || call.State != CallStateActive {
 		return errors.New("lab publish call did not become active")
 	}
 	s.setState(LabSessionStateActive)
-	s.mediaWG.Add(1)
-	go s.publishMediaLoop(call.RTPPort, codec)
+	s.mediaWG.Add(2)
+	go s.publishAudioLoop(audio.Port, codec)
+	go s.publishVideoLoop(video.Port)
 	return nil
 }
 
@@ -317,15 +337,22 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 		return fmt.Errorf("%w: receive stream %q", ErrStreamNotFound, s.request.StreamKey)
 	}
 	mediaInfo := stream.Publisher().MediaInfo()
-	if mediaInfo == nil || codecNameForAV(mediaInfo.AudioCodec) != strings.ToUpper(strings.TrimSpace(s.request.Codec)) {
+	if mediaInfo == nil || codecNameForAV(mediaInfo.AudioCodec) != strings.ToUpper(strings.TrimSpace(s.request.Codec)) || mediaInfo.VideoCodec != avframe.CodecH264 {
 		return ErrCodecMismatch
 	}
 	rtpConn, rtcpConn, err := listenLabUDPPair()
 	if err != nil {
 		return err
 	}
+	videoRTPConn, videoRTCPConn, err := listenLabUDPPair()
+	if err != nil {
+		_ = rtpConn.Close()
+		_ = rtcpConn.Close()
+		return err
+	}
 	s.mu.Lock()
 	s.rtpConn, s.rtcpConn = rtpConn, rtcpConn
+	s.videoRTPConn, s.videoRTCPConn = videoRTPConn, videoRTCPConn
 	s.mu.Unlock()
 	ua, err := sipgo.NewUA(sipgo.WithUserAgentHostname("lab.local"))
 	if err != nil {
@@ -351,7 +378,8 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 			return
 		}
 		audio := firstAudioMedia(offer)
-		if audio == nil {
+		video := firstVideoMedia(offer)
+		if audio == nil || video == nil {
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 			return
 		}
@@ -360,7 +388,11 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 			return
 		}
-		response := sip.NewResponseFromRequest(req, 200, "OK", buildLabSDP(codec, rtpConn.LocalAddr().(*net.UDPAddr).Port))
+		if _, ok := negotiateH264(video); !ok {
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
+			return
+		}
+		response := sip.NewResponseFromRequest(req, 200, "OK", buildLabSDP(codec, rtpConn.LocalAddr().(*net.UDPAddr).Port, videoRTPConn.LocalAddr().(*net.UDPAddr).Port))
 		response.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 		if to := response.To(); to != nil {
 			to.Params.Add("tag", "lab-"+s.id[:8])
@@ -401,42 +433,42 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	s.callID = callID
 	s.mu.Unlock()
 	s.setState(LabSessionStateActive)
-	s.mediaWG.Add(3)
-	go s.receiveRTPLoop()
-	go s.receiveRTCPLoop()
+	s.mediaWG.Add(5)
+	go s.receiveRTPLoop(rtpConn, false)
+	go s.receiveRTPLoop(videoRTPConn, true)
+	go s.receiveRTCPLoop(rtcpConn)
+	go s.receiveRTCPLoop(videoRTCPConn)
 	go s.receiveSourceLoop(stream, strings.ToUpper(strings.TrimSpace(s.request.Codec)))
 	return nil
 }
 
-func (s *sipLabSession) publishMediaLoop(remotePort int, codec string) {
+func (s *sipLabSession) publishAudioLoop(remotePort int, codec string) {
 	defer s.mediaWG.Done()
 	remoteRTP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort}
 	remoteRTCP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort + 1}
 	seq := uint16(1)
-	timestamp := uint32(8000)
-	ticker := time.NewTicker(20 * time.Millisecond)
+	var dts int64
+	ticker := time.NewTicker(time.Duration(labmedia.AudioFrameDurationMs) * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		payload := make([]byte, 160)
-		for i := range payload {
-			payload[i] = byte(i) ^ 0x5a
-		}
-		packet := &pionrtp.Packet{Header: pionrtp.Header{Version: 2, PayloadType: labPayloadType(codec), SequenceNumber: seq, Timestamp: timestamp, SSRC: 0x4c465047}, Payload: payload}
+		frame := labmedia.G711Frame(codecAV(codec), dts)
+		packet := &pionrtp.Packet{Header: pionrtp.Header{Version: 2, PayloadType: labPayloadType(codec), SequenceNumber: seq, Timestamp: uint32(dts * 8), SSRC: 0x4c465041}, Payload: frame.Payload}
 		if data, err := packet.Marshal(); err == nil {
 			if n, writeErr := s.rtpConn.WriteToUDP(data, remoteRTP); writeErr == nil {
 				s.rtpPacketsSent.Add(1)
+				s.audioRTPSent.Add(1)
 				s.rtpBytesSent.Add(uint64(n))
 				s.markMedia()
 			}
 		}
-		if data, err := (&rtcp.ReceiverReport{SSRC: 0x4c465047}).Marshal(); err == nil {
+		if data, err := (&rtcp.ReceiverReport{SSRC: 0x4c465041}).Marshal(); err == nil {
 			if _, writeErr := s.rtcpConn.WriteToUDP(data, remoteRTCP); writeErr == nil {
 				s.rtcpPacketsSent.Add(1)
 				s.markMedia()
 			}
 		}
 		seq++
-		timestamp += 160
+		dts += labmedia.AudioFrameDurationMs
 		select {
 		case <-s.ctx.Done():
 			return
@@ -445,12 +477,53 @@ func (s *sipLabSession) publishMediaLoop(remotePort int, codec string) {
 	}
 }
 
-func (s *sipLabSession) receiveRTPLoop() {
+func (s *sipLabSession) publishVideoLoop(remotePort int) {
+	defer s.mediaWG.Done()
+	remoteRTP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort}
+	remoteRTCP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort + 1}
+	session := mediarp.NewSession(96, 90000)
+	packetizer := &mediarp.H264Packetizer{}
+	var dts int64
+	ticker := time.NewTicker(time.Duration(labmedia.VideoFrameDurationMs) * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		packets, err := packetizer.Packetize(labmedia.VideoFrame(dts), 1200)
+		if err == nil {
+			session.WrapPackets(packets, dts)
+			for _, packet := range packets {
+				data, marshalErr := packet.Marshal()
+				if marshalErr != nil {
+					continue
+				}
+				if n, writeErr := s.videoRTPConn.WriteToUDP(data, remoteRTP); writeErr == nil {
+					s.rtpPacketsSent.Add(1)
+					s.videoRTPSent.Add(1)
+					s.rtpBytesSent.Add(uint64(n))
+					s.markMedia()
+				}
+			}
+		}
+		if data, reportErr := (&rtcp.ReceiverReport{SSRC: session.SSRC}).Marshal(); reportErr == nil {
+			if _, writeErr := s.videoRTCPConn.WriteToUDP(data, remoteRTCP); writeErr == nil {
+				s.rtcpPacketsSent.Add(1)
+				s.markMedia()
+			}
+		}
+		dts += labmedia.VideoFrameDurationMs
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *sipLabSession) receiveRTPLoop(conn *net.UDPConn, video bool) {
 	defer s.mediaWG.Done()
 	buf := make([]byte, 2048)
 	for {
-		_ = s.rtpConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, _, err := s.rtpConn.ReadFromUDP(buf)
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if s.ctx.Err() != nil {
 				return
@@ -463,18 +536,23 @@ func (s *sipLabSession) receiveRTPLoop() {
 		var packet pionrtp.Packet
 		if packet.Unmarshal(buf[:n]) == nil {
 			s.rtpPacketsRecv.Add(1)
+			if video {
+				s.videoRTPRecv.Add(1)
+			} else {
+				s.audioRTPRecv.Add(1)
+			}
 			s.rtpBytesRecv.Add(uint64(n))
 			s.markMedia()
 		}
 	}
 }
 
-func (s *sipLabSession) receiveRTCPLoop() {
+func (s *sipLabSession) receiveRTCPLoop(conn *net.UDPConn) {
 	defer s.mediaWG.Done()
 	buf := make([]byte, 2048)
 	for {
-		_ = s.rtcpConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, _, err := s.rtcpConn.ReadFromUDP(buf)
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if s.ctx.Err() != nil {
 				return
@@ -494,26 +572,21 @@ func (s *sipLabSession) receiveRTCPLoop() {
 
 func (s *sipLabSession) receiveSourceLoop(stream *core.Stream, codec string) {
 	defer s.mediaWG.Done()
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(labmedia.AudioFrameDurationMs) * time.Millisecond)
 	defer ticker.Stop()
 	var timestamp int64
 	for {
-		stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeAudio, codecAV(codec), avframe.FrameTypeInterframe, timestamp, timestamp, deterministicAudioPayload()))
-		timestamp += 20
+		if timestamp%labmedia.VideoFrameDurationMs == 0 {
+			stream.WriteFrame(labmedia.VideoFrame(timestamp))
+		}
+		stream.WriteFrame(labmedia.G711Frame(codecAV(codec), timestamp))
+		timestamp += labmedia.AudioFrameDurationMs
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
-}
-
-func deterministicAudioPayload() []byte {
-	payload := make([]byte, 160)
-	for i := range payload {
-		payload[i] = byte(0xa5 ^ i)
-	}
-	return payload
 }
 
 func (s *sipLabSession) stop() error {
@@ -546,12 +619,19 @@ func (s *sipLabSession) cleanup() {
 		invite, response, client := s.invite, s.response, s.client
 		peerCancel, peerDone, ua := s.peerCancel, s.peerDone, s.ua
 		rtpConn, rtcpConn := s.rtpConn, s.rtcpConn
+		videoRTPConn, videoRTCPConn := s.videoRTPConn, s.videoRTCPConn
 		s.mu.RUnlock()
 		if rtpConn != nil {
 			_ = rtpConn.Close()
 		}
 		if rtcpConn != nil {
 			_ = rtcpConn.Close()
+		}
+		if videoRTPConn != nil {
+			_ = videoRTPConn.Close()
+		}
+		if videoRTCPConn != nil {
+			_ = videoRTCPConn.Close()
 		}
 		var closeErr error
 		if mode == LabModePublish && client != nil && invite != nil && response != nil {
@@ -632,6 +712,10 @@ func (s *sipLabSession) snapshot() LabSessionSnapshot {
 	s.mu.RUnlock()
 	result.RTPPacketsSent = s.rtpPacketsSent.Load()
 	result.RTPPacketsRecv = s.rtpPacketsRecv.Load()
+	result.AudioRTPPacketsSent = s.audioRTPSent.Load()
+	result.AudioRTPPacketsRecv = s.audioRTPRecv.Load()
+	result.VideoRTPPacketsSent = s.videoRTPSent.Load()
+	result.VideoRTPPacketsRecv = s.videoRTPRecv.Load()
 	result.RTPBytesSent = s.rtpBytesSent.Load()
 	result.RTPBytesRecv = s.rtpBytesRecv.Load()
 	result.RTCPPacketsSent = s.rtcpPacketsSent.Load()
@@ -794,9 +878,9 @@ func freeLabPort() (int, error) {
 	return port, conn.Close()
 }
 
-func buildLabSDP(codec string, port int) []byte {
+func buildLabSDP(codec string, audioPort, videoPort int) []byte {
 	pt := labPayloadType(codec)
-	return []byte(fmt.Sprintf("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=LiveForge SIP lab\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio %d RTP/AVP %d\r\na=rtpmap:%d %s/8000\r\n", port, pt, pt, codec))
+	return []byte(fmt.Sprintf("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=LiveForge SIP lab\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio %d RTP/AVP %d\r\na=rtpmap:%d %s/8000\r\nm=video %d RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42c00b\r\n", audioPort, pt, pt, codec, videoPort))
 }
 
 func firstAudioMedia(description *sdp.SessionDescription) *sdp.MediaDescription {
@@ -805,6 +889,18 @@ func firstAudioMedia(description *sdp.SessionDescription) *sdp.MediaDescription 
 	}
 	for _, media := range description.Media {
 		if media.Type == "audio" {
+			return media
+		}
+	}
+	return nil
+}
+
+func firstVideoMedia(description *sdp.SessionDescription) *sdp.MediaDescription {
+	if description == nil {
+		return nil
+	}
+	for _, media := range description.Media {
+		if media.Type == "video" {
 			return media
 		}
 	}

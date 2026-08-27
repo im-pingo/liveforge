@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -96,6 +97,17 @@ func TestGBLabPublishUsesRealRegistrationAndMedia(t *testing.T) {
 	stream, ok := h.hub.Find(request.StreamKey)
 	if !ok || stream.Publisher() == nil {
 		t.Fatalf("publish stream = (%v, %v), keys=%v, want active publisher", stream, ok, h.hub.Keys())
+	}
+	waitForGBLab(t, func() bool {
+		stats := stream.Stats()
+		gop := stream.GOPCacheDetail()
+		return stats.VideoFrames >= 10 && stats.AudioFrames >= 10 &&
+			gop.VideoFrames >= 2 && gop.AudioFrames >= 2 &&
+			gop.DurationMs >= 40 && gop.DurationMs <= 1200
+	})
+	mediaInfo := stream.Publisher().MediaInfo()
+	if mediaInfo == nil || mediaInfo.VideoCodec != avframe.CodecH264 || mediaInfo.AudioCodec != avframe.CodecG711A || mediaInfo.SampleRate != 8000 || mediaInfo.Channels != 1 {
+		t.Fatalf("publish media info = %+v, want H264/G711A at 8000 Hz mono", mediaInfo)
 	}
 
 	if err := h.module.StopLabSession(session.ID); err != nil {
@@ -333,19 +345,40 @@ func TestGB28181InviteRecognitionRejectsSIPAudioAndOtherVideo(t *testing.T) {
 }
 
 func TestDeterministicGBLabFrameContainsDecodableH264ParameterSets(t *testing.T) {
-	nalus := h264.ExtractNALUs(deterministicGBLabFrame(0).Payload)
+	first := deterministicGBLabFrame(0)
+	nalus := h264.ExtractNALUs(first.Payload)
 	if len(nalus) < 3 {
 		t.Fatalf("deterministic frame NAL units = %d, want SPS/PPS/IDR", len(nalus))
 	}
-	if nalus[0][0]&0x1f != h264.NALTypeSPS || nalus[1][0]&0x1f != h264.NALTypePPS || nalus[2][0]&0x1f != h264.NALTypeIDR {
-		t.Fatalf("deterministic frame NAL types = %d/%d/%d, want 7/8/5", nalus[0][0]&0x1f, nalus[1][0]&0x1f, nalus[2][0]&0x1f)
+	var sps []byte
+	var hasPPS, hasIDR bool
+	for _, nalu := range nalus {
+		switch nalu[0] & 0x1f {
+		case h264.NALTypeSPS:
+			sps = nalu
+		case h264.NALTypePPS:
+			hasPPS = true
+		case h264.NALTypeIDR:
+			hasIDR = true
+		}
 	}
-	info, err := h264.ParseSPS(nalus[0])
+	if len(sps) == 0 || !hasPPS || !hasIDR {
+		t.Fatalf("deterministic frame NAL units missing SPS/PPS/IDR: %v", nalus)
+	}
+	info, err := h264.ParseSPS(sps)
 	if err != nil {
 		t.Fatalf("ParseSPS: %v", err)
 	}
-	if info.Width <= 0 || info.Height <= 0 {
-		t.Fatalf("SPS dimensions = %dx%d, want positive dimensions", info.Width, info.Height)
+	if info.Width < 160 || info.Height < 90 {
+		t.Fatalf("SPS dimensions = %dx%d, want at least 160x90", info.Width, info.Height)
+	}
+
+	next := deterministicGBLabFrame(40)
+	if next.FrameType != avframe.FrameTypeInterframe {
+		t.Fatalf("second deterministic frame type = %v, want interframe", next.FrameType)
+	}
+	if bytes.Equal(first.Payload, next.Payload) {
+		t.Fatal("consecutive deterministic video frames are identical")
 	}
 }
 

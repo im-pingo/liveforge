@@ -544,8 +544,8 @@ func TestStreamGOPCacheDetail(t *testing.T) {
 
 	// Empty GOP cache detail
 	d := s.GOPCacheDetail()
-	if d.TotalFrames != 0 {
-		t.Errorf("expected 0 total frames, got %d", d.TotalFrames)
+	if d.TotalFrames != 0 || d.Generation != 0 {
+		t.Errorf("empty GOP detail = %+v, want zero frames and generation", d)
 	}
 
 	// Write keyframe + interframe + late-arriving audio with an older DTS.
@@ -568,6 +568,14 @@ func TestStreamGOPCacheDetail(t *testing.T) {
 	}
 	if d.DurationMs != 60 {
 		t.Errorf("expected duration 60ms, got %d", d.DurationMs)
+	}
+	if d.Generation != 1 {
+		t.Errorf("expected generation 1 after first keyframe, got %d", d.Generation)
+	}
+
+	s.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 200, 200, []byte{0x65}))
+	if got := s.GOPCacheDetail().Generation; got != 2 {
+		t.Errorf("expected generation 2 after second keyframe, got %d", got)
 	}
 }
 

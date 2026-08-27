@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- Keep SIP lab media audio-only because the current SIP gateway is audio-only.
-- Keep GB28181 media H.264 in PS over RTP payload type 96.
+- Use dependency-free H.264 plus G.711 media in both labs: separate RTP tracks
+  for SIP and PS over RTP payload type 96 for GB28181.
 - Bind simulator endpoints to loopback and release all sockets/ports on stop.
 - Do not require FFmpeg, Docker, or an external PBX/GB28181 platform.
 - Preserve existing self-test endpoints and existing protocol APIs.
@@ -32,10 +32,10 @@
 - Produce `LabMode` values `publish` and `receive` plus immutable lab session snapshots with identity, stream key, state, direction, media counters, and timestamps.
 - Produce manager contracts for start, list, and idempotent stop.
 
-- [ ] Write failing tests for SIP and GB28181 start validation, list visibility, duplicate identity rejection, and idempotent stop.
-- [ ] Run focused tests and confirm they fail because the Lab Manager contracts do not exist.
-- [ ] Add the minimal shared snapshot and error contracts without implementing transport.
-- [ ] Run focused tests again and confirm contract-level failures now identify missing lifecycle behavior.
+- [x] Write failing tests for SIP and GB28181 start validation, list visibility, duplicate identity rejection, and idempotent stop.
+- [x] Run focused tests and confirm they fail because the Lab Manager contracts do not exist.
+- [x] Add the minimal shared snapshot and error contracts without implementing transport.
+- [x] Run focused tests again and confirm contract-level failures now identify missing lifecycle behavior.
 
 ### Task 2: Implement SIP Fake Device Publish And Receive
 
@@ -51,10 +51,10 @@
 - Publish mode must create a real inbound SIP call and send RTP/RTCP into the gateway-created stream.
 - Receive mode must create a fake SIP endpoint that accepts the gateway outbound INVITE and counts received RTP/RTCP.
 
-- [ ] Add failing integration tests that wait for a published stream and non-zero RTP counters, then stop and verify stream/session cleanup.
-- [ ] Implement loopback SIP UA/server signaling, deterministic PCMA/PCMU RTP generation, RTCP reports, and receive counters.
-- [ ] Connect lifecycle cleanup to gateway Hangup/stream publisher removal and make repeated stop safe.
-- [ ] Run `go test ./module/sipgateway -run 'Lab|SelfTest' -v` and then `go test -race ./module/sipgateway`.
+- [x] Add failing integration tests that wait for a published stream and non-zero RTP counters, then stop and verify stream/session cleanup.
+- [x] Implement loopback SIP UA/server signaling, deterministic H.264 plus PCMA/PCMU RTP generation, RTCP reports, and per-track receive counters.
+- [x] Connect lifecycle cleanup to gateway Hangup/stream publisher removal and make repeated stop safe.
+- [x] Run `go test ./module/sipgateway -run 'Lab|SelfTest' -v` and then `go test -race ./module/sipgateway`.
 
 ### Task 3: Implement GB28181 Fake Device Publish And Receive
 
@@ -70,10 +70,10 @@
 - Publish mode must register a fake device/channel and send PS/RTP media into a real GB28181 receiver.
 - Receive mode must answer the server's live-play INVITE and count PS/RTP/RTCP received by the fake device.
 
-- [ ] Add failing tests for fake registration, channel visibility, live publish stream creation, receive-mode INVITE acceptance, non-zero counters, and teardown.
-- [ ] Implement fake device SIP handlers for REGISTER, INVITE, ACK, BYE, and Keepalive/Catalog state.
-- [ ] Implement deterministic H.264 frame creation, existing PS muxing, RTP packetization, RTCP reports, and receiver counters.
-- [ ] Run `go test ./module/gb28181 -run 'Lab|SelfTest' -v` and then `go test -race ./module/gb28181`.
+- [x] Add failing tests for fake registration, channel visibility, live publish stream creation, receive-mode INVITE acceptance, non-zero counters, and teardown.
+- [x] Implement fake device SIP handlers for REGISTER, INVITE, ACK, BYE, and Keepalive/Catalog state.
+- [x] Implement deterministic H.264 frame creation, existing PS muxing, RTP packetization, RTCP reports, and receiver counters.
+- [x] Run `go test ./module/gb28181 -run 'Lab|SelfTest' -v` and then `go test -race ./module/gb28181`.
 
 ### Task 4: Add Authenticated Lab APIs And Cross-Protocol Metadata
 
@@ -91,10 +91,10 @@
 - Return stable `{code,message,data}` management envelopes containing session snapshots and resolved stream keys.
 - Include cross-protocol playback metadata for active published streams using the same listener discovery contract as `/api/v1/server/info`.
 
-- [ ] Add failing route/RBAC tests for viewer list, operator start/stop, invalid body, unavailable module, and stream metadata.
-- [ ] Implement request decoding, error mapping, provider lookup, and playback URL derivation.
-- [ ] Update OpenAPI schemas and verify unknown fields, missing fields, and credentials are handled safely.
-- [ ] Run `go test ./module/api -run 'Lab|Protocol|Management'`.
+- [x] Add failing route/RBAC tests for viewer list, operator start/stop, invalid body, unavailable module, and stream metadata.
+- [x] Implement request decoding, error mapping, provider lookup, and playback URL derivation.
+- [x] Update OpenAPI schemas and verify unknown fields, missing fields, and credentials are handled safely.
+- [x] Run `go test ./module/api -run 'Lab|Protocol|Management'`.
 
 ### Task 5: Add Console Device Controls And Cross-Protocol Playback
 
@@ -108,9 +108,9 @@
 - Add safe action handlers that call the new API routes and show active published streams in the existing player.
 - Keep real devices/calls/sessions and local lab sessions distinguishable.
 
-- [ ] Add failing HTML/source tests for controls, endpoint calls, permission attributes, and player actions.
-- [ ] Implement responsive lab controls, session tables, polling, stop confirmation, and cross-protocol preview buttons.
-- [ ] Run focused Console tests and any available Chromedp tests.
+- [x] Add failing HTML/source tests for controls, endpoint calls, permission attributes, and player actions.
+- [x] Implement responsive lab controls, session tables, polling, stop confirmation, and cross-protocol preview buttons.
+- [x] Run focused Console tests and any available Chromedp tests.
 
 ### Task 6: Synchronize Documentation And Run Full Verification
 
@@ -124,8 +124,8 @@
 - Modify: `docs/PROGRESS.md`
 - Modify: `AGENTS.md` only if verification/documentation contract changes
 
-- [ ] Document exact local workflows for SIP/GB28181 publish, receive, cross-protocol playback, stop, and cleanup.
-- [ ] Run `gofmt` and `git diff --check`.
-- [ ] Run focused tests, `go test -race ./...`, `go vet ./...`, both builds, tagged baseline, and docs checks.
-- [ ] Run targeted protocol/API race stress and verify no generated media, binaries, secrets, or coverage files are staged.
+- [x] Document exact local workflows for SIP/GB28181 publish, receive, cross-protocol playback, stop, and cleanup.
+- [x] Run `gofmt` and `git diff --check`.
+- [x] Run focused tests, `go test -race ./...`, `go vet ./...`, both builds, tagged baseline, and docs checks.
+- [x] Run targeted protocol/API race stress and verify no generated media, binaries, secrets, or coverage files are staged.
 - [ ] Commit with `im-pingo` and inspect author, stat, and clean worktree.
