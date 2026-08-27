@@ -30,7 +30,7 @@ flowchart LR
 
 - **统一时钟和帧模型**：`DTS`、`PTS` 使用毫秒，payload 保留原 codec 数据，不夹带容器头。
 - **单 publisher、多 reader**：一个 stream key 同时只接受一个 publisher；每个消费方拥有独立 cursor，不会因另一个消费者读取而消耗数据。
-- **缓存与实时连续**：新订阅者先拿到关键帧起始的历史数据，再从同一快照 cursor 继续实时数据。
+- **缓存与实时连续**：新订阅者先拿到当前 publisher generation 的关键帧起始历史数据，再从同一快照 cursor 继续实时数据；publisher 替换会终止旧 generation，不能把旧环形缓存接到新 publisher 上。
 - **协议状态隔离**：共享的是帧或已 mux 的字节；SSRC、RTP sequence、RTMP chunk 状态等连接状态仍属于单个连接。
 - **按需资源**：muxer、音频转码轨道、origin pull 和 forward target 都在真正需要时建立，并在无消费者或关闭时回收。
 
@@ -335,7 +335,7 @@ ForwardManager 监听异步 `EventPublish`：
 1. scheduler 从静态目标列表或 HTTP schedule URL 解析目标；
 2. health filter 过滤不健康节点；
 3. 每个目标建立独立 `ForwardTarget` 和 goroutine；
-4. target 自己创建 RingReader，读取主 ring 并调用 transport.Push；
+4. target 让 transport 从一个原子启动快照读取：协议需要时只发送该快照的 sequence header/GOP，再以 `LiveCursor` 创建 reader；`GenerationDone` 或 generation 校验失败时立即结束，不会从主 ring 的最老位置重放旧 publisher；
 5. 失败按指数退避重试，退避上限 30 秒；`ErrCodecMismatch` 不重试；
 6. 关闭 publisher 或模块时关闭 target，释放连接池和 reader。
 
@@ -410,8 +410,8 @@ auth 模块以同步 priority 10 hook 参与 publish/subscribe；cluster、recor
 
 ## 15. 录制、DVR、通知和监控
 
-- **Record**：监听 publish 生命周期，创建自己的主 ring reader；先写 sequence header，再写 FLV、fMP4、MP4、TS 或 HLS；结束时 drain 待处理帧、关闭 writer，并记录 completed/failed。没有媒体帧的会话保留为 failed，不伪装成可播放文件。
-- **DVR**：独立 reader 读取主 ring，用 TS muxer 按关键帧和 segment duration 切片。partial 文件完成后才发布为正式 segment，维护窗口和索引，并在自己的 listener 提供时移 HLS。
+- **Record**：监听 publish 生命周期，从同一个启动快照取得 `MediaInfo`、headers、GOP 和 `LiveCursor`；先写协议需要的 sequence header/GOP，再写 FLV、fMP4、MP4、TS 或 HLS，generation 结束时停止旧 reader。只有实际媒体帧才能完成成功文件；sequence-header-only 或空会话保留为 failed，不伪装成可播放文件。
+- **DVR**：从同一个启动快照取得预期音视频轨道、headers、GOP 和 `LiveCursor`，用独立 reader 和 TS muxer 按关键帧及 segment duration 切片。generation 结束会取消旧 reader；partial 文件完成后才发布为正式 segment，只有实际媒体才会建立成功 segment，随后维护窗口和索引并在自己的 listener 提供时移 HLS。
 - **Notify**：把异步生命周期事件发送到 HTTP webhook 或 WebSocket；webhook 使用 HMAC-SHA256 签名。
 - **Metrics**：Prometheus collector 汇总 server、stream、协议订阅者、GOP、转发、录制和 DVR 指标。转发字节计数做了批量提交，减少每帧指标开销。
 - **API/Console**：REST、RBAC、配置、cluster、SIP/GB、录制/DVR、审计和协议实验室属于控制面，不直接参与媒体热路径。

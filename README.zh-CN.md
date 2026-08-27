@@ -138,7 +138,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **限流** — IP 级令牌桶，防止连接洪泛
 - **慢消费者保护** — 基于 EWMA 的延迟检测，渐进式丢帧
 - **GCC 拥塞控制** — WebRTC WHEP 发送端带宽估计，自适应码率
-- **GOP 缓存** — 新订阅者即时收到最新关键帧组，实现快速起播
+- **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体
 
 ## 架构
 

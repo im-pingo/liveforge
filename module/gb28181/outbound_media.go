@@ -36,12 +36,14 @@ type outboundMediaSession struct {
 	remoteRTCP *net.UDPAddr
 	ssrc       uint32
 	sequence   uint16
+	snapshot   core.StreamStartupSnapshot
 
 	closeOnce sync.Once
 	subOnce   sync.Once
 	wg        sync.WaitGroup
 	done      chan error
 	admitted  bool
+	release   func()
 	rtcpMu    sync.Mutex
 	lastRTCP  time.Time
 
@@ -92,10 +94,12 @@ func (s *outboundMediaSession) setRemote(address *net.UDPAddr) error {
 }
 
 func (s *outboundMediaSession) admit() error {
-	if err := s.stream.AddSubscriber("gb28181"); err != nil {
+	release, err := s.stream.AddSubscriberForGeneration("gb28181", s.snapshot.Generation)
+	if err != nil {
 		return err
 	}
 	s.admitted = true
+	s.release = release
 	return nil
 }
 
@@ -112,15 +116,52 @@ func (s *outboundMediaSession) run() {
 }
 
 func (s *outboundMediaSession) runMedia() error {
-	reader := s.stream.RingBuffer().NewReaderAt(s.stream.GOPCacheSourceStart())
+	readCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.snapshot.GenerationDone:
+			cancel()
+		case <-readCtx.Done():
+		}
+	}()
+	if !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+		return nil
+	}
 	muxer := ps.NewMuxer()
+	for _, header := range []*avframe.AVFrame{s.snapshot.VideoSequenceHeader, s.snapshot.AudioSequenceHeader} {
+		if header == nil {
+			continue
+		}
+		if err := s.sendFrame(muxer, header); err != nil {
+			if readCtx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("GB28181 outbound media header: %w", err)
+		}
+	}
+	for _, frame := range s.snapshot.ReplayFrames {
+		if !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+			return nil
+		}
+		if err := s.sendFrame(muxer, frame); err != nil {
+			if readCtx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("GB28181 outbound media replay: %w", err)
+		}
+	}
+	reader := s.stream.RingBuffer().NewReaderAt(s.snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(s.ctx)
+		frame, ok := reader.ReadContext(readCtx)
 		if !ok {
-			if s.ctx.Err() != nil {
+			if readCtx.Err() != nil {
 				return nil
 			}
 			return errors.New("GB28181 outbound media source ended")
+		}
+		if !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+			return nil
 		}
 		if frame == nil ||
 			(frame.MediaType == avframe.MediaTypeVideo && frame.Codec != avframe.CodecH264) ||
@@ -216,8 +257,8 @@ func (s *outboundMediaSession) close() {
 
 func (s *outboundMediaSession) releaseSubscriber() {
 	s.subOnce.Do(func() {
-		if s.admitted {
-			s.stream.RemoveSubscriber("gb28181")
+		if s.admitted && s.release != nil {
+			s.release()
 		}
 	})
 }
@@ -231,10 +272,14 @@ func gbNTPTime(now time.Time) uint64 {
 
 func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channelID, streamKey string) (*MediaSession, error) {
 	stream, ok := m.handler.hub.Find(streamKey)
-	if !ok || stream.Publisher() == nil || stream.Publisher().MediaInfo() == nil {
+	if !ok {
 		return nil, fmt.Errorf("%w: receive stream %q", ErrLabInvalidRequest, streamKey)
 	}
-	mediaInfo := stream.Publisher().MediaInfo()
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil, fmt.Errorf("%w: receive stream %q", ErrLabInvalidRequest, streamKey)
+	}
+	mediaInfo := &snapshot.MediaInfo
 	if mediaInfo.VideoCodec != avframe.CodecH264 || mediaInfo.AudioCodec != avframe.CodecG711A {
 		return nil, fmt.Errorf("%w: receive stream requires H.264 and G.711A", ErrLabInvalidRequest)
 	}
@@ -253,6 +298,7 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	if err != nil {
 		return nil, err
 	}
+	sender.snapshot = snapshot
 	senderOwned := true
 	defer func() {
 		if senderOwned {
@@ -296,6 +342,10 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 		return nil, err
 	}
 	answerPort := parseSDPPort(string(response.Body()))
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		terminateAcceptedDialog(dialog)
+		return nil, fmt.Errorf("GB28181 outbound media source generation ended")
+	}
 	if err := sender.setRemote(&net.UDPAddr{IP: net.ParseIP(remoteIP), Port: answerPort}); err != nil {
 		terminateAcceptedDialog(dialog)
 		return nil, err

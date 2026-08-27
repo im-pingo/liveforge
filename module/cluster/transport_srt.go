@@ -31,6 +31,12 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 	if err != nil {
 		return fmt.Errorf("parse SRT URL: %w", err)
 	}
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
+	defer cancelGeneration()
 
 	srtCfg := t.buildConfig()
 	srtCfg.StreamId = "publish:" + streamID
@@ -40,61 +46,76 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 		return fmt.Errorf("srt dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	stopCancelWatch := closeOnContextDone(relayCtx, conn)
+	defer stopCancelWatch()
 
-	slog.Info("srt relay push connected, waiting for sequence headers", "module", "cluster", "target", targetURL)
-	markRelayConnected(ctx)
+	slog.Info("srt relay push connected", "module", "cluster", "target", targetURL)
+	markRelayConnected(relayCtx)
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
 
-	// Wait for sequence headers to be available before creating the muxer.
-	// The forward hook fires on EventPublish, but the first sequence header
-	// frame may not have arrived yet.
-	var muxer *ts.Muxer
-	reader := stream.RingBuffer().NewReader()
+	var videoSeqData, audioSeqData []byte
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
+		videoSeqData = append([]byte(nil), vsh.Payload...)
+	}
+	if ash := snapshot.AudioSequenceHeader; ash != nil {
+		audioSeqData = append([]byte(nil), ash.Payload...)
+	}
+	videoCodec := snapshot.MediaInfo.VideoCodec
+	audioCodec := snapshot.MediaInfo.AudioCodec
+	muxer := ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
+	writeData := func(data []byte, description string) error {
+		if len(data) == 0 {
+			return nil
+		}
+		n, err := conn.Write(data)
+		if err != nil {
+			if relayCtx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("srt %s write: %w", description, err)
+		}
+		recordRelayBytes(relayCtx, int64(n))
+		return nil
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if err := writeData(muxer.WriteFrame(frame), "replay"); err != nil {
+			return err
+		}
+	}
+
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(ctx)
+		frame, ok := reader.ReadContext(relayCtx)
 		if !ok {
 			return nil
 		}
-
-		// Lazily create the muxer once we see a keyframe (seq headers are set by then).
-		if muxer == nil {
-			if !frame.FrameType.IsKeyframe() {
-				continue // skip until we get a keyframe
-			}
-			pub := stream.Publisher()
-			if pub == nil {
-				return fmt.Errorf("stream has no publisher")
-			}
-			mi := pub.MediaInfo()
-
-			var videoSeqData, audioSeqData []byte
-			if vsh := stream.VideoSeqHeader(); vsh != nil {
-				videoSeqData = vsh.Payload
-			}
-			if ash := stream.AudioSeqHeader(); ash != nil {
-				audioSeqData = ash.Payload
-			}
-
-			slog.Info("srt relay push muxer initialized", "module", "cluster", "target", targetURL,
-				"video_codec", mi.VideoCodec, "audio_codec", mi.AudioCodec,
-				"video_seq_len", len(videoSeqData), "audio_seq_len", len(audioSeqData))
-
-			muxer = ts.NewMuxer(mi.VideoCodec, mi.AudioCodec, videoSeqData, audioSeqData)
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
 		}
 
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if frame.MediaType.IsVideo() {
+				videoCodec = frame.Codec
+				videoSeqData = append([]byte(nil), frame.Payload...)
+			} else if frame.MediaType.IsAudio() {
+				audioCodec = frame.Codec
+				audioSeqData = append([]byte(nil), frame.Payload...)
+			}
+			muxer = ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
+			if err := writeData(muxer.WritePATAndPMT(), "track refresh"); err != nil {
+				return err
+			}
 			continue
 		}
 
-		data := muxer.WriteFrame(frame)
-		if len(data) == 0 {
-			continue
+		if err := writeData(muxer.WriteFrame(frame), "media"); err != nil {
+			return err
 		}
-
-		n, err := conn.Write(data)
-		if err != nil {
-			return fmt.Errorf("srt write: %w", err)
-		}
-		recordRelayBytes(ctx, int64(n))
 	}
 }
 

@@ -126,6 +126,9 @@ func (ft *ForwardTarget) Run() {
 		if cancelled {
 			return
 		}
+		if err == nil && ft.stream.State() != core.StreamStatePublishing {
+			return
+		}
 
 		if err != nil {
 			if ft.health != nil {

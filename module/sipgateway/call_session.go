@@ -30,10 +30,12 @@ type CallSession struct {
 	rtcpConn   *net.UDPConn
 	remoteAddr *net.UDPAddr
 
-	stream    *core.Stream
-	publisher *sipPublisher
-	dialog    *dialogTeardown
-	metrics   *gatewayMetrics
+	stream            *core.Stream
+	startupSnapshot   core.StreamStartupSnapshot
+	releaseSubscriber func()
+	publisher         *sipPublisher
+	dialog            *dialogTeardown
+	metrics           *gatewayMetrics
 
 	lifecycleMu     sync.Mutex
 	mu              sync.RWMutex
@@ -196,7 +198,6 @@ func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remote
 		return errors.New("call session is terminated")
 	default:
 	}
-
 	publisher := &sipPublisher{
 		id: "sip-" + cs.callID,
 		info: &avframe.MediaInfo{
@@ -299,6 +300,10 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 		return errors.New("call session is terminated")
 	default:
 	}
+	startupSnapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
+		return errors.New("stream publisher generation is no longer active")
+	}
 
 	remoteIPAddr := net.ParseIP(remoteIP)
 	if remoteIPAddr == nil || remotePort <= 0 {
@@ -339,6 +344,7 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 
 	cs.mu.Lock()
 	cs.stream = stream
+	cs.startupSnapshot = startupSnapshot
 	cs.remoteAddr = &net.UDPAddr{IP: remoteIPAddr, Port: remotePort}
 	cs.conn = conn
 	cs.rtcpConn = rtcpConn
@@ -348,9 +354,13 @@ func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remot
 	}
 	cs.mu.Unlock()
 
-	if err := stream.AddSubscriber("sipgateway"); err != nil {
+	releaseSubscriber, err := stream.AddSubscriberForGeneration("sipgateway", startupSnapshot.Generation)
+	if err != nil {
 		return fmt.Errorf("admit SIP gateway subscriber: %w", err)
 	}
+	cs.mu.Lock()
+	cs.releaseSubscriber = releaseSubscriber
+	cs.mu.Unlock()
 
 	cs.mu.Lock()
 	cs.state = CallStateActive
@@ -570,6 +580,7 @@ func (cs *CallSession) sendLoop() {
 	}
 	cs.mu.RLock()
 	stream := cs.stream
+	releaseSubscriber := cs.releaseSubscriber
 	conn := cs.conn
 	rtcpConn := cs.rtcpConn
 	remoteAddr := cs.remoteAddr
@@ -586,9 +597,12 @@ func (cs *CallSession) sendLoop() {
 		}
 	}
 
-	defer stream.RemoveSubscriber("sipgateway")
+	defer func() {
+		if releaseSubscriber != nil {
+			releaseSubscriber()
+		}
+	}()
 
-	reader := stream.RingBuffer().NewReader()
 	readCtx, cancelRead := context.WithCancel(context.Background())
 	defer cancelRead()
 	go func() {
@@ -598,14 +612,90 @@ func (cs *CallSession) sendLoop() {
 		case <-readCtx.Done():
 		}
 	}()
+	cs.mu.RLock()
+	snapshot := cs.startupSnapshot
+	cs.mu.RUnlock()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		cs.ended()
+		return
+	}
+	generationCtx, cancelGeneration := context.WithCancel(readCtx)
+	defer cancelGeneration()
+	go func() {
+		select {
+		case <-snapshot.GenerationDone:
+			cancelGeneration()
+		case <-generationCtx.Done():
+		}
+	}()
 
-	for {
-		frame, ok := reader.ReadContext(readCtx)
-		if !ok {
-			if stream.RingBuffer().IsClosed() {
-				cs.ended()
+	for _, header := range []*avframe.AVFrame{snapshot.VideoSequenceHeader, snapshot.AudioSequenceHeader} {
+		if header == nil ||
+			(header.MediaType.IsAudio() && header.Codec != cs.codec.Codec) ||
+			(header.MediaType.IsVideo() && (video == nil || header.Codec != video.codec.Codec)) {
+			continue
+		}
+		if !cs.sendFrame(header, func() rtp.Packetizer {
+			if header.MediaType.IsVideo() {
+				return videoPacketizer
+			}
+			return audioPacketizer
+		}(), func() *rtp.Session {
+			if header.MediaType.IsVideo() {
+				return videoSession
+			}
+			return audioSession
+		}(), func() *net.UDPConn {
+			if header.MediaType.IsVideo() {
+				return video.conn
+			}
+			return conn
+		}(), func() *net.UDPConn {
+			if header.MediaType.IsVideo() {
+				return video.rtcpConn
+			}
+			return rtcpConn
+		}(), func() *net.UDPAddr {
+			if header.MediaType.IsVideo() {
+				return video.remoteAddr
+			}
+			return remoteAddr
+		}(), func() *rtcpSenderState {
+			if header.MediaType.IsVideo() {
+				return &video.rtcpSender
+			}
+			return &cs.rtcpSender
+		}()) {
+			return
+		}
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			cs.ended()
+			return
+		}
+		switch {
+		case frame.MediaType == avframe.MediaTypeAudio && frame.Codec == cs.codec.Codec:
+			if !cs.sendFrame(frame, audioPacketizer, audioSession, conn, rtcpConn, remoteAddr, &cs.rtcpSender) {
 				return
 			}
+		case video != nil && frame.MediaType == avframe.MediaTypeVideo && frame.Codec == video.codec.Codec:
+			if !cs.sendFrame(frame, videoPacketizer, videoSession, video.conn, video.rtcpConn, video.remoteAddr, &video.rtcpSender) {
+				return
+			}
+		}
+	}
+
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+
+	for {
+		frame, ok := reader.ReadContext(generationCtx)
+		if !ok {
+			cs.ended()
+			return
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			cs.ended()
 			return
 		}
 

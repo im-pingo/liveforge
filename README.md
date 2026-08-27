@@ -136,7 +136,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **Rate limiting** — Per-IP token bucket for connection flood protection
 - **Slow consumer protection** — EWMA-based lag detection with progressive frame dropping
 - **GCC congestion control** — Send-side bandwidth estimation for WebRTC WHEP with adaptive bitrate pacing
-- **GOP cache** — New subscribers receive the latest keyframe group instantly for fast startup
+- **Generation-bound startup** — SIP, GB28181, recording, DVR, and cluster egress capture one publisher snapshot, replay only the required current headers/GOP once, then continue from its live cursor. Publisher replacement cancels old readers, pure-audio streams never replay retained history, and sequence-header-only recordings are failed rather than published as successful media
 
 ## Architecture
 

@@ -1,6 +1,7 @@
 package dvr
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,15 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+type dvrStaleHistoryPublisher struct {
+	id   string
+	info *avframe.MediaInfo
+}
+
+func (p *dvrStaleHistoryPublisher) ID() string                    { return p.id }
+func (p *dvrStaleHistoryPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
+func (p *dvrStaleHistoryPublisher) Close() error                  { return nil }
 
 func TestSegmentIndex_AddAndLookup(t *testing.T) {
 	idx := NewSegmentIndex()
@@ -267,6 +277,82 @@ func TestSession_WritesSegments(t *testing.T) {
 		if _, err := os.Stat(seg.DiskPath); err != nil {
 			t.Errorf("segment file missing: %s", seg.DiskPath)
 		}
+	}
+}
+
+func TestSessionStaleHistoryStartsAtCurrentGeneration(t *testing.T) {
+	dir := t.TempDir()
+	stream := core.NewStream("live/stale-dvr", config.StreamConfig{
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 32,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	defer stream.Close()
+	old := &dvrStaleHistoryPublisher{id: "publisher-a", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(old); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x67, 0xaa},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 3, 0x65, 0xaa, 0x01},
+	))
+
+	stream.RemovePublisher()
+	current := &dvrStaleHistoryPublisher{id: "publisher-b", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(current); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x67, 0xbb},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 3, 0x65, 0xbb, 0x02},
+	))
+
+	session, err := NewSession("live/stale-dvr", stream, config.DVRConfig{
+		Path: filepath.Join(dir, "{stream_key}"),
+	}, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		33, 33, []byte{0, 0, 0, 3, 0x41, 0xbc, 0x03},
+	))
+
+	done := make(chan struct{})
+	go func() {
+		session.Run()
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	session.Stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DVR session did not stop")
+	}
+
+	var data []byte
+	for _, segment := range session.Index().Segments() {
+		segmentData, readErr := os.ReadFile(segment.DiskPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		data = append(data, segmentData...)
+	}
+	if bytes.Contains(data, []byte{0x65, 0xaa}) {
+		t.Fatal("DVR contains publisher-A media from retained ring history")
+	}
+	if !bytes.Contains(data, []byte{0x65, 0xbb}) || !bytes.Contains(data, []byte{0x41, 0xbc}) {
+		t.Fatalf("DVR does not contain publisher-B replay and live media: %x", data)
 	}
 }
 

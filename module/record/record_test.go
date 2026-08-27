@@ -169,6 +169,92 @@ func TestRecordSessionEndToEnd(t *testing.T) {
 	t.Logf("recorded %d bytes to %s", info.Size(), filePath)
 }
 
+func TestRecordSessionStaleHistoryStartsAtCurrentGeneration(t *testing.T) {
+	dir := t.TempDir()
+	cfg := newTestConfig(dir)
+	stream := core.NewStream("live/stale-record", cfg.Stream, config.LimitsConfig{}, core.NewEventBus())
+	defer stream.Close()
+
+	old := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(old); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x67, 0xaa}))
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65, 0xaa}))
+
+	stream.RemovePublisher()
+	current := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(current); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x67, 0xbb}))
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65, 0xbb}))
+
+	session, err := NewRecordSession("live/stale-record", stream, cfg.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		session.Run()
+		close(done)
+	}()
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 33, 33, []byte{0x41, 0xbc}))
+	time.Sleep(100 * time.Millisecond)
+	session.Stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("record session did not stop")
+	}
+
+	data, err := os.ReadFile(session.writer.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte{0x65, 0xaa}) || bytes.Contains(data, []byte{0x67, 0xaa}) {
+		t.Fatal("recording contains publisher-A media from retained ring history")
+	}
+	if !bytes.Contains(data, []byte{0x65, 0xbb}) || !bytes.Contains(data, []byte{0x41, 0xbc}) {
+		t.Fatalf("recording does not contain publisher-B replay and live media: %x", data)
+	}
+}
+
+func TestRecordSessionDoesNotDrainReplacementGeneration(t *testing.T) {
+	dir := t.TempDir()
+	cfg := newTestConfig(dir)
+	stream := core.NewStream("live/stale-drain", cfg.Stream, config.LimitsConfig{}, core.NewEventBus())
+	defer stream.Close()
+
+	old := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(old); err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewRecordSession("live/stale-drain", stream, cfg.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.writer.Close()
+	session.reader = stream.RingBuffer().NewReaderAt(session.snapshot.LiveCursor)
+
+	stream.RemovePublisher()
+	current := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(current); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0xbc},
+	))
+
+	if err := session.drainPendingFrames(); err != nil {
+		t.Fatal(err)
+	}
+	if got := session.writer.BytesWritten(); got != 0 {
+		t.Fatalf("replacement generation bytes drained = %d, want 0", got)
+	}
+}
+
 func TestParseSize(t *testing.T) {
 	tests := []struct {
 		input string

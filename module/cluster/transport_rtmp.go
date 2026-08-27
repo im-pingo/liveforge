@@ -27,13 +27,19 @@ func (t *RTMPTransport) Push(ctx context.Context, targetURL string, stream *core
 	if err != nil {
 		return fmt.Errorf("parse URL: %w", err)
 	}
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
+	defer cancelGeneration()
 
 	rc, err := dialRTMP(host)
 	if err != nil {
 		return err
 	}
 	defer rc.conn.Close()
-	stopCancelWatch := closeOnContextDone(ctx, rc.conn)
+	stopCancelWatch := closeOnContextDone(relayCtx, rc.conn)
 	defer stopCancelWatch()
 
 	if err := rc.setChunkSize(defaultChunkSize); err != nil {
@@ -64,32 +70,59 @@ func (t *RTMPTransport) Push(ctx context.Context, targetURL string, stream *core
 	}
 
 	slog.Info("rtmp relay push connected", "module", "cluster", "target", targetURL)
-	markRelayConnected(ctx)
+	markRelayConnected(relayCtx)
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		if err := rc.sendMediaFrame(vsh); err != nil {
+			if relayCtx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("video seq header: %w", err)
 		}
-		recordRelayBytes(ctx, int64(len(vsh.Payload)))
+		recordRelayBytes(relayCtx, int64(len(vsh.Payload)))
 	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
+	if ash := snapshot.AudioSequenceHeader; ash != nil {
 		if err := rc.sendMediaFrame(ash); err != nil {
+			if relayCtx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("audio seq header: %w", err)
 		}
-		recordRelayBytes(ctx, int64(len(ash.Payload)))
+		recordRelayBytes(relayCtx, int64(len(ash.Payload)))
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if err := rc.sendMediaFrame(frame); err != nil {
+			if relayCtx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("replay frame: %w", err)
+		}
+		recordRelayBytes(relayCtx, int64(len(frame.Payload)))
 	}
 
-	reader := stream.RingBuffer().NewReader()
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(ctx)
+		frame, ok := reader.ReadContext(relayCtx)
 		if !ok {
+			return nil
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return nil
 		}
 
 		if err := rc.sendMediaFrame(frame); err != nil {
+			if relayCtx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("send frame: %w", err)
 		}
-		recordRelayBytes(ctx, int64(len(frame.Payload)))
+		recordRelayBytes(relayCtx, int64(len(frame.Payload)))
 	}
 }
 

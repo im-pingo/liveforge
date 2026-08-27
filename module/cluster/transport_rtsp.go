@@ -40,6 +40,12 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 	if err != nil {
 		return fmt.Errorf("parse URL: %w", err)
 	}
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
+	defer cancelGeneration()
 	addr := u.Host
 	if u.Port() == "" {
 		addr += ":554"
@@ -55,7 +61,7 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 	defer close(done)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-relayCtx.Done():
 			conn.Close()
 		case <-done:
 			conn.Close()
@@ -64,11 +70,10 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 
 	rc := &rtspClient{conn: conn, br: bufio.NewReader(conn), cseq: 0}
 
-	pub := stream.Publisher()
-	if pub == nil {
-		return fmt.Errorf("stream has no publisher")
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
 	}
-	mi := pub.MediaInfo()
+	mi := &snapshot.MediaInfo
 	sd := sdp.BuildFromMediaInfo(mi, targetURL, "0.0.0.0")
 	sdpBody := sd.Marshal()
 
@@ -107,7 +112,10 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 	}
 
 	slog.Info("rtsp relay push connected", "module", "cluster", "target", targetURL)
-	markRelayConnected(ctx)
+	markRelayConnected(relayCtx)
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
 
 	// Build packetizers and sessions
 	var videoSession, audioSession *pkgrtp.Session
@@ -126,10 +134,35 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 		audioSession = pkgrtp.NewSession(97, clockRate)
 	}
 
-	reader := stream.RingBuffer().NewReader()
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		var pkt pkgrtp.Packetizer
+		var session *pkgrtp.Session
+		var ch int
+		if frame.MediaType.IsVideo() && videoPkt != nil && videoChannel >= 0 {
+			pkt, session, ch = videoPkt, videoSession, videoChannel
+		} else if frame.MediaType.IsAudio() && audioPkt != nil && audioChannel >= 0 {
+			pkt, session, ch = audioPkt, audioSession, audioChannel
+		} else {
+			continue
+		}
+		if err := t.sendRTSPFrame(relayCtx, conn, frame, pkt, session, ch); err != nil {
+			return err
+		}
+	}
+
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(ctx)
+		frame, ok := reader.ReadContext(relayCtx)
 		if !ok {
+			return nil
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return nil
 		}
 
@@ -153,26 +186,32 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 			continue
 		}
 
-		rtpPackets, err := pkt.Packetize(frame, pkgrtp.DefaultMTU)
+		if err := t.sendRTSPFrame(relayCtx, conn, frame, pkt, session, ch); err != nil {
+			return err
+		}
+	}
+}
+
+func (t *RTSPTransport) sendRTSPFrame(ctx context.Context, conn io.Writer, frame *avframe.AVFrame, pkt pkgrtp.Packetizer, session *pkgrtp.Session, channel int) error {
+	rtpPackets, err := pkt.Packetize(frame, pkgrtp.DefaultMTU)
+	if err != nil {
+		return nil
+	}
+	session.WrapPackets(rtpPackets, frame.DTS)
+	for _, p := range rtpPackets {
+		raw, err := p.Marshal()
 		if err != nil {
 			continue
 		}
-		session.WrapPackets(rtpPackets, frame.DTS)
-
-		for _, p := range rtpPackets {
-			raw, err := p.Marshal()
-			if err != nil {
-				continue
+		if err := writeInterleaved(conn, uint8(channel), raw); err != nil {
+			if ctx.Err() != nil {
+				return nil
 			}
-			if err := writeInterleaved(conn, uint8(ch), raw); err != nil {
-				if ctx.Err() != nil {
-					return nil
-				}
-				return fmt.Errorf("write interleaved: %w", err)
-			}
-			recordRelayBytes(ctx, int64(len(raw)+4))
+			return fmt.Errorf("write interleaved: %w", err)
 		}
+		recordRelayBytes(ctx, int64(len(raw)+4))
 	}
+	return nil
 }
 
 func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core.Stream) error {

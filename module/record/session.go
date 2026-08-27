@@ -16,6 +16,7 @@ import (
 type RecordSession struct {
 	streamKey   string
 	stream      *core.Stream
+	snapshot    core.StreamStartupSnapshot
 	publisherID string
 	cfg         config.RecordConfig
 	writer      *FileWriter
@@ -49,22 +50,14 @@ func newRecordSessionWithWriter(streamKey string, stream *core.Stream, cfg confi
 	session := &RecordSession{
 		streamKey: streamKey,
 		stream:    stream,
+		snapshot:  stream.StartupSnapshot(),
 		cfg:       cfg,
 		writer:    writer,
-		reader:    stream.RingBuffer().NewReader(),
 		done:      make(chan struct{}),
 		finished:  make(chan struct{}),
 		startedAt: time.Now().UTC(),
 	}
-	if publisher := stream.Publisher(); publisher != nil {
-		if info := publisher.MediaInfo(); info != nil {
-			writer.SetExpectedTracks(info.VideoCodec, info.AudioCodec)
-		}
-	}
 	session.updateStatus(RecordingActive, nil)
-	if publisher := stream.Publisher(); publisher != nil {
-		session.publisherID = publisher.ID()
-	}
 	return session
 }
 
@@ -119,27 +112,61 @@ func (s *RecordSession) run() error {
 		case <-readCtx.Done():
 		}
 	}()
+	snapshot := s.snapshot
+	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	s.writer.SetExpectedTracks(snapshot.MediaInfo.VideoCodec, snapshot.MediaInfo.AudioCodec)
+	generationCtx, cancelGeneration := context.WithCancel(readCtx)
+	defer cancelGeneration()
+	go func() {
+		select {
+		case <-snapshot.GenerationDone:
+			cancelGeneration()
+		case <-generationCtx.Done():
+		}
+	}()
 
-	// Write sequence headers first if available
-	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
+	// Write the headers captured with the same snapshot as the replay frames.
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		if err := s.writer.WriteFrame(vsh); err != nil {
 			slog.Error("write video seq header error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
 		}
 	}
-	if ash := s.stream.AudioSeqHeader(); ash != nil {
+	if ash := snapshot.AudioSequenceHeader; ash != nil {
 		if err := s.writer.WriteFrame(ash); err != nil {
 			slog.Error("write audio seq header error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
 		}
 	}
+	for _, frame := range snapshot.ReplayFrames {
+		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if err := s.writer.WriteFrame(frame); err != nil {
+			slog.Error("write replay frame error", "module", "record", "stream", s.streamKey, "error", err)
+			return err
+		}
+	}
+	readerCursor := snapshot.LiveCursor
+	// NewRecordSession is also used as a standalone writer by callers that feed
+	// an idle stream directly. Preserve that legacy path; module-managed
+	// sessions always have a nonzero publisher generation and start at LiveCursor.
+	if snapshot.Generation == 0 {
+		readerCursor = snapshot.GenerationStartCursor
+	}
+	s.reader = s.stream.RingBuffer().NewReaderAt(readerCursor)
 
 	for {
-		frame, ok := s.reader.ReadContext(readCtx)
+		frame, ok := s.reader.ReadContext(generationCtx)
 		if !ok {
 			if isRecordStopRequested(s.done) {
 				return s.drainPendingFrames()
 			}
+			return nil
+		}
+		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 			return nil
 		}
 		if err := s.writer.WriteFrame(frame); err != nil {
@@ -159,9 +186,18 @@ func isRecordStopRequested(done <-chan struct{}) bool {
 }
 
 func (s *RecordSession) drainPendingFrames() error {
+	if s.reader == nil {
+		return nil
+	}
 	for {
+		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+			return nil
+		}
 		frame, ok := s.reader.TryRead()
 		if !ok {
+			return nil
+		}
+		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
 			return nil
 		}
 		if err := s.writer.WriteFrame(frame); err != nil {

@@ -960,6 +960,37 @@ func TestStreamMaxSubscribers(t *testing.T) {
 	}
 }
 
+func TestStreamGenerationSubscriberReleaseDoesNotTouchReplacement(t *testing.T) {
+	s := NewStream("live/generation-subs", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pubA := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := s.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+	releaseA, err := s.AddSubscriberForGeneration("sipgateway", s.StartupSnapshot().Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.RemovePublisherIf(pubA)
+	pubB := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := s.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	releaseB, err := s.AddSubscriberForGeneration("sipgateway", s.StartupSnapshot().Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseA()
+	if got := s.Subscribers()["sipgateway"]; got != 1 {
+		t.Fatalf("replacement subscriber count after old release = %d, want 1", got)
+	}
+	releaseB()
+	if got := s.Subscribers()["sipgateway"]; got != 0 {
+		t.Fatalf("subscriber count after replacement release = %d, want 0", got)
+	}
+}
+
 func TestStreamSeqHeaderCaching(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

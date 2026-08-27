@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -8,8 +9,10 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/internal/labmedia"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
 	"github.com/pion/rtcp"
+	pionrtp "github.com/pion/rtp/v2"
 )
 
 func TestGBOutboundSenderReportsArePeriodicAndCountPayloadOctets(t *testing.T) {
@@ -67,6 +70,104 @@ func TestGBOutboundSenderReportsArePeriodicAndCountPayloadOctets(t *testing.T) {
 		t.Fatalf("sender reports sent = %d, want at least 2", got)
 	}
 }
+
+func TestGBOutboundSessionStartupSkipsStaleHistory(t *testing.T) {
+	hub := core.NewStreamHub(config.StreamConfig{
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 32,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/stale-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+	}}
+	if err := stream.SetPublisher(old); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x67, 0xaa},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0xaa},
+	))
+
+	stream.RemovePublisher()
+	current := &gbOutboundTestPublisher{id: "publisher-b", info: old.info}
+	if err := stream.SetPublisher(current); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x67, 0xbb},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0xbb},
+	))
+	snapshot := stream.StartupSnapshot()
+
+	sender, err := newOutboundMediaSession(stream, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.close()
+	sender.snapshot = snapshot
+	remoteRTP, remoteRTCP, err := listenGBLabUDPPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remoteRTP.Close()
+	defer remoteRTCP.Close()
+	if err := sender.setRemote(remoteRTP.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.admit(); err != nil {
+		t.Fatal(err)
+	}
+	sender.start()
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		33, 33, []byte{0x41, 0xbc},
+	))
+
+	var data []byte
+	for i := 0; i < 3; i++ {
+		if err := remoteRTP.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		packetData := make([]byte, 2048)
+		n, _, err := remoteRTP.ReadFromUDP(packetData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var packet pionrtp.Packet
+		if err := packet.Unmarshal(packetData[:n]); err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, packet.Payload...)
+	}
+	if bytes.Contains(data, []byte{0x65, 0xaa}) {
+		t.Fatal("GB28181 outbound session sent publisher-A media from retained ring history")
+	}
+	if !bytes.Contains(data, []byte{0x65, 0xbb}) || !bytes.Contains(data, []byte{0x41, 0xbc}) {
+		t.Fatalf("GB28181 outbound session missing publisher-B replay/live media: %x", data)
+	}
+}
+
+type gbOutboundTestPublisher struct {
+	id   string
+	info *avframe.MediaInfo
+}
+
+func (p *gbOutboundTestPublisher) ID() string                    { return p.id }
+func (p *gbOutboundTestPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
+func (p *gbOutboundTestPublisher) Close() error                  { return nil }
 
 func readGBSenderReport(t *testing.T, conn *net.UDPConn) *rtcp.SenderReport {
 	t.Helper()

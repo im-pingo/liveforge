@@ -90,12 +90,13 @@ type Stream struct {
 	state     StreamState
 	publisher Publisher
 
-	ringBuffer    *util.RingBuffer[*avframe.AVFrame]
-	muxerManager  *MuxerManager
-	gopCache      [][]*avframe.AVFrame
-	gopStarts     []int64
-	gopGeneration uint64
-	subscribers   map[string]int // protocol -> count (e.g. "rtmp" -> 2)
+	ringBuffer            *util.RingBuffer[*avframe.AVFrame]
+	muxerManager          *MuxerManager
+	gopCache              [][]*avframe.AVFrame
+	gopStarts             []int64
+	gopGeneration         uint64
+	subscribers           map[string]int // protocol -> count (e.g. "rtmp" -> 2)
+	generationSubscribers map[uint64]map[string]int
 
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
@@ -120,15 +121,16 @@ type Stream struct {
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *Stream {
 	s := &Stream{
-		key:                 key,
-		config:              cfg,
-		limits:              limits,
-		state:               StreamStateIdle,
-		ringBuffer:          util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
-		eventBus:            bus,
-		subscribers:         make(map[string]int),
-		seqHeaderReady:      make(chan struct{}),
-		startupStateChanged: make(chan struct{}),
+		key:                   key,
+		config:                cfg,
+		limits:                limits,
+		state:                 StreamStateIdle,
+		ringBuffer:            util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
+		eventBus:              bus,
+		subscribers:           make(map[string]int),
+		generationSubscribers: make(map[uint64]map[string]int),
+		seqHeaderReady:        make(chan struct{}),
+		startupStateChanged:   make(chan struct{}),
 	}
 	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
 	s.feedbackRouter = NewFeedbackRouter(cfg.Feedback)
@@ -801,7 +803,10 @@ func (s *Stream) TranscodeManager() *TranscodeManager {
 func (s *Stream) AddSubscriber(protocol string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.addSubscriberLocked(protocol)
+}
 
+func (s *Stream) addSubscriberLocked(protocol string) error {
 	if max := s.limits.MaxSubscribersPerStream; max > 0 {
 		total := 0
 		for _, n := range s.subscribers {
@@ -824,6 +829,54 @@ func (s *Stream) AddSubscriber(protocol string) error {
 	}
 
 	return nil
+}
+
+// AddSubscriberForGeneration admits a subscriber and returns a release function
+// that can only remove the lease created for this publisher generation.
+func (s *Stream) AddSubscriberForGeneration(protocol string, generation uint64) (func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != StreamStatePublishing || s.publisherGeneration != generation {
+		return nil, fmt.Errorf("publisher generation %d is no longer active", generation)
+	}
+	if err := s.addSubscriberLocked(protocol); err != nil {
+		return nil, err
+	}
+	byProtocol := s.generationSubscribers[generation]
+	if byProtocol == nil {
+		byProtocol = make(map[string]int)
+		s.generationSubscribers[generation] = byProtocol
+	}
+	byProtocol[protocol]++
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { s.removeSubscriberForGeneration(protocol, generation) })
+	}, nil
+}
+
+func (s *Stream) removeSubscriberForGeneration(protocol string, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byProtocol := s.generationSubscribers[generation]
+	if byProtocol == nil || byProtocol[protocol] <= 0 {
+		return
+	}
+	byProtocol[protocol]--
+	if byProtocol[protocol] == 0 {
+		delete(byProtocol, protocol)
+	}
+	if len(byProtocol) == 0 {
+		delete(s.generationSubscribers, generation)
+	}
+	if s.subscribers[protocol] > 0 {
+		s.subscribers[protocol]--
+		if s.subscribers[protocol] == 0 {
+			delete(s.subscribers, protocol)
+		}
+	}
+	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
+	s.checkIdleTimeout()
 }
 
 // RemoveSubscriber decrements the subscriber count for a protocol.

@@ -25,6 +25,7 @@ import (
 type Session struct {
 	streamKey   string
 	stream      *core.Stream
+	snapshot    core.StreamStartupSnapshot
 	publisherID string
 	cfg         config.DVRConfig
 	index       *SegmentIndex
@@ -127,6 +128,7 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 	session := &Session{
 		streamKey:   streamKey,
 		stream:      stream,
+		snapshot:    stream.StartupSnapshot(),
 		cfg:         cfg,
 		index:       idx,
 		segDir:      segDir,
@@ -136,14 +138,10 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 		segStartDTS: -1,
 		lastDTS:     -1,
 		segSeqNum:   startSeq,
-		reader:      stream.RingBuffer().NewReader(),
 		done:        make(chan struct{}),
 		finished:    make(chan struct{}),
 		startedAt:   time.Now().UTC(),
 		metrics:     metrics,
-	}
-	if publisher := stream.Publisher(); publisher != nil {
-		session.publisherID = publisher.ID()
 	}
 	if recoveredPartials > 0 {
 		metrics.writeFailures.Add(uint64(recoveredPartials))
@@ -176,19 +174,42 @@ func (s *Session) Run() {
 		case <-readCtx.Done():
 		}
 	}()
-
-	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
+	snapshot := s.snapshot
+	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+		return
+	}
+	s.videoCodec = snapshot.MediaInfo.VideoCodec
+	s.audioCodec = snapshot.MediaInfo.AudioCodec
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		s.videoSeq = append([]byte(nil), vsh.Payload...)
-		s.videoCodec = vsh.Codec
 	}
-	if ash := s.stream.AudioSeqHeader(); ash != nil {
+	if ash := snapshot.AudioSequenceHeader; ash != nil {
 		s.audioSeq = append([]byte(nil), ash.Payload...)
-		s.audioCodec = ash.Codec
 	}
+	generationCtx, cancelGeneration := context.WithCancel(readCtx)
+	defer cancelGeneration()
+	go func() {
+		select {
+		case <-snapshot.GenerationDone:
+			cancelGeneration()
+		case <-generationCtx.Done():
+		}
+	}()
+
+	for _, frame := range snapshot.ReplayFrames {
+		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
+		s.processFrame(frame)
+	}
+	s.reader = s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 
 	for {
-		frame, ok := s.reader.ReadContext(readCtx)
+		frame, ok := s.reader.ReadContext(generationCtx)
 		if !ok {
+			return
+		}
+		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 			return
 		}
 		s.processFrame(frame)
