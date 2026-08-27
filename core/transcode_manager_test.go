@@ -202,6 +202,73 @@ func TestTranscodeManagerStaleReleaseDoesNotCancelReplacementTrack(t *testing.T)
 	}
 }
 
+func TestTranscodeManagerRejectsStaleSnapshotBeforeTrackLookup(t *testing.T) {
+	s := newTranscodeTestStream(avframe.CodecG711U)
+	tm := s.TranscodeManager()
+	stale := s.StartupSnapshot()
+
+	s.RemovePublisher()
+	if err := s.SetPublisher(&testPublisher{
+		id:   "replacement",
+		info: &avframe.MediaInfo{AudioCodec: avframe.CodecG711U},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.RingBuffer().Close() })
+
+	staleReader, staleRelease, err := tm.GetOrCreateAudioReaderAt(avframe.CodecG711A, stale)
+	if err == nil {
+		t.Fatal("stale snapshot acquisition succeeded before replacement track creation")
+	}
+	if staleReader != nil {
+		staleReader.Close()
+		t.Fatal("stale snapshot acquisition returned a usable reader")
+	}
+	staleRelease()
+	tm.mu.Lock()
+	_, created := tm.audioTracks[avframe.CodecG711A]
+	tm.mu.Unlock()
+	if created {
+		t.Fatal("stale snapshot acquisition created a replacement-generation track")
+	}
+
+	current := s.StartupSnapshot()
+	newReader, newRelease, err := tm.GetOrCreateAudioReaderAt(avframe.CodecG711A, current)
+	if err != nil {
+		t.Fatalf("current snapshot acquisition failed: %v", err)
+	}
+	if newReader == nil {
+		t.Fatal("current snapshot acquisition returned no reader")
+	}
+	defer newReader.Close()
+	defer newRelease()
+
+	tm.mu.Lock()
+	replacement := tm.audioTracks[avframe.CodecG711A]
+	tm.mu.Unlock()
+	if replacement == nil {
+		t.Fatal("current snapshot acquisition did not create a track")
+	}
+
+	staleReader, staleRelease, err = tm.GetOrCreateAudioReaderAt(avframe.CodecG711A, stale)
+	if err == nil {
+		t.Fatal("stale snapshot acquisition reused the replacement track")
+	}
+	if staleReader != nil {
+		staleReader.Close()
+		t.Fatal("stale snapshot reuse returned a usable reader")
+	}
+	staleRelease()
+
+	tm.mu.Lock()
+	got := tm.audioTracks[avframe.CodecG711A]
+	subCount := replacement.subCount
+	tm.mu.Unlock()
+	if got != replacement || subCount != 1 {
+		t.Fatalf("stale snapshot changed replacement track/subscribers = %p/%d, want %p/1", got, subCount, replacement)
+	}
+}
+
 // TestTranscodeManagerNoPublisher verifies error when no publisher.
 func TestTranscodeManagerNoPublisher(t *testing.T) {
 	cfg := config.StreamConfig{RingBufferSize: 64}

@@ -48,7 +48,7 @@ func NewTranscodeManager(stream *Stream, registry *audiocodec.Registry, bufSize 
 // Otherwise it creates or reuses a shared TranscodedTrack.
 // The returned func must be called to release the subscription.
 func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, tm.stream.RingBuffer().WriteCursor(), 0, false, false, false)
+	return tm.getOrCreateReaderAt(targetCodec, tm.stream.RingBuffer().WriteCursor(), 0, false, false, false, nil)
 }
 
 // GetOrCreateReaderAt returns a reader whose newly-created transcode track
@@ -56,7 +56,7 @@ func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*u
 // output cursor; use GetOrCreateReaderAtFromHistory when a snapshot subscriber
 // must consume already-produced output as well.
 func (tm *TranscodeManager) GetOrCreateReaderAt(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, sourceStart, 0, false, false, false)
+	return tm.getOrCreateReaderAt(targetCodec, sourceStart, 0, false, false, false, nil)
 }
 
 // GetOrCreateReaderAtFromHistory returns a combined audio/video transcode
@@ -64,14 +64,14 @@ func (tm *TranscodeManager) GetOrCreateReaderAt(targetCodec avframe.CodecType, s
 // snapshot's audio codec epoch. HLS, LL-HLS, and DASH use this compatibility
 // path to transform the captured GOP without replaying stale audio epochs.
 func (tm *TranscodeManager) GetOrCreateReaderAtFromHistory(targetCodec avframe.CodecType, snapshot StreamStartupSnapshot) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, false, true, false)
+	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, false, true, false, &snapshot)
 }
 
 // GetOrCreateAudioReaderAt returns a target-codec audio-only reader sourced
 // from snapshot. RTMP and WHEP use it when direct video has a separate cursor.
 // The reader cannot emit audio older than snapshot's current codec epoch.
 func (tm *TranscodeManager) GetOrCreateAudioReaderAt(targetCodec avframe.CodecType, snapshot StreamStartupSnapshot) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, true, false, true)
+	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, true, false, true, &snapshot)
 }
 
 // GetOrCreateAudioReaderAtFromHistory returns an audio-only target-codec
@@ -79,7 +79,7 @@ func (tm *TranscodeManager) GetOrCreateAudioReaderAt(targetCodec avframe.CodecTy
 // muxers use it to transform cached audio without pulling direct video behind
 // the snapshot's live cursor.
 func (tm *TranscodeManager) GetOrCreateAudioReaderAtFromHistory(targetCodec avframe.CodecType, snapshot StreamStartupSnapshot) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, true, true, true)
+	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, true, true, true, &snapshot)
 }
 
 func (tm *TranscodeManager) getOrCreateReaderAt(
@@ -89,18 +89,29 @@ func (tm *TranscodeManager) getOrCreateReaderAt(
 	audioOnly bool,
 	fromHistory bool,
 	forceTrack bool,
+	snapshot *StreamStartupSnapshot,
 ) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	pub := tm.stream.Publisher()
-	if pub == nil {
+	// SetPublisher takes these locks in the same order while Reset removes old
+	// tracks. Holding the stream lock through track lookup/creation makes the
+	// snapshot generation check and map mutation one atomic acquisition.
+	tm.stream.mu.RLock()
+	defer tm.stream.mu.RUnlock()
+	if tm.stream.state != StreamStatePublishing || isNilPublisher(tm.stream.publisher) {
 		return nil, func() {}, fmt.Errorf("no publisher on stream")
 	}
+	if snapshot != nil && tm.stream.publisherGeneration != snapshot.Generation {
+		return nil, func() {}, fmt.Errorf(
+			"stale stream startup snapshot generation %d (active %d)",
+			snapshot.Generation,
+			tm.stream.publisherGeneration,
+		)
+	}
 
-	sourceCodec, _ := tm.stream.audioCodecState()
+	sourceCodec := tm.stream.mediaInfo.AudioCodec
 
 	// Zero-overhead path: target matches source, no transcoding needed.
 	if targetCodec == sourceCodec && !forceTrack {
-		rb := tm.stream.RingBuffer()
-		reader := rb.NewReaderAt(sourceStart)
+		reader := tm.stream.ringBuffer.NewReaderAt(sourceStart)
 		return reader, func() {}, nil
 	}
 

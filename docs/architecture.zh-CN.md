@@ -377,7 +377,7 @@ flowchart LR
 - reader release 捕获实际取得的 `TranscodedTrack` 实例；旧 generation 的延迟 release 不能递减或取消 replacement generation 中同 target codec 的新 track；
 - publisher 重新发布时 `Reset()` 取消所有旧轨道，避免旧 codec 的输出混入新会话。
 
-普通 `GetOrCreateReaderAt()` 从当前转码输出 cursor 开始，适合只需要实时数据的连接。Snapshot-bound `GetOrCreateReaderAtFromHistory()`、`GetOrCreateAudioReaderAt()` 和 `GetOrCreateAudioReaderAtFromHistory()` 接受整个启动快照，而不是裸 `SourceCursor`；core 从快照内部取得 epoch floor，为每个 consumer 建立独立的过滤 reader。HTTP muxer 可重放当前 epoch 的历史音频，HLS/DASH combined reader 仍可取得历史视频，但任何路径都不会先读出更旧 epoch 的音频。关闭该 consumer-local reader 只释放自己的 shared-track 引用，不会关闭其他 reader 或 producer。
+普通 `GetOrCreateReaderAt()` 从当前转码输出 cursor 开始，适合只需要实时数据的连接。Snapshot-bound `GetOrCreateReaderAtFromHistory()`、`GetOrCreateAudioReaderAt()` 和 `GetOrCreateAudioReaderAtFromHistory()` 接受整个启动快照，而不是裸 `SourceCursor`；core 从快照内部取得 epoch floor，为每个 consumer 建立独立的过滤 reader。快照 generation 校验与 `Reset`、track map 查询和创建遵循同一个 Stream 到 TranscodeManager 的加锁顺序，整个 acquisition 不存在 check-then-act 窗口；旧 generation 快照返回空 reader，不能创建、复用、递减、关闭或污染 replacement track。HTTP muxer 可重放当前 epoch 的历史音频，HLS/DASH combined reader 仍可取得历史视频，但任何路径都不会先读出更旧 epoch 的音频。关闭该 consumer-local reader 只释放自己的 shared-track 引用，不会关闭其他 reader 或 producer。
 
 转码轨道的源起点通常为 `GOPCacheSourceStart()`。这样可覆盖缓存 GOP 的音频，同时继续消费 live 音视频；HTTP 输出会用视频 DTS watermark 去掉已经在缓存中发送过的转码视频。
 
