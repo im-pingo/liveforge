@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -124,7 +125,6 @@ func (s *Subscriber) WriteLoop() {
 	}
 	s.muxer = flvpkg.NewMuxerWithModes(policy.videoMode, policy.audioMode)
 
-	var transcodeRelease func()
 	needsTranscode := policy.transcodeAudio
 
 	// Send sequence headers
@@ -161,29 +161,23 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Set up the live reader. The legacy transcode reader provides source video
-	// passthrough together with target audio for RTMP subscribers; it starts at
-	// the post-snapshot cursor so cached video is not replayed twice.
-	var reader *util.RingReader[*avframe.AVFrame]
 	if needsTranscode {
-		if tm := s.stream.TranscodeManager(); tm != nil {
-			var err error
-			reader, transcodeRelease, err = tm.GetOrCreateReaderAt(avframe.CodecAAC, snapshot.SourceCursor)
-			if err != nil {
-				s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
-				return
-			}
-		} else {
+		tm := s.stream.TranscodeManager()
+		if tm == nil {
 			s.fail(fmt.Errorf("rtmp: audio transcode unavailable"))
 			return
 		}
-	} else {
-		reader = s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
-	}
-	if transcodeRelease != nil {
-		defer transcodeRelease()
+		audioReader, release, err := tm.GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot.SourceCursor)
+		if err != nil {
+			s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
+			return
+		}
+		defer release()
+		s.writeTranscodedLoop(snapshot, s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor), audioReader)
+		return
 	}
 
+	reader := s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer, s.skipCfg)
 
 	// Watch for subscriber close and unblock any in-progress Read().
@@ -209,6 +203,75 @@ func (s *Subscriber) WriteLoop() {
 			return
 		}
 		filter.ReportSendTime(time.Since(start))
+	}
+}
+
+type rtmpFrameDelivery struct {
+	frame  *avframe.AVFrame
+	filter *core.SlowConsumerFilter
+}
+
+func (s *Subscriber) writeTranscodedLoop(snapshot core.StreamStartupSnapshot, sourceReader, audioReader *util.RingReader[*avframe.AVFrame]) {
+	sourceFilter := core.NewSlowConsumerFilter(sourceReader, s.stream.Config().SlowConsumer, s.skipCfg)
+	audioFilter := core.NewSlowConsumerFilter(audioReader, s.stream.Config().SlowConsumer, s.skipCfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	deliveries := make(chan rtmpFrameDelivery)
+	sourceDone := make(chan struct{})
+	audioDone := make(chan struct{})
+
+	var pumps sync.WaitGroup
+	pump := func(filter *core.SlowConsumerFilter, done chan<- struct{}, accept func(*avframe.AVFrame) bool) {
+		defer pumps.Done()
+		defer close(done)
+		for {
+			frame, ok := filter.NextFrame()
+			if !ok || !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			if !accept(frame) {
+				continue
+			}
+			select {
+			case deliveries <- rtmpFrameDelivery{frame: frame, filter: filter}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	pumps.Add(2)
+	go pump(sourceFilter, sourceDone, func(frame *avframe.AVFrame) bool {
+		return frame.MediaType.IsVideo()
+	})
+	go pump(audioFilter, audioDone, func(frame *avframe.AVFrame) bool {
+		return frame.MediaType.IsAudio() && frame.Codec == avframe.CodecAAC
+	})
+	defer func() {
+		cancel()
+		sourceFilter.Close()
+		audioFilter.Close()
+		pumps.Wait()
+	}()
+
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-snapshot.GenerationDone:
+			return
+		case <-sourceDone:
+			return
+		case <-audioDone:
+			return
+		case delivery := <-deliveries:
+			if !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			start := time.Now()
+			if err := s.sendFrame(delivery.frame); err != nil {
+				return
+			}
+			delivery.filter.ReportSendTime(time.Since(start))
+		}
 	}
 }
 

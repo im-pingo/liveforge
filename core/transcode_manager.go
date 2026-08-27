@@ -75,6 +75,14 @@ func (tm *TranscodeManager) GetOrCreateAudioReaderAt(targetCodec avframe.CodecTy
 	return tm.getOrCreateReaderAt(targetCodec, sourceStart, true, false)
 }
 
+// GetOrCreateAudioReaderAtFromHistory returns an audio-only target-codec
+// reader at the oldest retained output while sourcing a new track at
+// sourceStart. Snapshot muxers use it to transform cached audio without
+// pulling direct video behind the snapshot's live cursor.
+func (tm *TranscodeManager) GetOrCreateAudioReaderAtFromHistory(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
+	return tm.getOrCreateReaderAt(targetCodec, sourceStart, true, true)
+}
+
 func (tm *TranscodeManager) getOrCreateReaderAt(targetCodec avframe.CodecType, sourceStart int64, audioOnly, fromHistory bool) (*util.RingReader[*avframe.AVFrame], func(), error) {
 	pub := tm.stream.Publisher()
 	if pub == nil {

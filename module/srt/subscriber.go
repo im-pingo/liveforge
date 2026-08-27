@@ -138,6 +138,9 @@ func (s *Subscriber) Run() {
 				audioSeqData = frame.Payload
 			}
 			muxer = ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
+			if err := s.sendData(muxer.WritePATAndPMT()); err != nil {
+				return
+			}
 			continue
 		}
 
@@ -155,6 +158,10 @@ func (s *Subscriber) Run() {
 // queue. This is essential for burst writes like the GOP cache.
 func (s *Subscriber) sendFrame(muxer *ts.Muxer, frame *avframe.AVFrame) error {
 	data := muxer.WriteFrame(frame)
+	return s.sendData(data)
+}
+
+func (s *Subscriber) sendData(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}

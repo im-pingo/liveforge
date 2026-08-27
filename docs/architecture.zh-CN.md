@@ -194,9 +194,9 @@ sequenceDiagram
 
 ### 7.3 不同消费者的起点
 
-- 普通 RTMP、RTSP、SRT、HTTP muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
-- 需要转换历史音频的 HTTP muxer 或 WHEP：只把 `SourceCursor` 用作转码输入起点；直接视频仍从 `LiveCursor` 读取。
-- 使用历史转码输出时，HTTP muxer 会按缓存视频 DTS 范围过滤转码轨中可能重复出现的视频帧。
+- 普通 RTMP、RTSP、SRT、共享 HTTP FLV/TS/fMP4 muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
+- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。
+- HLS、LL-HLS、DASH 的兼容路径仍使用 combined 历史转码 reader，并按缓存视频 DTS 范围过滤其中可能重复出现的视频帧；这些 segmenter 尚未迁移到独立 direct/audio reader。
 - SRT 不再用跨音视频的最大 DTS 过滤 replay/live 重叠；cursor 是唯一重复边界，因此缓存视频 DTS 4000 之后的实时音频 DTS 1000 仍会发送。
 
 ## 8. RingBuffer 设计与并发语义
@@ -243,7 +243,7 @@ RingReader:  每个消费者独立的 readCursor
 对每个 stream，`MuxerManager` 按 `flv`、`ts`、`mp4` 保存 `MuxerInstance`：
 
 1. 第一个该格式订阅者到来时，为当前 publisher generation 创建 SharedBuffer、`Done` channel 和 generation-bound `MuxerInstance`，并启动一个 muxer goroutine。
-2. muxer 获取一个 ready `StartupSnapshot`，向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续写实时帧；转码输入单独使用 `SourceCursor`。
+2. muxer 先捕获与实例 generation 相同的启动快照；尚未 ready 时同时等待该快照的 `GenerationDone`，publisher 被移除就立即退出，不能等待并接入 replacement generation。ready 后向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续直接媒体；转码音频由独立 reader 从 `SourceCursor` 输入。
 3. 后续同格式订阅者从共享 bytes reader 读取，不重新创建 muxer。
 4. HTTP/WS 请求释放自己实际取得的实例。最后一个订阅者释放或该 publisher generation 结束时关闭 `Done`，muxer 关闭 reader 和 SharedBuffer，实例从 manager 删除；旧请求不能递减 replacement generation 的实例。
 
@@ -276,22 +276,22 @@ RTMP play 在鉴权后查找/创建 stream、增加 subscriber，然后：
 5. 使用连接私有 FLV muxer 编成 RTMP chunks；
 6. 通过 `SlowConsumerFilter` 根据延迟丢弃非关键视频帧。
 
-音频 codec 不兼容时，按目标 codec 取得 TranscodeManager reader，转换输入从 `SourceCursor` 建立；兼容时直接读取主 ring。初始化 sequence header 只发送一次，之后 publisher 发出的 live sequence header 仍会转发给 RTMP peer。
+音频 codec 不兼容时，直接视频仍由主 ring 的 `LiveCursor` reader 提供，另一个 audio-only TranscodeManager reader 从 `SourceCursor` 取得转换输入；兼容时直接读取主 ring。replay 视频、视频 sequence header 和目标音频 header 都只发送一次，之后 publisher 发出的 live sequence header 仍会转发给 RTMP peer。
 
 ### RTSP
 
-RTSP 支持 OPTIONS、DESCRIBE、SETUP、PLAY，以及 ANNOUNCE、RECORD、TEARDOWN；传输支持 TCP interleaved、UDP unicast 和 UDP multicast。播放时从 MediaInfo 生成 SDP，每个订阅者独立创建 packetizer、SSRC、sequence 和 RTP timestamp 状态。即使底层都来自同一 RingBuffer，RTP 包不能简单在连接间共享。
+RTSP 支持 OPTIONS、DESCRIBE、SETUP、PLAY，以及 ANNOUNCE、RECORD、TEARDOWN；传输支持 TCP interleaved、UDP unicast 和 UDP multicast。DESCRIBE 从一个 ready `StartupSnapshot` 生成 SDP，并把同一快照在 session mutex 下保存；PLAY 只能使用该 generation 的 media/header/replay/cursor，若 DESCRIBE 后 publisher 被移除或替换则拒绝播放，不能把旧 SDP 与新媒体配对。每个订阅者独立创建 packetizer、SSRC、sequence 和 RTP timestamp 状态。即使底层都来自同一 RingBuffer，RTP 包不能简单在连接间共享。
 
 ### SRT
 
-SRT stream ID 决定 publish 或 subscribe。订阅端从一个启动快照创建 TS muxer，先发送 replay，再从 `LiveCursor` 接续；不使用跨 track 的最大 DTS watermark。live sequence header 会更新已知 codec/header 并重建 TS muxer，使后续 PAT/PMT 反映新增或变化的 track。为抵御 GOP burst，写队列返回 `io.EOF` 时会短暂重试。SRT 订阅也使用慢消费者过滤，并在 generation 结束时退出。
+SRT stream ID 决定 publish 或 subscribe。订阅端从一个启动快照创建 TS muxer，先发送 replay，再从 `LiveCursor` 接续；不使用跨 track 的最大 DTS watermark。live sequence header 会更新已知 codec/header 并重建 TS muxer，立即发送新的 PAT/PMT，再发送该 track 的第一帧；因此晚到的 AAC header 后即使没有视频关键帧，首个音频帧也不会在 video-only PMT 下发送或被丢弃。为抵御 GOP burst，写队列返回 `io.EOF` 时会短暂重试。SRT 订阅也使用慢消费者过滤，并在 generation 结束时退出。
 
 ### HTTP-FLV、HTTP-TS、FMP4
 
 这些路径复用上一节描述的格式 muxer：
 
 - FLV：header 和 sequence header 作为 init data，之后共享 FLV tags；
-- TS：PAT/PMT 可在关键帧前内联写入，每帧输出 TS packets；
+- TS：PAT/PMT 可在关键帧前内联写入；late sequence header 新增或改变 track 时，共享 muxer 会先单独输出刷新后的 PAT/PMT，再无重复地输出该 track 的第一帧；
 - FMP4：init segment 单独输出，GOP 作为首个 fragment，实时帧大约按 200ms 聚合；建线时 rebasing DTS/PTS，但保留 B-frame 的 signed composition offset。
 
 ### HLS、LL-HLS、DASH

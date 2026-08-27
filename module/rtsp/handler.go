@@ -69,11 +69,14 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 		return resp
 	}
 	stream, ok := h.server.StreamHub().Find(streamKey)
-	if !ok || stream.Publisher() == nil {
+	if !ok {
 		return newResponse(404, "Stream Not Found", req)
 	}
-	mediaInfo := stream.Publisher().MediaInfo()
-	sd := sdp.BuildFromMediaInfo(mediaInfo, req.URL, "0.0.0.0")
+	startup := stream.StartupSnapshot()
+	if !startup.Ready || !stream.IsPublisherGeneration(startup.Generation) {
+		return newResponse(404, "Stream Not Found", req)
+	}
+	sd := sdp.BuildFromMediaInfo(&startup.MediaInfo, req.URL, "0.0.0.0")
 	body := sd.Marshal()
 	slog.Debug("DESCRIBE SDP", "module", "rtsp", "body", string(body))
 	resp := newResponse(200, "OK", req)
@@ -82,7 +85,7 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Body = body
 	if session != nil {
-		if !session.SetDescription(mediaInfo, stream) {
+		if !session.SetDescription(startup, stream) {
 			return newResponse(454, "Session Not Found", req)
 		}
 		if err := session.Transition(StateDescribed); err != nil {
@@ -296,6 +299,10 @@ func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr stri
 			return newResponse(454, "Session Not Found", req)
 		}
 		snapshot := session.Snapshot()
+		if snapshot.Stream == nil || !snapshot.Startup.Ready ||
+			!snapshot.Stream.IsPublisherGeneration(snapshot.Startup.Generation) {
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 		// Authorization runs before subscriber mutation. The asynchronous start
 		// event is emitted only after runSubscriberLoop installs the subscriber.
 		if err := h.server.GetEventBus().EmitSync(core.EventSubscribe, &core.EventContext{

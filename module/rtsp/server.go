@@ -377,7 +377,7 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	if sessionSnapshot.Closed || sessionSnapshot.Stream == nil || sessionSnapshot.MediaInfo == nil {
 		return
 	}
-	startup := sessionSnapshot.Stream.StartupSnapshot()
+	startup := sessionSnapshot.Startup
 	if !startup.Ready || !sessionSnapshot.Stream.IsPublisherGeneration(startup.Generation) {
 		return
 	}

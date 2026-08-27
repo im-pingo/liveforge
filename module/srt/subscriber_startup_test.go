@@ -108,10 +108,19 @@ func TestSRTLateSequenceHeaderRefreshesTrackConfiguration(t *testing.T) {
 	go startSRTSubscriber(sub, done)
 	readSRTWrite(t, conn)
 	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader, 20, 20, []byte{0x12, 0x10}))
-	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 40, 40, []byte{0, 0, 0, 2, 0x65, 2}))
-	data := readSRTWrite(t, conn)
-	if !tsOutputDeclaresStreamType(data, 0x0f) {
-		t.Fatal("SRT TS output did not refresh PMT with the late AAC track")
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 40, 40, []byte{1, 2}))
+	announcement := readSRTWrite(t, conn)
+	if !tsOutputDeclaresStreamType(announcement, 0x0f) {
+		t.Fatal("SRT TS output did not announce the late AAC track before its first media frame")
+	}
+	media := readSRTWrite(t, conn)
+	if !tsOutputContainsPID(media, ts.PIDAudio) {
+		t.Fatal("SRT TS output dropped the first late-track audio frame")
+	}
+	select {
+	case data := <-conn.writes:
+		t.Fatalf("SRT TS output duplicated the first late-track audio frame in %d extra bytes", len(data))
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -165,6 +174,17 @@ func tsOutputDeclaresStreamType(data []byte, streamType byte) bool {
 				return true
 			}
 			i += 5 + int(pkt[i+3]&0x0f)<<8 + int(pkt[i+4])
+		}
+	}
+	return false
+}
+
+func tsOutputContainsPID(data []byte, wantPID uint16) bool {
+	for offset := 0; offset+ts.PacketSize <= len(data); offset += ts.PacketSize {
+		pkt := data[offset : offset+ts.PacketSize]
+		pid := uint16(pkt[1]&0x1f)<<8 | uint16(pkt[2])
+		if pid == wantPID {
+			return true
 		}
 	}
 	return false
