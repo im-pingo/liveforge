@@ -7,11 +7,20 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
+func newPublishingMuxerManager(t *testing.T, key string) (*Stream, *MuxerManager) {
+	t.Helper()
+	stream := NewStream(key, newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	if err := stream.SetPublisher(&testPublisher{
+		id:   "publisher",
+		info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return stream, NewMuxerManager(stream, 256)
+}
+
 func TestMuxerManagerGetOrCreate(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
-	mm := NewMuxerManager(stream, 256)
+	_, mm := newPublishingMuxerManager(t, "live/test")
 
 	r1, inst1 := mm.GetOrCreateMuxer("flv")
 	r2, inst2 := mm.GetOrCreateMuxer("flv")
@@ -28,10 +37,7 @@ func TestMuxerManagerGetOrCreate(t *testing.T) {
 }
 
 func TestMuxerManagerRelease(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
-	mm := NewMuxerManager(stream, 256)
+	_, mm := newPublishingMuxerManager(t, "live/test")
 
 	_, inst := mm.GetOrCreateMuxer("flv")
 	mm.GetOrCreateMuxer("flv")
@@ -48,10 +54,7 @@ func TestMuxerManagerRelease(t *testing.T) {
 }
 
 func TestMuxerManagerStartCallback(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
-	mm := NewMuxerManager(stream, 256)
+	_, mm := newPublishingMuxerManager(t, "live/test")
 
 	started := false
 	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
@@ -72,10 +75,7 @@ func TestMuxerManagerStartCallback(t *testing.T) {
 }
 
 func TestMuxerInstanceDoneChannel(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
-	mm := NewMuxerManager(stream, 256)
+	_, mm := newPublishingMuxerManager(t, "live/test")
 
 	var capturedInst *MuxerInstance
 	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
@@ -101,10 +101,7 @@ func TestMuxerInstanceDoneChannel(t *testing.T) {
 }
 
 func TestMuxerManagerFormats(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
-	mm := NewMuxerManager(stream, 256)
+	_, mm := newPublishingMuxerManager(t, "live/test")
 
 	// Empty
 	formats := mm.Formats()
@@ -134,6 +131,74 @@ func TestMuxerManagerReleaseNonExistent(t *testing.T) {
 
 	// Should not panic
 	mm.ReleaseMuxer("nonexistent", nil)
+}
+
+func TestMuxerManagerRejectsBeforePublisher(t *testing.T) {
+	stream := NewStream("live/muxer-before-publisher", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	mm := NewMuxerManager(stream, 256)
+	starts := 0
+	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
+		starts++
+	})
+
+	reader, inst := mm.GetOrCreateMuxer("flv")
+	if reader != nil || inst != nil {
+		t.Fatalf("pre-publish muxer = (%p, %p), want (nil, nil)", reader, inst)
+	}
+	if starts != 0 {
+		t.Fatalf("pre-publish start callbacks = %d, want 0", starts)
+	}
+	if got := mm.SubscriberCount("flv"); got != 0 {
+		t.Fatalf("pre-publish subscribers = %d, want 0", got)
+	}
+}
+
+func TestMuxerManagerRetiresOnPublisherRemovalBeforeRepublish(t *testing.T) {
+	stream := NewStream("live/muxer-remove", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pubA := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+	mm := NewMuxerManager(stream, 256)
+	starts := 0
+	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
+		starts++
+	})
+	_, instA := mm.GetOrCreateMuxer("flv")
+
+	if !stream.RemovePublisherIf(pubA) {
+		t.Fatal("publisher A was not removed")
+	}
+	reader, inst := mm.GetOrCreateMuxer("flv")
+	if reader != nil || inst != nil {
+		t.Errorf("removed-publisher muxer = (%p, %p), want (nil, nil)", reader, inst)
+	}
+	select {
+	case <-instA.Done:
+	default:
+		t.Error("ended generation muxer was not retired")
+	}
+	if got := mm.SubscriberCount("flv"); got != 0 {
+		t.Errorf("removed-publisher subscribers = %d, want 0", got)
+	}
+	if starts != 1 {
+		t.Errorf("removed-publisher start callbacks = %d, want 1", starts)
+	}
+
+	pubB := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	_, instB := mm.GetOrCreateMuxer("flv")
+	if instB == nil || instB == instA {
+		t.Fatal("replacement publisher did not receive a fresh muxer")
+	}
+	if instB.Generation != 2 {
+		t.Fatalf("replacement muxer generation = %d, want 2", instB.Generation)
+	}
+	if starts != 2 {
+		t.Fatalf("replacement start callbacks = %d, want 2", starts)
+	}
 }
 
 func TestMuxerManagerGenerationReplacementAndInstanceRelease(t *testing.T) {
@@ -206,10 +271,7 @@ func TestMuxerManagerSubscriberCountNonExistent(t *testing.T) {
 }
 
 func TestMuxerInstanceInitData(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
-	mm := NewMuxerManager(stream, 256)
+	_, mm := newPublishingMuxerManager(t, "live/test")
 
 	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
 		inst.SetInitData([]byte("FLV-HEADER"))

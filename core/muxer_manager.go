@@ -72,12 +72,20 @@ func (mm *MuxerManager) RegisterMuxerStart(format string, fn MuxerStartFunc) {
 // GetOrCreateMuxer returns (or creates) a muxer instance for the given format,
 // and returns a new SharedBuffer reader for the caller.
 // If a new instance is created, the registered start callback is invoked.
+// It returns (nil, nil) when the stream has no active publisher generation.
 func (mm *MuxerManager) GetOrCreateMuxer(format string) (*SharedBufferReader, *MuxerInstance) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
-	generation := mm.stream.currentPublisherGeneration()
+	generation, active := mm.stream.activePublisherGeneration()
 	inst, ok := mm.muxers[format]
+	if !active {
+		if ok {
+			inst.close()
+			delete(mm.muxers, format)
+		}
+		return nil, nil
+	}
 	isNew := !ok || inst.Generation != generation
 	if isNew {
 		if ok {

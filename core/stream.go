@@ -208,6 +208,10 @@ func (s *Stream) State() StreamState {
 
 // SetPublisher assigns a publisher to this stream.
 func (s *Stream) SetPublisher(pub Publisher) error {
+	if isNilPublisher(pub) {
+		return errors.New("publisher is nil")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -243,9 +247,7 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	s.mediaInfo = avframe.MediaInfo{}
 	s.startupReady = false
 	s.generationDone = make(chan struct{})
-	if pub != nil {
-		s.mergePublisherMediaInfoLocked(pub.MediaInfo())
-	}
+	s.mergePublisherMediaInfoLocked(pub.MediaInfo())
 	s.publisher = pub
 	s.state = StreamStatePublishing
 	s.startupReady = s.startupReadyLocked()
@@ -296,14 +298,27 @@ func (s *Stream) removePublisherLocked() {
 }
 
 func samePublisher(left, right Publisher) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
+	if isNilPublisher(left) || isNilPublisher(right) {
+		return false
 	}
 	leftType := reflect.TypeOf(left)
 	if leftType != reflect.TypeOf(right) || !leftType.Comparable() {
 		return false
 	}
 	return left == right
+}
+
+func isNilPublisher(pub Publisher) bool {
+	if pub == nil {
+		return true
+	}
+	value := reflect.ValueOf(pub)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (s *Stream) closeGenerationLocked() {
@@ -456,7 +471,7 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
+	if isNilPublisher(pub) || !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
 		return false
 	}
 	return s.writeFrameLocked(frame)
@@ -612,10 +627,13 @@ func (s *Stream) IsPublisherGeneration(generation uint64) bool {
 	return s.state == StreamStatePublishing && s.publisherGeneration == generation
 }
 
-func (s *Stream) currentPublisherGeneration() uint64 {
+func (s *Stream) activePublisherGeneration() (uint64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.publisherGeneration
+	if s.state != StreamStatePublishing || isNilPublisher(s.publisher) {
+		return 0, false
+	}
+	return s.publisherGeneration, true
 }
 
 // GOPCacheLen returns the total number of frames across all cached GOPs.

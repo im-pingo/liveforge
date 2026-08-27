@@ -6,6 +6,8 @@ LiveForge is an MIT-licensed Go 1.26+ live streaming server. It ingests, transmu
 
 For a source-oriented Chinese architecture walkthrough, see [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md). It documents the current module boundaries, AVFrame flow, GOP snapshot/cursor consistency, SPMC RingBuffer semantics, SharedBuffer/MuxerManager, protocol egress, cluster forwarding/origin pull, and on-demand audio transcoding. It is intentionally based on implemented code; older design drafts are not treated as runtime behavior.
 
+The core publisher lifecycle rejects nil and typed-nil `Publisher` values before changing timers, state, or generation. `MuxerManager.GetOrCreateMuxer` creates or reuses an instance only for an active publishing generation; before first publish or after publisher removal it returns no reader/instance and retires any mapped instance from the ended generation.
+
 ## Capability matrix
 
 | Capability | Publish | Play | Default port or path | Prerequisites |

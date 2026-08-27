@@ -31,6 +31,12 @@ func (p *testPublisher) ID() string                    { return p.id }
 func (p *testPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *testPublisher) Close() error                  { return nil }
 
+type typedNilTestPublisher struct{}
+
+func (*typedNilTestPublisher) ID() string                    { return "typed-nil" }
+func (*typedNilTestPublisher) MediaInfo() *avframe.MediaInfo { return nil }
+func (*typedNilTestPublisher) Close() error                  { return nil }
+
 func TestStreamStateTransitions(t *testing.T) {
 	bus := NewEventBus()
 	s := NewStream("live/test", newTestStreamConfig(), config.LimitsConfig{}, bus)
@@ -54,6 +60,63 @@ func TestStreamStateTransitions(t *testing.T) {
 	s.RemovePublisher()
 	if s.State() != StreamStateNoPublisher {
 		t.Fatalf("expected no_publisher, got %v", s.State())
+	}
+}
+
+func TestStreamRejectsNilPublisherWithoutMutation(t *testing.T) {
+	var typedNil *typedNilTestPublisher
+	tests := []struct {
+		name string
+		pub  Publisher
+	}{
+		{name: "nil"},
+		{name: "typed nil", pub: typedNil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewStream("live/nil-publisher", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			defer s.Close()
+			valid := &testPublisher{id: "valid", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+			if err := s.SetPublisher(valid); err != nil {
+				t.Fatal(err)
+			}
+			if !s.RemovePublisherIf(valid) {
+				t.Fatal("valid publisher was not removed")
+			}
+
+			before := s.StartupSnapshot()
+			beforeNoPublisherTimer := s.noPublisherTimer
+			beforeIdleTimer := s.idleTimer
+			beforeCursor := s.RingBuffer().WriteCursor()
+
+			if err := s.SetPublisher(tt.pub); err == nil {
+				t.Error("SetPublisher accepted a nil publisher")
+			}
+			if s.State() != StreamStateNoPublisher {
+				t.Errorf("state = %s after rejected publisher, want no_publisher", s.State())
+			}
+			if s.Publisher() != nil {
+				t.Error("rejected publisher became active")
+			}
+			after := s.StartupSnapshot()
+			if after.Generation != before.Generation || after.GenerationDone != before.GenerationDone {
+				t.Errorf("rejected publisher changed generation from %d to %d", before.Generation, after.Generation)
+			}
+			if s.noPublisherTimer != beforeNoPublisherTimer || s.idleTimer != beforeIdleTimer {
+				t.Error("rejected publisher changed stream timers")
+			}
+			frame := avframe.NewAVFrame(
+				avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+				0, 0, []byte{0xff},
+			)
+			if s.WriteFrameForPublisher(tt.pub, frame) {
+				t.Fatal("nil publisher frame was accepted")
+			}
+			if cursor := s.RingBuffer().WriteCursor(); cursor != beforeCursor {
+				t.Fatalf("nil publisher advanced ring cursor from %d to %d", beforeCursor, cursor)
+			}
+		})
 	}
 }
 
