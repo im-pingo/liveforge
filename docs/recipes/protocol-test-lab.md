@@ -173,6 +173,10 @@ while `segment_duration` controls completed full segments. The default full
 segment target is `1.0` second and values below `0.1` are rejected by the
 configuration schema. Both settings are hot-reloadable; existing segment
 managers stop and later requests recreate them with the new policy.
+An initial LL-HLS request waits for one complete segment using a
+millisecond-rounded `segment_duration + part_duration` budget, with a 10-second
+floor and 30-second cap. If that budget expires or the manager stops first, the
+request returns HTTP 503 instead of exposing a part-only playlist.
 
 ```yaml
 http_stream:
@@ -201,6 +205,9 @@ LL-HLS full segments use `.ts` or `.m4s` according to `container`, while HLS
 uses `.ts`. DASH uses the audio init and `a$Number$.m4s` media routes. The first
 full audio-only segment should become available near its configured target
 duration, without waiting for source shutdown or a video keyframe.
+DASH rebases the first source timestamp once and keeps all later fMP4 fragments
+on that same relative decode timeline, including when the source starts at DTS
+zero.
 
 The startup cache is the video-keyframe-bounded GOP. `GOP #N` is a
 stream-lifetime generation that increments for every keyframe, so replacement

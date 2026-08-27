@@ -734,6 +734,115 @@ func TestHandlerLLHLSInitialPlaylistWaitsForCompletedSegment(t *testing.T) {
 	}
 }
 
+func TestHandlerLLHLSInitialPlaylistNeverReturnsPartsAfterManagerStops(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	srv.Config().HTTP.LLHLS.Enabled = true
+	srv.Config().HTTP.LLHLS.Container = "fmp4"
+	srv.Config().HTTP.LLHLS.PartDuration = 0.2
+	srv.Config().HTTP.LLHLS.SegmentDuration = 15
+
+	stream, err := srv.StreamHub().GetOrCreate("live/llhls-stopped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewLLHLSManager("live/llhls-stopped", "/live/llhls-stopped", 0.2, 15, 5, "fmp4")
+	m.llhlsMu.Lock()
+	m.llhlsManagers["live/llhls-stopped"] = mgr
+	m.llhlsMu.Unlock()
+
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(addr + "/live/llhls-stopped.m3u8")
+		if err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		resultCh <- result{status: resp.StatusCode, body: string(body), err: readErr}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	mgr.segmenter.callbacks.OnPart(&LLHLSPart{
+		Index:       0,
+		Duration:    0.2,
+		Independent: true,
+		Data:        []byte("part"),
+	})
+	select {
+	case got := <-resultCh:
+		t.Fatalf("part-only initial playlist returned before manager stop: status %d body %q error %v", got.status, got.body, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mgr.Stop()
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.status != http.StatusServiceUnavailable {
+			t.Fatalf("stopped initial playlist response = status %d body %q, want status %d", got.status, got.body, http.StatusServiceUnavailable)
+		}
+		if strings.Contains(got.body, "#EXT-X-PART") {
+			t.Fatalf("stopped initial playlist returned part-only media: %q", got.body)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("initial playlist did not stop waiting after manager shutdown")
+	}
+}
+
+func TestHandlerLLHLSInitialPlaylistTimeoutNeverReturnsParts(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	srv.Config().HTTP.LLHLS.Enabled = true
+	srv.Config().HTTP.LLHLS.Container = "fmp4"
+	srv.Config().HTTP.LLHLS.PartDuration = 0.2
+	srv.Config().HTTP.LLHLS.SegmentDuration = 15
+
+	stream, err := srv.StreamHub().GetOrCreate("live/llhls-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewLLHLSManager("live/llhls-timeout", "/live/llhls-timeout", 0.2, 15, 5, "fmp4")
+	mgr.initialPlaylistWait = 10 * time.Millisecond
+	mgr.segmenter.callbacks.OnPart(&LLHLSPart{
+		Index:       0,
+		Duration:    0.2,
+		Independent: true,
+		Data:        []byte("part"),
+	})
+	m.llhlsMu.Lock()
+	m.llhlsManagers["live/llhls-timeout"] = mgr
+	m.llhlsMu.Unlock()
+
+	resp, err := (&http.Client{Timeout: time.Second}).Get(addr + "/live/llhls-timeout.m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("timed-out initial playlist response = status %d body %q, want status %d", resp.StatusCode, body, http.StatusServiceUnavailable)
+	}
+	if strings.Contains(string(body), "#EXT-X-PART") {
+		t.Fatalf("timed-out initial playlist returned part-only media: %q", body)
+	}
+}
+
 func TestQueryToMap(t *testing.T) {
 	tests := []struct {
 		name string

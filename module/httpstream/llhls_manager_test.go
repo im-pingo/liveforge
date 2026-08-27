@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"context"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,30 @@ func TestLLHLSManager_HasContent(t *testing.T) {
 		t.Error("should not have content for segment 1 yet")
 	}
 	m.mu.Unlock()
+}
+
+func TestLLHLSInitialPlaylistWaitDuration(t *testing.T) {
+	tests := []struct {
+		name            string
+		segmentDuration float64
+		partDuration    float64
+		want            time.Duration
+	}{
+		{name: "preserves ten second minimum", segmentDuration: 1, partDuration: 0.2, want: 10 * time.Second},
+		{name: "extends to segment plus one part", segmentDuration: 15, partDuration: 0.2, want: 15*time.Second + 200*time.Millisecond},
+		{name: "rounds up to media timestamp unit", segmentDuration: 10, partDuration: 0.0001, want: 10*time.Second + time.Millisecond},
+		{name: "caps finite overflow", segmentDuration: math.MaxFloat64, partDuration: math.MaxFloat64, want: 30 * time.Second},
+		{name: "caps positive infinity", segmentDuration: math.Inf(1), partDuration: 0.2, want: 30 * time.Second},
+		{name: "caps not a number", segmentDuration: math.NaN(), partDuration: 0.2, want: 30 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := llhlsInitialPlaylistWaitDuration(tt.segmentDuration, tt.partDuration); got != tt.want {
+				t.Fatalf("initial LL-HLS playlist wait = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestLLHLSManagerAudioOnlyLiveSegments(t *testing.T) {

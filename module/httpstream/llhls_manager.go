@@ -3,6 +3,7 @@ package httpstream
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -19,14 +20,15 @@ type LLHLSManager struct {
 	currentMSN   int
 	initSegment  []byte
 
-	segmenter       *LLHLSSegmenter
-	playlist        *LLHLSPlaylist
-	streamKey       string
-	basePath        string
-	container       string
-	segmentCount    int
-	partDuration    float64
-	segmentDuration float64
+	segmenter           *LLHLSSegmenter
+	playlist            *LLHLSPlaylist
+	streamKey           string
+	basePath            string
+	container           string
+	segmentCount        int
+	partDuration        float64
+	segmentDuration     float64
+	initialPlaylistWait time.Duration
 
 	done chan struct{}
 }
@@ -34,13 +36,14 @@ type LLHLSManager struct {
 // NewLLHLSManager creates a new LL-HLS manager.
 func NewLLHLSManager(streamKey, basePath string, partDuration, segmentDuration float64, segmentCount int, container string) *LLHLSManager {
 	m := &LLHLSManager{
-		streamKey:       streamKey,
-		basePath:        basePath,
-		container:       container,
-		segmentCount:    segmentCount,
-		partDuration:    partDuration,
-		segmentDuration: segmentDuration,
-		done:            make(chan struct{}),
+		streamKey:           streamKey,
+		basePath:            basePath,
+		container:           container,
+		segmentCount:        segmentCount,
+		partDuration:        partDuration,
+		segmentDuration:     segmentDuration,
+		initialPlaylistWait: llhlsInitialPlaylistWaitDuration(segmentDuration, partDuration),
+		done:                make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
 
@@ -74,6 +77,29 @@ func NewLLHLSManager(streamKey, basePath string, partDuration, segmentDuration f
 	})
 
 	return m
+}
+
+func llhlsInitialPlaylistWaitDuration(segmentDuration, partDuration float64) time.Duration {
+	const (
+		minimumWait = 10 * time.Second
+		maximumWait = 30 * time.Second
+	)
+	if math.IsNaN(segmentDuration) || math.IsNaN(partDuration) ||
+		math.IsInf(segmentDuration, 0) || math.IsInf(partDuration, 0) {
+		return maximumWait
+	}
+
+	targetSeconds := segmentDuration + partDuration
+	if math.IsNaN(targetSeconds) || math.IsInf(targetSeconds, 0) ||
+		targetSeconds >= maximumWait.Seconds() {
+		return maximumWait
+	}
+	targetMilliseconds := math.Ceil(targetSeconds * float64(time.Second/time.Millisecond))
+	wait := time.Duration(targetMilliseconds) * time.Millisecond
+	if wait < minimumWait {
+		return minimumWait
+	}
+	return wait
 }
 
 // Run starts the segmenter loop. Blocks until stream ends or Stop() is called.

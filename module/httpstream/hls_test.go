@@ -451,11 +451,15 @@ func newAudioOnlyAACStream(t *testing.T, key string) *core.Stream {
 }
 
 func writeLiveAACFrames(stream *core.Stream, count int, intervalMS int64) [][]byte {
+	return writeLiveAACFramesFromDTS(stream, count, intervalMS, 0)
+}
+
+func writeLiveAACFramesFromDTS(stream *core.Stream, count int, intervalMS, originDTS int64) [][]byte {
 	payloads := make([][]byte, count)
 	for i := range count {
 		payload := []byte{0x21, byte(i), 0x34, 0x55}
 		payloads[i] = payload
-		dts := int64(i) * intervalMS
+		dts := originDTS + int64(i)*intervalMS
 		stream.WriteFrame(avframe.NewAVFrame(
 			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
 			dts, dts, payload,

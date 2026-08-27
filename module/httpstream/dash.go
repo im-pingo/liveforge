@@ -35,15 +35,16 @@ type DASHManager struct {
 	nextSeqNum  int
 	seqBase     int // sequence number of first segment in window
 
-	startTime  time.Time // for MPD availabilityStartTime
-	dtsBase    int64     // DTS of first frame (ms); aligns timeline with segment data
-	timeBase   float64   // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
-	streamKey  string
-	basePath   string // e.g., "/live/stream1"
-	hasVideo   bool   // whether video track is present
-	hasAudio   bool   // whether audio track is present
-	audioCodec string // e.g., "mp4a.40.2" for MPD codecs attribute
-	done       chan struct{}
+	startTime          time.Time // for MPD availabilityStartTime
+	dtsBase            int64     // DTS of first frame (ms); aligns timeline with segment data
+	dtsBaseInitialized bool
+	timeBase           float64 // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
+	streamKey          string
+	basePath           string // e.g., "/live/stream1"
+	hasVideo           bool   // whether video track is present
+	hasAudio           bool   // whether audio track is present
+	audioCodec         string // e.g., "mp4a.40.2" for MPD codecs attribute
+	done               chan struct{}
 
 	// Video metadata extracted from sequence header for MPD Representation.
 	videoCodecStr string // e.g., "avc1.640028"
@@ -218,8 +219,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			dur = d.targetDur
 		}
 
-		if d.dtsBase == 0 {
+		if !d.dtsBaseInitialized {
 			d.dtsBase = segStartDTS
+			d.dtsBaseInitialized = true
 		}
 
 		// Split audio frames at the segment boundary. Audio frames read

@@ -119,7 +119,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **Delta playlist** — `_HLS_skip=YES` support to reduce playlist transfer size
 - **fMP4 container** — Default fMP4 with TS fallback option
 - **Legacy player compat** — Graceful degradation for players without LL-HLS support (buffered segment delivery)
-- **Keyframe-aligned startup** — Cached and live GOP frames remain continuous; the initial Hls.js manifest waits for one complete segment without duplicating its parts, then blocking reloads retain the latest completed part identities while consuming new low-latency parts. DASH also starts after one complete segment, uses a one-fragment live delay, and refreshes its MPD within two seconds. HLS, LL-HLS, and DASH manifests escape each stream-key segment, DASH URL attributes are XML-safe, and media-segment routing preserves valid keys at arbitrary path depth
+- **Keyframe-aligned startup** — Cached and live GOP frames remain continuous; the initial Hls.js manifest waits for one complete segment without duplicating its parts. Its bounded wait covers the configured full-segment target plus one part (10-second floor, 30-second cap), and returns 503 instead of a part-only manifest if no full segment becomes available. Blocking reloads retain the latest completed part identities while consuming new low-latency parts. DASH also starts after one complete segment, uses a one-fragment live delay, and refreshes its MPD within two seconds. HLS, LL-HLS, and DASH manifests escape each stream-key segment, DASH URL attributes are XML-safe, and media-segment routing preserves valid keys at arbitrary path depth
 
 ### Management & Operations
 
@@ -284,7 +284,8 @@ playlist at `/live/audio.m3u8` and a full segment at `/live/audio/0.ts` or
 `part_duration` controls partial segments, while `segment_duration` controls
 completed full segments and defaults to `1.0` seconds. Without video keyframes,
 the first full segment completes near the configured segment target instead of
-waiting for source shutdown.
+waiting for source shutdown. DASH media fragments retain one continuous relative
+decode timeline even when the publisher's first DTS is zero.
 
 ### Web Console
 
