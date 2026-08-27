@@ -15,6 +15,7 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
@@ -270,15 +271,19 @@ func TestCleanupSessionEmitsOneGenerationTaggedPublishStop(t *testing.T) {
 	}
 }
 
-func TestInterleavedActivityRefreshesSession(t *testing.T) {
+func TestInterleavedActiveRTCPRefreshesSession(t *testing.T) {
 	m := NewModule()
-	session := NewRTSPSession("tcp", "live/tcp")
+	_, _, session := newRTSPIngressSession(t, "tcp")
 	old := time.Now().Add(-time.Hour)
 	session.mu.Lock()
 	session.lastTouch = old
 	session.mu.Unlock()
+	data, err := rtcp.Marshal([]rtcp.Packet{&rtcp.ReceiverReport{SSRC: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if err := m.processInterleaved(session, 1, []byte{0x00}); err != nil {
+	if err := m.processInterleaved(session, 1, data); err != nil {
 		t.Fatalf("process RTCP interleaved activity: %v", err)
 	}
 
@@ -287,6 +292,59 @@ func TestInterleavedActivityRefreshesSession(t *testing.T) {
 	session.mu.Unlock()
 	if !touched.After(old) {
 		t.Fatalf("interleaved activity did not refresh session: %v", touched)
+	}
+}
+
+func TestInterleavedActiveMalformedRTPPreservesParseErrorSemantics(t *testing.T) {
+	_, _, session := newRTSPIngressSession(t, "tcp-malformed-active")
+	old := time.Now().Add(-time.Hour)
+	session.mu.Lock()
+	session.lastTouch = old
+	session.mu.Unlock()
+
+	if err := new(Module).processInterleaved(session, 0, []byte{0x80}); err != nil {
+		t.Fatalf("active malformed RTP error = %v, want ignored parse error", err)
+	}
+	session.mu.Lock()
+	touched := session.lastTouch
+	session.mu.Unlock()
+	if !touched.After(old) {
+		t.Fatalf("active malformed RTP did not retain activity semantics: %v", touched)
+	}
+}
+
+func TestInterleavedStaleControlAndMalformedRTPStopWithoutActivity(t *testing.T) {
+	rtcpData, err := rtcp.Marshal([]rtcp.Packet{&rtcp.ReceiverReport{SSRC: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		channel uint8
+		data    []byte
+	}{
+		{name: "RTCP", channel: 1, data: rtcpData},
+		{name: "malformed RTP", channel: 0, data: []byte{0x80}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream, oldPublisher, session := newRTSPIngressSession(t, "tcp-stale-"+tt.name)
+			replaceRTSPIngressPublisher(t, stream, oldPublisher)
+			old := time.Now().Add(-time.Hour)
+			session.mu.Lock()
+			session.lastTouch = old
+			session.mu.Unlock()
+
+			if err := new(Module).processInterleaved(session, tt.channel, tt.data); err == nil {
+				t.Fatalf("stale %s returned no error", tt.name)
+			}
+			session.mu.Lock()
+			touched := session.lastTouch
+			session.mu.Unlock()
+			if !touched.Equal(old) {
+				t.Fatalf("stale %s refreshed session from %v to %v", tt.name, old, touched)
+			}
+		})
 	}
 }
 
@@ -333,7 +391,7 @@ func TestUDPPublishActivityRefreshesSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer transport.Close()
-	session := NewRTSPSession("udp", "live/udp")
+	_, _, session := newRTSPIngressSession(t, "udp")
 	old := time.Now().Add(-time.Hour)
 	session.mu.Lock()
 	session.lastTouch = old
@@ -347,7 +405,12 @@ func TestUDPPublishActivityRefreshesSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	if _, err := client.Write(make([]byte, 12)); err != nil {
+	pkt := &pionrtp.Packet{Header: pionrtp.Header{Version: 2, PayloadType: 200}, Payload: []byte{1}}
+	data, err := pkt.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(data); err != nil {
 		t.Fatal(err)
 	}
 
@@ -363,6 +426,44 @@ func TestUDPPublishActivityRefreshesSession(t *testing.T) {
 			t.Fatal("successful UDP RTP read did not refresh session")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestUDPPublishLoopStopsForStaleMalformedRTPWithoutActivity(t *testing.T) {
+	transport := newEphemeralRTSPUDPTransport(t)
+	defer transport.Close()
+	stream, oldPublisher, session := newRTSPIngressSession(t, "udp-stale-malformed")
+	replaceRTSPIngressPublisher(t, stream, oldPublisher)
+	old := time.Now().Add(-time.Hour)
+	session.mu.Lock()
+	session.lastTouch = old
+	session.mu.Unlock()
+	loopDone := make(chan struct{})
+	go func() {
+		new(Module).udpPublishLoop(transport, session)
+		close(loopDone)
+	}()
+
+	rtpPort, _ := transport.ServerPorts()
+	client, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: rtpPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.Write([]byte{0x80}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("UDP publish loop did not stop for stale malformed RTP")
+	}
+	session.mu.Lock()
+	touched := session.lastTouch
+	session.mu.Unlock()
+	if !touched.Equal(old) {
+		t.Fatalf("stale malformed UDP RTP refreshed session from %v to %v", old, touched)
 	}
 }
 
@@ -412,5 +513,66 @@ func TestUDPPublishLoopStopsForClosedPublisher(t *testing.T) {
 	case <-loopDone:
 	case <-time.After(time.Second):
 		t.Fatal("UDP publish loop did not stop for closed publisher")
+	}
+}
+
+func newRTSPIngressSession(t *testing.T, id string) (*core.Stream, *RTSPPublisher, *RTSPSession) {
+	t.Helper()
+	stream := core.NewStream("live/"+id, config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	info := &avframe.MediaInfo{VideoCodec: avframe.CodecH264}
+	publisher, err := NewRTSPPublisher(id+"-publisher", info, stream, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(publisher); err != nil {
+		t.Fatal(err)
+	}
+	session := NewRTSPSession(id+"-session", stream.Key())
+	if !session.SetPublisher(info, stream, publisher) {
+		t.Fatal("set RTSP session publisher")
+	}
+	return stream, publisher, session
+}
+
+func replaceRTSPIngressPublisher(t *testing.T, stream *core.Stream, oldPublisher *RTSPPublisher) *RTSPPublisher {
+	t.Helper()
+	if !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("remove old RTSP publisher")
+	}
+	replacement, err := NewRTSPPublisher("replacement", &avframe.MediaInfo{VideoCodec: avframe.CodecH264}, stream, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	return replacement
+}
+
+func newEphemeralRTSPUDPTransport(t *testing.T) *UDPTransport {
+	t.Helper()
+	loopback := net.ParseIP("127.0.0.1")
+	rtpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtcpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback})
+	if err != nil {
+		_ = rtpConn.Close()
+		t.Fatal(err)
+	}
+	ports, err := portalloc.New(1, 65535)
+	if err != nil {
+		_ = rtpConn.Close()
+		_ = rtcpConn.Close()
+		t.Fatal(err)
+	}
+	return &UDPTransport{
+		rtpConn:  rtpConn,
+		rtcpConn: rtcpConn,
+		rtpPort:  rtpConn.LocalAddr().(*net.UDPAddr).Port,
+		rtcpPort: rtcpConn.LocalAddr().(*net.UDPAddr).Port,
+		ports:    ports,
+		done:     make(chan struct{}),
 	}
 }

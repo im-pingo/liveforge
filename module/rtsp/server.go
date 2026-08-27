@@ -496,13 +496,14 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 		if err != nil {
 			return
 		}
-		publisher := session.Snapshot().Publisher
-		if publisher != nil {
-			pkt := &pionrtp.Packet{}
-			if err := pkt.Unmarshal(buf[:n]); err == nil {
-				if err := publisher.FeedRTP(pkt); err != nil {
-					return
-				}
+		publisher, err := activePublisherForIngress(session)
+		if err != nil {
+			return
+		}
+		pkt := &pionrtp.Packet{}
+		if err := pkt.Unmarshal(buf[:n]); err == nil {
+			if err := publisher.FeedRTP(pkt); err != nil {
+				return
 			}
 		}
 		session.Touch()
@@ -513,8 +514,11 @@ func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []
 	if session == nil {
 		return nil
 	}
-	publisher := session.Snapshot().Publisher
-	if channel%2 != 0 || publisher == nil {
+	publisher, err := activePublisherForIngress(session)
+	if err != nil {
+		return err
+	}
+	if channel%2 != 0 {
 		session.Touch()
 		return nil
 	}
@@ -526,6 +530,21 @@ func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []
 	}
 	session.Touch()
 	return nil
+}
+
+func activePublisherForIngress(session *RTSPSession) (*RTSPPublisher, error) {
+	snapshot := session.Snapshot()
+	publisher := snapshot.Publisher
+	if snapshot.Closed || publisher == nil || snapshot.Stream == nil || publisher.stream != snapshot.Stream {
+		return nil, fmt.Errorf("RTSP session %s has no active publisher", snapshot.ID)
+	}
+	publisher.mu.Lock()
+	closed := publisher.closed
+	publisher.mu.Unlock()
+	if closed || snapshot.Stream.Publisher() != publisher {
+		return nil, fmt.Errorf("RTSP publisher %s no longer owns stream", publisher.id)
+	}
+	return publisher, nil
 }
 
 func (m *Module) cleanupSession(session *RTSPSession) bool {
