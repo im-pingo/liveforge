@@ -94,6 +94,10 @@ func TestRTSPSubscribeLifecycleStopWaitsForBlockedStart(t *testing.T) {
 	if err := stream.SetPublisher(pub); err != nil {
 		t.Fatal(err)
 	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64},
+	))
 	startEntered := make(chan *core.EventContext, 1)
 	releaseStart := make(chan struct{})
 	stopRan := make(chan *core.EventContext, 1)

@@ -170,7 +170,7 @@ GOP 缓存由最近 `GOPCacheNum` 个视频 GOP 组成。每个 GOP 从视频关
 
 ### 7.2 原子快照
 
-`GOPCacheSnapshot()` 在同一把 Stream 读锁下完成两件事：复制 GOP 帧切片，并读取主 ring 的 write cursor。返回值是 `(frames, cursor)`。
+`StartupSnapshot()` 在同一把 Stream 读锁下复制当前 publisher generation 的完整启动状态：`MediaInfo`、音视频 sequence header、GOP replay frames、`LiveCursor`、`SourceCursor`、generation 编号和 `GenerationDone`。`LiveCursor` 指向快照之后的第一帧；`SourceCursor` 指向最老缓存 GOP 的 ring 位置，仅供需要转换历史输入的 worker 使用。兼容调用方仍可使用 `GOPCacheSnapshot()`，但协议订阅和共享 HTTP muxer 使用完整启动快照。
 
 ```mermaid
 sequenceDiagram
@@ -180,24 +180,24 @@ sequenceDiagram
     participant R as Ring cursor
     participant C as New subscriber
 
-    C->>S: GOPCacheSnapshot()
-    S->>G: 复制当前 GOP
-    S->>R: 读取 cursor = N
-    S-->>C: (cachedFrames, N)
+    C->>S: StartupSnapshot()
+    S->>G: 复制 headers 和 GOP replay
+    S->>R: 读取 LiveCursor = N 和 SourceCursor
+    S-->>C: snapshot(generation, replay, cursors, done)
     W->>S: WriteFrame(frame N)
     C->>C: 先发送 cachedFrames
     C->>R: NewReaderAt(N)
     R-->>C: 从 N 开始读取实时帧
 ```
 
-如果缓存和 cursor 分开读取，publisher 可能恰好在两次读取之间写入一帧：订阅者会先从缓存发送它，再从 ring 再发送一次，导致重复帧和 DTS 逆序。原子快照消除了这个窗口。
+如果 media info、header、缓存和 cursor 分开读取，publisher 可能恰好在调用之间写帧或被替换：订阅者会重复/遗漏边界帧，或者把旧 generation 的初始化状态与新 generation 的媒体混合。原子快照消除了这些窗口。订阅 reader 同时监听 `GenerationDone`；阻塞读取被唤醒后、处理帧前还会调用 `IsPublisherGeneration`，因此 replacement generation 的第一帧不会泄漏给旧订阅者。
 
 ### 7.3 不同消费者的起点
 
-- 普通 RTMP、SRT、HTTP muxer 和 WHEP live：发送快照后，从快照返回的 post-snapshot cursor 读取实时 ring。
-- 需要转换历史音频的 HTTP muxer：使用 `GOPCacheSourceStart()` 创建转码源 reader，从最老 GOP 起点建立完整的目标音频历史。
-- WHEP realtime：跳过 GOP，直接等待实时关键帧。
+- 普通 RTMP、RTSP、SRT、HTTP muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
+- 需要转换历史音频的 HTTP muxer 或 WHEP：只把 `SourceCursor` 用作转码输入起点；直接视频仍从 `LiveCursor` 读取。
 - 使用历史转码输出时，HTTP muxer 会按缓存视频 DTS 范围过滤转码轨中可能重复出现的视频帧。
+- SRT 不再用跨音视频的最大 DTS 过滤 replay/live 重叠；cursor 是唯一重复边界，因此缓存视频 DTS 4000 之后的实时音频 DTS 1000 仍会发送。
 
 ## 8. RingBuffer 设计与并发语义
 
@@ -242,10 +242,10 @@ RingReader:  每个消费者独立的 readCursor
 
 对每个 stream，`MuxerManager` 按 `flv`、`ts`、`mp4` 保存 `MuxerInstance`：
 
-1. 第一个该格式订阅者到来时创建 SharedBuffer 和 `Done` channel，并启动一个 muxer goroutine。
-2. muxer 原子获取 GOP snapshot，向 SharedBuffer 写 init/header、GOP，再从 snapshot cursor 继续写实时帧。
+1. 第一个该格式订阅者到来时，为当前 publisher generation 创建 SharedBuffer、`Done` channel 和 generation-bound `MuxerInstance`，并启动一个 muxer goroutine。
+2. muxer 获取一个 ready `StartupSnapshot`，向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续写实时帧；转码输入单独使用 `SourceCursor`。
 3. 后续同格式订阅者从共享 bytes reader 读取，不重新创建 muxer。
-4. 最后一个订阅者释放时关闭 `Done`，muxer 关闭 reader 和 SharedBuffer，实例从 manager 删除。
+4. HTTP/WS 请求释放自己实际取得的实例。最后一个订阅者释放或该 publisher generation 结束时关闭 `Done`，muxer 关闭 reader 和 SharedBuffer，实例从 manager 删除；旧请求不能递减 replacement generation 的实例。
 
 ```mermaid
 flowchart LR
@@ -272,11 +272,11 @@ RTMP play 在鉴权后查找/创建 stream、增加 subscriber，然后：
 1. 等待 sequence header；
 2. 发送 FLV sequence header；
 3. 发送 GOP snapshot；
-4. 从 snapshot cursor 读取实时 AVFrame；
+4. 从 `LiveCursor` 读取实时 AVFrame，并在每次唤醒后确认 publisher generation 仍匹配；
 5. 使用连接私有 FLV muxer 编成 RTMP chunks；
 6. 通过 `SlowConsumerFilter` 根据延迟丢弃非关键视频帧。
 
-音频 codec 不兼容时，按目标 codec 取得 TranscodeManager reader；兼容时直接读取主 ring。
+音频 codec 不兼容时，按目标 codec 取得 TranscodeManager reader，转换输入从 `SourceCursor` 建立；兼容时直接读取主 ring。初始化 sequence header 只发送一次，之后 publisher 发出的 live sequence header 仍会转发给 RTMP peer。
 
 ### RTSP
 
@@ -284,7 +284,7 @@ RTSP 支持 OPTIONS、DESCRIBE、SETUP、PLAY，以及 ANNOUNCE、RECORD、TEARD
 
 ### SRT
 
-SRT stream ID 决定 publish 或 subscribe。订阅端创建 TS muxer，先发送原子 GOP snapshot，再从 cursor 接续；为抵御 GOP burst，写队列返回 `io.EOF` 时会短暂重试。SRT 订阅也使用慢消费者过滤。
+SRT stream ID 决定 publish 或 subscribe。订阅端从一个启动快照创建 TS muxer，先发送 replay，再从 `LiveCursor` 接续；不使用跨 track 的最大 DTS watermark。live sequence header 会更新已知 codec/header 并重建 TS muxer，使后续 PAT/PMT 反映新增或变化的 track。为抵御 GOP burst，写队列返回 `io.EOF` 时会短暂重试。SRT 订阅也使用慢消费者过滤，并在 generation 结束时退出。
 
 ### HTTP-FLV、HTTP-TS、FMP4
 

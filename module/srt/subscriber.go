@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -74,51 +75,49 @@ func (s *Subscriber) Run() {
 	}
 	defer s.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx) //nolint:errcheck
 
-	// Wait for sequence headers to initialize the TS muxer.
-	if !s.waitForSequenceHeaders(stream) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(ctx)
+	if !ok {
 		return
 	}
 
-	// Build TS muxer from publisher's codec info.
-	pub := stream.Publisher()
-	if pub == nil {
-		return
-	}
-
-	mi := pub.MediaInfo()
+	videoCodec := snapshot.MediaInfo.VideoCodec
+	audioCodec := snapshot.MediaInfo.AudioCodec
 	var videoSeqData, audioSeqData []byte
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoSeqData = vsh.Payload
 	}
-	if ash := stream.AudioSeqHeader(); ash != nil {
+	if ash := snapshot.AudioSequenceHeader; ash != nil {
 		audioSeqData = ash.Payload
 	}
+	muxer := ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
 
-	muxer := ts.NewMuxer(mi.VideoCodec, mi.AudioCodec, videoSeqData, audioSeqData)
-
-	// Snapshot GOP cache and write cursor atomically: frames written during
-	// the GOP send are neither lost nor duplicated. Track the highest DTS
-	// sent so we can skip small overlaps from the ring buffer.
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	var lastDTS int64
-	for _, frame := range gopCache {
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if err := s.sendFrame(muxer, frame); err != nil {
 			return
 		}
-		if frame.DTS > lastDTS {
-			lastDTS = frame.DTS
-		}
 	}
 
-	// Start the ring buffer reader right after the snapshot position.
-	// Combined with the DTS filter below, this prevents backward DTS jumps
-	// while tolerating small overlaps.
-	reader := stream.RingBuffer().NewReaderAt(startPos)
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	filter := core.NewSlowConsumerFilter(reader, stream.Config().SlowConsumer, s.skipCfg)
 
 	// Watch for subscriber close and unblock any in-progress Read().
 	go func() {
-		<-s.closed
+		select {
+		case <-s.closed:
+		case <-snapshot.GenerationDone:
+		}
 		filter.Close()
 	}()
 
@@ -127,13 +126,18 @@ func (s *Subscriber) Run() {
 		if !ok {
 			return
 		}
-
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			continue
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
 		}
-
-		// Skip frames already covered by the GOP cache
-		if frame.DTS <= lastDTS {
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if frame.MediaType.IsVideo() {
+				videoCodec = frame.Codec
+				videoSeqData = frame.Payload
+			} else if frame.MediaType.IsAudio() {
+				audioCodec = frame.Codec
+				audioSeqData = frame.Payload
+			}
+			muxer = ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
 			continue
 		}
 
@@ -170,18 +174,4 @@ func (s *Subscriber) sendFrame(muxer *ts.Muxer, frame *avframe.AVFrame) error {
 		return err
 	}
 	return io.EOF
-}
-
-// waitForSequenceHeaders blocks until at least one sequence header is available.
-func (s *Subscriber) waitForSequenceHeaders(stream *core.Stream) bool {
-	// Fast path: already available
-	if stream.VideoSeqHeader() != nil || stream.AudioSeqHeader() != nil {
-		return true
-	}
-	select {
-	case <-stream.SeqHeaderReady():
-		return true
-	case <-s.closed:
-		return false
-	}
 }

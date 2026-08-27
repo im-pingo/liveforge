@@ -67,6 +67,7 @@ func TestWHEPPayloadTypeCorrectness(t *testing.T) {
 	ppsData := []byte{0x68, 0xce, 0x38, 0x80}
 	stream.WriteFrame(&avframe.AVFrame{
 		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
 		FrameType: avframe.FrameTypeSequenceHeader,
 		Payload:   buildTestAVCConfigPayload(spsData, ppsData),
 		DTS:       0,
@@ -211,6 +212,7 @@ func TestWHEPPayloadTypeCorrectness(t *testing.T) {
 
 		stream.WriteFrame(&avframe.AVFrame{
 			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
 			FrameType: frameType,
 			Payload:   payload,
 			DTS:       dts,
@@ -342,6 +344,7 @@ func TestWHEPWithGCC(t *testing.T) {
 	ppsData := []byte{0x68, 0xce, 0x38, 0x80}
 	stream.WriteFrame(&avframe.AVFrame{
 		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
 		FrameType: avframe.FrameTypeSequenceHeader,
 		Payload:   buildTestAVCConfigPayload(spsData, ppsData),
 		DTS:       0,
@@ -469,6 +472,7 @@ func TestWHEPWithGCC(t *testing.T) {
 
 		stream.WriteFrame(&avframe.AVFrame{
 			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
 			FrameType: frameType,
 			Payload:   payload,
 			DTS:       dts,
@@ -531,6 +535,7 @@ func TestWHEPAudioTranscoding(t *testing.T) {
 	ppsData := []byte{0x68, 0xce, 0x38, 0x80}
 	stream.WriteFrame(&avframe.AVFrame{
 		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
 		FrameType: avframe.FrameTypeSequenceHeader,
 		Payload:   buildTestAVCConfigPayload(spsData, ppsData),
 		DTS:       0,
@@ -714,6 +719,7 @@ func TestWHEPAudioTranscoding(t *testing.T) {
 		}
 		stream.WriteFrame(&avframe.AVFrame{
 			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
 			FrameType: frameType,
 			Payload:   payload,
 			DTS:       videoDTS,
@@ -853,6 +859,7 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	ppsData := []byte{0x68, 0xce, 0x38, 0x80}
 	stream.WriteFrame(&avframe.AVFrame{
 		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
 		FrameType: avframe.FrameTypeSequenceHeader,
 		Payload:   buildTestAVCConfigPayload(spsData, ppsData),
 		DTS:       0,
@@ -1034,6 +1041,7 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 		}
 		stream.WriteFrame(&avframe.AVFrame{
 			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
 			FrameType: frameType,
 			Payload:   payload,
 			DTS:       videoDTS,

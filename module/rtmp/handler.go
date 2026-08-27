@@ -310,6 +310,10 @@ func (h *Handler) onPlay(vals []any) error {
 	sub := NewSubscriberWithCapabilities(h.streamKey, h.conn, h.cw, stream, h.skipCfg, h.caps, func(err error) {
 		slog.Warn("rtmp subscriber cannot represent stream codec", "subscriber", "rtmp-sub-"+h.streamKey, "error", err)
 	})
+	startup := stream.StartupSnapshot()
+	if startup.Ready {
+		sub.startup = &startup
+	}
 	lifecycleCtx := &core.EventContext{
 		StreamKey:    h.streamKey,
 		SubscriberID: sub.ID(),

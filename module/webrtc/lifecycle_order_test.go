@@ -354,6 +354,10 @@ func TestWHEPLifecycleUsesSubscriberGenerationAndDeleteCleansUp(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64},
+	))
 	starts := make(chan *core.EventContext, 1)
 	stops := make(chan *core.EventContext, 1)
 	server.GetEventBus().Register(core.HookRegistration{

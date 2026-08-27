@@ -82,13 +82,14 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pub := stream.Publisher()
-	if pub == nil {
+	startup := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(startup.Generation) ||
+		(!startup.MediaInfo.HasVideo() && !startup.MediaInfo.HasAudio()) {
 		releaseConn()
-		http.Error(w, "stream has no publisher", http.StatusNotFound)
+		http.Error(w, "stream startup unavailable", http.StatusNotFound)
 		return
 	}
-	info := pub.MediaInfo()
+	info := &startup.MediaInfo
 
 	// Track subscriber limit.
 	if err := stream.AddSubscriber("webrtc"); err != nil {
@@ -315,7 +316,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	// Start the feed goroutine. It waits for ICE+DTLS to complete before
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
-	go whepFeedLoop(stream, videoSender, audioSender, sess.done, connected, mode, info.VideoCodec, targetAudioCodec, bwe)
+	go whepFeedLoop(stream, startup, videoSender, audioSender, sess.done, connected, mode, targetAudioCodec, bwe)
 
 	if !sess.startLifecycle(m.server.GetEventBus(), core.EventSubscribe, &lifecycleCtx) {
 		sess.Close()

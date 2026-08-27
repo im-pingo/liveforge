@@ -86,7 +86,11 @@ func (m *Module) serveWebSocket(ctx context.Context, conn *websocket.Conn, forma
 
 	mm := stream.MuxerManager()
 	reader, inst := mm.GetOrCreateMuxer(format)
-	defer mm.ReleaseMuxer(format)
+	if reader == nil || inst == nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "stream ended")
+		return
+	}
+	defer mm.ReleaseMuxer(format, inst)
 
 	// Send init data (FLV header / FMP4 init segment). TS doesn't need it.
 	if format == "flv" || format == "mp4" {

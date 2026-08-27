@@ -394,7 +394,11 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 
 	mm := stream.MuxerManager()
 	reader, inst := mm.GetOrCreateMuxer(format)
-	defer mm.ReleaseMuxer(format)
+	if reader == nil || inst == nil {
+		http.Error(w, "stream not publishing", http.StatusNotFound)
+		return
+	}
+	defer mm.ReleaseMuxer(format, inst)
 
 	// Set response headers
 	switch format {

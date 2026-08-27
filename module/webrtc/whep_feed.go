@@ -25,12 +25,14 @@ import (
 // mode controls startup behavior:
 //   - "realtime": skip GOP cache, read live frames, discard until first keyframe.
 //   - "live": send GOP cache (paced at 10x speed), then live frames.
-func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, videoCodec avframe.CodecType, targetAudioCodec avframe.CodecType, bwe cc.BandwidthEstimator) {
+func whepFeedLoop(stream *core.Stream, startup core.StreamStartupSnapshot, video, audio *TrackSender, done <-chan struct{}, connected <-chan struct{}, mode string, targetAudioCodec avframe.CodecType, bwe cc.BandwidthEstimator) {
 	// Wait for ICE+DTLS to complete before sending media.
 	select {
 	case <-connected:
 		slog.Info("peer connected, starting media feed", "module", "webrtc", "mode", mode)
 	case <-done:
+		return
+	case <-startup.GenerationDone:
 		return
 	}
 
@@ -44,11 +46,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	}
 
 	// Determine if audio transcoding is needed.
-	var sourceAudioCodec avframe.CodecType
-	if pub := stream.Publisher(); pub != nil {
-		sourceAudioCodec = pub.MediaInfo().AudioCodec
-	}
+	sourceAudioCodec := startup.MediaInfo.AudioCodec
 	needsTranscode := targetAudioCodec != sourceAudioCodec && sourceAudioCodec != 0
+	videoCodec := startup.MediaInfo.VideoCodec
 
 	// Track the last DTS to compute sample durations.
 	var lastVideoDTS, lastAudioDTS int64
@@ -59,7 +59,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	var paramSetBuf []byte
 	needsAnnexB := videoCodec == avframe.CodecH264 || videoCodec == avframe.CodecH265
 	if needsAnnexB {
-		if sh := stream.VideoSeqHeader(); sh != nil {
+		if sh := startup.VideoSequenceHeader; sh != nil {
 			paramSetBuf = pkgrtp.VideoToAnnexB(videoCodec, sh.Payload, true)
 		}
 	}
@@ -222,20 +222,11 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	}
 
 	var gopCache []*avframe.AVFrame
-	var startPos int64
 	if mode == "live" {
-		gopCache, startPos = whepLiveSnapshot(stream, needsTranscode)
-	} else {
-		startPos = stream.RingBuffer().WriteCursor()
+		gopCache = whepLiveSnapshot(startup, needsTranscode)
 	}
 
-	// Source video always comes from the atomic snapshot cursor. A separate
-	// transcode reader contributes target-codec audio only.
-	transcodeStart := startPos
-	if mode == "live" && needsTranscode {
-		transcodeStart = stream.GOPCacheSourceStart()
-	}
-	readers := newWHEPFeedReaders(stream, startPos, transcodeStart, needsTranscode, targetAudioCodec)
+	readers := newWHEPFeedReaders(stream, startup, needsTranscode, targetAudioCodec)
 	defer readers.Close()
 
 	// Live mode: send the cached GOP so the subscriber gets an immediate
@@ -245,6 +236,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	if mode == "live" {
 		var prevDTS int64
 		for _, frame := range gopCache {
+			if !stream.IsPublisherGeneration(startup.Generation) {
+				return
+			}
 			if frame.MediaType.IsVideo() {
 				if writeVideoSample(frame) && frame.FrameType == avframe.FrameTypeKeyframe {
 					cacheKeyframeSent = true
@@ -261,6 +255,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 						select {
 						case <-timer.C:
 						case <-done:
+							timer.Stop()
+							return
+						case <-startup.GenerationDone:
 							timer.Stop()
 							return
 						}
@@ -299,10 +296,15 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	// arrives, then start sending from that keyframe onward.
 	gotKeyframe := whepInitialMediaReady(mode, cacheKeyframeSent, video != nil)
 	for {
-		readers.drainTargetAudio(gotKeyframe, targetAudioCodec, writeAudioSample)
+		if !readers.drainTargetAudio(stream, startup.Generation, gotKeyframe, targetAudioCodec, writeAudioSample) {
+			return
+		}
 
 		frame, ok := readers.source.TryRead()
 		if ok {
+			if !stream.IsPublisherGeneration(startup.Generation) {
+				return
+			}
 			if frame.MediaType.IsAudio() {
 				if !needsTranscode && gotKeyframe {
 					writeAudioSample(frame)
@@ -338,6 +340,9 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 							case <-done:
 								timer.Stop()
 								return
+							case <-startup.GenerationDone:
+								timer.Stop()
+								return
 							}
 						case "reset":
 							paceBaseWall = time.Now()
@@ -351,7 +356,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 			}
 			continue
 		}
-		if !readers.wait(done) {
+		if !readers.wait(done, startup.GenerationDone) {
 			return
 		}
 	}
@@ -360,10 +365,10 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 // whepLiveSnapshot captures the cached GOP and source-ring cursor together.
 // When audio will be transcoded, the source cache contributes video only;
 // source-codec audio cannot be packetized on the negotiated target track.
-func whepLiveSnapshot(stream *core.Stream, needsTranscode bool) ([]*avframe.AVFrame, int64) {
-	frames, startPos := stream.GOPCacheSnapshot()
+func whepLiveSnapshot(snapshot core.StreamStartupSnapshot, needsTranscode bool) []*avframe.AVFrame {
+	frames := snapshot.ReplayFrames
 	if !needsTranscode {
-		return frames, startPos
+		return frames
 	}
 
 	videoOnly := frames[:0]
@@ -372,7 +377,7 @@ func whepLiveSnapshot(stream *core.Stream, needsTranscode bool) ([]*avframe.AVFr
 			videoOnly = append(videoOnly, frame)
 		}
 	}
-	return videoOnly, startPos
+	return videoOnly
 }
 
 type whepFeedReaders struct {
@@ -386,11 +391,11 @@ type whepFeedReaders struct {
 	sourceClosed chan struct{}
 }
 
-func newWHEPFeedReaders(stream *core.Stream, startPos, transcodeStart int64, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
-	readers := &whepFeedReaders{source: stream.RingBuffer().NewReaderAt(startPos)}
+func newWHEPFeedReaders(stream *core.Stream, snapshot core.StreamStartupSnapshot, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
+	readers := &whepFeedReaders{source: stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)}
 	if needsTranscode {
 		if tm := stream.TranscodeManager(); tm != nil {
-			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, transcodeStart)
+			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, snapshot.SourceCursor)
 			if err != nil {
 				slog.Warn("whep: audio transcode failed, video only", "error", err)
 			} else {
@@ -411,14 +416,17 @@ func (r *whepFeedReaders) Close() {
 	}
 }
 
-func (r *whepFeedReaders) drainTargetAudio(ready bool, targetCodec avframe.CodecType, writeAudio func(*avframe.AVFrame)) {
+func (r *whepFeedReaders) drainTargetAudio(stream *core.Stream, generation uint64, ready bool, targetCodec avframe.CodecType, writeAudio func(*avframe.AVFrame)) bool {
 	if r.targetAudio == nil {
-		return
+		return stream.IsPublisherGeneration(generation)
 	}
 	for {
 		frame, ok := r.targetAudio.TryRead()
 		if !ok {
-			return
+			return stream.IsPublisherGeneration(generation)
+		}
+		if !stream.IsPublisherGeneration(generation) {
+			return false
 		}
 		if ready && frame.MediaType.IsAudio() && whepAudioFrameAllowed(frame, targetCodec) {
 			writeAudio(frame)
@@ -426,7 +434,7 @@ func (r *whepFeedReaders) drainTargetAudio(ready bool, targetCodec avframe.Codec
 	}
 }
 
-func (r *whepFeedReaders) startWaiters(done <-chan struct{}) {
+func (r *whepFeedReaders) startWaiters(done, generationDone <-chan struct{}) {
 	r.waitOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		r.waitCancel = cancel
@@ -440,6 +448,8 @@ func (r *whepFeedReaders) startWaiters(done <-chan struct{}) {
 		go func() {
 			select {
 			case <-done:
+				cancel()
+			case <-generationDone:
 				cancel()
 			case <-ctx.Done():
 			}
@@ -462,10 +472,12 @@ func watchWHEPReader(ctx context.Context, reader *util.RingReader[*avframe.AVFra
 	}
 }
 
-func (r *whepFeedReaders) wait(done <-chan struct{}) bool {
-	r.startWaiters(done)
+func (r *whepFeedReaders) wait(done, generationDone <-chan struct{}) bool {
+	r.startWaiters(done, generationDone)
 	select {
 	case <-done:
+		return false
+	case <-generationDone:
 		return false
 	case <-r.sourceClosed:
 		return false
