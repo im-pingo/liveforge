@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/im-pingo/liveforge/config"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 func TestMuxerManagerGetOrCreate(t *testing.T) {
@@ -32,15 +33,15 @@ func TestMuxerManagerRelease(t *testing.T) {
 	stream := NewStream("live/test", cfg, config.LimitsConfig{}, bus)
 	mm := NewMuxerManager(stream, 256)
 
-	mm.GetOrCreateMuxer("flv")
+	_, inst := mm.GetOrCreateMuxer("flv")
 	mm.GetOrCreateMuxer("flv")
 
-	mm.ReleaseMuxer("flv")
+	mm.ReleaseMuxer("flv", inst)
 	if mm.SubscriberCount("flv") != 1 {
 		t.Errorf("expected 1 subscriber, got %d", mm.SubscriberCount("flv"))
 	}
 
-	mm.ReleaseMuxer("flv")
+	mm.ReleaseMuxer("flv", inst)
 	if mm.SubscriberCount("flv") != 0 {
 		t.Errorf("expected 0 subscribers, got %d", mm.SubscriberCount("flv"))
 	}
@@ -89,7 +90,7 @@ func TestMuxerInstanceDoneChannel(t *testing.T) {
 	default:
 	}
 
-	mm.ReleaseMuxer("flv")
+	mm.ReleaseMuxer("flv", capturedInst)
 
 	select {
 	case <-capturedInst.Done:
@@ -132,7 +133,65 @@ func TestMuxerManagerReleaseNonExistent(t *testing.T) {
 	mm := NewMuxerManager(stream, 256)
 
 	// Should not panic
-	mm.ReleaseMuxer("nonexistent")
+	mm.ReleaseMuxer("nonexistent", nil)
+}
+
+func TestMuxerManagerGenerationReplacementAndInstanceRelease(t *testing.T) {
+	stream := NewStream("live/muxer-generation", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pubA := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+
+	mm := NewMuxerManager(stream, 256)
+	starts := 0
+	mm.RegisterMuxerStart("flv", func(inst *MuxerInstance, s *Stream) {
+		starts++
+	})
+	_, instA := mm.GetOrCreateMuxer("flv")
+	mm.GetOrCreateMuxer("flv")
+	if instA.Generation != 1 {
+		t.Fatalf("publisher A muxer generation = %d, want 1", instA.Generation)
+	}
+
+	if !stream.RemovePublisherIf(pubA) {
+		t.Fatal("publisher A was not removed")
+	}
+	pubB := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	_, instB := mm.GetOrCreateMuxer("flv")
+	if instB == instA {
+		t.Fatal("replacement publisher reused the retired muxer instance")
+	}
+	if instB.Generation != 2 {
+		t.Fatalf("publisher B muxer generation = %d, want 2", instB.Generation)
+	}
+	if starts != 2 {
+		t.Fatalf("muxer start callbacks = %d, want 2", starts)
+	}
+	select {
+	case <-instA.Done:
+	default:
+		t.Fatal("retired muxer instance was not closed")
+	}
+
+	mm.ReleaseMuxer("flv", instA)
+	mm.ReleaseMuxer("flv", instA)
+	if got := mm.SubscriberCount("flv"); got != 1 {
+		t.Fatalf("retired instance release changed replacement subscribers to %d, want 1", got)
+	}
+	select {
+	case <-instB.Done:
+		t.Fatal("retired instance release closed the replacement muxer")
+	default:
+	}
+
+	mm.ReleaseMuxer("flv", instB)
+	if got := mm.SubscriberCount("flv"); got != 0 {
+		t.Fatalf("replacement subscribers = %d after release, want 0", got)
+	}
 }
 
 func TestMuxerManagerSubscriberCountNonExistent(t *testing.T) {

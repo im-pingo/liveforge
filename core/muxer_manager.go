@@ -9,12 +9,20 @@ type MuxerStartFunc func(inst *MuxerInstance, stream *Stream)
 
 // MuxerInstance holds a SharedBuffer and tracks subscriber count for a format.
 type MuxerInstance struct {
-	Buffer   *SharedBuffer
-	subCount int
-	Done     chan struct{} // closed when last subscriber leaves
-	initMu   sync.Mutex
-	initDone bool
-	initData []byte
+	Buffer     *SharedBuffer
+	Generation uint64
+	subCount   int
+	Done       chan struct{} // closed when last subscriber leaves or its generation is retired
+	doneOnce   sync.Once
+	initMu     sync.Mutex
+	initDone   bool
+	initData   []byte
+}
+
+func (inst *MuxerInstance) close() {
+	inst.doneOnce.Do(func() {
+		close(inst.Done)
+	})
 }
 
 // SetInitData stores format-specific init data (only the first call takes effect).
@@ -68,12 +76,17 @@ func (mm *MuxerManager) GetOrCreateMuxer(format string) (*SharedBufferReader, *M
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
+	generation := mm.stream.currentPublisherGeneration()
 	inst, ok := mm.muxers[format]
-	isNew := !ok
+	isNew := !ok || inst.Generation != generation
 	if isNew {
+		if ok {
+			inst.close()
+		}
 		inst = &MuxerInstance{
-			Buffer: NewSharedBuffer(mm.bufSize),
-			Done:   make(chan struct{}),
+			Buffer:     NewSharedBuffer(mm.bufSize),
+			Generation: generation,
+			Done:       make(chan struct{}),
 		}
 		mm.muxers[format] = inst
 	}
@@ -90,18 +103,19 @@ func (mm *MuxerManager) GetOrCreateMuxer(format string) (*SharedBufferReader, *M
 
 // ReleaseMuxer decrements the subscriber count for a format.
 // If count reaches zero, the Done channel is closed and the muxer instance is removed.
-func (mm *MuxerManager) ReleaseMuxer(format string) {
+func (mm *MuxerManager) ReleaseMuxer(format string, inst *MuxerInstance) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
-	inst, ok := mm.muxers[format]
-	if !ok {
+	if inst == nil || inst.subCount <= 0 {
 		return
 	}
 	inst.subCount--
 	if inst.subCount <= 0 {
-		close(inst.Done)
-		delete(mm.muxers, format)
+		inst.close()
+		if current, ok := mm.muxers[format]; ok && current == inst {
+			delete(mm.muxers, format)
+		}
 	}
 }
 
