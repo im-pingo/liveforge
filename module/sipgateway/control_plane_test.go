@@ -228,6 +228,7 @@ type fakeInviteDialog struct {
 	mu                sync.Mutex
 	acks              int
 	byes              int
+	closes            int
 	ackHook           func()
 	responseHook      func()
 	rejectCanceledACK bool
@@ -246,7 +247,11 @@ func (d *fakeInviteDialog) Response() *sip.Response {
 	}
 	return response
 }
-func (d *fakeInviteDialog) Close() {}
+func (d *fakeInviteDialog) Close() {
+	d.mu.Lock()
+	d.closes++
+	d.mu.Unlock()
+}
 func (d *fakeInviteDialog) SendACK(ctx context.Context) error {
 	d.mu.Lock()
 	d.acks++

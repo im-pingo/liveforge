@@ -353,8 +353,14 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		gw.metrics.setupFailures.Add(1)
 		return "", fmt.Errorf("send INVITE: %w", err)
 	}
+	dialog := newDialogTeardown(invTx)
+	teardownOnReturn := true
+	defer func() {
+		if teardownOnReturn {
+			_ = dialog.abort()
+		}
+	}()
 	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
-		invTx.Close()
 		gw.metrics.setupFailures.Add(1)
 		return "", errors.New("stream publisher generation is no longer active")
 	}
@@ -366,7 +372,6 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	select {
 	case <-startupCtx.Done():
 		if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
-			invTx.Close()
 			gw.metrics.setupFailures.Add(1)
 			return "", errors.New("stream publisher generation is no longer active")
 		}
@@ -375,7 +380,7 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		default:
 			resp = invTx.Response()
 			if resp == nil {
-				invTx.Close()
+				dialog.close()
 				resp = invTx.Response()
 				if resp == nil {
 					gw.metrics.setupFailures.Add(1)
@@ -397,18 +402,10 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", fmt.Errorf("INVITE failed: no response")
 	}
 	if !stream.IsPublisherGeneration(startupSnapshot.Generation) {
-		invTx.Close()
 		gw.metrics.setupFailures.Add(1)
 		return "", errors.New("stream publisher generation is no longer active")
 	}
 
-	dialog := newDialogTeardown(invTx)
-	teardownOnReturn := true
-	defer func() {
-		if teardownOnReturn {
-			_ = dialog.teardown()
-		}
-	}()
 	ackCtx, cancelACK := bindSIPGeneration(context.Background(), startupSnapshot)
 	ackCtx, cancelACKTimeout := context.WithTimeout(ackCtx, 5*time.Second)
 	err = invTx.SendACK(ackCtx)

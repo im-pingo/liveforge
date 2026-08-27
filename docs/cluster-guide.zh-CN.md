@@ -7,7 +7,7 @@ LiveForge 支持多节点集群转发，提供两种模式：
 
 两种模式均支持多种传输协议：**RTMP**、**SRT**、**RTSP**、**RTP**。协议由配置中的 URL scheme 决定（`rtmp://`、`srt://`、`rtsp://`、`rtp://`）。
 
-每条转推都绑定一个 publisher generation。传输层只捕获一次原子启动快照：协议或容器需要时只发送该快照的 sequence header 和缓存 GOP 一次，然后从 `LiveCursor` 创建 AVFrame reader。reader 监听 generation 结束，并在每次阻塞读取后再次校验 generation，因此 publisher 替换后的第一帧不会泄漏到旧转推，也不会从 ring 当前保留的最老位置启动。GB28181 PS 转发如果视频 sequence header 发送失败，会传播带阶段信息的错误，并在 replay/live 媒体之前停止。纯音频没有 replay 历史，直接从 live cursor 开始。
+每条转推都绑定一个 publisher generation。传输层只捕获一次原子启动快照：协议或容器需要时只发送该快照的 sequence header 和缓存 GOP 一次，然后从 `LiveCursor` 创建 AVFrame reader。reader 监听 generation 结束，并在每次阻塞读取后再次校验 generation，因此 publisher 替换后的第一帧不会泄漏到旧转推，也不会从 ring 当前保留的最老位置启动。GB28181 PS 转发如果视频 sequence header 发送失败，会传播带阶段信息的错误，并在 replay/live 媒体之前停止。SIP/GB28181 出站启动在 2xx 对话已接受后遇到 generation 终止会发送一次 BYE；接受前取消只关闭未建立的事务。纯音频没有 replay 历史，直接从 live cursor 开始。
 
 ## 协议选择
 

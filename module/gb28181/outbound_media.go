@@ -334,10 +334,11 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	if err != nil {
 		return nil, err
 	}
+	dialog = newManagedInviteDialog(dialog)
 	dialogOwned := true
 	defer func() {
 		if dialogOwned {
-			dialog.Close()
+			cleanupInviteDialog(dialog)
 		}
 	}()
 	select {

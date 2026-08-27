@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +94,76 @@ func TestGBOutboundNegotiationCancelsWithPublisherGeneration(t *testing.T) {
 	}
 	if got := len(h.sessions.All()); got != 0 {
 		t.Fatalf("GB28181 stale negotiation activated %d sessions", got)
+	}
+}
+
+func TestGBOutboundGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/accepted-generation-retirement")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+	ports, err := portalloc.New(42300, 42301)
+	if err != nil {
+		t.Fatalf("New port allocator: %v", err)
+	}
+	h := &handler{sessions: NewSessionManager(), hub: hub, ports: ports}
+	inviteContext := make(chan context.Context, 1)
+	var dialog *successfulInviteDialog
+	m := &Module{
+		sipService: failingInviteService{},
+		handler:    h,
+		sendInvite: func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
+			inviteContext <- ctx
+			done := make(chan struct{})
+			response := sip.NewResponseFromRequest(req, 200, "OK", []byte("v=0\r\nm=video 30000 RTP/AVP 96\r\n"))
+			response.AppendHeader(sip.NewHeader("To", "<sip:channel@127.0.0.1>;tag=accepted"))
+			dialog = &successfulInviteDialog{response: response, done: done}
+			stream.RemovePublisher()
+			return dialog, nil
+		},
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := m.startOutboundMedia(context.Background(), &Device{
+			DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
+		}, "channel", stream.Key())
+		result <- err
+	}()
+
+	select {
+	case bound := <-inviteContext:
+		select {
+		case <-bound.Done():
+		case <-time.After(time.Second):
+			t.Fatal("GB28181 outbound INVITE context was not canceled with publisher generation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound INVITE did not start")
+	}
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "GB28181 outbound media source generation ended") {
+			t.Fatalf("GB28181 outbound error = %v, want source-generation retirement", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound negotiation did not terminate after publisher retirement")
+	}
+	if dialog.ackCalls.Load() != 0 {
+		t.Fatalf("GB28181 stale negotiation sent %d ACKs, want none", dialog.ackCalls.Load())
+	}
+	if dialog.byeCalls.Load() != 1 || !dialog.closed.Load() {
+		t.Fatalf("accepted GB28181 dialog cleanup BYE=%d closed=%v, want 1/true", dialog.byeCalls.Load(), dialog.closed.Load())
 	}
 }
 

@@ -30,7 +30,7 @@ flowchart LR
 
 - **统一时钟和帧模型**：`DTS`、`PTS` 使用毫秒，payload 保留原 codec 数据，不夹带容器头。
 - **单 publisher、多 reader**：一个 stream key 同时只接受一个 publisher；每个消费方拥有独立 cursor，不会因另一个消费者读取而消耗数据。
-- **缓存与实时连续**：新订阅者先拿到当前 publisher generation 的关键帧起始历史数据，再从同一快照 cursor 继续实时数据；publisher 替换会终止旧 generation，不能把旧环形缓存接到新 publisher 上。
+- **缓存与实时连续**：新订阅者先拿到当前 publisher generation 的关键帧起始历史数据，再从同一快照 cursor 继续实时数据；publisher 替换会终止旧 generation，不能把旧环形缓存接到新 publisher 上。SIP/GB28181 出站信令若在 2xx 后遇到 generation 终止，会通过已接受对话发送一次 BYE，再释放事务和会话资源。
 - **协议状态隔离**：共享的是帧或已 mux 的字节；SSRC、RTP sequence、RTMP chunk 状态等连接状态仍属于单个连接。
 - **按需资源**：muxer、音频转码轨道、origin pull 和 forward target 都在真正需要时建立，并在无消费者或关闭时回收。
 
@@ -192,7 +192,7 @@ sequenceDiagram
 
 如果 media info、header、缓存和 cursor 分开读取，publisher 可能恰好在调用之间写帧或被替换：订阅者会重复/遗漏边界帧，或者把旧 generation 的初始化状态与新 generation 的媒体混合。原子快照消除了这些窗口。订阅 reader 同时监听 `GenerationDone`；阻塞读取被唤醒后、处理帧前还会调用 `IsPublisherGeneration`，因此 replacement generation 的第一帧不会泄漏给旧订阅者。
 
-SIP Gateway 出站呼叫和 GB28181 出站媒体会把同一个快照贯穿 SDP/codec 选择、INVITE 等待、ACK、subscriber admission 和媒体 reader；generation 在 ACK 或激活前结束时，旧会话不会继续建立，也不会把旧信令和新媒体配对。GB28181 PS 转发发送视频 sequence header 失败时会返回带阶段信息的错误，并在 replay/live 之前停止。
+SIP Gateway 出站呼叫和 GB28181 出站媒体会把同一个快照贯穿 SDP/codec 选择、INVITE 等待、ACK、subscriber admission 和媒体 reader；generation 在 ACK 或激活前结束时，旧会话不会继续建立，也不会把旧信令和新媒体配对。2xx 已接受后若 generation 终止，SIP/GB28181 会通过幂等的已接受对话清理路径发送一次 BYE；2xx 之前的取消仍只关闭未建立的事务。GB28181 PS 转发发送视频 sequence header 失败时会返回带阶段信息的错误，并在 replay/live 之前停止。
 
 ### 7.3 不同消费者的起点
 

@@ -106,9 +106,10 @@ func (s *rtcpSenderState) recordPacket(packet *pionrtp.Packet, now time.Time) (s
 }
 
 type dialogTeardown struct {
-	dialog inviteDialog
-	once   sync.Once
-	err    error
+	dialog    inviteDialog
+	once      sync.Once
+	closeOnce sync.Once
+	err       error
 }
 
 func newDialogTeardown(dialog inviteDialog) *dialogTeardown {
@@ -123,18 +124,39 @@ func (d *dialogTeardown) teardown() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		d.err = d.dialog.SendBYE(ctx)
 		cancel()
-		d.dialog.Close()
+		d.close()
 	})
 	return d.err
+}
+
+func (d *dialogTeardown) close() {
+	if d == nil || d.dialog == nil {
+		return
+	}
+	d.closeOnce.Do(d.dialog.Close)
+}
+
+// abort closes the INVITE transaction and sends BYE if a 2xx established a
+// dialog while the setup path was being retired.
+func (d *dialogTeardown) abort() error {
+	if d == nil || d.dialog == nil {
+		return nil
+	}
+	d.close()
+	response := d.dialog.Response()
+	if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		d.once.Do(func() {})
+		return nil
+	}
+	return d.teardown()
 }
 
 func (d *dialogTeardown) endedByRemote() {
 	if d == nil || d.dialog == nil {
 		return
 	}
-	d.once.Do(func() {
-		d.dialog.Close()
-	})
+	d.once.Do(func() {})
+	d.close()
 }
 
 type sipPublisher struct {

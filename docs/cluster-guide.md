@@ -7,7 +7,7 @@ LiveForge supports multi-node cluster relay with two modes:
 
 Both modes support multiple transport protocols: **RTMP**, **SRT**, **RTSP**, and **RTP**. The protocol is determined by the URL scheme in the configuration (`rtmp://`, `srt://`, `rtsp://`, `rtp://`).
 
-Every relay push is bound to one publisher generation. The transport captures one atomic startup snapshot, sends the snapshot's headers and cached GOP once when the protocol/container needs them, then starts its AVFrame reader at `LiveCursor`. It listens for generation completion and verifies the generation after each blocking read, so a replacement publisher's first frame cannot leak into an old relay and a relay never starts at the ring's retained oldest frame. A GB28181 PS relay propagates a video sequence-header send failure and stops before replay/live media. Audio-only streams have no replay history and begin at the live cursor.
+Every relay push is bound to one publisher generation. The transport captures one atomic startup snapshot, sends the snapshot's headers and cached GOP once when the protocol/container needs them, then starts its AVFrame reader at `LiveCursor`. It listens for generation completion and verifies the generation after each blocking read, so a replacement publisher's first frame cannot leak into an old relay and a relay never starts at the ring's retained oldest frame. A GB28181 PS relay propagates a video sequence-header send failure and stops before replay/live media. SIP and GB28181 outbound startup cleanup sends one BYE when a 2xx dialog is accepted before generation retirement, while cancellation before acceptance only closes the pending transaction. Audio-only streams have no replay history and begin at the live cursor.
 
 ## Protocol Selection
 

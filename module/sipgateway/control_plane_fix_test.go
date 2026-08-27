@@ -619,6 +619,53 @@ func TestGatewayOutboundNegotiationDoesNotMixPublisherGenerations(t *testing.T) 
 	}
 }
 
+func TestGatewayGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		retire func(*core.Stream, *fakeInviteDialog)
+	}{
+		{
+			name: "before send invite returns",
+			retire: func(stream *core.Stream, _ *fakeInviteDialog) {
+				stream.RemovePublisher()
+			},
+		},
+		{
+			name: "while response is observed",
+			retire: func(stream *core.Stream, dialog *fakeInviteDialog) {
+				var once sync.Once
+				dialog.responseHook = func() {
+					once.Do(func() { stream.RemovePublisher() })
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
+			stream, _ := hub.GetOrCreate("live/accepted-generation-retirement")
+			publishTestAudio(t, stream, avframe.CodecG711A)
+			dialog := &fakeInviteDialog{done: make(chan struct{})}
+			close(dialog.done)
+			gw.sendInvite = func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+				dialog.response = sip.NewResponseFromRequest(req, 200, "OK", []byte(testAudioOffer))
+				test.retire(stream, dialog)
+				return dialog, nil
+			}
+
+			_, err := gw.Dial(context.Background(), "alice", stream.Key())
+			if err == nil || !strings.Contains(err.Error(), "publisher generation is no longer active") {
+				t.Fatalf("Dial error = %v, want source-generation retirement error", err)
+			}
+			dialog.mu.Lock()
+			acks, byes, closes := dialog.acks, dialog.byes, dialog.closes
+			dialog.mu.Unlock()
+			if acks != 0 || byes != 1 || closes != 1 {
+				t.Fatalf("accepted generation cleanup ACK=%d BYE=%d Close=%d, want 0/1/1", acks, byes, closes)
+			}
+		})
+	}
+}
+
 func TestGatewayFinalizesReady2xxWhenCallerAlreadyCanceled(t *testing.T) {
 	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/simultaneous-ready")
