@@ -60,54 +60,80 @@ type yamlTraversalState struct {
 }
 
 func yamlMappingContainsPath(node *yaml.Node, path []string, active map[yamlTraversalState]bool) bool {
+	return yamlMappingContainsPathMemo(node, path, active, make(map[yamlTraversalState]bool))
+}
+
+func yamlMappingContainsPathMemo(
+	node *yaml.Node,
+	path []string,
+	active map[yamlTraversalState]bool,
+	completed map[yamlTraversalState]bool,
+) (found bool) {
 	node = dereferenceYAMLAlias(node)
 	if node == nil || node.Kind != yaml.MappingNode || len(path) == 0 {
 		return false
 	}
 
 	state := yamlTraversalState{node: node, pathDepth: len(path)}
+	if found, ok := completed[state]; ok {
+		return found
+	}
 	if active[state] {
 		return false
 	}
 	active[state] = true
 	defer delete(active, state)
+	defer func() {
+		completed[state] = found
+	}()
 
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		key := dereferenceYAMLAlias(node.Content[i])
 		if key != nil && key.Kind == yaml.ScalarNode && key.Value == path[0] {
-			if len(path) == 1 || yamlMappingContainsPath(node.Content[i+1], path[1:], active) {
+			if len(path) == 1 || yamlMappingContainsPathMemo(node.Content[i+1], path[1:], active, completed) {
 				return true
 			}
 		}
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if isYAMLMergeKey(node.Content[i]) && yamlMergeContainsPath(node.Content[i+1], path, active) {
+		if isYAMLMergeKey(node.Content[i]) && yamlMergeContainsPath(node.Content[i+1], path, active, completed) {
 			return true
 		}
 	}
 	return false
 }
 
-func yamlMergeContainsPath(node *yaml.Node, path []string, active map[yamlTraversalState]bool) bool {
+func yamlMergeContainsPath(
+	node *yaml.Node,
+	path []string,
+	active map[yamlTraversalState]bool,
+	completed map[yamlTraversalState]bool,
+) (found bool) {
 	node = dereferenceYAMLAlias(node)
 	if node == nil {
 		return false
 	}
 	if node.Kind == yaml.MappingNode {
-		return yamlMappingContainsPath(node, path, active)
+		return yamlMappingContainsPathMemo(node, path, active, completed)
 	}
 	if node.Kind != yaml.SequenceNode {
 		return false
 	}
 
 	state := yamlTraversalState{node: node, pathDepth: len(path)}
+	if found, ok := completed[state]; ok {
+		return found
+	}
 	if active[state] {
 		return false
 	}
 	active[state] = true
 	defer delete(active, state)
+	defer func() {
+		completed[state] = found
+	}()
 	for _, child := range node.Content {
-		if yamlMergeContainsPath(child, path, active) {
+		if yamlMergeContainsPath(child, path, active, completed) {
 			return true
 		}
 	}

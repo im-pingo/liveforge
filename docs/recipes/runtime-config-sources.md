@@ -35,6 +35,11 @@ that GOP once, then continues from the atomically captured live cursor. A
 pure-audio stream has no GOP startup history: it starts at the live cursor and
 receives the next frame without a separate audio startup cache.
 
+The removed `stream.audio_cache_ms` setting is rejected before typed parsing,
+including when YAML mapping aliases or `<<` merge mappings and sequences
+introduce it. Validation follows repeated merge aliases with bounded work and
+terminates safely on recursive alias graphs.
+
 ## Local File
 
 ```yaml

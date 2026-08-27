@@ -1,10 +1,13 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadRejectsRemovedStreamSetting(t *testing.T) {
@@ -39,4 +42,51 @@ func TestLoadRejectsRemovedStreamSettingThroughYAMLIndirection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemovedSettingTraversalBoundsRepeatedMergeDAG(t *testing.T) {
+	benchmark := func(depth int) testing.BenchmarkResult {
+		root := repeatedMergeDAG(t, depth)
+		return testing.Benchmark(func(b *testing.B) {
+			for range b.N {
+				if yamlMappingContainsPath(
+					root,
+					[]string{"stream", "audio_cache_ms"},
+					make(map[yamlTraversalState]bool),
+				) {
+					b.Fatal("unexpected removed setting in repeated merge DAG")
+				}
+			}
+		})
+	}
+
+	shallow := benchmark(8)
+	deep := benchmark(16)
+	if deep.NsPerOp() > shallow.NsPerOp()*8 {
+		t.Fatalf(
+			"repeated merge DAG traversal growth = %d ns/op to %d ns/op, want <= 8x",
+			shallow.NsPerOp(),
+			deep.NsPerOp(),
+		)
+	}
+}
+
+func repeatedMergeDAG(t *testing.T, depth int) *yaml.Node {
+	t.Helper()
+
+	var source strings.Builder
+	source.WriteString("level0: &level0 {}\n")
+	for level := 1; level <= depth; level++ {
+		fmt.Fprintf(&source, "level%d: &level%d\n  <<: [*level%d, *level%d]\n", level, level, level-1, level-1)
+	}
+	fmt.Fprintf(&source, "<<: *level%d\n", depth)
+
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(source.String()), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Content) != 1 {
+		t.Fatalf("document content nodes = %d, want 1", len(document.Content))
+	}
+	return document.Content[0]
 }
