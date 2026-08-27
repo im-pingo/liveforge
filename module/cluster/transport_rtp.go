@@ -509,7 +509,9 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 			continue
 		}
 
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+			return nil
+		}
 	}
 }
 
@@ -731,7 +733,9 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 			continue
 		}
 
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+			return
+		}
 	}
 }
 

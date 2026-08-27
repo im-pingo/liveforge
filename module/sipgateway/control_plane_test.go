@@ -380,6 +380,87 @@ func TestGatewayCountsInboundRTPPacketsAndBytes(t *testing.T) {
 	}
 }
 
+func TestSIPGatewayStalePublisherCallbackCannotWriteReplacementGeneration(t *testing.T) {
+	cfg := newTestGatewayConfig()
+	rtpPort := evenSIPLabPort(t)
+	cfg.RTPPortRange = []int{rtpPort, rtpPort + 1}
+	gw, svc, hub := newControlPlaneGateway(t, cfg)
+	if resp := inviteGateway(t, svc, "stale-writer", "stale-writer", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("INVITE status = %v, want 200", resp)
+	}
+	call, ok := gw.Call("stale-writer")
+	if !ok {
+		t.Fatal("active inbound call not found")
+	}
+	stream, ok := hub.Find("sip/stale-writer")
+	if !ok {
+		t.Fatal("inbound stream not found")
+	}
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: call.RTPPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	sendPacket := func(sequence uint16) {
+		t.Helper()
+		packet := &pionrtp.Packet{
+			Header:  pionrtp.Header{Version: 2, PayloadType: 8, SequenceNumber: sequence, Timestamp: uint32(sequence) * 160, SSRC: 1},
+			Payload: []byte{byte(sequence), 2, 3, 4},
+		}
+		data, marshalErr := packet.Marshal()
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, writeErr := conn.Write(data); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	waitForReceived := func(want uint64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for gw.Metrics().RTPPacketsRecv < want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := gw.Metrics().RTPPacketsRecv; got < want {
+			t.Fatalf("received RTP packets = %d, want at least %d", got, want)
+		}
+	}
+
+	sendPacket(1)
+	waitForReceived(1)
+	deadline := time.Now().Add(time.Second)
+	for stream.RingBuffer().WriteCursor() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != 1 {
+		t.Fatalf("active SIP callback cursor = %d, want 1", got)
+	}
+	oldPublisher := stream.Publisher()
+	if !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("old SIP publisher was not removed")
+	}
+	replacement := &sipPublisher{id: "sip-replacement", info: &avframe.MediaInfo{AudioCodec: avframe.CodecG711A}}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	startCursor := stream.StartupSnapshot().GenerationStartCursor
+
+	sendPacket(2)
+	waitForReceived(2)
+	time.Sleep(10 * time.Millisecond)
+	if got := stream.RingBuffer().WriteCursor(); got != startCursor {
+		t.Fatalf("stale SIP callback advanced replacement cursor to %d, want %d", got, startCursor)
+	}
+	deadline = time.Now().Add(time.Second)
+	for gw.ActiveCalls() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("stale SIP publisher left %d active calls", got)
+	}
+}
+
 func TestGatewayCleansUpWhenRTPNetworkReadFails(t *testing.T) {
 	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
 	if resp := inviteGateway(t, svc, "read-failure", "live-test", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {

@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -26,18 +27,18 @@ type RTSPPublisher struct {
 	tsBaseSet     bool
 
 	// Access unit accumulation: collect NALs until RTP marker bit
-	accPayload   []byte           // accumulated AVCC payload for current access unit
+	accPayload   []byte            // accumulated AVCC payload for current access unit
 	accFrameType avframe.FrameType // best frame type seen in current access unit
 	accMediaType avframe.MediaType
 	accCodec     avframe.CodecType
 
 	// RTCP RR support
-	rtcpWriter    io.Writer // TCP conn for sending RTCP
-	rtcpChannel   uint8     // RTCP channel (odd, e.g. 1 for video)
-	localSSRC     uint32
-	receivedPkts  uint32
-	highestSeq    uint32
-	done          chan struct{}
+	rtcpWriter   io.Writer // TCP conn for sending RTCP
+	rtcpChannel  uint8     // RTCP channel (odd, e.g. 1 for video)
+	localSSRC    uint32
+	receivedPkts uint32
+	highestSeq   uint32
+	done         chan struct{}
 }
 
 // Verify interface compliance.
@@ -197,7 +198,9 @@ func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 			p.accPayload,
 		)
 		p.frameCount++
-		p.stream.WriteFrame(auFrame)
+		if !p.stream.WriteFrameForPublisher(p, auFrame) && p.stream.Publisher() != p {
+			return fmt.Errorf("RTSP publisher %s no longer owns stream", p.id)
+		}
 
 		// Reset accumulation buffer
 		p.accPayload = nil

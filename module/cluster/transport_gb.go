@@ -277,7 +277,9 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 				if pub.info.AudioCodec == 0 && frame.MediaType == avframe.MediaTypeAudio {
 					pub.info.AudioCodec = frame.Codec
 				}
-				stream.WriteFrame(frame)
+				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+					return nil
+				}
 			}
 			psBuf = psBuf[:0]
 		}
@@ -408,7 +410,9 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 				if pub.info.VideoCodec == 0 && frame.MediaType == avframe.MediaTypeVideo {
 					pub.info.VideoCodec = frame.Codec
 				}
-				stream.WriteFrame(frame)
+				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+					return
+				}
 			}
 			psBuf = psBuf[:0]
 		}

@@ -13,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 )
 
@@ -22,6 +23,56 @@ type failingACKDialog struct {
 	ackErr   error
 	byeCalls atomic.Int32
 	closed   atomic.Bool
+}
+
+func TestGB28181StalePublisherCallbackCannotWriteReplacementGeneration(t *testing.T) {
+	bus := core.NewEventBus()
+	hub := core.NewStreamHub(config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 16}, config.LimitsConfig{}, bus)
+	ports, err := portalloc.New(42190, 42191)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &handler{sessions: NewSessionManager(), hub: hub, bus: bus, ports: ports, prefix: "gb28181"}
+	device := &Device{DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp"}
+	session, err := (&inviteClient{
+		sipService: failingInviteService{},
+		handler:    h,
+		sendInvite: func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+			return newSuccessfulInviteDialog(req), nil
+		},
+	}).invite(context.Background(), device, "stale-writer", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := session.Stream
+	oldPublisher := session.Publisher
+	defer func() {
+		h.closeSession(session, "")
+	}()
+
+	activeFrame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x01},
+	)
+	oldPublisher.callback(activeFrame)
+	if got := stream.RingBuffer().WriteCursor(); got != 1 {
+		t.Fatalf("active GB28181 callback cursor = %d, want 1", got)
+	}
+	if !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("old GB28181 publisher was not removed")
+	}
+	replacement := NewPublisher("gb28181-replacement", nil)
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	startCursor := stream.StartupSnapshot().GenerationStartCursor
+	oldPublisher.callback(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		40, 40, []byte{0x65, 0x02},
+	))
+	if got := stream.RingBuffer().WriteCursor(); got != startCursor {
+		t.Fatalf("stale GB28181 callback advanced replacement cursor to %d, want %d", got, startCursor)
+	}
 }
 
 func newFailingACKDialog(req *sip.Request) *failingACKDialog {

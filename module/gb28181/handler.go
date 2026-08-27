@@ -165,10 +165,11 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	// Create publisher
-	pub := NewPublisher(
+	var pub *Publisher
+	pub = NewPublisher(
 		newPublisherID("live", channelID),
 		func(frame *avframe.AVFrame) {
-			stream.WriteFrame(frame)
+			stream.WriteFrameForPublisher(pub, frame)
 		},
 	)
 

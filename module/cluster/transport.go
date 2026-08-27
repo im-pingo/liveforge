@@ -113,7 +113,8 @@ type RelayTransport interface {
 	Push(ctx context.Context, targetURL string, stream *core.Stream) error
 
 	// Pull connects to a remote node and pulls frames into a local stream.
-	// stream.WriteFrame() returning false (bitrate-limited) is silently dropped.
+	// Publisher-bound writes that return false for bitrate limiting are silently dropped.
+	// A relay that no longer owns the stream generation stops receiving.
 	// Returns nil on normal termination, error on abnormal disconnection.
 	Pull(ctx context.Context, sourceURL string, stream *core.Stream) error
 

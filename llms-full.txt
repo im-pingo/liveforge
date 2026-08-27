@@ -8,6 +8,8 @@ For a source-oriented Chinese architecture walkthrough, see [docs/architecture.z
 
 The core publisher lifecycle rejects nil and typed-nil `Publisher` values before changing timers, state, or generation. `MuxerManager.GetOrCreateMuxer` creates or reuses an instance only for an active publishing generation; before first publish or after publisher removal it returns no reader/instance and retires any mapped instance from the ended generation.
 
+Every production network or session ingress writer binds frames to the publisher that owns its connection through `Stream.WriteFrameForPublisher`. Delayed callbacks from a replaced publisher are rejected before they can mutate the replacement generation's media information, startup cache, or ring buffer; stream-oriented stale receive loops terminate, while datagram callbacks may drop frames after teardown. Raw `Stream.WriteFrame` remains available only for tests and explicit internal injection.
+
 ## Capability matrix
 
 | Capability | Publish | Play | Default port or path | Prerequisites |

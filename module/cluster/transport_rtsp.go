@@ -291,7 +291,9 @@ func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 			continue
 		}
 
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+			return nil
+		}
 	}
 }
 

@@ -246,9 +246,7 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 				0, 0,
 				mediaInfo.VideoSequenceHeader,
 			)
-			if stream.Publisher() == pub {
-				stream.WriteFrame(seqFrame)
-			}
+			stream.WriteFrameForPublisher(pub, seqFrame)
 			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
 		}
 	}

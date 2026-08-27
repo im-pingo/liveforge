@@ -422,6 +422,7 @@ func (cs *CallSession) receiveLoop() {
 	cs.mu.RLock()
 	conn := cs.conn
 	idleTimeout := cs.rtpIdleTimeout
+	publisher := cs.publisher
 	cs.mu.RUnlock()
 	if idleTimeout <= 0 {
 		idleTimeout = 30 * time.Second
@@ -465,7 +466,10 @@ func (cs *CallSession) receiveLoop() {
 		frame.DTS = int64(pkt.Timestamp) * 1000 / int64(cs.codec.ClockRate)
 		frame.PTS = frame.DTS
 
-		cs.stream.WriteFrame(frame)
+		if !cs.stream.WriteFrameForPublisher(publisher, frame) && cs.stream.Publisher() != publisher {
+			cs.Close()
+			return
+		}
 	}
 }
 
@@ -513,7 +517,10 @@ func (cs *CallSession) receiveVideoLoop(track *sipVideoTrack) {
 			if frame.FrameType == avframe.FrameTypeSequenceHeader && publisher != nil {
 				publisher.setVideoSequenceHeader(frame.Payload)
 			}
-			cs.stream.WriteFrame(frame)
+			if !cs.stream.WriteFrameForPublisher(publisher, frame) && cs.stream.Publisher() != publisher {
+				cs.Close()
+				return
+			}
 		}
 	}
 }

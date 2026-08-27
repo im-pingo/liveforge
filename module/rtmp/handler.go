@@ -372,27 +372,27 @@ func (h *Handler) handleMediaMessage(msg *Message) error {
 		// concurrent readers (RTSP/WebRTC/HTTP subscribers) never observe a
 		// partially updated struct.
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			if pub := stream.Publisher(); pub != nil {
-				if rp, ok := pub.(*Publisher); ok {
-					mi := *rp.MediaInfo()
-					if frame.MediaType.IsVideo() {
-						mi.VideoCodec = frame.Codec
-						mi.VideoSequenceHeader = append([]byte(nil), frame.Payload...)
-					} else if frame.MediaType.IsAudio() {
-						mi.AudioCodec = frame.Codec
-						mi.AudioSequenceHeader = append([]byte(nil), frame.Payload...)
-						if frame.Codec == avframe.CodecAAC && len(frame.Payload) >= 2 {
-							if ascInfo, err := aac.ParseAudioSpecificConfig(frame.Payload); err == nil {
-								mi.SampleRate = ascInfo.SampleRate
-								mi.Channels = ascInfo.Channels
-							}
+			if rp := h.publisher; rp != nil {
+				mi := *rp.MediaInfo()
+				if frame.MediaType.IsVideo() {
+					mi.VideoCodec = frame.Codec
+					mi.VideoSequenceHeader = append([]byte(nil), frame.Payload...)
+				} else if frame.MediaType.IsAudio() {
+					mi.AudioCodec = frame.Codec
+					mi.AudioSequenceHeader = append([]byte(nil), frame.Payload...)
+					if frame.Codec == avframe.CodecAAC && len(frame.Payload) >= 2 {
+						if ascInfo, err := aac.ParseAudioSpecificConfig(frame.Payload); err == nil {
+							mi.SampleRate = ascInfo.SampleRate
+							mi.Channels = ascInfo.Channels
 						}
 					}
-					rp.SetMediaInfo(&mi)
 				}
+				rp.SetMediaInfo(&mi)
 			}
 		}
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(h.publisher, frame) && stream.Publisher() != h.publisher {
+			return fmt.Errorf("RTMP publisher no longer owns stream %s", h.streamKey)
+		}
 	}
 	return nil
 }

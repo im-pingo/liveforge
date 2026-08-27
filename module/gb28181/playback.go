@@ -66,10 +66,11 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("create playback stream: %w", err)
 	}
-	pub := NewPublisher(
+	var pub *Publisher
+	pub = NewPublisher(
 		newPublisherID("playback", channelID),
 		func(frame *avframe.AVFrame) {
-			stream.WriteFrame(frame)
+			stream.WriteFrameForPublisher(pub, frame)
 		},
 	)
 	receiver, err := newRTPReceiver(rtpPort, pub)

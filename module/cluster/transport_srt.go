@@ -146,7 +146,9 @@ func (t *SRTTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 				pub.info.AudioSequenceHeader = frame.Payload
 			}
 		}
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+			_ = conn.Close()
+		}
 	})
 
 	buf := make([]byte, 1500)

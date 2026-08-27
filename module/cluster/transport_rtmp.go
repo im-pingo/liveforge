@@ -167,7 +167,9 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 				if pub.info.VideoCodec == 0 {
 					pub.info.VideoCodec = frame.Codec
 				}
-				stream.WriteFrame(frame)
+				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+					return nil
+				}
 			}
 		case rtmp.MsgAudio:
 			recordRelayBytes(ctx, int64(len(msg.Payload)))
@@ -176,7 +178,9 @@ func (t *RTMPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 				if pub.info.AudioCodec == 0 {
 					pub.info.AudioCodec = frame.Codec
 				}
-				stream.WriteFrame(frame)
+				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+					return nil
+				}
 			}
 		case rtmp.MsgAMF0Command:
 			vals, err := rtmp.AMF0Decode(msg.Payload)

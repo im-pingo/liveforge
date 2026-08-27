@@ -73,10 +73,11 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
-	pub := NewPublisher(
+	var pub *Publisher
+	pub = NewPublisher(
 		newPublisherID("live", channelID),
 		func(frame *avframe.AVFrame) {
-			stream.WriteFrame(frame)
+			stream.WriteFrameForPublisher(pub, frame)
 		},
 	)
 	receiver, err := newRTPReceiver(rtpPort, pub)
