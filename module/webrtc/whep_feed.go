@@ -297,7 +297,7 @@ func whepFeedLoop(stream *core.Stream, video, audio *TrackSender, done <-chan st
 	// Live frame loop: start reading only NEW frames (after snapshot).
 	// In realtime mode, skip all frames until the first video keyframe
 	// arrives, then start sending from that keyframe onward.
-	gotKeyframe := whepInitialKeyframeReady(mode, cacheKeyframeSent)
+	gotKeyframe := whepInitialMediaReady(mode, cacheKeyframeSent, video != nil)
 	for {
 		readers.drainTargetAudio(gotKeyframe, targetAudioCodec, writeAudioSample)
 
@@ -478,6 +478,15 @@ func (r *whepFeedReaders) wait(done <-chan struct{}) bool {
 
 func whepInitialKeyframeReady(mode string, cacheKeyframeSent bool) bool {
 	return mode == "live" && cacheKeyframeSent
+}
+
+// Audio-only streams have no video keyframe to wait for. They can start
+// delivering audio as soon as the peer connection is ready.
+func whepInitialMediaReady(mode string, cacheKeyframeSent, hasVideo bool) bool {
+	if !hasVideo {
+		return true
+	}
+	return whepInitialKeyframeReady(mode, cacheKeyframeSent)
 }
 
 func shouldDropWHEPVideoFrame(codec avframe.CodecType, frame *avframe.AVFrame, maxSentPTS int64) bool {

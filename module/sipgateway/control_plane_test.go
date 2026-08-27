@@ -338,7 +338,10 @@ func TestGatewayDialsListsAndHangsUpOutboundCall(t *testing.T) {
 }
 
 func TestGatewayCountsInboundRTPPacketsAndBytes(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	cfg := newTestGatewayConfig()
+	rtpPort := evenSIPLabPort(t)
+	cfg.RTPPortRange = []int{rtpPort, rtpPort + 1}
+	gw, svc, _ := newControlPlaneGateway(t, cfg)
 	if resp := inviteGateway(t, svc, "rtp-counters", "counter-stream", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("INVITE status = %v, want 200", resp)
 	}

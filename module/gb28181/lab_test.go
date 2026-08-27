@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	sipgateway "github.com/im-pingo/liveforge/module/sipgateway"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/codec/h264"
 )
 
 func validGBLabRequest() LabSessionRequest {
@@ -132,6 +136,216 @@ func TestGBLabPublishUsesRequestedCustomStreamKey(t *testing.T) {
 	defaultKey := h.module.handler.prefix + "/" + request.ChannelID
 	if defaultStream, defaultOK := h.hub.Find(defaultKey); defaultOK && defaultStream.Publisher() != nil {
 		t.Fatalf("default stream %q unexpectedly has an active publisher", defaultKey)
+	}
+}
+
+func TestGBLabPublishRefreshesRegistrationKeepalive(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	h.module.registry.keepaliveTimeout = 300 * time.Millisecond
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "34020000001320000061",
+		ChannelID: "34020000001320000062",
+		StreamKey: "gb28181/keepalive",
+	}
+
+	session, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	waitForGBLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTPPacketsSent > 0
+	})
+
+	firstKeepalive := gbLabLastKeepalive(h.module.registry, request.DeviceID)
+	waitForGBLab(t, func() bool {
+		return gbLabLastKeepalive(h.module.registry, request.DeviceID).After(firstKeepalive)
+	})
+
+	time.Sleep(350 * time.Millisecond)
+	h.module.registry.checkKeepalives(nil)
+	device := h.module.registry.Get(request.DeviceID)
+	if device == nil || device.Status != DeviceStatusOnline {
+		t.Fatalf("device after keepalive timeout = %+v, want online", device)
+	}
+}
+
+func TestCombinedSIPAndGB28181RoutesAudioInviteToSIPGateway(t *testing.T) {
+	h := newCombinedSIPAndGBLabHarness(t)
+	request := sipgateway.LabSessionRequest{
+		Mode:      sipgateway.LabModePublish,
+		DeviceID:  "d1",
+		StreamKey: "s1",
+		Codec:     "PCMA",
+	}
+	session, err := h.gateway.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.gateway.StopLabSession(session.ID) })
+
+	var active sipgateway.LabSessionSnapshot
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, snapshot := range h.gateway.ListLabSessions() {
+			if snapshot.ID == session.ID && snapshot.State == sipgateway.LabSessionStateActive && snapshot.RTPPacketsSent > 0 {
+				active = snapshot
+				break
+			}
+		}
+		if active.State == sipgateway.LabSessionStateActive {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if active.State != sipgateway.LabSessionStateActive {
+		t.Fatalf("SIP lab snapshot = %+v, want active audio publisher; all=%+v", active, h.gateway.ListLabSessions())
+	}
+
+	stream, ok := h.server.StreamHub().Find(request.StreamKey)
+	if !ok || stream.Publisher() == nil {
+		t.Fatalf("stream %q = (%v, %v), want active SIP publisher", request.StreamKey, stream, ok)
+	}
+	if !strings.HasPrefix(stream.Publisher().ID(), "sip-") {
+		t.Fatalf("stream %q publisher ID = %q, want SIP gateway publisher", request.StreamKey, stream.Publisher().ID())
+	}
+}
+
+func TestCombinedSIPAndGB28181RoutesVideoInviteToGB28181(t *testing.T) {
+	h := newCombinedSIPAndGBLabHarness(t)
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "34020000001320000051",
+		ChannelID: "34020000001320000052",
+		StreamKey: "gb28181/combined-video",
+	}
+	session, err := h.gb.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession GB28181 publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.gb.StopLabSession(session.ID) })
+
+	active := waitForGBLabSnapshot(t, h.gb, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTPPacketsSent > 0 && snapshot.PSFramesSent > 0
+	})
+	if active.Direction != LabDirectionInbound {
+		t.Fatalf("GB28181 lab snapshot = %+v, want inbound video publisher", active)
+	}
+	stream, ok := h.server.StreamHub().Find(request.StreamKey)
+	if !ok || stream.Publisher() == nil {
+		t.Fatalf("stream %q = (%v, %v), want active GB28181 publisher", request.StreamKey, stream, ok)
+	}
+	if !strings.HasPrefix(stream.Publisher().ID(), "gb28181-live-") {
+		t.Fatalf("stream %q publisher ID = %q, want GB28181 publisher", request.StreamKey, stream.Publisher().ID())
+	}
+	if calls := h.gateway.ListCalls(); len(calls) != 0 {
+		t.Fatalf("SIP Gateway calls after GB28181 video INVITE = %+v, want none", calls)
+	}
+}
+
+type combinedSIPAndGBLabHarness struct {
+	server  *core.Server
+	gb      *Module
+	gateway *sipgateway.Module
+}
+
+func newCombinedSIPAndGBLabHarness(t *testing.T) combinedSIPAndGBLabHarness {
+	t.Helper()
+	sipAddr := freeGBLabAddress(t)
+	gbPort := freeGBLabPort(t)
+	gatewayPort := freeGBLabPortExcluding(t, gbPort)
+
+	cfg := &config.Config{
+		SIP: config.SIPConfig{
+			Enabled:   true,
+			Listen:    sipAddr,
+			Transport: []string{"udp"},
+			ServerID:  "liveforge-combined-lab",
+			Domain:    "lab.local",
+			Gateway: config.SIPGatewayConfig{
+				Enabled:      true,
+				StreamPrefix: "sip",
+				RTPPortRange: []int{gatewayPort, gatewayPort + 100},
+				Codecs:       []string{"PCMA", "PCMU"},
+				MaxCalls:     8,
+			},
+		},
+		GB28181: config.GB28181Config{
+			Enabled:      true,
+			StreamPrefix: "gb28181",
+			RTPPortRange: []int{gbPort, gbPort + 100},
+			Keepalive:    config.KeepaliveConfig{Timeout: time.Minute},
+		},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 256},
+	}
+	server := core.NewServer(cfg)
+	sipModule := sipmod.NewModule()
+	gbModule := NewModule(sipModule.Service())
+	gatewayModule := sipgateway.NewModule(sipModule.Service())
+	server.RegisterModule(sipModule)
+	server.RegisterModule(gbModule)
+	server.RegisterModule(gatewayModule)
+	if err := server.Init(); err != nil {
+		t.Fatalf("Init combined SIP and GB28181 lab harness: %v", err)
+	}
+	t.Cleanup(server.Shutdown)
+	time.Sleep(25 * time.Millisecond)
+	return combinedSIPAndGBLabHarness{server: server, gb: gbModule, gateway: gatewayModule}
+}
+
+func TestGB28181InviteRecognitionRejectsSIPAudioAndOtherVideo(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "GB28181 PS video",
+			body: "v=0\r\nm=video 30000 RTP/AVP 96\r\na=rtpmap:96 PS/90000\r\n",
+			want: true,
+		},
+		{
+			name: "legacy video without rtpmap",
+			body: "v=0\r\nm=video 30000 RTP/AVP 96\r\n",
+			want: true,
+		},
+		{
+			name: "SIP PCMA audio",
+			body: "v=0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
+			want: false,
+		},
+		{
+			name: "H264 video",
+			body: "v=0\r\nm=video 30000 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n",
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := newGBRequest(sip.INVITE, "device", "channel")
+			req.SetBody([]byte(test.body))
+			if got := isGB28181VideoInvite(req); got != test.want {
+				t.Fatalf("isGB28181VideoInvite = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDeterministicGBLabFrameContainsDecodableH264ParameterSets(t *testing.T) {
+	nalus := h264.ExtractNALUs(deterministicGBLabFrame(0).Payload)
+	if len(nalus) < 3 {
+		t.Fatalf("deterministic frame NAL units = %d, want SPS/PPS/IDR", len(nalus))
+	}
+	if nalus[0][0]&0x1f != h264.NALTypeSPS || nalus[1][0]&0x1f != h264.NALTypePPS || nalus[2][0]&0x1f != h264.NALTypeIDR {
+		t.Fatalf("deterministic frame NAL types = %d/%d/%d, want 7/8/5", nalus[0][0]&0x1f, nalus[1][0]&0x1f, nalus[2][0]&0x1f)
+	}
+	info, err := h264.ParseSPS(nalus[0])
+	if err != nil {
+		t.Fatalf("ParseSPS: %v", err)
+	}
+	if info.Width <= 0 || info.Height <= 0 {
+		t.Fatalf("SPS dimensions = %dx%d, want positive dimensions", info.Width, info.Height)
 	}
 }
 
@@ -264,18 +478,26 @@ func freeGBLabPort(t *testing.T) int {
 	if port%2 != 0 {
 		port++
 	}
+	if port+100 > 65535 {
+		port = 60000
+	}
 	return port
 }
 
+func freeGBLabPortExcluding(t *testing.T, other int) int {
+	t.Helper()
+	for attempt := 0; attempt < 100; attempt++ {
+		port := freeGBLabPort(t)
+		if port > other+100 || other > port+100 {
+			return port
+		}
+	}
+	t.Fatalf("could not find a free GB lab port range outside %d", other)
+	return 0
+}
+
 func deterministicGBLabTestFrame(timestamp int64) *avframe.AVFrame {
-	startCode := []byte{0, 0, 0, 1}
-	payload := append([]byte{}, startCode...)
-	payload = append(payload, []byte{0x67, 0x42, 0x00, 0x1e, 0xab, 0x40, 0x50}...)
-	payload = append(payload, startCode...)
-	payload = append(payload, []byte{0x68, 0xce, 0x38, 0x80}...)
-	payload = append(payload, startCode...)
-	payload = append(payload, 0x65, 1, 2, 3, 4, 5, 6, 7, 8)
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, timestamp, timestamp, payload)
+	return deterministicGBLabFrame(timestamp)
 }
 
 func waitForGBLabSnapshot(t *testing.T, module *Module, id string, predicate func(LabSessionSnapshot) bool) LabSessionSnapshot {
@@ -303,6 +525,15 @@ func waitForGBLab(t *testing.T, predicate func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("GB lab condition was not reached")
+}
+
+func gbLabLastKeepalive(registry *DeviceRegistry, deviceID string) time.Time {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	if device := registry.devices[deviceID]; device != nil {
+		return device.LastKeepalive
+	}
+	return time.Time{}
 }
 
 func (m *labManager) session(id string) *gbLabSession {

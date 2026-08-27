@@ -66,6 +66,7 @@ type LabSessionSnapshot struct {
 	Mode            LabMode         `json:"mode"`
 	State           LabSessionState `json:"state"`
 	Direction       LabDirection    `json:"direction"`
+	LastError       string          `json:"last_error,omitempty"`
 	RTPPacketsSent  uint64          `json:"rtp_packets_sent"`
 	RTPPacketsRecv  uint64          `json:"rtp_packets_received"`
 	RTPBytesSent    uint64          `json:"rtp_bytes_sent"`
@@ -78,6 +79,18 @@ type LabSessionSnapshot struct {
 	UpdatedAt       time.Time       `json:"updated_at"`
 	LastMediaAt     time.Time       `json:"last_media_at,omitempty"`
 	StoppedAt       time.Time       `json:"stopped_at,omitempty"`
+}
+
+func redactedLabError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.Join(strings.Fields(err.Error()), " ")
+	runes := []rune(message)
+	if len(runes) > 256 {
+		return string(runes[:256])
+	}
+	return message
 }
 
 // LabManager owns local GB28181 lab session lifecycle state.

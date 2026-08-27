@@ -449,6 +449,24 @@ func TestRegisterCodecs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registerCodecs: %v", err)
 	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("NewPeerConnection: %v", err)
+	}
+	defer pc.Close()
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio); err != nil {
+		t.Fatalf("AddTransceiverFromKind(audio): %v", err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+	for _, codec := range []string{"PCMA/8000", "PCMU/8000"} {
+		if !strings.Contains(offer.SDP, codec) {
+			t.Errorf("registered WebRTC audio codecs do not include %s", codec)
+		}
+	}
 }
 
 func TestCorsMiddleware(t *testing.T) {

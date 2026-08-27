@@ -36,7 +36,7 @@ func (m *Module) RunSelfTest(ctx context.Context) (protocoltest.Report, error) {
 	}
 
 	muxer := ps.NewMuxer()
-	payload := []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0x1e, 0xab, 0x40, 0x50, 0, 0, 0, 1, 0x68, 0xce, 0x38, 0x80, 0, 0, 0, 1, 0x65, 0x01, 0x02, 0x03}
+	payload := deterministicGBLabH264Payload()
 	packed, err := muxer.Pack(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, payload))
 	if err != nil {
 		checks = append(checks, protocoltest.Check{Name: "ps_roundtrip", Detail: err.Error()})
@@ -159,7 +159,7 @@ func runGBMediaLoop(ctx context.Context) []protocoltest.Check {
 	}
 	defer rtcpListener.Close()
 	muxer := ps.NewMuxer()
-	packed, err := muxer.Pack(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0x1e, 0, 0, 0, 1, 0x65, 1, 2, 3}))
+	packed, err := muxer.Pack(deterministicGBLabFrame(0))
 	if err != nil {
 		return []protocoltest.Check{{Name: "ps_rtp_media_loopback", Detail: err.Error()}, {Name: "rtcp_control_loopback", Detail: err.Error()}}
 	}

@@ -163,6 +163,18 @@ func TestWHEPInitialKeyframeGateRequiresSentCachedKeyframe(t *testing.T) {
 	}
 }
 
+func TestWHEPInitialMediaGateAllowsAudioOnlyStreams(t *testing.T) {
+	if !whepInitialMediaReady("realtime", false, false) {
+		t.Fatal("audio-only realtime playback waited for a video keyframe")
+	}
+	if !whepInitialMediaReady("live", false, false) {
+		t.Fatal("audio-only live playback waited for a video keyframe")
+	}
+	if whepInitialMediaReady("realtime", false, true) {
+		t.Fatal("video realtime playback bypassed the keyframe gate")
+	}
+}
+
 func TestWHEPFeedReadersDrainOnlyTargetAudioAfterKeyframe(t *testing.T) {
 	targetRing := util.NewRingBuffer[*avframe.AVFrame](16)
 	readers := &whepFeedReaders{targetAudio: targetRing.NewReaderAt(0)}

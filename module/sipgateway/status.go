@@ -94,6 +94,7 @@ type LabSessionSnapshot struct {
 	State           LabSessionState `json:"state"`
 	Direction       LabDirection    `json:"direction"`
 	Codec           string          `json:"codec,omitempty"`
+	LastError       string          `json:"last_error,omitempty"`
 	RTPPacketsSent  uint64          `json:"rtp_packets_sent"`
 	RTPPacketsRecv  uint64          `json:"rtp_packets_received"`
 	RTPBytesSent    uint64          `json:"rtp_bytes_sent"`

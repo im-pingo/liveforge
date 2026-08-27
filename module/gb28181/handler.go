@@ -12,6 +12,7 @@ import (
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
+	"github.com/im-pingo/liveforge/pkg/sdp"
 )
 
 // handler processes SIP requests for the GB28181 module.
@@ -74,6 +75,13 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 }
 
 func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
+	// SIP and GB28181 share one transport. Only claim video PS offers; audio
+	// INVITEs must remain available for the SIP gateway handler registered after
+	// this module.
+	if !isGB28181VideoInvite(req) {
+		return
+	}
+
 	from := req.From()
 	if from == nil {
 		resp := sip.NewResponseFromRequest(req, 400, "Bad Request", nil)
@@ -206,6 +214,34 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	slog.Info("invite accepted", "module", "gb28181",
 		"device", deviceID, "channel", channelID,
 		"stream", streamKey, "local_port", rtpPort)
+}
+
+func isGB28181VideoInvite(req *sip.Request) bool {
+	if req == nil || len(req.Body()) == 0 {
+		return false
+	}
+	offer, err := sdp.Parse(req.Body())
+	if err != nil {
+		return false
+	}
+	for _, media := range offer.Media {
+		if media == nil || !strings.EqualFold(media.Type, "video") || !strings.EqualFold(media.Proto, "RTP/AVP") {
+			continue
+		}
+		for _, payloadType := range media.Formats {
+			if payloadType != 96 {
+				continue
+			}
+			mapping := media.RTPMap(payloadType)
+			// Some older devices omit rtpmap for the GB28181 static lab-style
+			// offer. Keep accepting that established shape while rejecting an
+			// explicitly announced non-PS video codec.
+			if mapping == nil || (strings.EqualFold(mapping.EncodingName, "PS") && mapping.ClockRate == 90000) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func inboundStreamKey(req *sip.Request, prefix, channelID string) string {

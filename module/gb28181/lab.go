@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -176,6 +177,7 @@ type gbLabSession struct {
 	cleanupOnce sync.Once
 	stopRequest bool
 	mediaWG     sync.WaitGroup
+	controlWG   sync.WaitGroup
 
 	client     *sipgo.Client
 	ua         *sipgo.UserAgent
@@ -303,6 +305,7 @@ func (s *gbLabSession) startPublish(ctx context.Context) error {
 		return errors.New("GB28181 lab INVITE answer has no RTP port")
 	}
 	s.setState(LabSessionStateActive)
+	s.startKeepaliveLoop(serverHost, serverPort)
 	s.mediaWG.Add(1)
 	go s.publishMediaLoop(remotePort)
 	return nil
@@ -375,6 +378,7 @@ func (s *gbLabSession) startReceive(ctx context.Context) error {
 	s.callID, s.inviteRequest, s.inviteResponse, s.inviteTx = callID, invite, response, tx
 	s.mu.Unlock()
 	s.setState(LabSessionStateActive)
+	s.startKeepaliveLoop(serverHost, serverPort)
 	s.mediaWG.Add(3)
 	go s.receiveMediaLoop()
 	go s.receiveRTCPLoop()
@@ -486,6 +490,46 @@ func (s *gbLabSession) sendKeepalive(ctx context.Context, host string, port int)
 	return nil
 }
 
+func gbLabKeepaliveInterval(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		timeout = 180 * time.Second
+	}
+	interval := timeout / 3
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	if interval > time.Minute {
+		interval = time.Minute
+	}
+	return interval
+}
+
+func (s *gbLabSession) startKeepaliveLoop(host string, port int) {
+	interval := gbLabKeepaliveInterval(s.module.registry.keepaliveTimeout)
+	s.controlWG.Add(1)
+	go func() {
+		defer s.controlWG.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(s.ctx, interval)
+				err := s.sendKeepalive(ctx, host, port)
+				cancel()
+				if err != nil {
+					if s.ctx.Err() != nil {
+						return
+					}
+					slog.Warn("GB28181 lab keepalive failed", "module", "gb28181", "device", s.request.DeviceID, "error", err)
+				}
+			}
+		}
+	}()
+}
+
 func (s *gbLabSession) sendCatalog(ctx context.Context, host string, port int) error {
 	body := CatalogResponse{CmdType: "Catalog", SN: 1, DeviceID: s.request.DeviceID, SumNum: 1, DeviceList: CatalogDeviceList{Num: 1, Items: []CatalogItem{{DeviceID: s.request.ChannelID, Name: "LiveForge GB Lab Camera", Manufacturer: "LiveForge", Status: "ON"}}}}
 	data, err := xml.Marshal(body)
@@ -525,14 +569,19 @@ func (s *gbLabSession) publishMediaLoop(remotePort int) {
 }
 
 func deterministicGBLabFrame(timestamp int64) *avframe.AVFrame {
-	startCode := []byte{0, 0, 0, 1}
-	payload := append([]byte{}, startCode...)
-	payload = append(payload, []byte{0x67, 0x42, 0x00, 0x1e, 0xab, 0x40, 0x50}...)
-	payload = append(payload, startCode...)
-	payload = append(payload, []byte{0x68, 0xce, 0x38, 0x80}...)
-	payload = append(payload, startCode...)
-	payload = append(payload, 0x65, 1, 2, 3, 4, 5, 6, 7, 8)
-	return avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, timestamp, timestamp, payload)
+	return avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, timestamp, timestamp, deterministicGBLabH264Payload())
+}
+
+func deterministicGBLabH264Payload() []byte {
+	// A valid constrained-baseline 32x32 SPS/PPS/IDR access unit keeps the
+	// protocol lab playable without requiring FFmpeg or another encoder.
+	return []byte{
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x0a, 0xda, 0x25, 0xb0, 0x11,
+		0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x32, 0x8f, 0x12,
+		0x26, 0xa0, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x0f, 0xc8,
+		0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x3a, 0x26, 0x28, 0x00, 0x09, 0x02,
+		0xc9, 0xd7, 0x5e,
+	}
 }
 
 func (s *gbLabSession) sendSourceLoop(stream *core.Stream) {
@@ -701,6 +750,10 @@ func (s *gbLabSession) cleanup() {
 		deviceID := s.request.DeviceID
 		s.mu.RUnlock()
 
+		// Keepalive requests use the session SIP client. Stop that loop before
+		// sending teardown requests or closing the client.
+		s.controlWG.Wait()
+
 		var cleanupErr error
 		if mode == LabModePublish && client != nil && invite != nil && response != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -780,6 +833,7 @@ func (s *gbLabSession) snapshot() LabSessionSnapshot {
 	result := LabSessionSnapshot{
 		ID: s.id, Identity: s.identity, DeviceID: s.request.DeviceID, ChannelID: s.request.ChannelID,
 		StreamKey: s.request.StreamKey, Mode: s.request.Mode, State: s.state, Direction: s.direction,
+		LastError: redactedLabError(s.closeErr),
 		StartedAt: s.startedAt, UpdatedAt: s.updatedAt, LastMediaAt: s.lastMedia, StoppedAt: s.stoppedAt,
 	}
 	s.mu.RUnlock()

@@ -253,6 +253,58 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 	}
 }
 
+func TestConsoleProtocolLabErrorsAreVisibleAndReadable(t *testing.T) {
+
+	doc, script := consoleDocument(t)
+	elements := consoleElementsByID(doc)
+	for _, tableID := range []string{"sip-lab-sessions-tbody", "gb-lab-sessions-tbody"} {
+		if elements[tableID] == nil {
+			t.Fatalf("protocol lab table %q is missing", tableID)
+		}
+	}
+	for _, contract := range []string{
+		`<th>Error</th>`,
+		`appendTextCell(row, s.last_error || "-", "lab-error")`,
+		`.lab-error`,
+		`overflow-wrap: anywhere`,
+	} {
+		if !strings.Contains(string(consoleHTML), contract) && !strings.Contains(script, contract) {
+			t.Errorf("console protocol lab error contract is missing %q", contract)
+		}
+	}
+}
+
+func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
+	doc, script := consoleDocument(t)
+	elements := consoleElementsByID(doc)
+	if elements["player-audio"] == nil {
+		t.Fatal("player modal is missing the audio playback element")
+	}
+	for _, contract := range []string{
+		`document.getElementById("player-audio")`,
+		`audio.srcObject = null`,
+		`audio.src = ""`,
+		`var audioOnlyG711 = !hasVideo && ["g711a", "g711u", "pcma", "pcmu"].indexOf(audioCodec) >= 0`,
+		`addWHEPProtocols(protocols)`,
+		`monitorPlayableAudio`,
+		`remoteStream.addTrack(event.track);`,
+		`mediaElement.srcObject = remoteStream;`,
+		`if (!expectsVideo && mediaElement.readyState >= 2 && mediaTime > 0)`,
+		`markPlaying();`,
+		"var playPromise = mediaElement.play();\n      monitorStreamMedia(mediaElement, generation, \"WebRTC/WHEP\", streamKey);",
+		`streamMedia[s.stream_key] = { video_codec: "", audio_codec: s.codec || "" }`,
+		`streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "" }`,
+		`appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key)`,
+		`["h264", "avc", "avc1", "h265", "hevc", "hev1", "hvc1", "av1", "av01", "vp8", "vp08", "vp9", "vp09"]`,
+		`button.dataset.mediaCodec || ""`,
+		`function openPlayer(streamKey, mediaHint)`,
+	} {
+		if !strings.Contains(script, contract) {
+			t.Errorf("audio-only playback contract is missing %q", contract)
+		}
+	}
+}
+
 func TestConsoleManagementActionsAreConfirmedAndPermissionAware(t *testing.T) {
 	_, script := consoleDocument(t)
 	for _, contract := range []struct {

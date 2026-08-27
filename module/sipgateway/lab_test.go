@@ -134,6 +134,49 @@ func TestSIPLabPublishUsesRealSignalingAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestSIPLabPublishAcceptsUnprefixedStreamKey(t *testing.T) {
+	h := newRealSIPLabHarness(t)
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "unprefixed-publish-device",
+		StreamKey: "s1",
+		Codec:     "PCMA",
+	}
+
+	session, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+
+	active := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTPPacketsSent > 0
+	})
+	if active.StreamKey != request.StreamKey {
+		t.Fatalf("active stream key = %q, want %q", active.StreamKey, request.StreamKey)
+	}
+	stream, ok := h.hub.Find(request.StreamKey)
+	if !ok || stream.Publisher() == nil {
+		t.Fatalf("publish stream = (%v, %v), want active publisher", stream, ok)
+	}
+}
+
+func TestSIPLabStreamKeyOverrideRequiresLoopback(t *testing.T) {
+	request := sip.NewRequest(sip.INVITE, sip.Uri{Scheme: "sip", User: "channel", Host: "lab.local"})
+	request.AppendHeader(sip.NewHeader("X-LiveForge-Lab-Stream-Key", "s1"))
+	gateway := &Gateway{prefix: "sip"}
+
+	request.SetSource("127.0.0.1:5060")
+	if got := gateway.streamKeyFromRequest(request); got != "s1" {
+		t.Fatalf("loopback stream key = %q, want s1", got)
+	}
+
+	request.SetSource("192.0.2.10:5060")
+	if got := gateway.streamKeyFromRequest(request); got != "sip/channel" {
+		t.Fatalf("non-loopback stream key = %q, want sip/channel", got)
+	}
+}
+
 func TestSIPLabGatewayCloseCancelsBlockedStart(t *testing.T) {
 	target := freeSIPLabUDPAddress(t)
 	svc := &mockSIPService{localAddr: target, serverID: "test", domain: "test.local"}
@@ -367,6 +410,9 @@ func evenSIPLabPort(t *testing.T) int {
 	port := conn.LocalAddr().(*net.UDPAddr).Port
 	if port%2 != 0 {
 		port++
+	}
+	if port+100 > 65535 {
+		port = 60000
 	}
 	return port
 }

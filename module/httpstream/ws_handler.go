@@ -33,7 +33,7 @@ func (m *Module) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamKey := app + "/" + key
+	streamKey := streamKeyFromPath(app, key)
 
 	// Run authorization independently from lifecycle delivery.
 	subscribeCtx := &core.EventContext{

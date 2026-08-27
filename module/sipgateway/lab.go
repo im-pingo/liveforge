@@ -121,7 +121,7 @@ func validateLabRequest(request LabSessionRequest) error {
 	if request.Mode != LabModePublish && request.Mode != LabModeReceive {
 		return ErrLabInvalidRequest
 	}
-	if !validLabIdentity(request.DeviceID) || strings.TrimSpace(request.StreamKey) == "" {
+	if !validLabIdentity(request.DeviceID) || !validLabStreamKey(request.StreamKey) {
 		return ErrLabInvalidRequest
 	}
 	switch strings.ToUpper(strings.TrimSpace(request.Codec)) {
@@ -276,15 +276,12 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	if err != nil {
 		return err
 	}
-	user, err := s.gatewayStreamUser()
-	if err != nil {
-		return err
-	}
 	codec := strings.ToUpper(strings.TrimSpace(s.request.Codec))
 	callID := uuid.NewString()
-	invite := newLabInvite(sip.INVITE, sip.Uri{Scheme: "sip", User: user, Host: host, Port: port}, s.request.DeviceID, s.gateway.sipService.Domain(), callID)
+	invite := newLabInvite(sip.INVITE, sip.Uri{Scheme: "sip", User: s.request.DeviceID, Host: host, Port: port}, s.request.DeviceID, s.gateway.sipService.Domain(), callID)
 	invite.SetBody(buildLabSDP(codec, rtpConn.LocalAddr().(*net.UDPAddr).Port))
 	invite.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+	invite.AppendHeader(sip.NewHeader(labStreamKeyHeader, s.request.StreamKey))
 	invite.SetTransport("udp")
 	response, err := sendLabInvite(requestContext, client, invite)
 	if err != nil {
@@ -626,6 +623,7 @@ func (s *sipLabSession) snapshot() LabSessionSnapshot {
 		State:       s.state,
 		Direction:   s.direction,
 		Codec:       strings.ToUpper(strings.TrimSpace(s.request.Codec)),
+		LastError:   redactedTerminalError(s.closeErr),
 		StartedAt:   s.startedAt,
 		UpdatedAt:   s.updatedAt,
 		LastMediaAt: s.lastMedia,
@@ -639,18 +637,6 @@ func (s *sipLabSession) snapshot() LabSessionSnapshot {
 	result.RTCPPacketsSent = s.rtcpPacketsSent.Load()
 	result.RTCPPacketsRecv = s.rtcpPacketsRecv.Load()
 	return result
-}
-
-func (s *sipLabSession) gatewayStreamUser() (string, error) {
-	prefix := strings.TrimSuffix(s.gateway.prefix, "/") + "/"
-	if !strings.HasPrefix(s.request.StreamKey, prefix) {
-		return "", fmt.Errorf("%w: stream key must start with %q", ErrLabInvalidRequest, prefix)
-	}
-	user := strings.TrimPrefix(s.request.StreamKey, prefix)
-	if !validLabIdentity(user) {
-		return "", fmt.Errorf("%w: stream key suffix is not a SIP identity", ErrLabInvalidRequest)
-	}
-	return user, nil
 }
 
 func newLabClient() (*sipgo.UserAgent, *sipgo.Client, error) {

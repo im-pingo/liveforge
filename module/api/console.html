@@ -331,10 +331,21 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   aspect-ratio: 16/9;
   margin-bottom: 12px;
 }
+.player-video-wrap.audio-only {
+  aspect-ratio: auto;
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  padding: 16px;
+}
 .player-video-wrap video {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+.player-video-wrap audio {
+  display: none;
+  width: 100%;
 }
 .player-status {
   font-size: 12px;
@@ -774,6 +785,12 @@ select:focus-visible {
 .health-good { color: var(--green); }
 .health-warn { color: var(--yellow); }
 .health-bad { color: var(--red); }
+.lab-error {
+  max-width: 280px;
+  color: var(--red);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .ops-view .stat-card { min-height: 92px; }
 .ops-view .table-wrap { min-height: 96px; }
 #view-cluster table,
@@ -944,7 +961,7 @@ select:focus-visible {
         <button class="btn btn-play" id="gb-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
       </form>
       <div class="ops-error" id="gb-lab-error"></div>
-      <div class="table-wrap"><table><thead><tr><th>Device / Channel</th><th>Mode</th><th>Stream</th><th>State</th><th>RTP</th><th>RTCP</th><th>PS Frames</th><th>Actions</th></tr></thead><tbody id="gb-lab-sessions-tbody"></tbody></table><div id="gb-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent GB28181 lab sessions</div></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Device / Channel</th><th>Mode</th><th>Stream</th><th>State</th><th>Error</th><th>RTP</th><th>RTCP</th><th>PS Frames</th><th>Actions</th></tr></thead><tbody id="gb-lab-sessions-tbody"></tbody></table><div id="gb-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent GB28181 lab sessions</div></div></div>
     </div>
 
     <div class="gb-section-title">Devices</div>
@@ -1078,7 +1095,7 @@ select:focus-visible {
         <button class="btn btn-play" id="sip-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
       </form>
       <div class="ops-error" id="sip-lab-error"></div>
-      <div class="table-wrap"><table><thead><tr><th>Device</th><th>Mode</th><th>Stream</th><th>State</th><th>RTP</th><th>RTCP</th><th>Last Media</th><th>Actions</th></tr></thead><tbody id="sip-lab-sessions-tbody"></tbody></table><div id="sip-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent SIP lab sessions</div></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Device</th><th>Mode</th><th>Stream</th><th>State</th><th>Error</th><th>RTP</th><th>RTCP</th><th>Last Media</th><th>Actions</th></tr></thead><tbody id="sip-lab-sessions-tbody"></tbody></table><div id="sip-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent SIP lab sessions</div></div></div>
     </div>
     <div class="table-wrap"><table><thead><tr><th>Call ID</th><th>Direction</th><th>Stream</th><th>Codec</th><th>State</th><th>RTP</th><th>Actions</th></tr></thead><tbody id="sip-calls-tbody"></tbody></table><div id="sip-calls-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No SIP calls</div></div></div>
     <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
@@ -1158,6 +1175,7 @@ select:focus-visible {
     <div class="player-body">
       <div class="player-video-wrap">
         <video id="player-video" autoplay playsinline></video>
+        <audio id="player-audio" controls autoplay></audio>
       </div>
       <div class="player-status" id="player-status">Select a protocol to start playback</div>
       <div class="player-url" id="player-url" style="display:none"></div>
@@ -1632,7 +1650,18 @@ function renderStatsOverlay(v, a) {
   if (!overlay) return;
 
   if (!v) {
-    overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">No video stats yet</span></span></div>';
+    if (a) {
+      var audioPackets = a.packetsReceived || 0;
+      var audioLost = a.packetsLost || 0;
+      var audioJitter = a.jitter ? (a.jitter * 1000).toFixed(0) + 'ms' : '-';
+      overlay.innerHTML = '<div class="stat-row">' +
+        '<span class="stat-item"><span class="stat-label-s">A.Pkts</span>' + val(audioPackets) + '</span>' +
+        '<span class="stat-item"><span class="stat-label-s">A.Lost</span>' + val(audioLost, audioLost > 0 ? 'bad' : 'good') + '</span>' +
+        '<span class="stat-item"><span class="stat-label-s">A.Jit</span>' + val(audioJitter) + '</span>' +
+        '</div>';
+    } else {
+      overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for media stats...</span></span></div>';
+    }
     statsPrev = { v: v, a: a };
     return;
   }
@@ -1751,6 +1780,11 @@ function destroyCurrentPlayer() {
   video.srcObject = null;
   video.src = "";
   video.load();
+  var audio = document.getElementById("player-audio");
+  audio.pause();
+  audio.srcObject = null;
+  audio.src = "";
+  audio.load();
 }
 
 function isCurrentPlayer(generation) {
@@ -1777,7 +1811,39 @@ function setPlayerURL(url) {
   el.style.display = url ? "block" : "none";
 }
 
+function streamHasVideo(streamKey) {
+  var codec = normalizePlayerCodec((streamMedia[streamKey] || {}).video_codec);
+  return ["h264", "avc", "avc1", "h265", "hevc", "hev1", "hvc1", "av1", "av01", "vp8", "vp08", "vp9", "vp09"].indexOf(codec) >= 0;
+}
+
+function selectStreamMediaElement(streamKey) {
+  var hasVideo = streamHasVideo(streamKey);
+  var wrap = document.querySelector('.player-video-wrap');
+  var video = document.getElementById("player-video");
+  var audio = document.getElementById("player-audio");
+  if (wrap) wrap.classList.toggle("audio-only", !hasVideo);
+  video.style.display = hasVideo ? "block" : "none";
+  audio.style.display = hasVideo ? "none" : "block";
+  return hasVideo ? video : audio;
+}
+
 function monitorPlayableVideo(video, generation, label, streamKey) {
+  monitorPlayableMedia(video, generation, label, streamKey, true);
+}
+
+function monitorPlayableAudio(audio, generation, label, streamKey) {
+  monitorPlayableMedia(audio, generation, label, streamKey, false);
+}
+
+function monitorStreamMedia(mediaElement, generation, label, streamKey) {
+  if (streamHasVideo(streamKey)) {
+    monitorPlayableVideo(mediaElement, generation, label, streamKey);
+  } else {
+    monitorPlayableAudio(mediaElement, generation, label, streamKey);
+  }
+}
+
+function monitorPlayableMedia(mediaElement, generation, label, streamKey, expectsVideo) {
   if (currentVideoEventCleanup) {
     try { currentVideoEventCleanup(); } catch(e) {}
     currentVideoEventCleanup = null;
@@ -1785,9 +1851,7 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
 
   var finished = false;
   var frameCallbackID = null;
-  var media = streamMedia[streamKey] || {};
-  var expectsVideo = normalizePlayerCodec(media.video_codec) !== "";
-  var lastMediaTime = Number(video.currentTime) || 0;
+  var lastMediaTime = Number(mediaElement.currentTime) || 0;
   var lastProgressAt = Date.now();
   var playbackConfirmed = false;
   var playbackStalled = false;
@@ -1797,11 +1861,11 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
     finished = true;
     clearTimeout(startupTimeoutID);
     clearInterval(stallIntervalID);
-    video.removeEventListener("loadeddata", checkReady);
-    video.removeEventListener("playing", checkReady);
-    video.removeEventListener("timeupdate", checkReady);
-    if (frameCallbackID !== null && video.cancelVideoFrameCallback) {
-      try { video.cancelVideoFrameCallback(frameCallbackID); } catch(e) {}
+    mediaElement.removeEventListener("loadeddata", checkReady);
+    mediaElement.removeEventListener("playing", checkReady);
+    mediaElement.removeEventListener("timeupdate", checkReady);
+    if (frameCallbackID !== null && mediaElement.cancelVideoFrameCallback) {
+      try { mediaElement.cancelVideoFrameCallback(frameCallbackID); } catch(e) {}
     }
     if (currentVideoEventCleanup === cleanup) currentVideoEventCleanup = null;
   }
@@ -1818,10 +1882,14 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
       cleanup();
       return;
     }
-    if (video.readyState < 2 || video.paused) return;
-    if (expectsVideo && (video.videoWidth <= 0 || video.videoHeight <= 0)) return;
+    if (mediaElement.readyState < 2 || mediaElement.paused) return;
+    if (expectsVideo && (mediaElement.videoWidth <= 0 || mediaElement.videoHeight <= 0)) return;
 
-    var mediaTime = Number(video.currentTime) || 0;
+    var mediaTime = Number(mediaElement.currentTime) || 0;
+    if (!expectsVideo && mediaElement.readyState >= 2 && mediaTime > 0) {
+      markPlaying();
+      return;
+    }
     if (mediaTime > lastMediaTime + 0.05) {
       lastMediaTime = mediaTime;
       lastProgressAt = Date.now();
@@ -1845,19 +1913,19 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
       return;
     }
     checkReady();
-    if (playbackConfirmed && !playbackStalled && !video.paused && Date.now() - lastProgressAt >= 3000) {
+    if (playbackConfirmed && !playbackStalled && !mediaElement.paused && Date.now() - lastProgressAt >= 3000) {
       playbackStalled = true;
       setPlayerStatus("Playback stalled (" + label + ")", "error");
     }
   }, 500);
 
   currentVideoEventCleanup = cleanup;
-  video.addEventListener("loadeddata", checkReady);
-  video.addEventListener("playing", checkReady);
-  video.addEventListener("timeupdate", checkReady);
+  mediaElement.addEventListener("loadeddata", checkReady);
+  mediaElement.addEventListener("playing", checkReady);
+  mediaElement.addEventListener("timeupdate", checkReady);
 
-  if (expectsVideo && video.requestVideoFrameCallback) {
-    frameCallbackID = video.requestVideoFrameCallback(function() {
+  if (expectsVideo && mediaElement.requestVideoFrameCallback) {
+    frameCallbackID = mediaElement.requestVideoFrameCallback(function() {
       checkReady();
     });
   }
@@ -1867,6 +1935,7 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
 function playHTTPFLV(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
+  var mediaElement = selectStreamMediaElement(streamKey);
   var url = mediaURL("/" + streamKey + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
@@ -1880,12 +1949,12 @@ function playHTTPFLV(streamKey) {
     url: url,
     isLive: true
   });
-  player.attachMediaElement(document.getElementById("player-video"));
+  player.attachMediaElement(mediaElement);
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-FLV", streamKey);
+    monitorStreamMedia(mediaElement, generation, "HTTP-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1904,6 +1973,7 @@ function playHTTPFLV(streamKey) {
 function playWSFLV(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
+  var mediaElement = selectStreamMediaElement(streamKey);
   var url = websocketMediaURL("/ws/" + streamKey + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
@@ -1917,12 +1987,12 @@ function playWSFLV(streamKey) {
     url: url,
     isLive: true
   });
-  player.attachMediaElement(document.getElementById("player-video"));
+  player.attachMediaElement(mediaElement);
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(document.getElementById("player-video"), generation, "WS-FLV", streamKey);
+    monitorStreamMedia(mediaElement, generation, "WS-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1941,6 +2011,7 @@ function playWSFLV(streamKey) {
 function playHTTPTS(streamKey) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
+  var mediaElement = selectStreamMediaElement(streamKey);
   var url = mediaURL("/" + streamKey + ".ts");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
@@ -1954,12 +2025,12 @@ function playHTTPTS(streamKey) {
     url: url,
     isLive: true
   });
-  player.attachMediaElement(document.getElementById("player-video"));
+  player.attachMediaElement(mediaElement);
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-TS", streamKey);
+    monitorStreamMedia(mediaElement, generation, "HTTP-TS", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -2013,7 +2084,7 @@ function playFMP4(streamKey) {
     return;
   }
 
-  var video = document.getElementById("player-video");
+  var video = selectStreamMediaElement(streamKey);
   var ms = new MediaSource();
   var abortCtrl = new AbortController();
   currentMSEAbort = abortCtrl;
@@ -2112,7 +2183,7 @@ function playFMP4(streamKey) {
         video.play().then(function() {
           if (!isCurrentPlayer(generation)) return;
           setPlayerStatus("Connected, waiting for first decoded frame...");
-          monitorPlayableVideo(video, generation, "FMP4", streamKey);
+          monitorStreamMedia(video, generation, "FMP4", streamKey);
         }).catch(function(e) {
           if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
         });
@@ -2167,7 +2238,7 @@ function playHLS(streamKey) {
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
-  var video = document.getElementById("player-video");
+  var video = selectStreamMediaElement(streamKey);
 
   if (typeof Hls === "undefined") {
     setPlayerStatus("hls.js not loaded", "error");
@@ -2190,7 +2261,7 @@ function playHLS(streamKey) {
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Connected, waiting for first decoded frame...");
-        monitorPlayableVideo(video, generation, "HLS", streamKey);
+        monitorStreamMedia(video, generation, "HLS", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -2212,7 +2283,7 @@ function playHLS(streamKey) {
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
         setPlayerStatus("Connected, waiting for first decoded frame...");
-        monitorPlayableVideo(video, generation, "HLS native", streamKey);
+        monitorStreamMedia(video, generation, "HLS native", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -2235,7 +2306,7 @@ function playDASH(streamKey) {
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
-  var video = document.getElementById("player-video");
+  var video = selectStreamMediaElement(streamKey);
 
   if (typeof dashjs === "undefined") {
     setPlayerStatus("dash.js not loaded", "error");
@@ -2263,7 +2334,7 @@ function playDASH(streamKey) {
     if (!isCurrentPlayer(generation) || playbackMonitorStarted) return;
     playbackMonitorStarted = true;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(video, generation, "DASH", streamKey);
+    monitorStreamMedia(video, generation, "DASH", streamKey);
   });
 
   player.on(dashjs.MediaPlayer.events.ERROR, function(e) {
@@ -2293,20 +2364,22 @@ function playWHEP(streamKey, mode) {
   var remoteStream = new MediaStream();
   var receivedTrack = false;
   var playbackMonitorStarted = false;
-  var video = document.getElementById("player-video");
-  video.srcObject = remoteStream;
+  var mediaElement = selectStreamMediaElement(streamKey);
+  var hasVideo = streamHasVideo(streamKey);
+  mediaElement.srcObject = remoteStream;
 
   pc.ontrack = function(event) {
     if (!isCurrentPlayer(generation)) return;
     receivedTrack = true;
     remoteStream.addTrack(event.track);
-    if (!playbackMonitorStarted && (event.track.kind === "video" || !normalizePlayerCodec((streamMedia[streamKey] || {}).video_codec))) {
+    // Rebind after the first track arrives so browsers refresh an element
+    // that was initially attached to an empty MediaStream.
+    mediaElement.srcObject = remoteStream;
+    if (!playbackMonitorStarted && (event.track.kind === "video" || !hasVideo)) {
       playbackMonitorStarted = true;
-      video.play().then(function() {
-        if (!isCurrentPlayer(generation)) return;
-        setPlayerStatus("WebRTC connected, waiting for first decoded frame...");
-        monitorPlayableVideo(video, generation, "WebRTC/WHEP", streamKey);
-      }).catch(function(e) {
+      var playPromise = mediaElement.play();
+      monitorStreamMedia(mediaElement, generation, "WebRTC/WHEP", streamKey);
+      playPromise.catch(function(e) {
         if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
       });
     }
@@ -2396,7 +2469,7 @@ function addHTTPProtocols(protocols) {
   protocols.push({ id: "dash", label: "DASH", fn: playDASH });
 }
 
-function openPlayer(streamKey) {
+function openPlayer(streamKey, mediaHint) {
   destroyCurrentPlayer();
   statsVisible = false;
   var btnStats = document.getElementById('btn-stats');
@@ -2410,11 +2483,18 @@ function openPlayer(streamKey) {
   var tabs = document.getElementById("proto-tabs");
   tabs.innerHTML = "";
   var protocols = [];
-  var media = streamMedia[streamKey] || {};
+  var media = Object.assign({}, streamMedia[streamKey] || {}, mediaHint || {});
+  if (mediaHint) streamMedia[streamKey] = media;
   var videoCodec = media.video_codec || "";
+  var audioCodec = normalizePlayerCodec(media.audio_codec);
+  var hasVideo = streamHasVideo(streamKey);
+  var audioOnlyG711 = !hasVideo && ["g711a", "g711u", "pcma", "pcmu"].indexOf(audioCodec) >= 0;
   var whepPreferred = prefersWHEP(videoCodec);
 
-  if (whepPreferred) {
+  selectStreamMediaElement(streamKey);
+  if (audioOnlyG711) {
+    if (endpoints.webrtc) addWHEPProtocols(protocols);
+  } else if (whepPreferred) {
     addWHEPProtocols(protocols);
   } else {
     addHTTPProtocols(protocols);
@@ -2422,7 +2502,9 @@ function openPlayer(streamKey) {
   }
 
   if (protocols.length === 0) {
-    if (whepPreferred && !endpoints.webrtc) {
+    if (audioOnlyG711 && !endpoints.webrtc) {
+      setPlayerStatus("G.711 audio requires WebRTC/WHEP playback", "error");
+    } else if (whepPreferred && !endpoints.webrtc) {
       setPlayerStatus((videoCodec || "This video codec") + " requires WebRTC/WHEP playback", "error");
     } else {
       setPlayerStatus("No streaming endpoints available", "error");
@@ -3048,7 +3130,7 @@ function createDynamicActionHandlers() {
     "stream-delete": function(value) { deleteStream(value); },
     "sip-detail": function(value) { loadSIPCall(value); },
     "sip-hangup": function(value) { hangupSIPCall(value); },
-    "sip-lab-preview": function(value) { openPlayer(value); },
+    "sip-lab-preview": function(value, button) { openPlayer(value, { video_codec: "", audio_codec: button.dataset.mediaCodec || "" }); },
     "sip-lab-stop": function(value) { stopSIPLab(value); },
     "recording-detail": function(value) { loadRecording(value); },
     "recording-play": function(value) { playRecording(value, recordingFormats[value]); },
@@ -3065,7 +3147,7 @@ function createDynamicActionHandlers() {
     "gb-playback": function(value) { openPlayback(value); },
     "gb-preview": function(value) { openPlayer(value); },
     "gb-close-session": function(value) { gbCloseSession(value); },
-    "gb-lab-preview": function(value) { openPlayer(value); },
+    "gb-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.mediaCodec || "H264", audio_codec: "" }); },
     "gb-lab-stop": function(value) { stopGBLab(value); }
   };
 }
@@ -3075,7 +3157,7 @@ document.addEventListener("click", function(event) {
   var button = event.target.closest("[data-action]");
   if (!button) return;
   var handler = dynamicActionHandlers[button.dataset.action];
-  if (handler) handler(button.dataset.actionId);
+  if (handler) handler(button.dataset.actionId, button);
 });
 
 function renderEmptyTable(tbodyID, emptyID, rows) {
@@ -3247,18 +3329,23 @@ function renderSIPLabSessions(views) {
   empty.style.display = views.length ? "none" : "block";
   views.forEach(function(view) {
     var s = view.session || {};
+    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "", audio_codec: s.codec || "" };
     var row = tbody.insertRow();
     appendTextCell(row, s.device_id || s.identity || "-", "mono");
     appendTextCell(row, s.mode || "-");
     appendTextCell(row, s.stream_key || "-", "stream-key");
     appendTextCell(row, s.state || "-");
+    appendTextCell(row, s.last_error || "-", "lab-error");
     appendTextCell(row, (s.rtp_packets_sent || 0) + " tx / " + (s.rtp_packets_received || 0) + " rx", "mono");
     appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
     appendTextCell(row, formatDate(s.last_media_at));
     var actionCell = row.insertCell();
     var actions = document.createElement("div");
     actions.className = "actions";
-    if (s.stream_key && view.playback && view.playback.available) appendActionButton(actions, "Preview", "btn-play", "sip-lab-preview", s.stream_key);
+    if (s.stream_key && view.playback && view.playback.available) {
+      var preview = appendActionButton(actions, "Preview", "btn-play", "sip-lab-preview", s.stream_key);
+      preview.dataset.mediaCodec = s.codec || "";
+    }
     if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "sip-lab-stop", s.id);
     actionCell.appendChild(actions);
   });
@@ -3848,18 +3935,23 @@ function renderGBLabSessions(views) {
   empty.style.display = views.length ? "none" : "block";
   views.forEach(function(view) {
     var s = view.session || {};
+    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "" };
     var row = tbody.insertRow();
     appendTextCell(row, (s.device_id || "-") + " / " + (s.channel_id || "-"), "mono");
     appendTextCell(row, s.mode || "-");
     appendTextCell(row, s.stream_key || "-", "stream-key");
     appendTextCell(row, s.state || "-");
+    appendTextCell(row, s.last_error || "-", "lab-error");
     appendTextCell(row, (s.rtp_packets_sent || 0) + " tx / " + (s.rtp_packets_received || 0) + " rx", "mono");
     appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
     appendTextCell(row, (s.ps_frames_sent || 0) + " tx / " + (s.ps_frames_received || 0) + " rx", "mono");
     var actionCell = row.insertCell();
     var actions = document.createElement("div");
     actions.className = "actions";
-    if (s.stream_key && view.playback && view.playback.available) appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key);
+    if (s.stream_key && view.playback && view.playback.available) {
+      var preview = appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key);
+      preview.dataset.mediaCodec = s.video_codec || "H264";
+    }
     if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "gb-lab-stop", s.id);
     actionCell.appendChild(actions);
   });

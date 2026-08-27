@@ -137,7 +137,7 @@ func TestSIPLabAPIListsSessionsAndPlaybackMetadata(t *testing.T) {
 	cfg.RTSP.Enabled = true
 	cfg.WebRTC.Enabled = true
 	server := core.NewServer(cfg)
-	stub := &protocolLabSIPStub{sessions: []sipgateway.LabSessionSnapshot{{ID: "sip-lab-1", StreamKey: "sip/lab", State: sipgateway.LabSessionStateActive}}}
+	stub := &protocolLabSIPStub{sessions: []sipgateway.LabSessionSnapshot{{ID: "sip-lab-1", StreamKey: "sip/lab", State: sipgateway.LabSessionStateFailed, LastError: "INVITE rejected"}}}
 	server.RegisterModule(stub)
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, server)
@@ -153,6 +153,9 @@ func TestSIPLabAPIListsSessionsAndPlaybackMetadata(t *testing.T) {
 	}
 	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"stream_key":"sip/lab"`)) {
 		t.Fatalf("list body=%s, want stream key", recorder.Body.String())
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"last_error":"INVITE rejected"`)) {
+		t.Fatalf("list body=%s, want terminal error", recorder.Body.String())
 	}
 	for _, field := range []string{"http_flv", "hls", "dash", "whep"} {
 		if !bytes.Contains(recorder.Body.Bytes(), []byte(`"`+field+`"`)) {

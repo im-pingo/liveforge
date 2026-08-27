@@ -32,6 +32,7 @@ func TestParseStreamPath(t *testing.T) {
 		{"/live/test.ts", "live", "test", "ts", true},
 		{"/app/stream.mp4", "app", "stream", "mp4", true},
 		{"/live/multi/part.flv", "live", "multi/part", "flv", true},
+		{"/s1.flv", "", "s1", "flv", true},
 		{"/noext", "", "", "", false},
 		{"/", "", "", "", false},
 		{"/.flv", "", "", "", false},
@@ -60,6 +61,7 @@ func TestParseSegmentPath(t *testing.T) {
 		{"/live/test/a1.m4s", "live", "test", "a1", "m4s", true},
 		{"/live/test/vinit.mp4", "live", "test", "vinit", "mp4", true},
 		{"/live/test/audio_init.mp4", "live", "test", "audio_init", "mp4", true},
+		{"/s1/0.ts", "", "s1", "0", "ts", true},
 		{"/notenough", "", "", "", "", false},
 		{"/a/b", "", "", "", "", false},
 		{"/a/b/nodot", "", "", "", "", false},
@@ -243,6 +245,39 @@ func TestHandlerFLVStream(t *testing.T) {
 	}
 	if !strings.Contains(content, "flv-data-1") {
 		t.Error("response should contain flv-data-1")
+	}
+
+	unprefixed, err := srv.StreamHub().GetOrCreate("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unprefixed.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	m.registeredMu.Lock()
+	m.registered[unprefixed] = true
+	m.registeredMu.Unlock()
+	unprefixed.MuxerManager().RegisterMuxerStart("flv", func(inst *core.MuxerInstance, _ *core.Stream) {
+		go func() {
+			defer inst.Buffer.Close()
+			inst.SetInitData([]byte("UNPREFIXED-FLV-HEADER"))
+			inst.Buffer.Write([]byte("unprefixed-flv-data"))
+		}()
+	})
+	resp, err = client.Get(addr + "/s1.flv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unprefixed FLV status = %d", resp.StatusCode)
+	}
+	unprefixedBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unprefixedBody), "unprefixed-flv-data") {
+		t.Fatalf("unprefixed FLV body = %q", unprefixedBody)
 	}
 }
 
