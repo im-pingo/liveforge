@@ -28,7 +28,6 @@ func testConfig() *config.Config {
 		Stream: config.StreamConfig{
 			GOPCache:       true,
 			GOPCacheNum:    1,
-			AudioCacheMs:   1000,
 			RingBufferSize: 1024,
 		},
 		Metrics: config.MetricsConfig{

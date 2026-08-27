@@ -37,29 +37,27 @@ func TestStreamHubUpdatePolicyPublishesHotValues(t *testing.T) {
 	}
 }
 
-func TestStreamUpdatePolicyReconcilesCachesAndTimeouts(t *testing.T) {
+func TestStreamUpdatePolicyReconcilesGOPCacheAndTimeouts(t *testing.T) {
 	cfg := config.StreamConfig{
 		GOPCache:           true,
 		GOPCacheNum:        2,
-		AudioCacheMs:       1000,
 		RingBufferSize:     16,
 		NoPublisherTimeout: time.Hour,
 	}
 	stream := NewStream("live/policy", cfg, config.LimitsConfig{}, NewEventBus())
 	stream.WriteFrame(&avframe.AVFrame{MediaType: avframe.MediaTypeVideo, FrameType: avframe.FrameTypeKeyframe, DTS: 0})
 	stream.WriteFrame(&avframe.AVFrame{MediaType: avframe.MediaTypeAudio, FrameType: avframe.FrameTypeInterframe, DTS: 1})
-	if stream.GOPCacheLen() == 0 || len(stream.AudioCache()) == 0 {
-		t.Fatal("test setup did not populate caches")
+	if stream.GOPCacheLen() == 0 {
+		t.Fatal("test setup did not populate the GOP cache")
 	}
 	stream.RemovePublisher()
 
 	next := cfg
 	next.GOPCache = false
-	next.AudioCacheMs = 0
 	next.NoPublisherTimeout = 10 * time.Millisecond
 	stream.UpdatePolicy(next, config.LimitsConfig{})
-	if stream.GOPCacheLen() != 0 || len(stream.AudioCache()) != 0 {
-		t.Fatalf("disabled caches retained data: gop=%d audio=%d", stream.GOPCacheLen(), len(stream.AudioCache()))
+	if stream.GOPCacheLen() != 0 {
+		t.Fatalf("disabled GOP cache retained %d frames", stream.GOPCacheLen())
 	}
 	deadline := time.Now().Add(time.Second)
 	for stream.State() != StreamStateDestroying && time.Now().Before(deadline) {

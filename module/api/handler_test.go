@@ -40,7 +40,6 @@ func newTestConfig() *config.Config {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     256,
 			IdleTimeout:        5 * time.Second,
 			NoPublisherTimeout: 3 * time.Second,
@@ -176,8 +175,8 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	if si.GOPGeneration != 1 {
 		t.Errorf("expected gop_generation 1, got %d", si.GOPGeneration)
 	}
-	if si.AudioCacheFrames != 2 || si.AudioCacheDurationMs != 20 {
-		t.Errorf("audio cache = %d frames/%d ms, want 2 frames/20 ms", si.AudioCacheFrames, si.AudioCacheDurationMs)
+	if si.AudioCacheFrames != 0 || si.AudioCacheDurationMs != 0 {
+		t.Errorf("retained audio-cache fields = %d frames/%d ms, want zero values", si.AudioCacheFrames, si.AudioCacheDurationMs)
 	}
 	if si.Stats == nil {
 		t.Error("expected stats in stream list response")

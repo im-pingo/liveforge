@@ -53,7 +53,6 @@ func TestPublishSubscribeFlow(t *testing.T) {
 	cfg := config.StreamConfig{
 		GOPCache:           true,
 		GOPCacheNum:        1,
-		AudioCacheMs:       1000,
 		RingBufferSize:     256,
 		NoPublisherTimeout: 5 * time.Second,
 	}

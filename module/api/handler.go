@@ -96,19 +96,16 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 	}
 
 	gopDetail := stream.GOPCacheDetail()
-	audioDetail := stream.AudioCacheDetail()
 
 	info := StreamInfo{
-		Key:                  stream.Key(),
-		State:                state.String(),
-		GOPCacheLen:          gopDetail.TotalFrames,
-		GOPVideoFrames:       gopDetail.VideoFrames,
-		GOPAudioFrames:       gopDetail.AudioFrames,
-		GOPDurationMs:        gopDetail.DurationMs,
-		GOPGeneration:        gopDetail.Generation,
-		AudioCacheFrames:     audioDetail.Frames,
-		AudioCacheDurationMs: audioDetail.DurationMs,
-		Subscribers:          subs,
+		Key:            stream.Key(),
+		State:          state.String(),
+		GOPCacheLen:    gopDetail.TotalFrames,
+		GOPVideoFrames: gopDetail.VideoFrames,
+		GOPAudioFrames: gopDetail.AudioFrames,
+		GOPDurationMs:  gopDetail.DurationMs,
+		GOPGeneration:  gopDetail.Generation,
+		Subscribers:    subs,
 	}
 
 	if pub := stream.Publisher(); pub != nil {

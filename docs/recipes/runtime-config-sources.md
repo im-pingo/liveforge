@@ -27,6 +27,14 @@ and GB28181 port ranges select their documented module fallback behavior;
 non-empty ranges must contain two ordered positive ports. See the field
 descriptions in `docs/config/config.schema.json` for exact range behavior.
 
+## Stream Startup Cache Semantics
+
+The GOP cache is bounded by video keyframes and replays the interleaved video
+and audio frames retained between those boundaries. A late subscriber replays
+that GOP once, then continues from the atomically captured live cursor. A
+pure-audio stream has no GOP startup history: it starts at the live cursor and
+receives the next frame without a separate audio startup cache.
+
 ## Local File
 
 ```yaml

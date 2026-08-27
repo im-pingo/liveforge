@@ -932,7 +932,7 @@ func newRealSIPLabHarness(t *testing.T) realSIPLabHarness {
 				MaxCalls:     8,
 			},
 		},
-		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, AudioCacheMs: 1000, RingBufferSize: 256},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 256},
 	}
 	server := core.NewServer(cfg)
 	sipModule := sipmod.NewModule()

@@ -174,7 +174,7 @@
     "stream": {
       "type": "object", "additionalProperties": false,
       "properties": {
-        "gop_cache": {"type": "boolean", "x-liveforge-reload": "hot_reload"}, "gop_cache_num": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "audio_cache_ms": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"},
+        "gop_cache": {"type": "boolean", "x-liveforge-reload": "hot_reload"}, "gop_cache_num": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"},
         "ring_buffer_size": {"type": "integer", "minimum": 1, "x-liveforge-reload": "restart_required"}, "idle_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "no_publisher_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"},
         "slow_consumer": {"$ref": "#/$defs/slow_consumer", "x-liveforge-reload": "hot_reload"}, "feedback": {"$ref": "#/$defs/feedback", "x-liveforge-reload": "hot_reload"},
         "simulcast": {"$ref": "#/$defs/simulcast", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}

@@ -67,7 +67,6 @@ func baseConfig(name string) *config.Config {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     1024,
 			IdleTimeout:        30 * time.Second,
 			NoPublisherTimeout: 15 * time.Second,

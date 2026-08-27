@@ -15,7 +15,6 @@ func newTestStreamConfig() config.StreamConfig {
 	return config.StreamConfig{
 		GOPCache:           true,
 		GOPCacheNum:        1,
-		AudioCacheMs:       1000,
 		RingBufferSize:     256,
 		IdleTimeout:        5 * time.Second,
 		NoPublisherTimeout: 3 * time.Second,
@@ -651,33 +650,6 @@ func TestStreamGOPCacheSourceStartTracksOldestCachedGOP(t *testing.T) {
 	}
 }
 
-func TestStreamAudioCacheMs(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	cfg.GOPCache = false
-	cfg.AudioCacheMs = 500
-	s := NewStream("live/audio-cache", cfg, config.LimitsConfig{}, bus)
-
-	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC}}
-	_ = s.SetPublisher(pub)
-
-	// Write 10 audio frames at 100ms DTS intervals (0, 100, 200, ..., 900)
-	for i := 0; i < 10; i++ {
-		af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, int64(i*100), int64(i*100), []byte{0xFF})
-		s.WriteFrame(af)
-	}
-
-	// With AudioCacheMs=500, last frame DTS=900, minDTS=400
-	// Frames with DTS >= 400 remain: 400, 500, 600, 700, 800, 900 = 6 frames
-	ac := s.AudioCache()
-	if len(ac) != 6 {
-		t.Errorf("expected 6 audio cache frames, got %d", len(ac))
-	}
-	if len(ac) > 0 && ac[0].DTS != 400 {
-		t.Errorf("expected first audio frame DTS=400, got %d", ac[0].DTS)
-	}
-}
-
 func TestStreamIdleTimeout(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
@@ -720,25 +692,6 @@ func TestStreamIdleTimeoutCancelledBySubscriber(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if s.State() == StreamStateDestroying {
 		t.Error("stream should not be destroying — subscriber cancelled idle timeout")
-	}
-}
-
-func TestStreamAudioCacheDisabled(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	cfg.GOPCache = false
-	cfg.AudioCacheMs = 0
-	s := NewStream("live/audio-disabled", cfg, config.LimitsConfig{}, bus)
-
-	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC}}
-	_ = s.SetPublisher(pub)
-
-	af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 100, 100, []byte{0xFF})
-	s.WriteFrame(af)
-
-	ac := s.AudioCache()
-	if len(ac) != 0 {
-		t.Errorf("expected empty audio cache when disabled, got %d frames", len(ac))
 	}
 }
 

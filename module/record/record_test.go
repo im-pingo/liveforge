@@ -30,7 +30,6 @@ func newTestConfig(dir string) *config.Config {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     256,
 			IdleTimeout:        5 * time.Second,
 			NoPublisherTimeout: 3 * time.Second,
@@ -557,7 +556,6 @@ func TestFMP4RecordSessionEndToEnd(t *testing.T) {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     256,
 			IdleTimeout:        5 * time.Second,
 			NoPublisherTimeout: 3 * time.Second,

@@ -160,14 +160,14 @@ Each Lab manager retains all active sessions plus the newest 16 terminal
 records. Starting and stopping more sessions prunes only the oldest terminal
 records; active sessions are never removed by history maintenance.
 
-The Streams Console reports the video GOP and rolling audio cache separately.
-`GOP #N` is a stream-lifetime generation that increments for every keyframe, so
-cache replacement remains visible even when the polling interval repeatedly
-samples the same point in a fixed GOP cycle. For a healthy one-second sample
-loop, the GOP grows after the first IDR and contains video plus interleaved
-audio, while Audio Cache reports independently according to
-`stream.audio_cache_ms`. A zero GOP before the first keyframe is normal; a
-persistent zero GOP with increasing video-frame totals is not.
+The startup cache is the video-keyframe-bounded GOP. `GOP #N` is a
+stream-lifetime generation that increments for every keyframe, so replacement
+remains visible even when the polling interval repeatedly samples the same point
+in a fixed GOP cycle. For a healthy one-second sample loop, the GOP grows after
+the first IDR and contains video plus interleaved audio. A pure-audio stream
+starts from the live cursor without retained startup history. A zero GOP before
+the first keyframe is normal; a persistent zero GOP with increasing video-frame
+totals is not.
 
 ## Verification
 

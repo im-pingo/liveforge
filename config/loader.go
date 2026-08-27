@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,6 +19,9 @@ func Load(path string) (*Config, error) {
 
 	// Expand ${ENV_VAR} patterns
 	expanded := os.ExpandEnv(string(data))
+	if err := ValidateRemovedSettings([]byte(expanded)); err != nil {
+		return nil, err
+	}
 
 	cfg := defaults()
 	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
@@ -30,6 +34,45 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// ValidateRemovedSettings rejects configuration keys that are no longer
+// supported while leaving unrelated unknown fields compatible.
+func ValidateRemovedSettings(data []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if len(document.Content) == 0 {
+		return nil
+	}
+
+	root := dereferenceYAMLAlias(document.Content[0])
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "stream" {
+			continue
+		}
+		stream := dereferenceYAMLAlias(root.Content[i+1])
+		if stream == nil || stream.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(stream.Content); j += 2 {
+			if stream.Content[j].Value == "audio_cache_ms" {
+				return errors.New("stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache")
+			}
+		}
+	}
+	return nil
+}
+
+func dereferenceYAMLAlias(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
 }
 
 // defaults returns a Config with sensible default values.
@@ -81,7 +124,6 @@ func defaults() *Config {
 		Stream: StreamConfig{
 			GOPCache:       true,
 			GOPCacheNum:    1,
-			AudioCacheMs:   1000,
 			RingBufferSize: 1024,
 			SlowConsumer: SlowConsumerConfig{
 				Enabled:          true,

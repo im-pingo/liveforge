@@ -95,7 +95,6 @@ type Stream struct {
 	gopCache      [][]*avframe.AVFrame
 	gopStarts     []int64
 	gopGeneration uint64
-	audioCache    []*avframe.AVFrame
 	subscribers   map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 
 	videoSeqHeader *avframe.AVFrame
@@ -160,18 +159,6 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 	} else if len(s.gopCache) > cfg.GOPCacheNum {
 		s.gopCache = append([][]*avframe.AVFrame(nil), s.gopCache[len(s.gopCache)-cfg.GOPCacheNum:]...)
 		s.gopStarts = append([]int64(nil), s.gopStarts[len(s.gopStarts)-cfg.GOPCacheNum:]...)
-	}
-	if cfg.AudioCacheMs <= 0 {
-		s.audioCache = nil
-	} else if len(s.audioCache) > 0 {
-		cutoff := s.audioCache[len(s.audioCache)-1].DTS - int64(cfg.AudioCacheMs)
-		first := 0
-		for first < len(s.audioCache) && s.audioCache[first].DTS < cutoff {
-			first++
-		}
-		if first > 0 {
-			s.audioCache = append([]*avframe.AVFrame(nil), s.audioCache[first:]...)
-		}
 	}
 	if s.noPublisherTimer != nil {
 		s.noPublisherTimer.Stop()
@@ -534,19 +521,6 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 		}
 	}
 
-	// Update audio cache for late-joining subscribers
-	if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && s.config.AudioCacheMs > 0 {
-		s.audioCache = append(s.audioCache, frame)
-		minDTS := frame.DTS - int64(s.config.AudioCacheMs)
-		trimIdx := 0
-		for trimIdx < len(s.audioCache) && s.audioCache[trimIdx].DTS < minDTS {
-			trimIdx++
-		}
-		if trimIdx > 0 {
-			s.audioCache = s.audioCache[trimIdx:]
-		}
-	}
-
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
 	return true
@@ -738,33 +712,6 @@ func (s *Stream) GOPCacheSourceStart() int64 {
 		return s.ringBuffer.WriteCursor()
 	}
 	return s.gopStarts[0]
-}
-
-// AudioCache returns a copy of the current audio cache.
-func (s *Stream) AudioCache() []*avframe.AVFrame {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]*avframe.AVFrame, len(s.audioCache))
-	copy(result, s.audioCache)
-	return result
-}
-
-// AudioCacheDetail returns audio-cache statistics without copying frames.
-type AudioCacheDetail struct {
-	Frames     int
-	DurationMs int64
-}
-
-func (s *Stream) AudioCacheDetail() AudioCacheDetail {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	detail := AudioCacheDetail{Frames: len(s.audioCache)}
-	if detail.Frames > 1 {
-		detail.DurationMs = s.audioCache[detail.Frames-1].DTS - s.audioCache[0].DTS
-	}
-	return detail
 }
 
 // VideoSeqHeader returns the cached video sequence header (SPS/PPS), if any.

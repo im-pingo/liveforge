@@ -1,10 +1,19 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/im-pingo/liveforge/config"
 )
+
+func TestParseDocumentRejectsRemovedStreamSetting(t *testing.T) {
+	_, err := ParseDocument([]byte("stream:\n  audio_cache_ms: 1000\n"))
+	const want = "stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("removed setting error = %v, want %q", err, want)
+	}
+}
 
 func TestParseDocumentExpandsEnvironmentLikeBootstrapLoad(t *testing.T) {
 	t.Setenv("LIVEFORGE_TEST_API_TOKEN", "runtime-admin-secret")

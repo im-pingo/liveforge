@@ -284,7 +284,6 @@ type SlowConsumerConfig struct {
 type StreamConfig struct {
 	GOPCache           bool               `yaml:"gop_cache"`
 	GOPCacheNum        int                `yaml:"gop_cache_num"`
-	AudioCacheMs       int                `yaml:"audio_cache_ms"`
 	RingBufferSize     int                `yaml:"ring_buffer_size"`
 	IdleTimeout        time.Duration      `yaml:"idle_timeout"`
 	NoPublisherTimeout time.Duration      `yaml:"no_publisher_timeout"`

@@ -58,7 +58,6 @@ func TestMultiProtocolPublishSubscribe(t *testing.T) {
 	cfg := config.StreamConfig{
 		GOPCache:           true,
 		GOPCacheNum:        2,
-		AudioCacheMs:       1000,
 		RingBufferSize:     512,
 		NoPublisherTimeout: 5 * time.Second,
 	}
@@ -146,9 +145,9 @@ func TestMultiProtocolPublishSubscribe(t *testing.T) {
 func TestHLSMuxerLifecycle(t *testing.T) {
 	bus := core.NewEventBus()
 	cfg := config.StreamConfig{
-		GOPCache:           true,
-		GOPCacheNum:        1,
-		RingBufferSize:     256,
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 256,
 		NoPublisherTimeout: 5 * time.Second,
 	}
 
@@ -195,9 +194,9 @@ func TestHLSMuxerLifecycle(t *testing.T) {
 func TestStreamStatsIntegration(t *testing.T) {
 	bus := core.NewEventBus()
 	cfg := config.StreamConfig{
-		GOPCache:       true,
-		GOPCacheNum:    1,
-		RingBufferSize: 256,
+		GOPCache:           true,
+		GOPCacheNum:        1,
+		RingBufferSize:     256,
 		NoPublisherTimeout: 5 * time.Second,
 	}
 

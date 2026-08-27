@@ -153,9 +153,8 @@ sequenceDiagram
 1. 检查每流码率限制；超过限制时拒绝非序列头帧。
 2. 遇到 sequence header，更新视频 SPS/PPS（或 VPS/SPS/PPS）和音频 AudioSpecificConfig，并关闭 `seqHeaderReady`，唤醒等待初始化的订阅者。
 3. 视频关键帧开启新的 GOP；视频 interframe 追加到当前 GOP；音频帧追加到当前 GOP，以保持 A/V DTS 顺序。
-4. 按 `audio_cache_ms` 保留最近一段音频，供延迟加入或转码历史输出使用。
-5. 更新帧数、字节数、码率、帧率等统计。
-6. 将同一个 `AVFrame` 指针写入主 RingBuffer。
+4. 更新帧数、字节数、码率、帧率等统计。
+5. 将同一个 `AVFrame` 指针写入主 RingBuffer。
 
 帧 payload 在核心层不重复复制；复制只发生在需要隔离生命周期的已 mux 字节（如 SharedBuffer）或快照切片时。消费者不能修改共享的 `AVFrame` 内容。
 
@@ -164,6 +163,8 @@ sequenceDiagram
 ### 7.1 缓存内容
 
 GOP 缓存由最近 `GOPCacheNum` 个视频 GOP 组成。每个 GOP 从视频关键帧开始，包含后续视频帧，并混入时间范围内的音频帧；因此它不是“只缓存视频帧”的数组。sequence header 单独保存，不计入 GOP 帧列表。`GOPCacheDetail()` 可统计总帧、音视频帧数和 DTS 时长。
+
+纯音频流没有视频关键帧，因此不生成 GOP 启动历史；延迟加入的订阅者从原子捕获的 live cursor 开始接收后续帧。核心不会为纯音频维护独立的启动缓存。
 
 视频关键帧到来时，代码先记录当前 ring write cursor 作为 `gopStart`，再追加新 GOP；超出数量后从最老端裁剪。`GOPCacheSourceStart()` 返回最老 GOP 对应的 ring 位置，转码 worker 需要从历史起点读取时使用它。
 

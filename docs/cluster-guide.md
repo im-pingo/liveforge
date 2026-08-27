@@ -73,7 +73,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -134,7 +133,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -189,7 +187,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -287,7 +284,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -341,7 +337,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
