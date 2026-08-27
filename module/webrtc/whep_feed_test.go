@@ -51,7 +51,7 @@ func TestWHEPStartupSnapshotDropsSourceAudioWhenTranscoding(t *testing.T) {
 	}
 }
 
-func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T) {
+func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderUnavailable(t *testing.T) {
 	stream := core.NewStream("live/whep-reader-transition", config.StreamConfig{
 		RingBufferSize: 16,
 	}, config.LimitsConfig{}, core.NewEventBus())
@@ -83,13 +83,8 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 		t.Fatal("transcode reader missing")
 	}
 
-	select {
-	case <-readers.targetAudio.Signal(): // Empty registry makes transcoder close asynchronously.
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for failed transcoder to close")
-	}
 	if _, ok := readers.targetAudio.TryRead(); ok {
-		t.Fatal("failed transcoder unexpectedly produced a frame")
+		t.Fatal("unavailable transcoder unexpectedly produced a frame")
 	}
 
 	woke := make(chan bool, 1)
@@ -103,22 +98,22 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	afterTranscoderClose := avframe.NewAVFrame(
+	afterUnavailableEpoch := avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeInterframe,
 		1066, 1066, []byte{2},
 	)
-	stream.WriteFrame(afterTranscoderClose)
+	stream.WriteFrame(afterUnavailableEpoch)
 	select {
 	case ok := <-woke:
 		if !ok {
-			t.Fatal("reader wait stopped after transcode failure")
+			t.Fatal("reader wait stopped while the transcode epoch was unavailable")
 		}
 	case <-time.After(time.Second):
 		close(waitDone)
-		t.Fatal("source video did not wake reader after transcode failure")
+		t.Fatal("source video did not wake reader while the transcode epoch was unavailable")
 	}
-	if got, ok := readers.source.TryRead(); !ok || got != afterTranscoderClose {
-		t.Fatalf("source reader after transcode failure = (%v, %v), want uninterrupted video", got, ok)
+	if got, ok := readers.source.TryRead(); !ok || got != afterUnavailableEpoch {
+		t.Fatalf("source reader during unavailable transcode epoch = (%v, %v), want uninterrupted video", got, ok)
 	}
 }
 

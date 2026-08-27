@@ -195,7 +195,7 @@ sequenceDiagram
 ### 7.3 不同消费者的起点
 
 - 普通 RTMP、RTSP、SRT、共享 HTTP FLV/TS/fMP4 muxer 和 WHEP：直接媒体 reader 从 `LiveCursor` 读取。live 模式先发送 `ReplayFrames`；WHEP realtime 不发送 replay，并等待 reader 中的首个关键帧。
-- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。同一 publisher generation 的源音频每次改变 codec 都进入新的 codec epoch；publisher 帧带 source provenance，转码生成的 header/media 带 transformed provenance。共享 HTTP muxer 每个 epoch 同一时刻只有一个音频 owner：G.711/Opus epoch 使用转码 AAC，真实 source AAC epoch 原子切换到直接 reader，返回 G.711/Opus 后再切回转码 reader。转码器自己的启动 AAC header 只表示已由 init data 声明的目标轨，不得作为 source handoff；旧 epoch 已竞争到队列中的帧会被丢弃。每个 worker 在整个生命周期保留自己的转码 reader，切换 owner 不释放共享 producer，因此多个 FLV/TS/fMP4 worker 互不关闭，RTMP/WHEP 的 target-audio reader 与 HLS、LL-HLS、DASH 的 combined reader 也保持打开。每个需要转码的新 epoch 都重建 decoder、encoder、resampler、timestamp tracker 和 PCM 缓冲；target codec 源帧直接透传，不支持的其他 codec 被丢弃但不关闭 producer。直接视频 reader 始终不受音频切换影响。
+- RTMP、WHEP 和共享 HTTP muxer 需要转换历史音频时，会建立独立的 audio-only reader，只把 `SourceCursor` 用作转码输入起点；直接视频仍由 `LiveCursor` reader 提供，因此历史转码输出不会重复 replay 视频或启动 header。启动快照还私有携带当前 audio codec epoch floor；snapshot-bound reader 会保留 combined 路径需要的历史视频，但丢弃低于该 floor 的音频，所以晚加入者不会先输出旧 epoch 音频或倒退 DTS。同一 publisher generation 的源音频每次改变 codec 都进入新的 codec epoch；publisher 帧带 source provenance，转码生成的 header/media 带 transformed provenance。共享 HTTP FLV/TS/fMP4 即使以直接 AAC 起播也会取得共享 target-AAC track：source-provenance 副本交给直接 reader 唯一发送，而后续 G.711/Opus epoch 可立即恢复转码，不遗漏首帧，也不影响直接视频。共享 HTTP muxer 每个 epoch 同一时刻只有一个音频 owner：G.711/Opus epoch 使用转码 AAC，真实 source AAC epoch 原子切换到直接 reader，返回 G.711/Opus 后再切回转码 reader。转码器自己的启动 AAC header 只表示已由 init data 声明的目标轨，不得作为 source handoff；旧 epoch 已竞争到队列中的帧会被丢弃。每个 worker 在整个生命周期保留自己的转码 reader，切换 owner 不释放共享 producer，因此多个 FLV/TS/fMP4 worker 互不关闭，RTMP/WHEP 的 target-audio reader 与 HLS、LL-HLS、DASH 的 combined reader 也保持打开。每个需要转码的新 epoch 都重建 decoder、encoder、resampler、timestamp tracker 和 PCM 缓冲；target codec 源帧直接透传，不支持的 epoch 只保持 pipeline 不可用，不关闭或移除 producer；后续支持的 epoch 会向已有和新 reader 发送当前 target header/media。直接视频 reader 始终不受音频切换影响。
 - HLS、LL-HLS、DASH 的兼容路径仍使用 combined 历史转码 reader，并按缓存视频 DTS 范围过滤其中可能重复出现的视频帧；这些 segmenter 尚未迁移到独立 direct/audio reader。
 - SRT 不再用跨音视频的最大 DTS 过滤 replay/live 重叠；cursor 是唯一重复边界，因此缓存视频 DTS 4000 之后的实时音频 DTS 1000 仍会发送。
 
@@ -243,7 +243,7 @@ RingReader:  每个消费者独立的 readCursor
 对每个 stream，`MuxerManager` 按 `flv`、`ts`、`mp4` 保存 `MuxerInstance`：
 
 1. 第一个该格式订阅者到来时，为当前 publisher generation 创建 SharedBuffer、`Done` channel 和 generation-bound `MuxerInstance`，并启动一个 muxer goroutine。
-2. muxer 先捕获与实例 generation 相同的启动快照；尚未 ready 时同时等待该快照的 `GenerationDone`，publisher 被移除就立即退出，不能等待并接入 replacement generation。ready 后向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续直接媒体；转码音频由独立 reader 从 `SourceCursor` 输入。FLV/TS/fMP4 worker 按 source codec epoch 和 provenance 在转码 AAC 与直接 AAC owner 之间双向切换；生成的启动 header 不触发 handoff，真实 source AAC header 才切换到直接 owner，返回 G.711/Opus 后一个新的转码 epoch 恢复音频。TS 在真实直接 AAC 前先刷新 PAT/PMT。
+2. muxer 先捕获与实例 generation 相同的启动快照；尚未 ready 时同时等待该快照的 `GenerationDone`，publisher 被移除就立即退出，不能等待并接入 replacement generation。ready 后向 SharedBuffer 写 init/header、replay，再从 `LiveCursor` 继续直接媒体；target-AAC shared reader 从 `SourceCursor` 输入并按快照 epoch floor 过滤旧音频。FLV/TS/fMP4 worker 按 source codec epoch 和 provenance 在转码 AAC 与直接 AAC owner 之间双向切换；即使起播时是直接 AAC，也保留该 worker 的 shared target subscription 以观察后续 G.711/Opus。生成的启动 header 不触发 handoff，真实 source AAC 才由直接 owner 唯一发送，返回 G.711/Opus 后一个新的转码 epoch 恢复音频。TS 对这条 AAC 输出轨始终使用 AAC PAT/PMT 声明。
 3. 后续同格式订阅者从共享 bytes reader 读取，不重新创建 muxer。
 4. HTTP/WS 请求释放自己实际取得的实例。最后一个订阅者释放或该 publisher generation 结束时关闭 `Done`，muxer 关闭 reader 和 SharedBuffer，实例从 manager 删除；旧请求不能递减 replacement generation 的实例。
 
@@ -366,16 +366,18 @@ flowchart LR
 
 ## 12. 音频转码
 
-`core.TranscodeManager` 只在启用 `audiocodec` 构建且确实存在 codec 不匹配时工作：
+`core.TranscodeManager` 在启用 `audiocodec` 构建时提供共享 target-codec track：
 
-- 目标 codec 与 publisher codec 相同：直接返回主 ring 的 reader，零转码开销；
+- 普通 reader 的目标 codec 与 publisher codec 相同时直接返回主 ring，保持零转码开销；snapshot-bound audio-only reader 即使当前 codec 相同也跟随共享 target track，以便同 generation 的后续 codec epoch 可转码；
 - 目标 codec 不同：按目标 codec 创建或复用一个 `TranscodedTrack`；
 - 每条 track 由一个 goroutine 解码、重采样、编码并写入自己的 RingBuffer；多个相同目标 codec 的订阅者共享这条 track；
 - track 生命周期由 generation、source ring 和订阅引用计数决定，不由同 generation 的 codec 切换决定；每个 source codec epoch 使用全新的 decoder、encoder、resampler、timestamp tracker 和 PCM 缓冲，避免旧时间线或 PCM 跨 codec epoch；
 - target-codec source epoch 直接透传并保留 source provenance；生成 header 和编码输出标记 transformed provenance，供共享 muxer 区分启动声明与真实 source handoff；
+- 不支持的启动或中间 epoch 不关闭 mapped track；后续支持的 epoch 重建 pipeline，并先输出该 epoch 的 target header；
+- reader release 捕获实际取得的 `TranscodedTrack` 实例；旧 generation 的延迟 release 不能递减或取消 replacement generation 中同 target codec 的新 track；
 - publisher 重新发布时 `Reset()` 取消所有旧轨道，避免旧 codec 的输出混入新会话。
 
-普通 `GetOrCreateReaderAt()` 从当前转码输出 cursor 开始，适合只需要实时数据的连接；HTTP muxer 使用 `GetOrCreateReaderAtFromHistory()`，从仍保留的转码输出最老位置开始，以重放 GOP 中的历史音频。WHEP 使用 `GetOrCreateAudioReaderAt()`，因为视频仍由主 ring reader 提供，音频不能和视频共享一个转码 reader。
+普通 `GetOrCreateReaderAt()` 从当前转码输出 cursor 开始，适合只需要实时数据的连接。Snapshot-bound `GetOrCreateReaderAtFromHistory()`、`GetOrCreateAudioReaderAt()` 和 `GetOrCreateAudioReaderAtFromHistory()` 接受整个启动快照，而不是裸 `SourceCursor`；core 从快照内部取得 epoch floor，为每个 consumer 建立独立的过滤 reader。HTTP muxer 可重放当前 epoch 的历史音频，HLS/DASH combined reader 仍可取得历史视频，但任何路径都不会先读出更旧 epoch 的音频。关闭该 consumer-local reader 只释放自己的 shared-track 引用，不会关闭其他 reader 或 producer。
 
 转码轨道的源起点通常为 `GOPCacheSourceStart()`。这样可覆盖缓存 GOP 的音频，同时继续消费 live 音视频；HTTP 输出会用视频 DTS watermark 去掉已经在缓存中发送过的转码视频。
 

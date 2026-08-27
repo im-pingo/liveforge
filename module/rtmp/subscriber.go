@@ -167,7 +167,7 @@ func (s *Subscriber) WriteLoop() {
 			s.fail(fmt.Errorf("rtmp: audio transcode unavailable"))
 			return
 		}
-		audioReader, release, err := tm.GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot.SourceCursor)
+		audioReader, release, err := tm.GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot)
 		if err != nil {
 			s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
 			return

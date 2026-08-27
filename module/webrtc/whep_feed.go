@@ -395,7 +395,7 @@ func newWHEPFeedReaders(stream *core.Stream, snapshot core.StreamStartupSnapshot
 	readers := &whepFeedReaders{source: stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)}
 	if needsTranscode {
 		if tm := stream.TranscodeManager(); tm != nil {
-			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, snapshot.SourceCursor)
+			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, snapshot)
 			if err != nil {
 				slog.Warn("whep: audio transcode failed, video only", "error", err)
 			} else {

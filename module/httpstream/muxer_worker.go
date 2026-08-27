@@ -516,21 +516,28 @@ func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStart
 		allDone: make(chan struct{}),
 		plan:    plan,
 	}
-	if plan.mode == muxerAudioTranscode {
+	followAudioEpochs := plan.mode == muxerAudioTranscode ||
+		(plan.mode == muxerAudioPassthrough && plan.codec == avframe.CodecAAC)
+	if followAudioEpochs {
 		if tm := stream.TranscodeManager(); tm != nil {
-			reader, release, err := tm.GetOrCreateAudioReaderAtFromHistory(avframe.CodecAAC, snapshot.SourceCursor)
+			reader, release, err := tm.GetOrCreateAudioReaderAtFromHistory(avframe.CodecAAC, snapshot)
 			if err == nil {
 				input.audio = reader
 				input.release = release
 			} else {
 				slog.Warn("muxer: audio transcode unavailable", "stream", stream.Key(), "error", err)
-				plan = muxerAudioPlan{}
+				if plan.mode == muxerAudioTranscode {
+					plan = muxerAudioPlan{}
+				}
 			}
-		} else {
+		} else if plan.mode == muxerAudioTranscode {
 			plan = muxerAudioPlan{}
 		}
 	}
 	input.plan = plan
+	if input.audio != nil {
+		input.plan.mode = muxerAudioTranscode
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	input.cancel = cancel
@@ -685,7 +692,7 @@ func muxerLiveReaderSnapshot(stream *core.Stream, snapshot core.StreamStartupSna
 			// transcode track is intentionally started at the cached GOP source
 			// cursor so it contributes both target audio history and live video;
 			// callers filter the cached video portion by its video DTS watermark.
-			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot.SourceCursor)
+			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot)
 			if err == nil {
 				return reader, release, plan
 			}

@@ -565,6 +565,7 @@ type StreamStartupSnapshot struct {
 	SourceCursor          int64
 	GenerationDone        <-chan struct{}
 	Ready                 bool
+	audioCodecEpoch       uint64
 }
 
 // StartupSnapshot captures media information, headers, replay frames, and cursors atomically.
@@ -595,6 +596,7 @@ func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
 		SourceCursor:          sourceCursor,
 		GenerationDone:        s.generationDone,
 		Ready:                 s.startupReady,
+		audioCodecEpoch:       s.audioCodecEpoch,
 	}
 }
 

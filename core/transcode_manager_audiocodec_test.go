@@ -15,12 +15,12 @@ import (
 // HTTP-style consumer hands off and releases its shared transform subscription.
 func TestTranscodeManagerHTTPHandoffDoesNotCloseSharedAudioReader(t *testing.T) {
 	stream := newTranscodeTestStream(avframe.CodecG711U)
-	start := stream.RingBuffer().WriteCursor()
-	httpReader, releaseHTTP, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(avframe.CodecAAC, start)
+	snapshot := stream.StartupSnapshot()
+	httpReader, releaseHTTP, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	peerReader, releasePeer, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(avframe.CodecAAC, start)
+	peerReader, releasePeer, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestTranscodeManagerRebuildsPipelineForReturningSourceCodec(t *testing.T) {
 
 	baselineStream := newTranscodeTestStream(avframe.CodecG711U)
 	baselineReader, releaseBaseline, err := baselineStream.TranscodeManager().GetOrCreateAudioReaderAt(
-		avframe.CodecAAC, baselineStream.RingBuffer().WriteCursor(),
+		avframe.CodecAAC, baselineStream.StartupSnapshot(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestTranscodeManagerRebuildsPipelineForReturningSourceCodec(t *testing.T) {
 
 	stream := newTranscodeTestStream(avframe.CodecG711U)
 	reader, release, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(
-		avframe.CodecAAC, stream.RingBuffer().WriteCursor(),
+		avframe.CodecAAC, stream.StartupSnapshot(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +143,129 @@ func TestTranscodeManagerRebuildsPipelineForReturningSourceCodec(t *testing.T) {
 	}
 }
 
+// Catches treating an unsupported codec observed by the asynchronously
+// starting producer as terminal. The shared ring must remain mapped and both
+// existing and later readers must receive a subsequent supported epoch.
+func TestTranscodeManagerUnsupportedStartupEpochDoesNotPoisonSharedTrack(t *testing.T) {
+	stream := newTranscodeTestStream(avframe.CodecG729)
+	reader, release, err := stream.TranscodeManager().GetOrCreateAudioReaderAtFromHistory(
+		avframe.CodecAAC, stream.StartupSnapshot(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		reader.Close()
+		release()
+		stream.RingBuffer().Close()
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		stream.TranscodeManager().mu.Lock()
+		track := stream.TranscodeManager().audioTracks[avframe.CodecAAC]
+		closed := track == nil || track.ringBuffer.IsClosed()
+		ready := track != nil && track.ringBuffer.WriteCursor() > 0
+		stream.TranscodeManager().mu.Unlock()
+		if closed {
+			t.Fatal("unsupported startup codec closed and poisoned the mapped audio track")
+		}
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("shared audio producer did not finish asynchronous startup")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	writeG711Frames(stream, 1000, 12, bytes.Repeat([]byte{0xff}, 160))
+	lateReader, releaseLate, err := stream.TranscodeManager().GetOrCreateAudioReaderAtFromHistory(
+		avframe.CodecAAC, stream.StartupSnapshot(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		lateReader.Close()
+		releaseLate()
+	})
+
+	for _, frame := range readTranscodedAudioFrames(t, reader, 2) {
+		if frame.DTS < 1000 {
+			t.Fatalf("existing reader emitted stale DTS %d before the supported epoch", frame.DTS)
+		}
+	}
+	lateFrames := readCurrentEpochAudioWithHeader(t, lateReader, stream.StartupSnapshot().audioCodecEpoch, 2)
+	for _, frame := range lateFrames {
+		if frame.DTS < 1000 {
+			t.Fatalf("new reader emitted stale DTS %d before the supported epoch", frame.DTS)
+		}
+	}
+
+	stream.TranscodeManager().mu.Lock()
+	track := stream.TranscodeManager().audioTracks[avframe.CodecAAC]
+	poisoned := track == nil || track.ringBuffer.IsClosed()
+	stream.TranscodeManager().mu.Unlock()
+	if poisoned {
+		t.Fatal("supported recovery left the mapped audio track closed")
+	}
+}
+
+// Catches late snapshot readers starting at retained output from an older
+// source-codec epoch. The reader's first media must be at the snapshot epoch
+// floor, never stale audio with a backward timestamp.
+func TestTranscodeManagerLateSnapshotReaderStartsAtCurrentAudioEpoch(t *testing.T) {
+	stream := newTranscodeTestStream(avframe.CodecG711U)
+	keeper, releaseKeeper, err := stream.TranscodeManager().GetOrCreateAudioReaderAtFromHistory(
+		avframe.CodecAAC, stream.StartupSnapshot(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		keeper.Close()
+		releaseKeeper()
+		stream.RingBuffer().Close()
+	})
+
+	writeG711Frames(stream, 20, 16, bytes.Repeat([]byte{0x00}, 160))
+	readTranscodedAudioFrames(t, keeper, 3)
+	directHeader := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		1000, 1000, []byte{0x12, 0x10},
+	)
+	directMedia := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+		1020, 1020, []byte{0x21, 0x10},
+	)
+	stream.WriteFrame(directHeader)
+	stream.WriteFrame(directMedia)
+	readUntilTranscodeFrame(t, keeper, directMedia)
+	writeG711Frames(stream, 2000, 12, bytes.Repeat([]byte{0xff}, 160))
+	current := readTranscodedAudioFrames(t, keeper, 2)
+
+	snapshot := stream.StartupSnapshot()
+	lateReader, releaseLate, err := stream.TranscodeManager().GetOrCreateAudioReaderAtFromHistory(
+		avframe.CodecAAC, snapshot,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		lateReader.Close()
+		releaseLate()
+	}()
+
+	first := readTranscodedAudioFrames(t, lateReader, 1)[0]
+	if first.AudioCodecEpoch < current[0].AudioCodecEpoch {
+		t.Fatalf("late reader emitted retained epoch %d before snapshot epoch %d", first.AudioCodecEpoch, current[0].AudioCodecEpoch)
+	}
+	if first.DTS < current[0].DTS {
+		t.Fatalf("late reader first DTS = %d, want at least current DTS %d", first.DTS, current[0].DTS)
+	}
+}
+
 func writeG711Frames(stream *Stream, startDTS int64, count int, payload []byte) {
 	for i := range count {
 		dts := startDTS + int64(i*20)
@@ -168,6 +291,37 @@ func readTranscodedAudioFrames(t *testing.T, reader interface {
 		if frame != nil && frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader {
 			frames = append(frames, frame)
 		}
+	}
+	return frames
+}
+
+func readCurrentEpochAudioWithHeader(t *testing.T, reader interface {
+	ReadContext(context.Context) (*avframe.AVFrame, bool)
+}, epoch uint64, count int) []*avframe.AVFrame {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	frames := make([]*avframe.AVFrame, 0, count)
+	headerSeen := false
+	for len(frames) < count {
+		frame, ok := reader.ReadContext(ctx)
+		if !ok {
+			t.Fatalf("current-epoch reader closed with %d/%d audio frames", len(frames), count)
+		}
+		if frame == nil || !frame.MediaType.IsAudio() {
+			continue
+		}
+		if frame.AudioCodecEpoch < epoch {
+			t.Fatalf("reader emitted audio epoch %d below floor %d", frame.AudioCodecEpoch, epoch)
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			headerSeen = true
+			continue
+		}
+		if !headerSeen {
+			t.Fatalf("reader emitted epoch %d media before its target sequence header", epoch)
+		}
+		frames = append(frames, frame)
 	}
 	return frames
 }
