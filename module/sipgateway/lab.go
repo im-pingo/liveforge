@@ -14,7 +14,6 @@ import (
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 	"github.com/google/uuid"
-	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/internal/labmedia"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	mediarp "github.com/im-pingo/liveforge/pkg/rtp"
@@ -22,6 +21,8 @@ import (
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
+
+const sipLabTerminalHistoryLimit = 16
 
 type labManager struct {
 	mu         sync.RWMutex
@@ -72,6 +73,7 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 		if m.identities[identity] == id {
 			delete(m.identities, identity)
 		}
+		m.pruneTerminalsLocked()
 		m.mu.Unlock()
 		return session.snapshot(), err
 	}
@@ -103,8 +105,38 @@ func (m *labManager) stop(id string) error {
 	if m.identities[session.identity] == id {
 		delete(m.identities, session.identity)
 	}
+	m.pruneTerminalsLocked()
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *labManager) pruneTerminalsLocked() {
+	type terminalSession struct {
+		id        string
+		updatedAt time.Time
+	}
+	terminal := make([]terminalSession, 0, len(m.sessions))
+	for id, session := range m.sessions {
+		if session == nil || session.isReserved() {
+			continue
+		}
+		session.mu.RLock()
+		updatedAt := session.updatedAt
+		session.mu.RUnlock()
+		terminal = append(terminal, terminalSession{id: id, updatedAt: updatedAt})
+	}
+	if len(terminal) <= sipLabTerminalHistoryLimit {
+		return
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		if terminal[i].updatedAt.Equal(terminal[j].updatedAt) {
+			return terminal[i].id < terminal[j].id
+		}
+		return terminal[i].updatedAt.Before(terminal[j].updatedAt)
+	})
+	for _, session := range terminal[:len(terminal)-sipLabTerminalHistoryLimit] {
+		delete(m.sessions, session.id)
+	}
 }
 
 func (m *labManager) closeAll() {
@@ -433,12 +465,13 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	s.callID = callID
 	s.mu.Unlock()
 	s.setState(LabSessionStateActive)
-	s.mediaWG.Add(5)
+	s.mediaWG.Add(6)
 	go s.receiveRTPLoop(rtpConn, false)
 	go s.receiveRTPLoop(videoRTPConn, true)
 	go s.receiveRTCPLoop(rtcpConn)
 	go s.receiveRTCPLoop(videoRTCPConn)
-	go s.receiveSourceLoop(stream, strings.ToUpper(strings.TrimSpace(s.request.Codec)))
+	go s.sendReceiverReportLoop(rtcpConn, call.RTCPPort, 0x4c465241)
+	go s.sendReceiverReportLoop(videoRTCPConn, call.VideoRTCPPort, 0x4c465256)
 	return nil
 }
 
@@ -570,21 +603,38 @@ func (s *sipLabSession) receiveRTCPLoop(conn *net.UDPConn) {
 	}
 }
 
-func (s *sipLabSession) receiveSourceLoop(stream *core.Stream, codec string) {
+func (s *sipLabSession) sendReceiverReportLoop(conn *net.UDPConn, remotePort int, ssrc uint32) {
 	defer s.mediaWG.Done()
-	ticker := time.NewTicker(time.Duration(labmedia.AudioFrameDurationMs) * time.Millisecond)
+	if conn == nil || remotePort <= 0 {
+		return
+	}
+	interval := time.Second
+	if timeout := s.gateway.rtpIdleTimeout; timeout > 0 && timeout/3 < interval {
+		interval = timeout / 3
+	}
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var timestamp int64
-	for {
-		if timestamp%labmedia.VideoFrameDurationMs == 0 {
-			stream.WriteFrame(labmedia.VideoFrame(timestamp))
+	remote := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: remotePort}
+	send := func() {
+		data, err := (&rtcp.ReceiverReport{SSRC: ssrc}).Marshal()
+		if err != nil {
+			return
 		}
-		stream.WriteFrame(labmedia.G711Frame(codecAV(codec), timestamp))
-		timestamp += labmedia.AudioFrameDurationMs
+		if _, err := conn.WriteToUDP(data, remote); err == nil {
+			s.rtcpPacketsSent.Add(1)
+			s.markMedia()
+		}
+	}
+	send()
+	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+			send()
 		}
 	}
 }
@@ -694,6 +744,8 @@ func (s *sipLabSession) markMedia() {
 
 func (s *sipLabSession) snapshot() LabSessionSnapshot {
 	s.mu.RLock()
+	callID := s.callID
+	mode := s.request.Mode
 	result := LabSessionSnapshot{
 		ID:          s.id,
 		Identity:    s.identity,
@@ -720,6 +772,11 @@ func (s *sipLabSession) snapshot() LabSessionSnapshot {
 	result.RTPBytesRecv = s.rtpBytesRecv.Load()
 	result.RTCPPacketsSent = s.rtcpPacketsSent.Load()
 	result.RTCPPacketsRecv = s.rtcpPacketsRecv.Load()
+	if mode == LabModePublish && s.gateway != nil && callID != "" {
+		if call, ok := s.gateway.Call(callID); ok {
+			result.RTCPPacketsSent = call.RTCPPacketsRecv
+		}
+	}
 	return result
 }
 

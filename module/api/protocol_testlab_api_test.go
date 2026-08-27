@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -160,6 +161,53 @@ func TestSIPLabAPIListsSessionsAndPlaybackMetadata(t *testing.T) {
 	for _, field := range []string{"http_flv", "hls", "dash", "whep"} {
 		if !bytes.Contains(recorder.Body.Bytes(), []byte(`"`+field+`"`)) {
 			t.Fatalf("list body=%s, want playback field %q", recorder.Body.String(), field)
+		}
+	}
+}
+
+func TestProtocolLabPlaybackEscapesStreamPathAndUsesBoundWildcardListeners(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.HTTP.Enabled = true
+	cfg.RTMP.Enabled = true
+	cfg.RTMP.Listen = "127.0.0.1:1935"
+	cfg.RTSP.Enabled = true
+	cfg.RTSP.Listen = "127.0.0.1:8554"
+	cfg.WebRTC.Enabled = true
+	server := core.NewServer(cfg)
+	const streamKey = "tenant/cam?variant#one%raw"
+	server.RegisterModule(&protocolLabSIPStub{sessions: []sipgateway.LabSessionSnapshot{{
+		ID: "escaped-playback", StreamKey: streamKey, State: sipgateway.LabSessionStateActive,
+	}}})
+	server.RegisterModule(&endpointTestModule{name: "rtmp", addr: &net.TCPAddr{IP: net.IPv4zero, Port: 41935}})
+	server.RegisterModule(&endpointTestModule{name: "rtsp", addr: &net.TCPAddr{IP: net.IPv6unspecified, Port: 48554}})
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, server)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/sipgateway/lab/sessions", nil)
+	request.Host = "console.example:7443"
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	data := decodeManagementData(t, recorder)
+	sessions, ok := data["sessions"].([]any)
+	if !ok || len(sessions) != 1 {
+		t.Fatalf("sessions=%v, want one", data["sessions"])
+	}
+	view := sessions[0].(map[string]any)
+	playback := view["playback"].(map[string]any)
+	escaped := "tenant/cam%3Fvariant%23one%25raw"
+	want := map[string]string{
+		"rtmp":     "rtmp://console.example:41935/" + escaped,
+		"rtsp":     "rtsp://console.example:48554/" + escaped,
+		"http_flv": "/" + escaped + ".flv",
+		"ws_flv":   "/ws/" + escaped + ".flv",
+		"whep":     "/webrtc/whep/" + escaped + "?mode=realtime",
+	}
+	for field, expected := range want {
+		if playback[field] != expected {
+			t.Errorf("playback[%q] = %q, want %q", field, playback[field], expected)
 		}
 	}
 }

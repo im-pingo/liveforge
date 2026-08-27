@@ -1,11 +1,13 @@
 package gb28181
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
@@ -53,6 +55,11 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 
 	deviceID := from.Address.User
 	remoteAddr := req.Source()
+	if contact := req.GetHeader("Contact"); contact != nil {
+		if address, ok := sipContactAddress(contact.Value()); ok {
+			remoteAddr = address
+		}
+	}
 	transport := "udp"
 	if via := req.Via(); via != nil {
 		transport = strings.ToLower(via.Transport)
@@ -72,6 +79,28 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 	resp := sip.NewResponseFromRequest(req, 200, "OK", nil)
 	resp.AppendHeader(sip.NewHeader("Expires", "3600"))
 	tx.Respond(resp)
+}
+
+func sipContactAddress(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "<") {
+		end := strings.IndexByte(value, '>')
+		if end <= 1 {
+			return "", false
+		}
+		value = value[1:end]
+	} else if end := strings.IndexByte(value, ';'); end >= 0 {
+		value = value[:end]
+	}
+	var uri sip.Uri
+	if err := sip.ParseUri(value, &uri); err != nil || uri.Host == "" {
+		return "", false
+	}
+	port := uri.Port
+	if port <= 0 {
+		port = 5060
+	}
+	return net.JoinHostPort(strings.Trim(uri.Host, "[]"), fmt.Sprint(port)), true
 }
 
 func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
@@ -294,6 +323,16 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 	}
 	if snapshot.Stream != nil && snapshot.Publisher != nil {
 		snapshot.Stream.RemovePublisherIf(snapshot.Publisher)
+	}
+	if snapshot.InviteTx != nil {
+		if remoteAddr == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			if err := snapshot.InviteTx.SendBYE(ctx); err != nil {
+				slog.Debug("failed to send session BYE", "module", "gb28181", "session", snapshot.ID, "error", err)
+			}
+			cancel()
+		}
+		snapshot.InviteTx.Close()
 	}
 	if snapshot.ID != "" && h.sessions != nil {
 		h.sessions.RemoveIf(snapshot.ID, session)

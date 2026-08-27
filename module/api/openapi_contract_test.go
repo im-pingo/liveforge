@@ -118,6 +118,32 @@ func TestOpenAPIIncludesMiddlewareResponseStatuses(t *testing.T) {
 	}
 }
 
+func TestOpenAPIGBLabErrorsUseManagementEnvelopes(t *testing.T) {
+	doc := loadOpenAPIContract(t)
+	tests := []struct {
+		method string
+		path   string
+		status string
+		want   string
+	}{
+		{method: "POST", path: "/api/v1/gb28181/lab/sessions", status: "400", want: "#/components/responses/BadRequest"},
+		{method: "DELETE", path: "/api/v1/gb28181/lab/sessions/{labSessionId}", status: "404", want: "#/components/responses/NotFound"},
+	}
+	for _, test := range tests {
+		operation := doc.Paths[test.path].operation(test.method)
+		if operation == nil {
+			t.Fatalf("%s %s is not documented", test.method, test.path)
+		}
+		response, ok := operation.Responses[test.status].(map[string]any)
+		if !ok {
+			t.Fatalf("%s %s response %s = %#v", test.method, test.path, test.status, operation.Responses[test.status])
+		}
+		if got := response["$ref"]; got != test.want {
+			t.Errorf("%s %s response %s ref = %v, want %s", test.method, test.path, test.status, got, test.want)
+		}
+	}
+}
+
 func TestOpenAPICatalogAcceptsChannelOrDeviceID(t *testing.T) {
 	doc := loadOpenAPIContract(t)
 	const path = "/api/v1/gb28181/channels/{channelOrDeviceId}/catalog"

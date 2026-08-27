@@ -4,11 +4,19 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
+)
+
+const gbLabTerminalErrorLimit = 256
+
+var (
+	gbSIPCredentialPattern = regexp.MustCompile(`(?i)(sips?:[^\s:@]+):[^\s@]+@`)
+	gbBearerTokenPattern   = regexp.MustCompile(`(?i)(bearer\s+)[^\s]+`)
 )
 
 var (
@@ -75,6 +83,10 @@ type LabSessionSnapshot struct {
 	RTCPPacketsRecv uint64          `json:"rtcp_packets_received"`
 	PSFramesSent    uint64          `json:"ps_frames_sent"`
 	PSFramesRecv    uint64          `json:"ps_frames_received"`
+	AudioFramesSent uint64          `json:"audio_frames_sent"`
+	AudioFramesRecv uint64          `json:"audio_frames_received"`
+	VideoFramesSent uint64          `json:"video_frames_sent"`
+	VideoFramesRecv uint64          `json:"video_frames_received"`
 	StartedAt       time.Time       `json:"started_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
 	LastMediaAt     time.Time       `json:"last_media_at,omitempty"`
@@ -86,9 +98,11 @@ func redactedLabError(err error) string {
 		return ""
 	}
 	message := strings.Join(strings.Fields(err.Error()), " ")
+	message = gbSIPCredentialPattern.ReplaceAllString(message, `${1}:[redacted]@`)
+	message = gbBearerTokenPattern.ReplaceAllString(message, `${1}[redacted]`)
 	runes := []rune(message)
-	if len(runes) > 256 {
-		return string(runes[:256])
+	if len(runes) > gbLabTerminalErrorLimit {
+		return string(runes[:gbLabTerminalErrorLimit])
 	}
 	return message
 }
@@ -135,9 +149,11 @@ type MediaSession struct {
 	State      SessionState
 	Publisher  *Publisher
 	Receiver   *RTPReceiver
+	Sender     *outboundMediaSession
 	Stream     *core.Stream
 	SSRC       uint32
 	Playback   bool
+	InviteTx   inviteDialog
 	closed     bool
 	published  bool
 }
@@ -157,9 +173,11 @@ type MediaSessionSnapshot struct {
 	Publisher   *Publisher
 	PublisherID string
 	Receiver    *RTPReceiver
+	Sender      *outboundMediaSession
 	Stream      *core.Stream
 	SSRC        uint32
 	Playback    bool
+	InviteTx    inviteDialog
 	Closed      bool
 	Published   bool
 }
@@ -227,6 +245,9 @@ func (s *MediaSession) closeSnapshot() (MediaSessionSnapshot, bool) {
 	if snapshot.Receiver != nil {
 		snapshot.Receiver.Close()
 	}
+	if snapshot.Sender != nil {
+		snapshot.Sender.close()
+	}
 	if snapshot.Publisher != nil {
 		_ = snapshot.Publisher.Close()
 	}
@@ -263,9 +284,11 @@ func (s *MediaSession) snapshotLocked() MediaSessionSnapshot {
 		Publisher:   s.Publisher,
 		PublisherID: publisherID,
 		Receiver:    s.Receiver,
+		Sender:      s.Sender,
 		Stream:      s.Stream,
 		SSRC:        s.SSRC,
 		Playback:    s.Playback,
+		InviteTx:    s.InviteTx,
 		Closed:      s.closed,
 		Published:   s.published,
 	}

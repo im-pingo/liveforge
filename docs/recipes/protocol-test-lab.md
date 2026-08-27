@@ -33,9 +33,14 @@ For a persistent provider session, call the `SIPGatewayProvider` methods
 `StartLabSession(ctx, LabSessionRequest)`, `ListLabSessions()`, and
 `StopLabSession(id)`. In `publish` mode, the fake device creates a real inbound
 SIP call and sends deterministic H.264 video plus PCMA/PCMU audio on separate
-RTP tracks, with RTCP, into the gateway-created stream. In `receive` mode, it
-creates a fake SIP endpoint that accepts the gateway outbound INVITE and counts
-received audio/video RTP and RTCP. Stop is idempotent;
+RTP tracks, with RTCP, into the gateway-created stream. The gateway binds and
+parses both real RTCP receiver sockets, and the Lab counter reflects packets
+accepted there rather than successful UDP writes. In `receive` mode, the fake
+SIP endpoint accepts the gateway outbound INVITE, receives the existing source
+without writing generated frames into that stream, counts audio/video RTP and
+RTCP, and sends periodic receiver reports for each track. Gateway sender reports
+use each RTP track's SSRC, RFC NTP time, and per-track payload packet/octet
+counts. Stop is idempotent;
 the start signaling context is derived from both the caller and session stop
 context, so `StopLabSession` and `Gateway.Close` cancel unanswered starts and
 release their sockets. This provider workflow requires an initialized SIP
@@ -61,7 +66,9 @@ curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_TOKEN" \
 `GET` requires `sip:read`; `POST` and `DELETE` require `sip:calls`. The response
 contains aggregate counters, separate audio/video RTP counters, and relative
 HTTP-FLV, WS-FLV, TS, fMP4, HLS, DASH, and WHEP playback paths when those
-listeners are enabled. Use the returned
+listeners are enabled. Stream-key path segments are URL-escaped. Absolute
+RTMP/RTSP URLs use the actual bound listeners and replace wildcard bind hosts
+with the management request host. Use the returned
 session ID with `DELETE` to stop it. A failed session remains visible with a
 bounded, redacted `last_error` so a rejected INVITE, unavailable stream, codec
 mismatch, or timeout can be diagnosed from the API and Console.
@@ -82,12 +89,21 @@ camera. The Console GB28181 page renders every phase and its detail.
 
 Persistent GB28181 sessions use the same control shape and perform real
 REGISTER, Keepalive, Catalog, INVITE, ACK, BYE, and unregister signaling. In
-`publish` mode the fake device sends deterministic H.264 plus G.711A in PS/RTP
-payload type 96, with RTCP, into the registered channel stream. In `receive`
-mode it accepts LiveForge's live-play INVITE, sends the selected H.264/G.711A
-source as PS/RTP, and counts received RTP/RTCP/PS frames. The simulator binds only loopback sockets,
-requires no FFmpeg or external platform, and releases SIP, RTP, RTCP, and
-session resources on stop or module close:
+`publish` mode the fake device starts a listening SIP endpoint and advertises
+that Contact during registration. LiveForge then uses its normal invite client
+to initiate live play; the fake device accepts INVITE, consumes ACK without a
+response, handles BYE, and sends deterministic H.264 plus G.711A in PS/RTP
+payload type 96 with RTCP into LiveForge's real RTP/RTCP receiver. In `receive`
+mode LiveForge validates an existing H.264/G.711A source before activation and
+a module-owned outbound media session admits a source subscriber before it
+sends that source as PS/RTP/RTCP. Subscriber-limit rejection is returned
+synchronously and the Lab is never published as active. If the sender later
+fails, the Lab transitions to `failed`, records a bounded redacted diagnostic,
+and releases its dialog, module session, subscriber, sockets, and ports. The
+fake device only receives and counts RTP, RTCP, PS, audio, and video frames. The
+simulator binds only loopback sockets, requires no FFmpeg or external platform,
+and releases both SIP UAs, dialogs, RTP/RTCP ports, and session resources on
+stop or module close:
 
 After the initial registration, each persistent fake device continues sending
 Keepalive messages at roughly one-third of the configured
@@ -105,14 +121,16 @@ curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
 
 `GET` requires `gb28181:read`; `POST` and `DELETE` require
 `gb28181:control`. Receive mode requires the requested stream to already have
-an H.264 publisher. The publish sample includes a moving constrained-baseline
+an H.264 video and G.711A audio publisher. The publish sample includes a moving constrained-baseline
 SPS/PPS/IDR/interframe pattern at 25 fps and audible 8 kHz mono G.711A audio, so the
 resulting stream can be decoded by the Console and other H.264-capable outputs.
 The lab Preview action uses the
 requested stream key. The response includes
-PS/RTP/RTCP counters and cross-protocol playback paths. A failed session keeps
-a bounded, redacted `last_error` for diagnosis; a disabled or uninitialized
-module returns 503.
+PS/RTP/RTCP counters, separate audio/video frame counts, and cross-protocol
+playback paths. Lab responses and 400/404 errors use the management
+`{code,message,data}` envelope. A failed session keeps a bounded `last_error`
+with SIP credentials and bearer tokens removed before truncation; a disabled
+or uninitialized module returns 503.
 
 For `publish`, `stream_key` is authoritative and must be a printable ASCII
 value without leading/trailing whitespace and no longer than 256 bytes. The
@@ -131,6 +149,10 @@ SIP lab to use short identities such as `device_id=d1` and `stream_key=s1`
 without GB28181 creating a competing publisher. After either lab publishes, use
 the returned cross-protocol paths to verify playback through the enabled HTTP,
 RTSP, HLS, DASH, or WebRTC output.
+
+Each Lab manager retains all active sessions plus the newest 16 terminal
+records. Starting and stopping more sessions prunes only the oldest terminal
+records; active sessions are never removed by history maintenance.
 
 The Streams Console reports the video GOP and rolling audio cache separately.
 `GOP #N` is a stream-lifetime generation that increments for every keyframe, so

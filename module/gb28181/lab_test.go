@@ -3,7 +3,9 @@ package gb28181
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/labmedia"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	sipgateway "github.com/im-pingo/liveforge/module/sipgateway"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -121,6 +124,61 @@ func TestGBLabPublishUsesRealRegistrationAndMedia(t *testing.T) {
 	})
 	assertGBLabPortFree(t, publishRTP)
 	assertGBLabPortFree(t, publishRTCP)
+}
+
+func TestGBLabPublishUsesServerInviteAndRegisteredDeviceContact(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	request := LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "34020000001320000071",
+		ChannelID: "34020000001320000072",
+		StreamKey: "gb28181/server-invite",
+	}
+
+	session, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	lab := h.module.labs.session(session.ID)
+	if lab == nil {
+		t.Fatal("publish lab session was not retained")
+	}
+	waitForGBLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTPPacketsSent > 0 && snapshot.RTCPPacketsRecv > 0
+	})
+
+	device := h.module.registry.Get(request.DeviceID)
+	if device == nil {
+		t.Fatal("registered fake device was not found")
+	}
+	peerAddress := lab.peerAddress()
+	if peerAddress == "" || device.RemoteAddr != peerAddress {
+		t.Fatalf("registered device contact = %q, fake listener = %q; want server INVITE routed to fake listener", device.RemoteAddr, peerAddress)
+	}
+
+	sessions := h.module.sessions.GetByChannel(request.ChannelID)
+	if len(sessions) != 1 {
+		t.Fatalf("module media sessions = %d, want one server-initiated session", len(sessions))
+	}
+	serverSession := sessions[0].Snapshot()
+	if serverSession.Direction != SessionDirectionOutbound {
+		t.Fatalf("module media direction = %v, want server-initiated outbound", serverSession.Direction)
+	}
+	if serverSession.Receiver == nil {
+		t.Fatal("server-initiated publish session has no LiveForge RTP receiver")
+	}
+
+	rtcpAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: serverSession.LocalPort + 1}
+	probe, bindErr := net.ListenUDP("udp4", rtcpAddr)
+	if bindErr == nil {
+		_ = probe.Close()
+		t.Fatalf("LiveForge RTCP port %d was not bound by the real receiver", rtcpAddr.Port)
+	}
+	if err := h.module.StopLabSession(session.ID); err != nil {
+		t.Fatalf("StopLabSession publish: %v", err)
+	}
+	waitForGBLab(t, lab.byeReceived.Load)
 }
 
 func TestGBLabPublishUsesRequestedCustomStreamKey(t *testing.T) {
@@ -257,16 +315,74 @@ func TestCombinedSIPAndGB28181RoutesVideoInviteToGB28181(t *testing.T) {
 }
 
 type combinedSIPAndGBLabHarness struct {
-	server  *core.Server
-	gb      *Module
-	gateway *sipgateway.Module
+	server          *core.Server
+	gb              *Module
+	gateway         *sipgateway.Module
+	gbRTPRange      []int
+	gatewayRTPRange []int
+}
+
+func TestGBLabHarnessRTPRangesAreMinimalVerifiedAndDisjoint(t *testing.T) {
+	real := newRealGBLabHarness(t)
+	_, realSIPPort, err := sipAddress(real.module.sipService.LocalAddr())
+	if err != nil {
+		t.Fatalf("parse real GB Lab SIP address: %v", err)
+	}
+	assertGBLabHarnessRTPRange(t, real.rtpPortRange, 2, realSIPPort)
+	assertGBLabHarnessRangesFree(t, real.rtpPortRange)
+
+	combined := newCombinedSIPAndGBLabHarness(t)
+	_, combinedSIPPort, err := sipAddress(combined.gb.sipService.LocalAddr())
+	if err != nil {
+		t.Fatalf("parse combined Lab SIP address: %v", err)
+	}
+	assertGBLabHarnessRTPRange(t, combined.gbRTPRange, 1, combinedSIPPort)
+	assertGBLabHarnessRTPRange(t, combined.gatewayRTPRange, 2, combinedSIPPort)
+	if combined.gbRTPRange[0] <= combined.gatewayRTPRange[1] && combined.gatewayRTPRange[0] <= combined.gbRTPRange[1] {
+		t.Fatalf("combined GB range %v overlaps SIP Gateway range %v", combined.gbRTPRange, combined.gatewayRTPRange)
+	}
+	assertGBLabHarnessRangesFree(t, combined.gbRTPRange, combined.gatewayRTPRange)
+}
+
+func assertGBLabHarnessRTPRange(t *testing.T, rtpRange []int, pairCount, excludedPort int) {
+	t.Helper()
+	wantPortCount := pairCount * 2
+	if len(rtpRange) != 2 || rtpRange[0]%2 != 0 || rtpRange[1] != rtpRange[0]+wantPortCount-1 {
+		t.Fatalf("RTP range = %v, want exactly %d contiguous even-aligned RTP/RTCP pairs", rtpRange, pairCount)
+	}
+	if excludedPort >= rtpRange[0] && excludedPort <= rtpRange[1] {
+		t.Fatalf("SIP control port %d overlaps RTP range %v", excludedPort, rtpRange)
+	}
+}
+
+func assertGBLabHarnessRangesFree(t *testing.T, ranges ...[]int) {
+	t.Helper()
+	reservations := make([]*net.UDPConn, 0)
+	defer func() {
+		for _, conn := range reservations {
+			_ = conn.Close()
+		}
+	}()
+	for _, rtpRange := range ranges {
+		for port := rtpRange[0]; port <= rtpRange[1]; port++ {
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+			if err != nil {
+				t.Fatalf("RTP range port %d is not free: %v", port, err)
+			}
+			reservations = append(reservations, conn)
+		}
+	}
 }
 
 func newCombinedSIPAndGBLabHarness(t *testing.T) combinedSIPAndGBLabHarness {
 	t.Helper()
 	sipAddr := freeGBLabAddress(t)
-	gbPort := freeGBLabPort(t)
-	gatewayPort := freeGBLabPortExcluding(t, gbPort)
+	_, sipPort, err := sipAddress(sipAddr)
+	if err != nil {
+		t.Fatalf("parse combined Lab SIP address: %v", err)
+	}
+	gbRTPRange := freeGBLabRTPPortRange(t, 1, []int{sipPort, sipPort})
+	gatewayRTPRange := freeGBLabRTPPortRange(t, 2, []int{sipPort, sipPort}, gbRTPRange)
 
 	cfg := &config.Config{
 		SIP: config.SIPConfig{
@@ -278,7 +394,7 @@ func newCombinedSIPAndGBLabHarness(t *testing.T) combinedSIPAndGBLabHarness {
 			Gateway: config.SIPGatewayConfig{
 				Enabled:      true,
 				StreamPrefix: "sip",
-				RTPPortRange: []int{gatewayPort, gatewayPort + 100},
+				RTPPortRange: gatewayRTPRange,
 				Codecs:       []string{"PCMA", "PCMU"},
 				MaxCalls:     8,
 			},
@@ -286,7 +402,7 @@ func newCombinedSIPAndGBLabHarness(t *testing.T) combinedSIPAndGBLabHarness {
 		GB28181: config.GB28181Config{
 			Enabled:      true,
 			StreamPrefix: "gb28181",
-			RTPPortRange: []int{gbPort, gbPort + 100},
+			RTPPortRange: gbRTPRange,
 			Keepalive:    config.KeepaliveConfig{Timeout: time.Minute},
 		},
 		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 256},
@@ -303,7 +419,13 @@ func newCombinedSIPAndGBLabHarness(t *testing.T) combinedSIPAndGBLabHarness {
 	}
 	t.Cleanup(server.Shutdown)
 	time.Sleep(25 * time.Millisecond)
-	return combinedSIPAndGBLabHarness{server: server, gb: gbModule, gateway: gatewayModule}
+	return combinedSIPAndGBLabHarness{
+		server:          server,
+		gb:              gbModule,
+		gateway:         gatewayModule,
+		gbRTPRange:      append([]int(nil), gbRTPRange...),
+		gatewayRTPRange: append([]int(nil), gatewayRTPRange...),
+	}
 }
 
 func TestGB28181InviteRecognitionRejectsSIPAudioAndOtherVideo(t *testing.T) {
@@ -388,12 +510,21 @@ func TestGBLabReceiveAcceptsRealLivePlayAndCountsMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
-	publisher := NewPublisher("gb28181-source", nil)
+	publisher := &gbLabSourcePublisher{id: "gb28181-source", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}
 	if err := stream.SetPublisher(publisher); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
 	}
-	frame := deterministicGBLabTestFrame(0)
-	stream.WriteFrame(frame)
+	for timestamp := int64(0); timestamp < 200; timestamp += labmedia.AudioFrameDurationMs {
+		if timestamp%labmedia.VideoFrameDurationMs == 0 {
+			stream.WriteFrame(deterministicGBLabTestFrame(timestamp))
+		}
+		stream.WriteFrame(labmedia.G711Frame(avframe.CodecG711A, timestamp))
+	}
 	request := LabSessionRequest{
 		Mode:      LabModeReceive,
 		DeviceID:  "34020000001320000021",
@@ -418,6 +549,24 @@ func TestGBLabReceiveAcceptsRealLivePlayAndCountsMedia(t *testing.T) {
 	if active.Direction != LabDirectionOutbound {
 		t.Fatalf("receive snapshot = %+v, want outbound", active)
 	}
+	encoded, err := json.Marshal(active)
+	if err != nil {
+		t.Fatalf("marshal receive snapshot: %v", err)
+	}
+	var counters map[string]any
+	if err := json.Unmarshal(encoded, &counters); err != nil {
+		t.Fatalf("decode receive counters: %v", err)
+	}
+	if counters["audio_frames_received"] == nil || counters["audio_frames_received"].(float64) <= 0 {
+		t.Fatalf("receive counters = %s, want audio frames received by fake device", encoded)
+	}
+	if counters["video_frames_received"] == nil || counters["video_frames_received"].(float64) <= 0 {
+		t.Fatalf("receive counters = %s, want video frames received by fake device", encoded)
+	}
+	serverSessions := h.module.sessions.GetByChannel(request.ChannelID)
+	if len(serverSessions) != 1 || serverSessions[0].Snapshot().Direction != SessionDirectionOutbound || serverSessions[0].Snapshot().Publisher != nil {
+		t.Fatalf("module egress sessions = %+v, want one outbound non-publisher media session", serverSessions)
+	}
 	waitForGBLab(t, func() bool { return lab.catalogSent.Load() })
 
 	if err := h.module.StopLabSession(session.ID); err != nil {
@@ -437,6 +586,180 @@ func TestGBLabReceiveAcceptsRealLivePlayAndCountsMedia(t *testing.T) {
 	}
 }
 
+func TestGBLabReceiveRejectsIncompatibleSourceBeforeActivation(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	stream, err := h.hub.GetOrCreate("gb28181/incompatible-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "incompatible", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecAAC,
+	}}); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+
+	_, err = h.module.StartLabSession(context.Background(), LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "34020000001320000081",
+		ChannelID: "34020000001320000082",
+		StreamKey: stream.Key(),
+	})
+	if !errors.Is(err, ErrLabInvalidRequest) {
+		t.Fatalf("StartLabSession incompatible source error = %v, want ErrLabInvalidRequest", err)
+	}
+	if got := len(h.module.sessions.All()); got != 0 {
+		t.Fatalf("module sessions after incompatible source = %d, want 0", got)
+	}
+}
+
+func TestGBLabReceiveRejectsSubscriberAdmissionBeforeActivation(t *testing.T) {
+	h := newRealGBLabHarnessWithConfig(t, func(cfg *config.Config) {
+		cfg.Limits.MaxSubscribersPerStream = 1
+	})
+	stream, err := h.hub.GetOrCreate("gb28181/subscriber-limit-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "subscriber-limit-source", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+	if err := stream.AddSubscriber("occupied"); err != nil {
+		t.Fatalf("occupy subscriber capacity: %v", err)
+	}
+	t.Cleanup(func() { stream.RemoveSubscriber("occupied") })
+
+	request := LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "34020000001320000091",
+		ChannelID: "34020000001320000092",
+		StreamKey: stream.Key(),
+	}
+	failed, err := h.module.StartLabSession(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "max subscribers per stream") {
+		t.Fatalf("StartLabSession subscriber rejection = (%+v, %v), want synchronous limit error", failed, err)
+	}
+	if failed.State == LabSessionStateActive {
+		t.Fatalf("subscriber-rejected Lab state = %q, must never become active", failed.State)
+	}
+	for _, snapshot := range h.module.ListLabSessions() {
+		if snapshot.ID == failed.ID && snapshot.State == LabSessionStateActive {
+			t.Fatalf("subscriber-rejected Lab remained active: %+v", snapshot)
+		}
+	}
+	if got := len(h.module.sessions.All()); got != 0 {
+		t.Fatalf("subscriber rejection left %d module sessions", got)
+	}
+	lab := h.module.labs.session(failed.ID)
+	if lab == nil {
+		t.Fatal("subscriber-rejected Lab terminal record was not retained")
+	}
+	lab.mu.RLock()
+	moduleSession := lab.moduleSession
+	lab.mu.RUnlock()
+	if moduleSession != nil {
+		t.Fatalf("subscriber rejection created module dialog/session: %+v", moduleSession.Snapshot())
+	}
+	if h.module.registry.Get(request.DeviceID) != nil {
+		t.Fatal("subscriber rejection left fake device registered")
+	}
+	assertGBLabPortFree(t, lab.peerAddress())
+	fakeRTP, fakeRTCP := lab.mediaAddresses()
+	assertGBLabPortFree(t, fakeRTP)
+	assertGBLabPortFree(t, fakeRTCP)
+	assertGBLabModulePortPairFree(t, h)
+	if got := stream.Subscribers()["gb28181"]; got != 0 {
+		t.Fatalf("subscriber rejection left %d GB28181 subscribers", got)
+	}
+}
+
+func TestGBLabReceiveWorkerFailureTransitionsToFailedAndCleansUp(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	stream, err := h.hub.GetOrCreate("gb28181/worker-failure-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "worker-failure-source", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+
+	request := LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "34020000001320000101",
+		ChannelID: "34020000001320000102",
+		StreamKey: stream.Key(),
+	}
+	active, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession receive: %v", err)
+	}
+	lab := h.module.labs.session(active.ID)
+	if lab == nil {
+		t.Fatal("active receive Lab was not retained")
+	}
+	lab.mu.RLock()
+	moduleSession := lab.moduleSession
+	lab.mu.RUnlock()
+	if moduleSession == nil {
+		t.Fatal("active receive Lab has no module-owned sender session")
+	}
+	moduleSnapshot := moduleSession.Snapshot()
+	if moduleSnapshot.Sender == nil {
+		t.Fatal("active receive Lab has no outbound sender")
+	}
+	moduleRTP := moduleSnapshot.Sender.rtpConn.LocalAddr().String()
+	moduleRTCP := moduleSnapshot.Sender.rtcpConn.LocalAddr().String()
+	fakeRTP, fakeRTCP := lab.mediaAddresses()
+	peerAddress := lab.peerAddress()
+	if err := moduleSnapshot.Sender.rtpConn.Close(); err != nil {
+		t.Fatalf("close outbound RTP socket: %v", err)
+	}
+	stream.WriteFrame(deterministicGBLabTestFrame(0))
+
+	failed := waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateFailed && strings.Contains(snapshot.LastError, "GB28181 outbound media send")
+	})
+	if failed.LastError == "" || strings.ContainsAny(failed.LastError, "\r\n") || len([]rune(failed.LastError)) > gbLabTerminalErrorLimit {
+		t.Fatalf("worker failure diagnostic was not bounded/redacted: %q", failed.LastError)
+	}
+	if got := len(h.module.sessions.All()); got != 0 {
+		t.Fatalf("worker failure left %d module sessions", got)
+	}
+	if h.module.sessions.Get(moduleSnapshot.ID) != nil {
+		t.Fatalf("worker failure left module session %q registered", moduleSnapshot.ID)
+	}
+	waitForGBLab(t, lab.byeReceived.Load)
+	if h.module.registry.Get(request.DeviceID) != nil {
+		t.Fatal("worker failure left fake device registered")
+	}
+	if got := stream.Subscribers()["gb28181"]; got != 0 {
+		t.Fatalf("worker failure left %d GB28181 subscribers", got)
+	}
+	for _, address := range []string{moduleRTP, moduleRTCP, fakeRTP, fakeRTCP, peerAddress} {
+		assertGBLabPortFree(t, address)
+	}
+	assertGBLabModulePortPairFree(t, h)
+}
+
+type gbLabSourcePublisher struct {
+	id   string
+	info avframe.MediaInfo
+}
+
+func (p *gbLabSourcePublisher) ID() string                    { return p.id }
+func (p *gbLabSourcePublisher) MediaInfo() *avframe.MediaInfo { info := p.info; return &info }
+func (p *gbLabSourcePublisher) Close() error                  { return nil }
+
 func TestGBLabRejectsDuplicateIdentity(t *testing.T) {
 	h := newRealGBLabHarness(t)
 	request := LabSessionRequest{
@@ -453,17 +776,142 @@ func TestGBLabRejectsDuplicateIdentity(t *testing.T) {
 	}
 }
 
+func TestGBLabManagerBoundsTerminalHistoryAndReleasesReceiveResources(t *testing.T) {
+	const historyLimit = 16
+	h := newRealGBLabHarness(t)
+	stream, err := h.hub.GetOrCreate("gb28181/history-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "history-source", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher source: %v", err)
+	}
+	for timestamp := int64(0); timestamp < 200; timestamp += labmedia.AudioFrameDurationMs {
+		if timestamp%labmedia.VideoFrameDurationMs == 0 {
+			stream.WriteFrame(deterministicGBLabTestFrame(timestamp))
+		}
+		stream.WriteFrame(labmedia.G711Frame(avframe.CodecG711A, timestamp))
+	}
+
+	active, err := h.module.StartLabSession(context.Background(), LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "34020000001329990001",
+		ChannelID: "34020000001329990002",
+		StreamKey: stream.Key(),
+	})
+	if err != nil {
+		t.Fatalf("Start active receive session: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(active.ID) })
+	waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.AudioFramesRecv > 0 && snapshot.VideoFramesRecv > 0
+	})
+
+	terminalIDs := make([]string, 0, historyLimit+2)
+	for i := 0; i < historyLimit+2; i++ {
+		request := LabSessionRequest{
+			Mode:      LabModeReceive,
+			DeviceID:  fmt.Sprintf("3402000000132%07d", i*2+1),
+			ChannelID: fmt.Sprintf("3402000000132%07d", i*2+2),
+			StreamKey: stream.Key(),
+		}
+		session, err := h.module.StartLabSession(context.Background(), request)
+		if err != nil {
+			t.Fatalf("Start receive session %d: %v", i, err)
+		}
+		lab := h.module.labs.session(session.ID)
+		if lab == nil {
+			t.Fatalf("receive session %d was not retained", i)
+		}
+		lab.mu.RLock()
+		clientUA, peerUA := lab.clientUA, lab.peerUA
+		moduleSession := lab.moduleSession
+		lab.mu.RUnlock()
+		if clientUA == nil || peerUA == nil || clientUA == peerUA {
+			t.Fatalf("receive session %d UAs = (%p, %p), want separate client and peer UAs", i, clientUA, peerUA)
+		}
+		fakeRTP, fakeRTCP := lab.mediaAddresses()
+		peerAddress := lab.peerAddress()
+		if moduleSession == nil {
+			t.Fatalf("receive session %d has no module-owned egress", i)
+		}
+		modulePort := moduleSession.Snapshot().LocalPort
+		waitForGBLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+			return snapshot.State == LabSessionStateActive && snapshot.AudioFramesRecv > 0 && snapshot.VideoFramesRecv > 0
+		})
+		if err := h.module.StopLabSession(session.ID); err != nil {
+			t.Fatalf("Stop receive session %d: %v", i, err)
+		}
+		assertGBLabPortFree(t, fakeRTP)
+		assertGBLabPortFree(t, fakeRTCP)
+		assertGBLabPortFree(t, peerAddress)
+		assertGBLabPortFree(t, net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort)))
+		assertGBLabPortFree(t, net.JoinHostPort("127.0.0.1", fmt.Sprint(modulePort+1)))
+		if h.module.registry.Get(request.DeviceID) != nil {
+			t.Fatalf("receive session %d left its fake device registered", i)
+		}
+		terminalIDs = append(terminalIDs, session.ID)
+	}
+
+	listed := h.module.ListLabSessions()
+	if len(listed) != historyLimit+1 {
+		t.Fatalf("GB lab sessions = %d, want one active plus %d terminal", len(listed), historyLimit)
+	}
+	states := make(map[string]LabSessionState, len(listed))
+	for _, session := range listed {
+		states[session.ID] = session.State
+	}
+	if states[active.ID] != LabSessionStateActive {
+		t.Fatalf("active GB session state = %q, want retained active session", states[active.ID])
+	}
+	if _, ok := states[terminalIDs[0]]; ok {
+		t.Fatal("oldest GB terminal session was not pruned")
+	}
+	if states[terminalIDs[len(terminalIDs)-1]] != LabSessionStateStopped {
+		t.Fatal("newest GB terminal session was not retained")
+	}
+}
+
+func TestGBLabTerminalErrorRedactsSecretsBeforeTruncation(t *testing.T) {
+	err := errors.New(strings.Repeat("prefix ", 20) + "dialog sip:alice:topsecret@pbx.example.com\r\nAuthorization: Bearer secret-token " + strings.Repeat("suffix ", 30))
+	message := redactedLabError(err)
+	if strings.Contains(message, "topsecret") || strings.Contains(message, "secret-token") || strings.ContainsAny(message, "\r\n") {
+		t.Fatalf("redacted terminal error leaked a secret or newline: %q", message)
+	}
+	if !strings.Contains(message, "[redacted]") {
+		t.Fatalf("redacted terminal error = %q, want explicit redaction marker", message)
+	}
+	if len([]rune(message)) > 256 {
+		t.Fatalf("redacted terminal error length = %d, want at most 256 runes", len([]rune(message)))
+	}
+}
+
 type realGBLabHarness struct {
-	module *Module
-	hub    *core.StreamHub
+	module       *Module
+	hub          *core.StreamHub
+	rtpPortRange []int
 }
 
 func newRealGBLabHarness(t *testing.T) realGBLabHarness {
+	return newRealGBLabHarnessWithConfig(t, nil)
+}
+
+func newRealGBLabHarnessWithConfig(t *testing.T, configure func(*config.Config)) realGBLabHarness {
 	t.Helper()
+	sipAddr := freeGBLabAddress(t)
+	_, sipPort, err := sipAddress(sipAddr)
+	if err != nil {
+		t.Fatalf("parse real GB Lab SIP address: %v", err)
+	}
 	cfg := &config.Config{
 		SIP: config.SIPConfig{
 			Enabled:   true,
-			Listen:    freeGBLabAddress(t),
+			Listen:    sipAddr,
 			Transport: []string{"udp"},
 			ServerID:  "liveforge-gb-lab",
 			Domain:    "lab.local",
@@ -471,12 +919,14 @@ func newRealGBLabHarness(t *testing.T) realGBLabHarness {
 		GB28181: config.GB28181Config{
 			Enabled:      true,
 			StreamPrefix: "gb28181",
-			RTPPortRange: []int{freeGBLabPort(t), 0},
+			RTPPortRange: freeGBLabRTPPortRange(t, 2, []int{sipPort, sipPort}),
 			Keepalive:    config.KeepaliveConfig{Timeout: time.Minute},
 		},
 		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 256},
 	}
-	cfg.GB28181.RTPPortRange[1] = cfg.GB28181.RTPPortRange[0] + 100
+	if configure != nil {
+		configure(cfg)
+	}
 	server := core.NewServer(cfg)
 	sipModule := sipmod.NewModule()
 	gbModule := NewModule(sipModule.Service())
@@ -487,7 +937,7 @@ func newRealGBLabHarness(t *testing.T) realGBLabHarness {
 	}
 	t.Cleanup(server.Shutdown)
 	time.Sleep(25 * time.Millisecond)
-	return realGBLabHarness{module: gbModule, hub: server.StreamHub()}
+	return realGBLabHarness{module: gbModule, hub: server.StreamHub(), rtpPortRange: append([]int(nil), cfg.GB28181.RTPPortRange...)}
 }
 
 func freeGBLabAddress(t *testing.T) string {
@@ -500,33 +950,55 @@ func freeGBLabAddress(t *testing.T) string {
 	return conn.LocalAddr().String()
 }
 
-func freeGBLabPort(t *testing.T) int {
+func freeGBLabRTPPortRange(t *testing.T, pairCount int, excludedRanges ...[]int) []int {
 	t.Helper()
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatalf("reserve RTP port: %v", err)
+	if pairCount <= 0 {
+		t.Fatalf("RTP pair count = %d, want positive", pairCount)
 	}
-	defer conn.Close()
-	port := conn.LocalAddr().(*net.UDPAddr).Port
-	if port%2 != 0 {
-		port++
-	}
-	if port+100 > 65535 {
-		port = 60000
-	}
-	return port
-}
-
-func freeGBLabPortExcluding(t *testing.T, other int) int {
-	t.Helper()
-	for attempt := 0; attempt < 100; attempt++ {
-		port := freeGBLabPort(t)
-		if port > other+100 || other > port+100 {
-			return port
+	for _, excluded := range excludedRanges {
+		if len(excluded) != 2 || excluded[0] > excluded[1] {
+			t.Fatalf("invalid excluded RTP range %v", excluded)
 		}
 	}
-	t.Fatalf("could not find a free GB lab port range outside %d", other)
-	return 0
+
+	const (
+		minPort = 20000
+		maxPort = 29999
+	)
+	portCount := pairCount * 2
+	loopback := net.ParseIP("127.0.0.1")
+	for start := minPort; start+portCount-1 <= maxPort; start += 2 {
+		end := start + portCount - 1
+		excluded := false
+		for _, other := range excludedRanges {
+			if start <= other[1] && other[0] <= end {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+
+		reservations := make([]*net.UDPConn, 0, portCount)
+		available := true
+		for port := start; port <= end; port++ {
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
+			if err != nil {
+				available = false
+				break
+			}
+			reservations = append(reservations, conn)
+		}
+		for _, conn := range reservations {
+			_ = conn.Close()
+		}
+		if available {
+			return []int{start, end}
+		}
+	}
+	t.Fatalf("could not find %d contiguous RTP/RTCP pairs in %d-%d", pairCount, minPort, maxPort)
+	return nil
 }
 
 func deterministicGBLabTestFrame(timestamp int64) *avframe.AVFrame {
@@ -604,4 +1076,23 @@ func assertGBLabPortFree(t *testing.T, address string) {
 		t.Fatalf("lab address %q was not released: %v", address, err)
 	}
 	_ = conn.Close()
+}
+
+func assertGBLabModulePortPairFree(t *testing.T, h realGBLabHarness) {
+	t.Helper()
+	rtpPort, rtcpPort, err := h.module.handler.ports.AllocatePair()
+	if err != nil {
+		t.Fatalf("allocate released module media pair: %v", err)
+	}
+	defer h.module.handler.ports.Free(rtpPort, rtcpPort)
+	if len(h.rtpPortRange) != 2 || rtpPort != h.rtpPortRange[0] || rtcpPort != rtpPort+1 {
+		t.Fatalf("released module pair = %d/%d, want first configured pair in %v", rtpPort, rtcpPort, h.rtpPortRange)
+	}
+	for _, port := range []int{rtpPort, rtcpPort} {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+		if err != nil {
+			t.Fatalf("released module media port %d is still bound: %v", port, err)
+		}
+		_ = conn.Close()
+	}
 }

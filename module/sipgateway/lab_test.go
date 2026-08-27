@@ -2,8 +2,11 @@ package sipgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,9 +14,12 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/labmedia"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	mediarp "github.com/im-pingo/liveforge/pkg/rtp"
+	"github.com/pion/rtcp"
+	pionrtp "github.com/pion/rtp/v2"
 )
 
 func validSIPLabRequest() LabSessionRequest {
@@ -95,6 +101,48 @@ func TestLabManagerStopIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSIPLabManagerBoundsTerminalHistoryWithoutPruningActive(t *testing.T) {
+	const historyLimit = 16
+	manager := newLabManager(nil)
+	activeRequest := validSIPLabRequest()
+	activeRequest.DeviceID = "active-history-device"
+	active, err := manager.Start(context.Background(), activeRequest)
+	if err != nil {
+		t.Fatalf("Start active session: %v", err)
+	}
+	terminalIDs := make([]string, 0, historyLimit+2)
+	for i := 0; i < historyLimit+2; i++ {
+		request := validSIPLabRequest()
+		request.DeviceID = fmt.Sprintf("terminal-history-device-%d", i)
+		session, err := manager.Start(context.Background(), request)
+		if err != nil {
+			t.Fatalf("Start terminal session %d: %v", i, err)
+		}
+		if err := manager.Stop(session.ID); err != nil {
+			t.Fatalf("Stop terminal session %d: %v", i, err)
+		}
+		terminalIDs = append(terminalIDs, session.ID)
+	}
+
+	listed := manager.List()
+	if len(listed) != historyLimit+1 {
+		t.Fatalf("lab sessions = %d, want one active plus %d terminal", len(listed), historyLimit)
+	}
+	states := make(map[string]LabSessionState, len(listed))
+	for _, session := range listed {
+		states[session.ID] = session.State
+	}
+	if states[active.ID] != LabSessionStateContract {
+		t.Fatalf("active session state = %q, want retained contract session", states[active.ID])
+	}
+	if _, ok := states[terminalIDs[0]]; ok {
+		t.Fatal("oldest terminal session was not pruned")
+	}
+	if states[terminalIDs[len(terminalIDs)-1]] != LabSessionStateStopped {
+		t.Fatal("newest terminal session was not retained")
+	}
+}
+
 func TestSIPLabPublishUsesRealSignalingAndCleansUp(t *testing.T) {
 	h := newRealSIPLabHarness(t)
 	request := LabSessionRequest{
@@ -147,6 +195,70 @@ func TestSIPLabPublishUsesRealSignalingAndCleansUp(t *testing.T) {
 	})
 	if _, err := h.module.StartLabSession(context.Background(), request); err != nil {
 		t.Fatalf("reusing stopped publish identity: %v", err)
+	}
+}
+
+func TestSIPLabPublishUsesBoundGatewayRTCPReceivers(t *testing.T) {
+	h := newRealSIPLabHarness(t)
+	session, err := h.module.StartLabSession(context.Background(), LabSessionRequest{
+		Mode:      LabModePublish,
+		DeviceID:  "rtcp-receiver-device",
+		StreamKey: "sip/rtcp-receiver",
+		Codec:     "PCMA",
+	})
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTCPPacketsSent >= 2
+	})
+
+	h.module.Gateway().labs.mu.RLock()
+	lab := h.module.Gateway().labs.sessions[session.ID]
+	h.module.Gateway().labs.mu.RUnlock()
+	if lab == nil {
+		t.Fatal("publish lab session was not retained")
+	}
+	lab.mu.RLock()
+	callID := lab.callID
+	lab.mu.RUnlock()
+	call, ok := h.module.Call(callID)
+	if !ok {
+		t.Fatalf("gateway call %q was not found", callID)
+	}
+	for _, port := range []int{call.RTCPPort, call.VideoRTCPPort} {
+		probe, bindErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+		if bindErr == nil {
+			_ = probe.Close()
+			t.Fatalf("gateway RTCP port %d is not bound", port)
+		}
+	}
+
+	if err := h.module.StopLabSession(session.ID); err != nil {
+		t.Fatalf("StopLabSession publish: %v", err)
+	}
+	terminalLab := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateStopped
+	})
+	terminalCall, ok := h.module.Call(callID)
+	if !ok {
+		t.Fatalf("terminal gateway call %q was not retained", callID)
+	}
+	encoded, err := json.Marshal(terminalCall)
+	if err != nil {
+		t.Fatalf("marshal terminal call: %v", err)
+	}
+	var counters map[string]any
+	if err := json.Unmarshal(encoded, &counters); err != nil {
+		t.Fatalf("decode terminal call counters: %v", err)
+	}
+	received, ok := counters["rtcp_packets_received"].(float64)
+	if !ok || received < 2 {
+		t.Fatalf("terminal call counters = %s, want parsed RTCP for both tracks", encoded)
+	}
+	if terminalLab.RTCPPacketsSent != uint64(received) {
+		t.Fatalf("lab RTCP sent = %d, gateway parsed = %.0f; want receiver-side accounting", terminalLab.RTCPPacketsSent, received)
 	}
 }
 
@@ -345,6 +457,12 @@ func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartLabSession receive: %v", err)
 	}
+	for timestamp := int64(0); timestamp < 200; timestamp += 20 {
+		if timestamp%40 == 0 {
+			stream.WriteFrame(labmedia.VideoFrame(timestamp))
+		}
+		stream.WriteFrame(labmedia.G711Frame(avframe.CodecG711U, timestamp))
+	}
 	active := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
 		return snapshot.State == LabSessionStateActive &&
 			snapshot.AudioRTPPacketsRecv > 0 && snapshot.VideoRTPPacketsRecv > 0 &&
@@ -361,6 +479,236 @@ func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {
 		t.Fatalf("second StopLabSession receive: %v", err)
 	}
 	waitForSIPLab(t, func() bool { return h.module.Gateway().ActiveCalls() == 0 })
+}
+
+func TestSIPLabReceiveDoesNotMutateSourceStream(t *testing.T) {
+	h := newRealSIPLabHarness(t)
+	stream, err := h.hub.GetOrCreate("sip/immutable-receive-source")
+	if err != nil {
+		t.Fatalf("GetOrCreate receive stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gatewayTestPublisher{
+		id: "dedicated-receive-source",
+		info: &avframe.MediaInfo{
+			VideoCodec: avframe.CodecH264,
+			AudioCodec: avframe.CodecG711A,
+			SampleRate: 8000,
+			Channels:   1,
+		},
+	}); err != nil {
+		t.Fatalf("SetPublisher receive source: %v", err)
+	}
+	beforeStats := stream.Stats()
+	beforeCache := stream.GOPCacheDetail()
+
+	session, err := h.module.StartLabSession(context.Background(), LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "immutable-receive-device",
+		StreamKey: stream.Key(),
+		Codec:     "PCMA",
+	})
+	if err != nil {
+		t.Fatalf("StartLabSession receive: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	time.Sleep(120 * time.Millisecond)
+
+	afterStats := stream.Stats()
+	afterCache := stream.GOPCacheDetail()
+	if afterStats.BytesIn != beforeStats.BytesIn ||
+		afterStats.AudioFrames != beforeStats.AudioFrames ||
+		afterStats.VideoFrames != beforeStats.VideoFrames ||
+		afterCache.AudioFrames != beforeCache.AudioFrames ||
+		afterCache.VideoFrames != beforeCache.VideoFrames {
+		t.Fatalf("receive lab mutated source: stats before=%+v after=%+v cache before=%+v after=%+v", beforeStats, afterStats, beforeCache, afterCache)
+	}
+}
+
+func TestSIPLabReceiveSendsPeriodicPerTrackReceiverReports(t *testing.T) {
+	h := newRealSIPLabHarness(t)
+	const idleTimeout = 100 * time.Millisecond
+	h.module.Gateway().rtpIdleTimeout = idleTimeout
+	stream, err := h.hub.GetOrCreate("sip/periodic-receiver-reports")
+	if err != nil {
+		t.Fatalf("GetOrCreate receive stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gatewayTestPublisher{
+		id: "periodic-rr-source",
+		info: &avframe.MediaInfo{
+			VideoCodec: avframe.CodecH264,
+			AudioCodec: avframe.CodecG711A,
+			SampleRate: 8000,
+			Channels:   1,
+		},
+	}); err != nil {
+		t.Fatalf("SetPublisher receive source: %v", err)
+	}
+
+	session, err := h.module.StartLabSession(context.Background(), LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "periodic-rr-device",
+		StreamKey: stream.Key(),
+		Codec:     "PCMA",
+	})
+	if err != nil {
+		t.Fatalf("StartLabSession receive: %v", err)
+	}
+	t.Cleanup(func() { _ = h.module.StopLabSession(session.ID) })
+	stopSource := make(chan struct{})
+	defer close(stopSource)
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		var timestamp int64
+		for {
+			if timestamp%40 == 0 {
+				stream.WriteFrame(labmedia.VideoFrame(timestamp))
+			}
+			stream.WriteFrame(labmedia.G711Frame(avframe.CodecG711A, timestamp))
+			timestamp += 20
+			select {
+			case <-stopSource:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	time.Sleep(4 * idleTimeout)
+	h.module.Gateway().labs.mu.RLock()
+	lab := h.module.Gateway().labs.sessions[session.ID]
+	h.module.Gateway().labs.mu.RUnlock()
+	if lab == nil {
+		t.Fatal("receive lab session was not retained")
+	}
+	lab.mu.RLock()
+	callID := lab.callID
+	lab.mu.RUnlock()
+	call, ok := h.module.Call(callID)
+	if !ok || call.State != CallStateActive {
+		t.Fatalf("call after four RTCP idle windows = (%+v, %v), want active", call, ok)
+	}
+	snapshot := waitForSIPLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.RTCPPacketsSent >= 4
+	})
+	if snapshot.RTCPPacketsSent < 4 {
+		t.Fatalf("receiver reports sent = %d, want periodic reports for audio and video", snapshot.RTCPPacketsSent)
+	}
+}
+
+func TestSIPOutboundSenderReportsArePerTrackRFCCompliantAndPeriodic(t *testing.T) {
+	audioRTP, audioRTCP, err := listenLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen audio pair: %v", err)
+	}
+	defer audioRTP.Close()
+	defer audioRTCP.Close()
+	videoRTP, videoRTCP, err := listenLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen video pair: %v", err)
+	}
+	defer videoRTP.Close()
+	defer videoRTCP.Close()
+	audioSendRTP, audioSendRTCP, err := listenLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen audio sender pair: %v", err)
+	}
+	defer audioSendRTP.Close()
+	defer audioSendRTCP.Close()
+	videoSendRTP, videoSendRTCP, err := listenLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen video sender pair: %v", err)
+	}
+	defer videoSendRTP.Close()
+	defer videoSendRTCP.Close()
+
+	audioCodec := negotiatedCodec{Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA"}
+	call := newCallSession("sender-report-test", "sip/source", audioCodec, "outbound", 0, 0)
+	audioSession := mediarp.NewSession(uint8(audioCodec.PT), uint32(audioCodec.ClockRate))
+	audioPacketizer, err := mediarp.NewPacketizer(avframe.CodecG711A)
+	if err != nil {
+		t.Fatalf("new audio packetizer: %v", err)
+	}
+	videoSession := mediarp.NewSession(uint8(sipH264Codec.PT), uint32(sipH264Codec.ClockRate))
+	videoPacketizer, err := mediarp.NewPacketizer(avframe.CodecH264)
+	if err != nil {
+		t.Fatalf("new video packetizer: %v", err)
+	}
+	var audioReportState, videoReportState rtcpSenderState
+	if !call.sendFrame(labmedia.G711Frame(avframe.CodecG711A, 0), audioPacketizer, audioSession, audioSendRTP, audioSendRTCP, audioRTP.LocalAddr().(*net.UDPAddr), &audioReportState) {
+		t.Fatal("send audio frame failed")
+	}
+	audioPacket := readSIPLabRTPPacket(t, audioRTP)
+	audioReport := readSIPLabSenderReport(t, audioRTCP)
+	assertSIPLabSenderReport(t, audioReport, audioPacket, 1, uint32(len(audioPacket.Payload)))
+
+	if !call.sendFrame(labmedia.VideoFrame(0), videoPacketizer, videoSession, videoSendRTP, videoSendRTCP, videoRTP.LocalAddr().(*net.UDPAddr), &videoReportState) {
+		t.Fatal("send video frame failed")
+	}
+	videoPacket := readSIPLabRTPPacket(t, videoRTP)
+	videoReport := readSIPLabSenderReport(t, videoRTCP)
+	assertSIPLabSenderReport(t, videoReport, videoPacket, 1, uint32(len(videoPacket.Payload)))
+
+	time.Sleep(1100 * time.Millisecond)
+	if !call.sendFrame(labmedia.G711Frame(avframe.CodecG711A, 20), audioPacketizer, audioSession, audioSendRTP, audioSendRTCP, audioRTP.LocalAddr().(*net.UDPAddr), &audioReportState) {
+		t.Fatal("send second audio frame failed")
+	}
+	secondAudioPacket := readSIPLabRTPPacket(t, audioRTP)
+	secondAudioReport := readSIPLabSenderReport(t, audioRTCP)
+	assertSIPLabSenderReport(t, secondAudioReport, secondAudioPacket, 2, uint32(len(audioPacket.Payload)+len(secondAudioPacket.Payload)))
+}
+
+func readSIPLabRTPPacket(t *testing.T, conn *net.UDPConn) *pionrtp.Packet {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set RTP deadline: %v", err)
+	}
+	buf := make([]byte, 2048)
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read RTP packet: %v", err)
+	}
+	var packet pionrtp.Packet
+	if err := packet.Unmarshal(buf[:n]); err != nil {
+		t.Fatalf("unmarshal RTP packet: %v", err)
+	}
+	return &packet
+}
+
+func readSIPLabSenderReport(t *testing.T, conn *net.UDPConn) *rtcp.SenderReport {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set RTCP deadline: %v", err)
+	}
+	buf := make([]byte, 2048)
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read RTCP sender report: %v", err)
+	}
+	packets, err := rtcp.Unmarshal(buf[:n])
+	if err != nil || len(packets) != 1 {
+		t.Fatalf("unmarshal RTCP sender report = (%v, %v)", packets, err)
+	}
+	report, ok := packets[0].(*rtcp.SenderReport)
+	if !ok {
+		t.Fatalf("RTCP packet = %T, want *rtcp.SenderReport", packets[0])
+	}
+	return report
+}
+
+func assertSIPLabSenderReport(t *testing.T, report *rtcp.SenderReport, packet *pionrtp.Packet, packetCount, octetCount uint32) {
+	t.Helper()
+	if report.SSRC != packet.SSRC {
+		t.Fatalf("sender report SSRC = %#x, RTP SSRC = %#x", report.SSRC, packet.SSRC)
+	}
+	const ntpEpochOffset = 2208988800
+	reportTime := time.Unix(int64(report.NTPTime>>32)-ntpEpochOffset, 0)
+	if delta := time.Since(reportTime); delta < -time.Second || delta > 2*time.Second {
+		t.Fatalf("sender report NTP time = %d (%s), want RFC NTP near now", report.NTPTime, reportTime)
+	}
+	if report.RTPTime != packet.Timestamp || report.PacketCount != packetCount || report.OctetCount != octetCount {
+		t.Fatalf("sender report = %+v, RTP timestamp=%d payload=%d; want packets=%d octets=%d", report, packet.Timestamp, len(packet.Payload), packetCount, octetCount)
+	}
 }
 
 func TestSIPLabRejectsInvalidAndDuplicateIdentities(t *testing.T) {
@@ -383,9 +731,51 @@ type realSIPLabHarness struct {
 	hub    *core.StreamHub
 }
 
+func TestSIPLabHarnessRTPRangeExcludesSIPListener(t *testing.T) {
+	sipAddr := freeSIPLabUDPAddress(t)
+	_, sipPortText, err := net.SplitHostPort(sipAddr)
+	if err != nil {
+		t.Fatalf("split SIP address: %v", err)
+	}
+	sipPort, err := strconv.Atoi(sipPortText)
+	if err != nil {
+		t.Fatalf("parse SIP port: %v", err)
+	}
+
+	rtpRange := freeSIPLabRTPPortRange(t, sipPort)
+	if len(rtpRange) != 2 || rtpRange[0]%2 != 0 || rtpRange[1] != rtpRange[0]+3 {
+		t.Fatalf("RTP range = %v, want exactly two even-aligned RTP/RTCP pairs", rtpRange)
+	}
+	if sipPort >= rtpRange[0] && sipPort <= rtpRange[1] {
+		t.Fatalf("SIP control port %d overlaps RTP range %v", sipPort, rtpRange)
+	}
+
+	reservations := make([]*net.UDPConn, 0, 4)
+	defer func() {
+		for _, conn := range reservations {
+			_ = conn.Close()
+		}
+	}()
+	for port := rtpRange[0]; port <= rtpRange[1]; port++ {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+		if err != nil {
+			t.Fatalf("RTP range port %d is not free: %v", port, err)
+		}
+		reservations = append(reservations, conn)
+	}
+}
+
 func newRealSIPLabHarness(t *testing.T) realSIPLabHarness {
 	t.Helper()
 	sipAddr := freeSIPLabUDPAddress(t)
+	_, sipPortText, err := net.SplitHostPort(sipAddr)
+	if err != nil {
+		t.Fatalf("split SIP address: %v", err)
+	}
+	sipPort, err := strconv.Atoi(sipPortText)
+	if err != nil {
+		t.Fatalf("parse SIP port: %v", err)
+	}
 	cfg := &config.Config{
 		SIP: config.SIPConfig{
 			Enabled:   true,
@@ -396,14 +786,13 @@ func newRealSIPLabHarness(t *testing.T) realSIPLabHarness {
 			Gateway: config.SIPGatewayConfig{
 				Enabled:      true,
 				StreamPrefix: "sip",
-				RTPPortRange: []int{evenSIPLabPort(t), 0},
+				RTPPortRange: freeSIPLabRTPPortRange(t, sipPort),
 				Codecs:       []string{"PCMA", "PCMU"},
 				MaxCalls:     8,
 			},
 		},
 		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, AudioCacheMs: 1000, RingBufferSize: 256},
 	}
-	cfg.SIP.Gateway.RTPPortRange[1] = cfg.SIP.Gateway.RTPPortRange[0] + 100
 	server := core.NewServer(cfg)
 	sipModule := sipmod.NewModule()
 	gatewayModule := NewModule(sipModule.Service())
@@ -425,6 +814,49 @@ func freeSIPLabUDPAddress(t *testing.T) string {
 	}
 	defer conn.Close()
 	return conn.LocalAddr().String()
+}
+
+func freeSIPLabRTPPortRange(t *testing.T, excludedPort int) []int {
+	t.Helper()
+	const (
+		portCount   = 4
+		maxAttempts = 128
+	)
+	loopback := net.ParseIP("127.0.0.1")
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback})
+		if err != nil {
+			t.Fatalf("probe RTP range: %v", err)
+		}
+		start := probe.LocalAddr().(*net.UDPAddr).Port
+		_ = probe.Close()
+		if start%2 != 0 {
+			start--
+		}
+		end := start + portCount - 1
+		if start < 1024 || end > 65535 || excludedPort >= start && excludedPort <= end {
+			continue
+		}
+
+		reservations := make([]*net.UDPConn, 0, portCount)
+		available := true
+		for port := start; port <= end; port++ {
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
+			if err != nil {
+				available = false
+				break
+			}
+			reservations = append(reservations, conn)
+		}
+		for _, conn := range reservations {
+			_ = conn.Close()
+		}
+		if available {
+			return []int{start, end}
+		}
+	}
+	t.Fatalf("could not find two free RTP/RTCP pairs excluding SIP port %d", excludedPort)
+	return nil
 }
 
 func evenSIPLabPort(t *testing.T) int {

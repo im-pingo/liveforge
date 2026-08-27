@@ -298,7 +298,7 @@ paths:
       tags: [sipgateway]
       operationId: startSIPGatewayLabSession
       summary: Start a persistent local fake SIP device
-      description: Publish mode sends real PCMA or PCMU RTP/RTCP into LiveForge. Receive mode accepts LiveForge's outbound INVITE and counts received media. No external PBX is required.
+      description: Publish mode sends real H.264 plus PCMA or PCMU RTP/RTCP into LiveForge receivers. Receive mode accepts LiveForge's outbound INVITE, leaves the selected source stream unchanged, and sends periodic per-track receiver reports. No external PBX is required.
       x-liveforge-permission: sip:calls
       requestBody:
         required: true
@@ -729,14 +729,14 @@ paths:
       tags: [gb28181]
       operationId: startGB28181LabSession
       summary: Start a persistent local fake GB28181 device
-      description: Publish mode performs REGISTER, Keepalive, Catalog, INVITE/ACK/BYE and sends deterministic H.264 in PS/RTP with RTCP. Receive mode accepts LiveForge's live-play INVITE and counts PS/RTP/RTCP. No external GB28181 platform is required.
+      description: Publish mode performs REGISTER, Keepalive, Catalog, accepts LiveForge's server-initiated INVITE/ACK/BYE, and sends deterministic H.264 plus G.711A in PS/RTP with RTCP to LiveForge's receiver. Receive mode validates an H.264/G.711A source and admits its subscriber before activation, then uses a module-owned outbound session to send PS/RTP/RTCP to the fake device. Subscriber admission rejection fails startup synchronously; a later outbound media failure transitions the Lab to failed with a bounded redacted last_error and releases its signaling, session, subscriber, sockets, and ports. No external GB28181 platform is required.
       x-liveforge-permission: gb28181:control
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/GBLabRequest'}}}
       responses:
         '201': {description: GB28181 lab session started, content: {application/json: {schema: {$ref: '#/components/schemas/GBLabSessionResponse'}}}}
-        '400': {$ref: '#/components/responses/GBBadRequest'}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/GBUnauthorized'}
         '403': {$ref: '#/components/responses/GBForbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
@@ -755,7 +755,7 @@ paths:
         '200': {$ref: '#/components/responses/Success'}
         '401': {$ref: '#/components/responses/GBUnauthorized'}
         '403': {$ref: '#/components/responses/GBForbidden'}
-        '404': {$ref: '#/components/responses/GBNotFound'}
+        '404': {$ref: '#/components/responses/NotFound'}
         '429': {$ref: '#/components/responses/GBRateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/relay/push:
@@ -1058,14 +1058,14 @@ components:
     SecurityStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SecurityStatus'}}}]}
     SIPDialRequest: {type: object, additionalProperties: false, required: [target_uri, stream_key], properties: {target_uri: {type: string}, stream_key: {type: string}}}
     SIPLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, stream_key, codec], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string}, stream_key: {type: string}, codec: {type: string, enum: [PCMA, PCMU]}}}
-    ProtocolLabPlayback: {type: object, required: [stream_key, available], properties: {stream_key: {type: string}, available: {type: boolean}, rtmp: {type: string}, rtsp: {type: string}, http_flv: {type: string}, ws_flv: {type: string}, http_ts: {type: string}, fmp4: {type: string}, hls: {type: string}, dash: {type: string}, whep: {type: string}, whep_live: {type: string}}}
+    ProtocolLabPlayback: {type: object, required: [stream_key, available], description: Playback paths URL-escape each stream-key segment; absolute RTMP/RTSP URLs use bound listener discovery and normalize wildcard bind hosts to the management request host., properties: {stream_key: {type: string}, available: {type: boolean}, rtmp: {type: string}, rtsp: {type: string}, http_flv: {type: string}, ws_flv: {type: string}, http_ts: {type: string}, fmp4: {type: string}, hls: {type: string}, dash: {type: string}, whep: {type: string}, whep_live: {type: string}}}
     SIPLabSession: {type: object, properties: {id: {type: string}, identity: {type: string}, device_id: {type: string}, stream_key: {type: string}, mode: {type: string, enum: [publish, receive]}, state: {type: string, enum: [starting, active, contract, stopped, failed]}, direction: {type: string, enum: [inbound, outbound]}, codec: {type: string}, last_error: {type: string, description: Bounded redacted setup or terminal error}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, audio_rtp_packets_sent: {type: integer, format: int64}, audio_rtp_packets_received: {type: integer, format: int64}, video_rtp_packets_sent: {type: integer, format: int64}, video_rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_sent: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64}, started_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}, last_media_at: {type: string, format: date-time}, stopped_at: {type: string, format: date-time}}}
     SIPLabSessionView: {type: object, required: [session, playback], properties: {session: {$ref: '#/components/schemas/SIPLabSession'}, playback: {$ref: '#/components/schemas/ProtocolLabPlayback'}}}
     SIPLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/SIPLabSessionView'}}}}}}]}
     SIPLabSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SIPLabSessionView'}}}]}
     SIPCall:
       type: object
-      properties: {call_id: {type: string}, direction: {type: string, enum: [inbound, outbound]}, stream_key: {type: string}, codec: {type: string}, rtp_port: {type: integer}, rtcp_port: {type: integer}, video_codec: {type: string}, video_rtp_port: {type: integer}, video_rtcp_port: {type: integer}, remote_address: {type: string}, started_at: {type: string, format: date-time}, state: {type: string}, last_error: {type: string}, last_rtp_at: {type: string, format: date-time}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}}
+      properties: {call_id: {type: string}, direction: {type: string, enum: [inbound, outbound]}, stream_key: {type: string}, codec: {type: string}, rtp_port: {type: integer}, rtcp_port: {type: integer}, video_codec: {type: string}, video_rtp_port: {type: integer}, video_rtcp_port: {type: integer}, remote_address: {type: string}, started_at: {type: string, format: date-time}, state: {type: string}, last_error: {type: string}, last_rtp_at: {type: string, format: date-time}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64, description: Valid RTCP packets parsed by the call's real audio and video receiver sockets.}}
     SIPMetrics:
       type: object
       additionalProperties: false
@@ -1132,7 +1132,7 @@ components:
     GBSessionStart: {type: object, required: [stream_key, session_id], properties: {stream_key: {type: string}, session_id: {type: string}}}
     GBSession: {type: object, properties: {id: {type: string}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string}, direction: {type: string, enum: [inbound, outbound]}, state: {type: string}, local_port: {type: integer}, transport: {type: string}}}
     GBLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, channel_id, stream_key], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string, maxLength: 256, description: 'Authoritative publish key for the loopback Lab simulator; printable ASCII without leading/trailing whitespace. Ordinary GB28181 devices publish to {stream_prefix}/{channel_id}.'}}}
-    GBLabSession: {type: object, properties: {id: {type: string}, identity: {type: string}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string}, mode: {type: string, enum: [publish, receive]}, state: {type: string, enum: [starting, active, stopped, failed]}, direction: {type: string, enum: [inbound, outbound]}, last_error: {type: string, description: Bounded redacted setup or terminal error}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_sent: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64}, ps_frames_sent: {type: integer, format: int64}, ps_frames_received: {type: integer, format: int64}, started_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}, last_media_at: {type: string, format: date-time}, stopped_at: {type: string, format: date-time}}}
+    GBLabSession: {type: object, properties: {id: {type: string}, identity: {type: string}, device_id: {type: string}, channel_id: {type: string}, stream_key: {type: string}, mode: {type: string, enum: [publish, receive]}, state: {type: string, enum: [starting, active, stopped, failed]}, direction: {type: string, enum: [inbound, outbound]}, last_error: {type: string, description: Bounded redacted setup or terminal error}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_sent: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64}, ps_frames_sent: {type: integer, format: int64}, ps_frames_received: {type: integer, format: int64}, audio_frames_sent: {type: integer, format: int64}, audio_frames_received: {type: integer, format: int64}, video_frames_sent: {type: integer, format: int64}, video_frames_received: {type: integer, format: int64}, started_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}, last_media_at: {type: string, format: date-time}, stopped_at: {type: string, format: date-time}}}
     GBLabSessionView: {type: object, required: [session, playback], properties: {session: {$ref: '#/components/schemas/GBLabSession'}, playback: {$ref: '#/components/schemas/ProtocolLabPlayback'}}}
     GBLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/GBLabSessionView'}}}}}}]}
     GBLabSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/GBLabSessionView'}}}]}

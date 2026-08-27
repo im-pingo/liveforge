@@ -129,9 +129,9 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
 - **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
-- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久 SDP/编解码/RTP/PS/UDP 假设备检查；两个 provider 都支持可取消停止/关闭清理的持久回环发布/接收和跨协议播放。SIP 使用独立 RTP 轨道发布 H.264 加可选 PCMA/PCMU，GB28181 在 PS/RTP 中复用 H.264 加 8 kHz 单声道 G.711A。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
+- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式先校验 H.264 加 G.711A，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
 - **GB28181 Lab 流键** — 发布会使用请求中的 `stream_key`（可打印 ASCII、最长 256 字节且不能有首尾空白）；该覆盖只接受 loopback 模拟器请求，真实设备仍使用 `{stream_prefix}/{channel_id}`
-- **实验室诊断** — 失败的持久 SIP/GB28181 会话仍会显示有界脱敏的 `last_error`；会话显示媒体及分轨计数，Streams 页面同时展示音视频帧总数、随关键帧递增的 GOP generation，以及独立的 GOP/Audio Cache 状态
+- **实验室诊断** — Manager 保留全部活跃会话和最新 16 条终态记录。失败会话的有界 `last_error` 会先移除 SIP 凭据与 bearer token；会话视图展示接收端 RTCP 及独立音视频计数。播放路径会逐段转义流键，并按实际绑定监听器生成 RTMP/RTSP 绝对地址
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数

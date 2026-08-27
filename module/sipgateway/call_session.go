@@ -45,24 +45,62 @@ type CallSession struct {
 	rtpPacketsRecv  atomic.Uint64
 	rtpBytesSent    atomic.Uint64
 	rtpBytesRecv    atomic.Uint64
+	rtcpPacketsRecv atomic.Uint64
 	rtpIdleTimeout  time.Duration
 	onTerminate     func(*CallSession, CallState, error)
 	established     atomic.Bool
 	terminateOnce   sync.Once
 	stopOnce        sync.Once
-	rtcpSendOnce    sync.Once
+	rtcpSender      rtcpSenderState
 	video           *sipVideoTrack
 	closed          chan struct{}
 }
 
 type sipVideoTrack struct {
-	codec        negotiatedCodec
-	rtpPort      int
-	rtcpPort     int
-	conn         *net.UDPConn
-	rtcpConn     *net.UDPConn
-	remoteAddr   *net.UDPAddr
-	rtcpSendOnce sync.Once
+	codec      negotiatedCodec
+	rtpPort    int
+	rtcpPort   int
+	conn       *net.UDPConn
+	rtcpConn   *net.UDPConn
+	remoteAddr *net.UDPAddr
+	rtcpSender rtcpSenderState
+}
+
+const sipSenderReportInterval = time.Second
+
+type rtcpSenderState struct {
+	mu          sync.Mutex
+	ssrc        uint32
+	packetCount uint32
+	octetCount  uint32
+	lastReport  time.Time
+}
+
+type senderReportSnapshot struct {
+	ssrc        uint32
+	rtpTime     uint32
+	packetCount uint32
+	octetCount  uint32
+	ntpTime     uint64
+}
+
+func (s *rtcpSenderState) recordPacket(packet *pionrtp.Packet, now time.Time) (senderReportSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ssrc = packet.SSRC
+	s.packetCount++
+	s.octetCount += uint32(len(packet.Payload))
+	if !s.lastReport.IsZero() && now.Sub(s.lastReport) < sipSenderReportInterval {
+		return senderReportSnapshot{}, false
+	}
+	s.lastReport = now
+	return senderReportSnapshot{
+		ssrc:        s.ssrc,
+		rtpTime:     packet.Timestamp,
+		packetCount: s.packetCount,
+		octetCount:  s.octetCount,
+		ntpTime:     sipNTPTime(now),
+	}, true
 }
 
 type dialogTeardown struct {
@@ -183,32 +221,74 @@ func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remote
 	if err != nil {
 		return err
 	}
-	var videoConn *net.UDPConn
+	rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: cs.rtcpPort})
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	var videoConn, videoRTCPConn *net.UDPConn
 	if cs.video != nil {
 		videoConn, err = net.ListenUDP("udp", &net.UDPAddr{Port: cs.video.rtpPort})
 		if err != nil {
 			_ = conn.Close()
+			_ = rtcpConn.Close()
+			return err
+		}
+		videoRTCPConn, err = net.ListenUDP("udp", &net.UDPAddr{Port: cs.video.rtcpPort})
+		if err != nil {
+			_ = conn.Close()
+			_ = rtcpConn.Close()
+			_ = videoConn.Close()
 			return err
 		}
 	}
 
 	cs.mu.Lock()
 	cs.conn = conn
+	cs.rtcpConn = rtcpConn
 	if remoteIP != "" && remotePort > 0 {
 		cs.remoteAddr = &net.UDPAddr{IP: net.ParseIP(remoteIP), Port: remotePort}
 	}
 	if cs.video != nil {
 		cs.video.conn = videoConn
+		cs.video.rtcpConn = videoRTCPConn
 	}
 	cs.state = CallStateActive
 	cs.mu.Unlock()
 	cs.established.Store(true)
 
 	go cs.receiveLoop()
+	go cs.receiveInboundRTCPLoop(rtcpConn)
 	if cs.video != nil {
 		go cs.receiveVideoLoop(cs.video)
+		go cs.receiveInboundRTCPLoop(videoRTCPConn)
 	}
 	return nil
+}
+
+func (cs *CallSession) receiveInboundRTCPLoop(conn *net.UDPConn) {
+	buf := make([]byte, 1500)
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			return
+		}
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-cs.closed:
+				return
+			default:
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return
+		}
+		packets, err := rtcp.Unmarshal(buf[:n])
+		if err == nil && len(packets) > 0 {
+			cs.rtcpPacketsRecv.Add(uint64(len(packets)))
+		}
+	}
 }
 
 func (cs *CallSession) startOutbound(stream *core.Stream, remoteIP string, remotePort int) error {
@@ -318,6 +398,7 @@ func (cs *CallSession) receiveRTCPLoop() {
 		if err != nil || len(packets) == 0 {
 			continue
 		}
+		cs.rtcpPacketsRecv.Add(uint64(len(packets)))
 		lastValid = time.Now()
 	}
 }
@@ -438,7 +519,7 @@ func (cs *CallSession) receiveVideoRTCPLoop(track *sipVideoTrack) {
 			cs.networkLost(err)
 			return
 		}
-		_, _, err := track.rtcpConn.ReadFromUDP(buf)
+		n, sender, err := track.rtcpConn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-cs.closed:
@@ -452,6 +533,14 @@ func (cs *CallSession) receiveVideoRTCPLoop(track *sipVideoTrack) {
 			cs.networkLost(err)
 			return
 		}
+		if track.remoteAddr != nil && track.remoteAddr.IP != nil && !sender.IP.Equal(track.remoteAddr.IP) {
+			continue
+		}
+		packets, err := rtcp.Unmarshal(buf[:n])
+		if err != nil || len(packets) == 0 {
+			continue
+		}
+		cs.rtcpPacketsRecv.Add(uint64(len(packets)))
 		lastValid = time.Now()
 	}
 }
@@ -512,18 +601,18 @@ func (cs *CallSession) sendLoop() {
 
 		switch {
 		case frame.MediaType == avframe.MediaTypeAudio && frame.Codec == cs.codec.Codec:
-			if !cs.sendFrame(frame, audioPacketizer, audioSession, conn, rtcpConn, remoteAddr, &cs.rtcpSendOnce) {
+			if !cs.sendFrame(frame, audioPacketizer, audioSession, conn, rtcpConn, remoteAddr, &cs.rtcpSender) {
 				return
 			}
 		case video != nil && frame.MediaType == avframe.MediaTypeVideo && frame.Codec == video.codec.Codec:
-			if !cs.sendFrame(frame, videoPacketizer, videoSession, video.conn, video.rtcpConn, video.remoteAddr, &video.rtcpSendOnce) {
+			if !cs.sendFrame(frame, videoPacketizer, videoSession, video.conn, video.rtcpConn, video.remoteAddr, &video.rtcpSender) {
 				return
 			}
 		}
 	}
 }
 
-func (cs *CallSession) sendFrame(frame *avframe.AVFrame, packetizer rtp.Packetizer, session *rtp.Session, conn, rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, reportOnce *sync.Once) bool {
+func (cs *CallSession) sendFrame(frame *avframe.AVFrame, packetizer rtp.Packetizer, session *rtp.Session, conn, rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, reportState *rtcpSenderState) bool {
 	packets, err := packetizer.Packetize(frame, 1400)
 	if err != nil || len(packets) == 0 {
 		return true
@@ -540,31 +629,37 @@ func (cs *CallSession) sendFrame(frame *avframe.AVFrame, packetizer rtp.Packetiz
 			return false
 		}
 		cs.recordRTPSent(n)
-		cs.sendSenderReport(rtcpConn, remoteAddr, packet.Timestamp, reportOnce)
+		cs.sendSenderReport(rtcpConn, remoteAddr, packet, reportState)
 	}
 	return true
 }
 
-func (cs *CallSession) sendSenderReport(rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, rtpTimestamp uint32, reportOnce *sync.Once) {
-	if remoteAddr == nil || remoteAddr.Port >= 65535 {
+func (cs *CallSession) sendSenderReport(rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, packet *pionrtp.Packet, state *rtcpSenderState) {
+	if rtcpConn == nil || remoteAddr == nil || remoteAddr.Port >= 65535 || packet == nil || state == nil {
 		return
 	}
-	reportOnce.Do(func() {
-		if rtcpConn == nil {
-			return
-		}
-		data, err := (&rtcp.SenderReport{
-			SSRC:        0x4c465247,
-			NTPTime:     uint64(time.Now().UnixNano()),
-			RTPTime:     rtpTimestamp,
-			PacketCount: uint32(cs.rtpPacketsSent.Load()),
-			OctetCount:  uint32(cs.rtpBytesSent.Load()),
-		}).Marshal()
-		if err != nil {
-			return
-		}
-		_, _ = rtcpConn.WriteToUDP(data, &net.UDPAddr{IP: remoteAddr.IP, Port: remoteAddr.Port + 1})
-	})
+	report, due := state.recordPacket(packet, time.Now())
+	if !due {
+		return
+	}
+	data, err := (&rtcp.SenderReport{
+		SSRC:        report.ssrc,
+		NTPTime:     report.ntpTime,
+		RTPTime:     report.rtpTime,
+		PacketCount: report.packetCount,
+		OctetCount:  report.octetCount,
+	}).Marshal()
+	if err != nil {
+		return
+	}
+	_, _ = rtcpConn.WriteToUDP(data, &net.UDPAddr{IP: remoteAddr.IP, Port: remoteAddr.Port + 1})
+}
+
+func sipNTPTime(now time.Time) uint64 {
+	const ntpEpochOffset = 2208988800
+	seconds := uint64(now.Unix() + ntpEpochOffset)
+	fraction := uint64(now.Nanosecond()) * (uint64(1) << 32) / uint64(time.Second)
+	return seconds<<32 | fraction
 }
 
 // Close terminates a session and notifies its gateway owner exactly once.
@@ -682,6 +777,7 @@ func (cs *CallSession) snapshot() CallSnapshot {
 	snapshot.RTPPacketsRecv = cs.rtpPacketsRecv.Load()
 	snapshot.RTPBytesSent = cs.rtpBytesSent.Load()
 	snapshot.RTPBytesRecv = cs.rtpBytesRecv.Load()
+	snapshot.RTCPPacketsRecv = cs.rtcpPacketsRecv.Load()
 	return snapshot
 }
 

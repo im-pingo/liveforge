@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/im-pingo/liveforge/module/gb28181"
@@ -52,7 +54,7 @@ func (h *Handlers) handleSIPGatewayLabSessions(w http.ResponseWriter, r *http.Re
 	case http.MethodGet:
 		views := make([]protocolLabSessionView, 0)
 		for _, session := range provider.ListLabSessions() {
-			views = append(views, h.sipLabView(session))
+			views = append(views, h.sipLabView(r, session))
 		}
 		writeJSON(w, http.StatusOK, protocolLabListResponse{Sessions: views})
 	case http.MethodPost:
@@ -66,7 +68,7 @@ func (h *Handlers) handleSIPGatewayLabSessions(w http.ResponseWriter, r *http.Re
 			writeSIPLabError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, h.sipLabView(session))
+		writeJSON(w, http.StatusCreated, h.sipLabView(r, session))
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -103,7 +105,7 @@ func (h *Handlers) handleGB28181LabSessions(w http.ResponseWriter, r *http.Reque
 	case http.MethodGet:
 		views := make([]protocolLabSessionView, 0)
 		for _, session := range provider.ListLabSessions() {
-			views = append(views, h.gbLabView(session))
+			views = append(views, h.gbLabView(r, session))
 		}
 		writeJSON(w, http.StatusOK, protocolLabListResponse{Sessions: views})
 	case http.MethodPost:
@@ -117,7 +119,7 @@ func (h *Handlers) handleGB28181LabSessions(w http.ResponseWriter, r *http.Reque
 			writeGBLabError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, h.gbLabView(session))
+		writeJSON(w, http.StatusCreated, h.gbLabView(r, session))
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -150,15 +152,15 @@ func (h *Handlers) gb28181LabProvider() (gb28181LabProvider, bool) {
 	return provider, ok
 }
 
-func (h *Handlers) sipLabView(session sipgateway.LabSessionSnapshot) protocolLabSessionView {
-	return protocolLabSessionView{Session: session, Playback: h.labPlayback(session.StreamKey)}
+func (h *Handlers) sipLabView(r *http.Request, session sipgateway.LabSessionSnapshot) protocolLabSessionView {
+	return protocolLabSessionView{Session: session, Playback: h.labPlayback(r, session.StreamKey)}
 }
 
-func (h *Handlers) gbLabView(session gb28181.LabSessionSnapshot) protocolLabSessionView {
-	return protocolLabSessionView{Session: session, Playback: h.labPlayback(session.StreamKey)}
+func (h *Handlers) gbLabView(r *http.Request, session gb28181.LabSessionSnapshot) protocolLabSessionView {
+	return protocolLabSessionView{Session: session, Playback: h.labPlayback(r, session.StreamKey)}
 }
 
-func (h *Handlers) labPlayback(streamKey string) protocolLabPlayback {
+func (h *Handlers) labPlayback(r *http.Request, streamKey string) protocolLabPlayback {
 	key := strings.TrimSpace(streamKey)
 	playback := protocolLabPlayback{StreamKey: key}
 	if key == "" {
@@ -167,25 +169,70 @@ func (h *Handlers) labPlayback(streamKey string) protocolLabPlayback {
 	if stream, ok := h.server.StreamHub().Find(key); ok && stream.Publisher() != nil {
 		playback.Available = true
 	}
+	escapedKey := escapeStreamPath(key)
 	if cfg := h.server.Config(); cfg.RTMP.Enabled && cfg.RTMP.Listen != "" {
-		playback.RTMP = "rtmp://" + cfg.RTMP.Listen + "/" + key
+		endpoint := endpointAddress(h.server, "rtmp", cfg.RTMP.Listen)
+		playback.RTMP = "rtmp://" + playbackEndpointAuthority(r, endpoint) + "/" + escapedKey
 	}
 	if cfg := h.server.Config(); cfg.RTSP.Enabled && cfg.RTSP.Listen != "" {
-		playback.RTSP = "rtsp://" + cfg.RTSP.Listen + "/" + key
+		endpoint := endpointAddress(h.server, "rtsp", cfg.RTSP.Listen)
+		playback.RTSP = "rtsp://" + playbackEndpointAuthority(r, endpoint) + "/" + escapedKey
 	}
 	if cfg := h.server.Config(); cfg.HTTP.Enabled {
-		playback.HTTPFLV = "/" + key + ".flv"
-		playback.WSFLV = "/ws/" + key + ".flv"
-		playback.HTTPMPEGTS = "/" + key + ".ts"
-		playback.FMP4 = "/" + key + ".mp4"
-		playback.HLS = "/" + key + ".m3u8"
-		playback.DASH = "/" + key + ".mpd"
+		playback.HTTPFLV = "/" + escapedKey + ".flv"
+		playback.WSFLV = "/ws/" + escapedKey + ".flv"
+		playback.HTTPMPEGTS = "/" + escapedKey + ".ts"
+		playback.FMP4 = "/" + escapedKey + ".mp4"
+		playback.HLS = "/" + escapedKey + ".m3u8"
+		playback.DASH = "/" + escapedKey + ".mpd"
 	}
 	if cfg := h.server.Config(); cfg.WebRTC.Enabled {
-		playback.WHEP = "/webrtc/whep/" + key + "?mode=realtime"
-		playback.WHEPLive = "/webrtc/whep/" + key + "?mode=live"
+		playback.WHEP = "/webrtc/whep/" + escapedKey + "?mode=realtime"
+		playback.WHEPLive = "/webrtc/whep/" + escapedKey + "?mode=live"
 	}
 	return playback
+}
+
+func escapeStreamPath(key string) string {
+	segments := strings.Split(key, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
+}
+
+func playbackEndpointAuthority(r *http.Request, endpoint string) string {
+	value := strings.TrimSpace(endpoint)
+	fallbackHost := "127.0.0.1"
+	if r != nil {
+		fallbackHost = requestHostname(r.Host, fallbackHost)
+	}
+	if strings.HasPrefix(value, ":") {
+		return net.JoinHostPort(fallbackHost, strings.TrimPrefix(value, ":"))
+	}
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return value
+	}
+	if isWildcardEndpointHost(host) {
+		return net.JoinHostPort(fallbackHost, port)
+	}
+	return value
+}
+
+func requestHostname(authority, fallback string) string {
+	if host, _, err := net.SplitHostPort(authority); err == nil && host != "" {
+		return strings.Trim(host, "[]")
+	}
+	if host := strings.Trim(authority, "[]"); host != "" {
+		return host
+	}
+	return fallback
+}
+
+func isWildcardEndpointHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	return host == "" || host == "*" || host == "0.0.0.0" || host == "::" || host == "0:0:0:0:0:0:0:0"
 }
 
 func decodeStrictJSON(r *http.Request, destination any) error {

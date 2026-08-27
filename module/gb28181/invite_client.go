@@ -22,7 +22,10 @@ type inviteClient struct {
 
 // invite sends an INVITE to a device channel and sets up the media session.
 func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID string, params map[string]string) (*MediaSession, error) {
-	streamKey := fmt.Sprintf("%s/%s", ic.handler.prefix, channelID)
+	return ic.inviteStream(ctx, device, channelID, fmt.Sprintf("%s/%s", ic.handler.prefix, channelID), params)
+}
+
+func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channelID, streamKey string, params map[string]string) (*MediaSession, error) {
 	publishCtx := outboundPublishContext(device, streamKey, params)
 	if err := authorizePublish(ic.handler.bus, publishCtx); err != nil {
 		return nil, err
@@ -107,8 +110,12 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send INVITE: %w", err)
 	}
-	defer invTx.Close()
-
+	keepTransaction := false
+	defer func() {
+		if !keepTransaction {
+			invTx.Close()
+		}
+	}()
 	// Wait for final response
 	select {
 	case <-invTx.Done():
@@ -152,6 +159,7 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("set publisher: %w", err)
 	}
+	session.InviteTx = invTx
 	session.SetState(SessionStateStreaming)
 	ic.handler.sessions.Add(session)
 	go receiver.Run()
@@ -164,6 +172,7 @@ func (ic *inviteClient) invite(ctx context.Context, device *Device, channelID st
 	session.startPublishLifecycle(func() {
 		ic.handler.bus.EmitAsync(core.EventPublish, publishCtx)
 	})
+	keepTransaction = true
 
 	slog.Info("outbound invite accepted", "module", "gb28181",
 		"device", device.DeviceID, "channel", channelID,

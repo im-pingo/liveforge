@@ -6,19 +6,24 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
 // RTPReceiver listens for RTP packets over UDP or TCP.
 type RTPReceiver struct {
 	conn      *net.UDPConn
+	rtcpConn  *net.UDPConn
 	publisher *Publisher
 	reorder   *reorderBuffer
 	done      chan struct{}
 	closed    bool
 	mu        sync.Mutex
+	rtcpWG    sync.WaitGroup
+	rtcpRecv  atomic.Uint64
 }
 
 var newRTPReceiver = NewRTPReceiver
@@ -30,9 +35,15 @@ func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen UDP :%d: %w", port, err)
 	}
+	rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port + 1})
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("listen RTCP UDP :%d: %w", port+1, err)
+	}
 
 	return &RTPReceiver{
 		conn:      conn,
+		rtcpConn:  rtcpConn,
 		publisher: publisher,
 		reorder:   newReorderBuffer(50),
 		done:      make(chan struct{}),
@@ -41,6 +52,9 @@ func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
 
 // Run starts the receive loop. Blocks until closed or error.
 func (r *RTPReceiver) Run() {
+	r.rtcpWG.Add(1)
+	go r.runRTCP()
+	defer r.rtcpWG.Wait()
 	buf := make([]byte, 2048)
 	for {
 		r.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -76,6 +90,31 @@ func (r *RTPReceiver) Run() {
 	}
 }
 
+func (r *RTPReceiver) runRTCP() {
+	defer r.rtcpWG.Done()
+	buf := make([]byte, 2048)
+	for {
+		_ = r.rtcpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n, _, err := r.rtcpConn.ReadFromUDP(buf)
+		if err != nil {
+			r.mu.Lock()
+			closed := r.closed
+			r.mu.Unlock()
+			if closed {
+				return
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return
+		}
+		packets, err := rtcp.Unmarshal(buf[:n])
+		if err == nil {
+			r.rtcpRecv.Add(uint64(len(packets)))
+		}
+	}
+}
+
 // Close stops the receiver.
 func (r *RTPReceiver) Close() {
 	r.mu.Lock()
@@ -85,13 +124,17 @@ func (r *RTPReceiver) Close() {
 	}
 	r.closed = true
 	close(r.done)
-	r.conn.Close()
+	_ = r.conn.Close()
+	_ = r.rtcpConn.Close()
 }
 
 // LocalPort returns the local UDP port.
 func (r *RTPReceiver) LocalPort() int {
 	return r.conn.LocalAddr().(*net.UDPAddr).Port
 }
+
+// RTCPPacketsReceived returns the number of valid control packets parsed by LiveForge.
+func (r *RTPReceiver) RTCPPacketsReceived() uint64 { return r.rtcpRecv.Load() }
 
 // reorderBuffer reorders RTP packets by sequence number for UDP delivery.
 type reorderBuffer struct {
