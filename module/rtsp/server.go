@@ -506,7 +506,9 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 				return
 			}
 		}
-		session.Touch()
+		if err := touchActivePublisherSession(session, publisher); err != nil {
+			return
+		}
 	}
 }
 
@@ -519,8 +521,7 @@ func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []
 		return err
 	}
 	if channel%2 != 0 {
-		session.Touch()
-		return nil
+		return touchActivePublisherSession(session, publisher)
 	}
 	pkt := &pionrtp.Packet{}
 	if err := pkt.Unmarshal(data); err == nil {
@@ -528,8 +529,7 @@ func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []
 			return err
 		}
 	}
-	session.Touch()
-	return nil
+	return touchActivePublisherSession(session, publisher)
 }
 
 func activePublisherForIngress(session *RTSPSession) (*RTSPPublisher, error) {
@@ -545,6 +545,25 @@ func activePublisherForIngress(session *RTSPSession) (*RTSPPublisher, error) {
 		return nil, fmt.Errorf("RTSP publisher %s no longer owns stream", publisher.id)
 	}
 	return publisher, nil
+}
+
+func touchActivePublisherSession(session *RTSPSession, publisher *RTSPPublisher) error {
+	if publisher == nil || publisher.stream == nil {
+		return fmt.Errorf("RTSP session %s has no active publisher", session.ID)
+	}
+	touched := false
+	active := publisher.stream.WithActivePublisher(publisher, func() {
+		publisher.mu.Lock()
+		defer publisher.mu.Unlock()
+		if publisher.closed {
+			return
+		}
+		touched = session.touchPublisherIfCurrent(publisher.stream, publisher)
+	})
+	if !active || !touched {
+		return fmt.Errorf("RTSP publisher %s no longer owns session activity", publisher.id)
+	}
+	return nil
 }
 
 func (m *Module) cleanupSession(session *RTSPSession) bool {

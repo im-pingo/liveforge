@@ -138,6 +138,67 @@ func TestRemovePublisherIfKeepsReplacement(t *testing.T) {
 	}
 }
 
+func TestWithActivePublisherLinearizesActivityAndReplacement(t *testing.T) {
+	s := NewStream("live/linearized-activity", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	oldPublisher := &testPublisher{id: "old"}
+	if err := s.SetPublisher(oldPublisher); err != nil {
+		t.Fatal(err)
+	}
+	activityEntered := make(chan struct{})
+	releaseActivity := make(chan struct{})
+	activityDone := make(chan bool, 1)
+	go func() {
+		activityDone <- s.WithActivePublisher(oldPublisher, func() {
+			close(activityEntered)
+			<-releaseActivity
+		})
+	}()
+
+	select {
+	case <-activityEntered:
+	case <-time.After(time.Second):
+		t.Fatal("active publisher activity did not start")
+	}
+	removeStarted := make(chan struct{})
+	removeDone := make(chan bool, 1)
+	go func() {
+		close(removeStarted)
+		removeDone <- s.RemovePublisherIf(oldPublisher)
+	}()
+	<-removeStarted
+	select {
+	case <-removeDone:
+		t.Fatal("publisher replacement crossed active activity boundary")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseActivity)
+	if accepted := <-activityDone; !accepted {
+		t.Fatal("active publisher activity was rejected")
+	}
+	if removed := <-removeDone; !removed {
+		t.Fatal("old publisher was not removed after activity completed")
+	}
+
+	replacement := &testPublisher{id: "replacement"}
+	if err := s.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	staleActivityRan := false
+	if s.WithActivePublisher(oldPublisher, func() { staleActivityRan = true }) {
+		t.Fatal("stale publisher activity was accepted")
+	}
+	if staleActivityRan {
+		t.Fatal("stale publisher activity callback ran")
+	}
+	activeActivityRan := false
+	if !s.WithActivePublisher(replacement, func() { activeActivityRan = true }) {
+		t.Fatal("replacement publisher activity was rejected")
+	}
+	if !activeActivityRan {
+		t.Fatal("replacement publisher activity callback did not run")
+	}
+}
+
 func TestStreamPublisherGenerationIsolation(t *testing.T) {
 	s := NewStream("live/generation", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
 	pubA := &testPublisher{

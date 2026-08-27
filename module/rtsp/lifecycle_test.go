@@ -381,6 +381,55 @@ func TestInterleavedStalePublisherErrorStopsActivity(t *testing.T) {
 	}
 }
 
+func TestInterleavedPublisherReplacementDuringPacketStopsWithoutActivity(t *testing.T) {
+	stream, publisher, session := newRTSPIngressSession(t, "tcp-replaced-during-packet")
+	depacketizeEntered := make(chan struct{})
+	releaseDepacketize := make(chan struct{})
+	publisher.depacketizers[96] = &blockingRTSPDepacketizer{
+		entered: depacketizeEntered,
+		release: releaseDepacketize,
+	}
+	old := time.Now().Add(-time.Hour)
+	session.mu.Lock()
+	session.lastTouch = old
+	session.mu.Unlock()
+	pkt := &pionrtp.Packet{
+		Header:  pionrtp.Header{Version: 2, PayloadType: 96},
+		Payload: []byte{1},
+	}
+	data, err := pkt.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- new(Module).processInterleaved(session, 0, data)
+	}()
+
+	select {
+	case <-depacketizeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("interleaved packet did not reach depacketizer")
+	}
+	replaceRTSPIngressPublisher(t, stream, publisher)
+	close(releaseDepacketize)
+
+	select {
+	case err := <-processDone:
+		if err == nil {
+			t.Fatal("interleaved packet completed after publisher replacement")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("interleaved packet did not stop after publisher replacement")
+	}
+	session.mu.Lock()
+	touched := session.lastTouch
+	session.mu.Unlock()
+	if !touched.Equal(old) {
+		t.Fatalf("replaced interleaved publisher refreshed session from %v to %v", old, touched)
+	}
+}
+
 func TestUDPPublishActivityRefreshesSession(t *testing.T) {
 	ports, err := portalloc.New(42200, 42201)
 	if err != nil {
@@ -514,6 +563,76 @@ func TestUDPPublishLoopStopsForClosedPublisher(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("UDP publish loop did not stop for closed publisher")
 	}
+}
+
+func TestUDPPublisherReplacementDuringPacketStopsWithoutActivity(t *testing.T) {
+	transport := newEphemeralRTSPUDPTransport(t)
+	defer transport.Close()
+	stream, publisher, session := newRTSPIngressSession(t, "udp-replaced-during-packet")
+	depacketizeEntered := make(chan struct{})
+	releaseDepacketize := make(chan struct{})
+	publisher.depacketizers[96] = &blockingRTSPDepacketizer{
+		entered: depacketizeEntered,
+		release: releaseDepacketize,
+	}
+	old := time.Now().Add(-time.Hour)
+	session.mu.Lock()
+	session.lastTouch = old
+	session.mu.Unlock()
+	loopDone := make(chan struct{})
+	go func() {
+		new(Module).udpPublishLoop(transport, session)
+		close(loopDone)
+	}()
+
+	pkt := &pionrtp.Packet{
+		Header:  pionrtp.Header{Version: 2, PayloadType: 96},
+		Payload: []byte{1},
+	}
+	data, err := pkt.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtpPort, _ := transport.ServerPorts()
+	client, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: rtpPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, err := client.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-depacketizeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("UDP packet did not reach depacketizer")
+	}
+	replaceRTSPIngressPublisher(t, stream, publisher)
+	close(releaseDepacketize)
+
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("UDP publish loop did not stop after publisher replacement")
+	}
+	session.mu.Lock()
+	touched := session.lastTouch
+	session.mu.Unlock()
+	if !touched.Equal(old) {
+		t.Fatalf("replaced UDP publisher refreshed session from %v to %v", old, touched)
+	}
+}
+
+type blockingRTSPDepacketizer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingRTSPDepacketizer) Depacketize(*pionrtp.Packet) (*avframe.AVFrame, error) {
+	close(d.entered)
+	<-d.release
+	return nil, nil
 }
 
 func newRTSPIngressSession(t *testing.T, id string) (*core.Stream, *RTSPPublisher, *RTSPSession) {

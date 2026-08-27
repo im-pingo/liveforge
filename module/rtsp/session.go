@@ -303,6 +303,16 @@ func (s *RTSPSession) Touch() {
 	s.mu.Unlock()
 }
 
+func (s *RTSPSession) touchPublisherIfCurrent(stream *core.Stream, publisher *RTSPPublisher) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed || s.Stream != stream || s.Publisher != publisher {
+		return false
+	}
+	s.lastTouch = time.Now()
+	return true
+}
+
 func (s *RTSPSession) GetState() SessionState {
 	s.mu.Lock()
 	defer s.mu.Unlock()

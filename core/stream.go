@@ -464,6 +464,19 @@ func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) b
 	return s.writeFrameLocked(frame)
 }
 
+// WithActivePublisher runs activity while pub owns the active publishing
+// generation. activity executes with the stream lock held and must not call
+// any Stream method.
+func (s *Stream) WithActivePublisher(pub Publisher, activity func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if isNilPublisher(pub) || !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
+		return false
+	}
+	activity()
+	return true
+}
+
 func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 	// Enforce max_bitrate_per_stream: reject non-header frames when over limit
 	if maxKbps := s.limits.MaxBitratePerStream; maxKbps > 0 {
