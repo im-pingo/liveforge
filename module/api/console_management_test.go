@@ -97,6 +97,23 @@ func consoleNavigationViews(doc *html.Node) []string {
 	return views
 }
 
+func consoleDirectNavigationViews(node *html.Node) []string {
+	var views []string
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type != html.ElementNode || child.Data != "div" {
+			continue
+		}
+		for tab := child.FirstChild; tab != nil; tab = tab.NextSibling {
+			if tab.Type == html.ElementNode && tab.Data == "button" {
+				if view := consoleAttribute(tab, "data-view"); view != "" {
+					views = append(views, view)
+				}
+			}
+		}
+	}
+	return views
+}
+
 func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 	doc, _ := consoleDocument(t)
 	elements := consoleElementsByID(doc)
@@ -166,6 +183,19 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 		walkGroup(groupNode)
 		if !found {
 			t.Errorf("navigation group %q does not contain %q", group.id, group.view)
+		}
+	}
+	for _, group := range []struct {
+		id   string
+		want string
+	}{
+		{"nav-workspace", "streams,gb28181,sip,storage"},
+		{"nav-operations", "cluster"},
+		{"nav-system", "config,security"},
+	} {
+		got := strings.Join(consoleDirectNavigationViews(elements[group.id]), ",")
+		if got != group.want {
+			t.Errorf("navigation group %q direct views = %q, want %q", group.id, got, group.want)
 		}
 	}
 
@@ -243,6 +273,19 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 	if !strings.Contains(script, "documentData.desired_document || documentData.effective_document") {
 		t.Error("config editor must prefer desired values so restart-required settings are not overwritten")
 	}
+	for _, required := range []string{
+		"config-editor",
+		"config-effective-document",
+		"config-source-details",
+		"config-schema",
+		"documentData.effective_document",
+		"documentData.writable",
+		"document.getElementById(\"config-apply\").disabled = !documentData.writable",
+	} {
+		if !strings.Contains(script, required) && elements[required] == nil {
+			t.Errorf("config console is missing complete-document contract %q", required)
+		}
+	}
 	if !strings.Contains(script, "config-schema") || !strings.Contains(script, "JSON.stringify(schemaData, null, 2)") {
 		t.Error("config page must render the complete runtime JSON Schema")
 	}
@@ -272,6 +315,95 @@ func TestConsoleProtocolLabErrorsAreVisibleAndReadable(t *testing.T) {
 			t.Errorf("console protocol lab error contract is missing %q", contract)
 		}
 	}
+}
+
+func TestConsoleConfigBrowserRendersDesiredEffectiveSchemaAndSourceDetails(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Desired        string `json:"desired"`
+			Effective      string `json:"effective"`
+			Pending        string `json:"pending"`
+			PendingCount   string `json:"pendingCount"`
+			SourceDetails  string `json:"sourceDetails"`
+			Schema         string `json:"schema"`
+			ApplyDisabled  bool   `json:"applyDisabled"`
+			EditorReadOnly bool   `json:"editorReadOnly"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			var desired = "# source comment\nserver:\n  name: desired\napi:\n  auth:\n    bearer_token: '[REDACTED]'\n";
+			var effective = "server:\n  name: effective\n";
+			apiFetch = function(url) {
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"redis", active_version:"v9", pending_restart:["server.name"]});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:desired, effective_document:effective, writable:true, source_details:{kind:"redis", file:{path:"/etc/liveforge/config.yaml"}, http:{url:"https://config.example.test/liveforge"}, consul:{address:"https://consul.example.test", prefix:"liveforge"}, redis:{addr:"redis.example.test:6379", username:"liveforge", db:0, prefix:"liveforge:", hash:"config", version_key:"config:version", tls:true}}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1", $defs:{config:{type:"object"}}});
+				return Promise.resolve({});
+			};
+			window.__configProbe = null;
+			refreshRuntimeConfig().then(function() {
+				window.__configProbe = {
+					desired: document.getElementById("config-editor").value,
+					effective: document.getElementById("config-effective-document").textContent,
+					pending: document.getElementById("config-pending").textContent,
+					pendingCount: document.getElementById("config-pending-count").textContent,
+					sourceDetails: document.getElementById("config-source-details").textContent,
+					schema: document.getElementById("config-schema").textContent,
+					applyDisabled: document.getElementById("config-apply").disabled,
+					editorReadOnly: document.getElementById("config-editor").readOnly
+				};
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(20*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("probe complete config rendering: %v", err)
+		}
+		if !strings.Contains(probe.Desired, "name: desired") || !strings.Contains(probe.Desired, "[REDACTED]") || strings.Contains(probe.Desired, "source-secret") {
+			t.Errorf("desired config document = %q", probe.Desired)
+		}
+		if !strings.Contains(probe.Effective, "name: effective") || strings.Contains(probe.Effective, "desired") {
+			t.Errorf("effective config document = %q", probe.Effective)
+		}
+		if probe.Pending != "server.name" || probe.PendingCount != "1" {
+			t.Errorf("pending restart rendering = %q/%q", probe.Pending, probe.PendingCount)
+		}
+		for _, sourceKind := range []string{"\"kind\": \"redis\"", "\"file\"", "\"http\"", "\"consul\"", "\"redis\""} {
+			if !strings.Contains(probe.SourceDetails, sourceKind) {
+				t.Errorf("source details missing %q: %s", sourceKind, probe.SourceDetails)
+			}
+		}
+		if !strings.Contains(probe.Schema, "$defs") || !strings.Contains(probe.Schema, "config") {
+			t.Errorf("schema rendering = %q", probe.Schema)
+		}
+		if probe.ApplyDisabled || probe.EditorReadOnly {
+			t.Errorf("writable config controls disabled: apply=%v readonly=%v", probe.ApplyDisabled, probe.EditorReadOnly)
+		}
+	})
+}
+
+func TestConsoleStorageHidesRecordingPlaybackWhenDisabledAndKeepsFMP4Action(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			DisabledActions int    `json:"disabledActions"`
+			EnabledActions  int    `json:"enabledActions"`
+			Format          string `json:"format"`
+			PlayURL         string `json:"playURL"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			var item = {id:"archive/cam.mp4", stream_key:"live/cam", format:"fmp4", state:"completed"};
+			renderRecordings([item], false);
+			var disabledActions = document.querySelectorAll('[data-action="recording-play"]').length;
+			renderRecordings([item], true);
+			var enabledActions = document.querySelectorAll('[data-action="recording-play"]').length;
+			return {disabledActions:disabledActions, enabledActions:enabledActions, format:recordingFormats[item.id], playURL:recordingPlayURL(item.id)};
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+			t.Fatalf("probe storage playback actions: %v", err)
+		}
+		if probe.DisabledActions != 0 || probe.EnabledActions != 1 || probe.Format != "fmp4" || !strings.HasSuffix(probe.PlayURL, "/archive/cam.mp4/play") {
+			t.Fatalf("storage playback actions = %#v", probe)
+		}
+	})
 }
 
 func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
@@ -395,6 +527,8 @@ type consoleRemovedActionFocusProbe struct {
 type consoleProtocolLabMediaProbe struct {
 	CacheHeader   string `json:"cacheHeader"`
 	CacheText     string `json:"cacheText"`
+	AudioOnlyText string `json:"audioOnlyText"`
+	GOPBar        bool   `json:"gopBar"`
 	SIPAudioRTP   string `json:"sipAudioRTP"`
 	SIPVideoRTP   string `json:"sipVideoRTP"`
 	SIPVideoCodec string `json:"sipVideoCodec"`
@@ -576,7 +710,10 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 			renderStreams([{
 				key:"sip/lab", state:"publishing", publisher:"sip", subscribers:{}, stats:{},
 				gop_cache_len:26, gop_video_frames:25, gop_audio_frames:1, gop_duration_ms:960, gop_generation:7,
-				audio_cache_frames:50, audio_cache_duration_ms:980
+				video_codec:"H264", audio_codec:"AAC"
+			}, {
+				key:"audio-only", state:"publishing", publisher:"audio", subscribers:{}, stats:{},
+				video_codec:"", audio_codec:"PCMA", gop_cache_len:0, gop_video_frames:0, gop_audio_frames:0, gop_duration_ms:0, gop_generation:0
 			}]);
 			renderSIPLabSessions([{session:{
 				id:"sip-1", device_id:"d1", mode:"publish", stream_key:"sip/lab", state:"active", codec:"PCMA",
@@ -586,11 +723,16 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 			renderGBLabSessions([{session:{
 				id:"gb-1", device_id:"d2", channel_id:"c1", mode:"publish", stream_key:"gb/lab", state:"active"
 			}, playback:{available:true}}]);
-			var cacheCell = document.querySelector("#tbody tr td:nth-child(8)");
+			var rows = Array.from(document.querySelectorAll("#tbody tr"));
+			var rowFor = function(key) { return rows.find(function(row) { return row.cells[0].textContent === key; }); };
+			var videoRow = rowFor("sip/lab");
+			var audioRow = rowFor("audio-only");
 			var sipCells = document.querySelectorAll("#sip-lab-sessions-tbody tr td");
 			return {
 				cacheHeader: document.querySelector("#view-streams thead th:nth-child(8)").textContent.trim(),
-				cacheText: cacheCell ? cacheCell.textContent : "",
+				cacheText: videoRow ? videoRow.cells[7].textContent : "",
+				audioOnlyText: audioRow ? audioRow.cells[7].textContent : "",
+				gopBar: !!document.querySelector("#tbody .gop-bar"),
 				sipAudioRTP: sipCells[5] ? sipCells[5].textContent : "",
 				sipVideoRTP: sipCells[6] ? sipCells[6].textContent : "",
 				sipVideoCodec: (streamMedia["sip/lab"] || {}).video_codec || "",
@@ -602,7 +744,7 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
 			t.Fatalf("probe protocol lab media rendering: %v", err)
 		}
-		if probe.CacheHeader != "Media Cache" || !strings.Contains(probe.CacheText, "GOP #7 26") || !strings.Contains(probe.CacheText, "Audio 50") {
+		if probe.CacheHeader != "GOP Cache" || probe.CacheText != "GOP #7 26 frames / 1.0s V25 A1" || probe.AudioOnlyText != "Not applicable (audio-only)" || probe.GOPBar {
 			t.Errorf("cache rendering = header %q text %q", probe.CacheHeader, probe.CacheText)
 		}
 		if probe.SIPAudioRTP != "50 tx / 2 rx" || probe.SIPVideoRTP != "25 tx / 1 rx" {

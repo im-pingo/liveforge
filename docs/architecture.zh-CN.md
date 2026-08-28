@@ -131,7 +131,7 @@ sequenceDiagram
     Hub-->>Proto: Stream
     Proto->>S: SetPublisher()
     Proto->>S: WriteFrame(AVFrame)
-    S->>S: 更新序列头、GOP、音频缓存、统计
+    S->>S: 更新序列头、GOP 和统计
     S->>RB: 写入一帧
     RB-->>E: 每个 reader 独立读取
 ```
@@ -439,7 +439,7 @@ ring_capacity × (AVFrame 指针 + frame 对象 + payload)
 + 每个转码目标 codec 一个 TranscodedTrack ring
 ```
 
-GOP 和音频缓存保存的是 frame 指针，payload 生命周期由 publisher/帧对象管理；SharedBuffer 写入 muxed bytes，通常会产生新的 byte slice。增大 ring 容量可以容忍更多慢消费者，但会增加每个 stream 的内存，不能替代慢消费者策略。
+GOP 缓存保存的是 frame 指针，payload 生命周期由 publisher/帧对象管理；SharedBuffer 写入 muxed bytes，通常会产生新的 byte slice。增大 ring 容量可以容忍更多慢消费者，但会增加每个 stream 的内存，不能替代慢消费者策略。
 
 ### 延迟和连续性
 

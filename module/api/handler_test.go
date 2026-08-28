@@ -140,14 +140,13 @@ func TestHandleStreams_Publishing(t *testing.T) {
 
 	data := decodeAPIData(t, w.Body.Bytes())
 	var resp struct {
-		Streams []struct {
-			StreamInfo
-			AudioCacheFrames     int   `json:"audio_cache_frames"`
-			AudioCacheDurationMs int64 `json:"audio_cache_duration_ms"`
-		} `json:"streams"`
+		Streams []StreamInfo `json:"streams"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"audio_cache_frames"`) || strings.Contains(string(data), `"audio_cache_duration_ms"`) {
+		t.Fatalf("stream response retained removed audio-cache fields: %s", data)
 	}
 	if len(resp.Streams) != 1 {
 		t.Fatalf("expected 1 stream, got %d", len(resp.Streams))
@@ -174,9 +173,6 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	}
 	if si.GOPGeneration != 1 {
 		t.Errorf("expected gop_generation 1, got %d", si.GOPGeneration)
-	}
-	if si.AudioCacheFrames != 0 || si.AudioCacheDurationMs != 0 {
-		t.Errorf("retained audio-cache fields = %d frames/%d ms, want zero values", si.AudioCacheFrames, si.AudioCacheDurationMs)
 	}
 	if si.Stats == nil {
 		t.Error("expected stats in stream list response")

@@ -218,6 +218,11 @@ starts from the live cursor without retained startup history. A zero GOP before
 the first keyframe is normal; a persistent zero GOP with increasing video-frame
 totals is not.
 
+The Streams Console labels this surface `GOP Cache` and reports one
+keyframe-driven generation with interleaved video/audio frame counts and
+duration. Audio-only streams show `Not applicable (audio-only)` because they
+have no video-keyframe-bounded startup GOP.
+
 ## Verification
 
 Run focused tests without external services:

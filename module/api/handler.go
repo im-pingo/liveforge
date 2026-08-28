@@ -59,8 +59,6 @@ type StreamInfo struct {
 	GOPAudioFrames       int                `json:"gop_audio_frames"`
 	GOPDurationMs        int64              `json:"gop_duration_ms"`
 	GOPGeneration        uint64             `json:"gop_generation"`
-	AudioCacheFrames     int                `json:"audio_cache_frames"`
-	AudioCacheDurationMs int64              `json:"audio_cache_duration_ms"`
 	Subscribers          map[string]int     `json:"subscribers"`
 	Stats                *StreamStatsDetail `json:"stats,omitempty"`
 }

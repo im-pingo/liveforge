@@ -163,7 +163,7 @@ func TestRecordingManagementReportsDisabledWithoutModule(t *testing.T) {
 
 func TestRecordingPlayHandlerServesInlineRangeableMedia(t *testing.T) {
 	provider := &recordingProviderStub{
-		items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "mp4", State: record.RecordingCompleted}},
+		items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "fmp4", State: record.RecordingCompleted}},
 		content: []byte("0123456789"),
 	}
 	server := core.NewServer(newTestConfig())

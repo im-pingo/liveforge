@@ -120,9 +120,13 @@ The Config view reads the complete effective and desired configuration document 
 `GET /api/v1/server/config/document`, fetches the complete versioned JSON Schema from
 `GET /api/v1/server/config/schema`, and redacts values whose field names contain
 `token`, `password`, `secret`, `credential`, `passphrase`, or `private_key`. The
-The desired document is retained from the selected source so comments and fields
-not represented by the typed runtime struct remain visible. The page can edit the
-YAML, run a read-only Validate, and use Apply & Refresh. Viewer
+desired document is retained from the selected source so comments and fields
+not represented by the typed runtime struct remain visible in the editable source
+pane. The effective applied document is shown in a separate read-only pane;
+pending restart paths identify desired values that have not yet changed the
+effective configuration. Source details show the selected kind plus redacted
+file, HTTP, Consul, and Redis settings. The page can edit the YAML, run a
+read-only Validate, and use Apply & Refresh. Viewer
 tokens have `config:read`; Apply and Refresh require `config:reload` (operator or
 admin).
 

@@ -294,7 +294,7 @@ Open `http://localhost:8090/console` for the real-time management dashboard. Pre
 The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. The visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security). When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
 
 - Live stream list with state, codecs, bitrate, FPS
-- Media cache visualization with a keyframe-driven GOP generation plus separate video GOP and rolling audio-cache frame/duration values
+- GOP Cache visualization with keyframe-driven generation, interleaved video/audio frame counts, and duration; audio-only streams show `Not applicable (audio-only)`
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WebRTC realtime, and WebRTC Live)
 - WebRTC publish with camera/mic and outbound stats
 - Permission-aware stream kick/delete and runtime config refresh
@@ -318,7 +318,7 @@ Key sections:
 |---------|---------|
 | `rtmp` | RTMP ingest/playback (default `:1935`) |
 | `rtsp` | RTSP ingest/playback with TCP + UDP (default `:8554`) |
-| `http_stream` | HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket (default `:8080`) |
+| `http_stream` | HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket (default `:8080`); `http_stream.llhls.segment_duration` controls completed LL-HLS segments |
 | `webrtc` | WHIP/WHEP with ICE servers and UDP port range (default `:8443`) |
 | `srt` | SRT ingest/playback with AES encryption (default `:6000`) |
 | `sip` | SIP signaling server and local SIP Gateway lab (default `:5060`) |

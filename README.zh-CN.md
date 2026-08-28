@@ -295,7 +295,7 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。视觉分组为 Workspace（Streams、GB28181、SIP Calls、Storage）、Operations（Cluster）和 System（Config、Security）。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
 
 - 流列表：状态、编解码器、码率、帧率
-- 媒体缓存可视化，显示随关键帧递增的 GOP generation，并分别显示视频 GOP 和滚动音频缓存的帧数/时长
+- GOP Cache 可视化，显示随关键帧递增的 generation、交错的视频/音频帧数和时长；纯音频流显示 `Not applicable (audio-only)`
 - 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、HLS、DASH、WebRTC 实时模式和 WebRTC Live 模式）
 - WebRTC 推流（摄像头/麦克风 + 发送端统计）
 - 权限感知的踢流、删流和运行时配置刷新
@@ -319,7 +319,7 @@ LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读�
 |--------|------|
 | `rtmp` | RTMP 推拉流（默认 `:1935`） |
 | `rtsp` | RTSP 推拉流，TCP + UDP（默认 `:8554`） |
-| `http_stream` | HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket（默认 `:8080`） |
+| `http_stream` | HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket（默认 `:8080`）；`http_stream.llhls.segment_duration` 控制 LL-HLS 完整分段 |
 | `webrtc` | WHIP/WHEP，ICE 服务器和 UDP 端口范围（默认 `:8443`） |
 | `srt` | SRT 推拉流，AES 加密（默认 `:6000`） |
 | `sip` | GB28181 SIP 信令服务器和本地 SIP Gateway 实验室（默认 `:5060`） |

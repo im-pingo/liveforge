@@ -124,22 +124,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
 .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 
-/* Media cache bar */
+/* GOP cache */
 .gop-cell { min-width: 170px; }
-.gop-bar-wrap {
-  width: 100%;
-  height: 6px;
-  background: var(--surface2);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 4px;
-}
-.gop-bar {
-  height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--blue));
-  transition: width 0.4s ease;
-}
 .gop-label {
   font-size: 11px;
   font-family: "SF Mono", "Fira Code", monospace;
@@ -913,7 +899,7 @@ select:focus-visible {
           <th>Bitrate</th>
           <th>FPS</th>
           <th>Uptime</th>
-          <th>Media Cache</th>
+          <th>GOP Cache</th>
           <th>Subscribers</th>
           <th>Actions</th>
         </tr>
@@ -1036,14 +1022,21 @@ select:focus-visible {
       <div class="ops-section-title"><span>Pending Restart</span><span id="config-pending-count">0</span></div>
       <div class="ops-list" id="config-pending"></div>
     </div>
-    <div class="ops-section">
-      <div class="ops-section-title"><span>Complete Configuration</span><span id="config-source-writable">Read-only</span></div>
+    <div class="ops-section" id="config-documents">
+      <div class="ops-section-title"><span>Desired Source Document</span><span id="config-source-writable">Read-only</span></div>
       <div class="ops-toolbar-actions" style="margin-bottom:10px">
         <button class="btn" id="config-validate" data-permission="viewer" type="button">Validate</button>
         <button class="btn btn-play" id="config-apply" data-permission="operator" type="button">Apply &amp; Refresh</button>
       </div>
-      <textarea class="config-editor" id="config-editor" spellcheck="false" aria-label="Complete configuration document"></textarea>
+      <textarea class="config-editor" id="config-editor" spellcheck="false" aria-label="Desired source configuration document"></textarea>
+      <div class="ops-section-title" style="margin-top:12px"><span>Effective Applied Document</span><span id="config-effective-state">Applied</span></div>
+      <pre class="ops-detail" id="config-effective-document">Effective document unavailable</pre>
+    </div>
+    <div class="ops-section" id="config-source">
+      <div class="ops-section-title"><span>Selected Source Details</span><span id="config-source-kind">-</span></div>
       <pre class="ops-detail" id="config-source-details">Source details unavailable</pre>
+    </div>
+    <div class="ops-section" id="config-schema-section">
       <div class="ops-section-title" style="margin-top:12px"><span>Configuration Schema</span><span id="config-schema-version">-</span></div>
       <pre class="ops-detail" id="config-schema">Schema unavailable</pre>
     </div>
@@ -2670,21 +2663,14 @@ function renderStreams(streams) {
     var gopCell = row.insertCell();
     var gop = document.createElement("div");
     gop.className = "gop-cell";
-    var barWrap = document.createElement("div");
-    barWrap.className = "gop-bar-wrap";
-    var bar = document.createElement("div");
-    bar.className = "gop-bar";
-    bar.style.width = Math.min((s.gop_cache_len || 0) / 120 * 100, 100).toFixed(0) + "%";
-    barWrap.appendChild(bar);
-    var gopLabel = document.createElement("div");
-    gopLabel.className = "gop-label";
-    gopLabel.textContent = "GOP #" + (s.gop_generation || 0) + " " + (s.gop_cache_len || 0) + " frames / " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
-    var audioLabel = document.createElement("div");
-    audioLabel.className = "gop-label";
-    audioLabel.textContent = "Audio " + (s.audio_cache_frames || 0) + " frames / " + ((s.audio_cache_duration_ms || 0) / 1000).toFixed(1) + "s";
-    gop.appendChild(barWrap);
-    gop.appendChild(gopLabel);
-    gop.appendChild(audioLabel);
+    if (!s.video_codec && s.audio_codec) {
+      gop.textContent = "Not applicable (audio-only)";
+    } else {
+      var gopLabel = document.createElement("div");
+      gopLabel.className = "gop-label";
+      gopLabel.textContent = "GOP #" + (s.gop_generation || 0) + " " + (s.gop_cache_len || 0) + " frames / " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+      gop.appendChild(gopLabel);
+    }
     gopCell.appendChild(gop);
 
     var subscriberCell = row.insertCell();
@@ -3222,7 +3208,10 @@ function refreshRuntimeConfig(signal) {
     if (document.activeElement !== editor) {
       editor.value = documentData.desired_document || documentData.effective_document || JSON.stringify(documentData.desired || documentData.effective || {}, null, 2);
     }
-    document.getElementById("config-source-writable").textContent = documentData.writable ? "Writable" : "Read-only";
+    document.getElementById("config-source-writable").textContent = documentData.writable ? "Writable source" : "Read-only source";
+    document.getElementById("config-effective-state").textContent = pending.length ? "Applied; restart pending" : "Applied";
+    document.getElementById("config-effective-document").textContent = documentData.effective_document || JSON.stringify(documentData.effective || {}, null, 2);
+    document.getElementById("config-source-kind").textContent = documentData.source_details && documentData.source_details.kind ? documentData.source_details.kind : (data.source || "-");
     document.getElementById("config-source-details").textContent = JSON.stringify(documentData.source_details || {}, null, 2);
     document.getElementById("config-schema-version").textContent = schemaData.$id || "JSON Schema";
     document.getElementById("config-schema").textContent = JSON.stringify(schemaData, null, 2);
@@ -3230,7 +3219,7 @@ function refreshRuntimeConfig(signal) {
     var button = document.getElementById("config-refresh");
     button.disabled = !data.enabled || !canManage("operator");
     document.getElementById("config-validate").disabled = !canManage("viewer");
-    editor.readOnly = !canManage("operator");
+    editor.readOnly = !documentData.writable || !canManage("operator");
     document.getElementById("config-apply").disabled = !documentData.writable || !canManage("operator");
   }).catch(function(err) { showManagementError("config", err); });
 }
@@ -3460,7 +3449,7 @@ function recordingPlayURL(recordingID) {
   return recordingURL(recordingID) + "/play";
 }
 
-function renderRecordings(items) {
+function renderRecordings(items, allowPlayback) {
   items = items || [];
   recordingFormats = Object.create(null);
   document.getElementById("recording-count").textContent = items.length;
@@ -3480,7 +3469,7 @@ function renderRecordings(items) {
     var actions = document.createElement("div");
     actions.className = "actions";
     appendActionButton(actions, "Details", "", "recording-detail", item.id);
-    if (item.state === "completed") {
+    if (item.state === "completed" && allowPlayback !== false) {
       appendActionButton(actions, "Play", "btn-play", "recording-play", item.id);
       appendActionButton(actions, "Download", "", "recording-download", item.id);
     }
@@ -3518,12 +3507,12 @@ function refreshStorage(signal) {
     settledRequest(apiFetch("/api/v1/recordings/status", { signal: signal })),
     settledRequest(apiFetch("/api/v1/dvr/status", { signal: signal }))
   ]).then(function(results) {
-    if (results[0].value) renderRecordings(results[0].value);
     var recordingStatus = results[1].value || {};
     var recordingMetrics = recordingStatus.metrics || {};
     document.getElementById("recording-completed").textContent = recordingMetrics.files_completed || 0;
     var capability = document.getElementById("recording-capability");
     var state = recordingStatus.state || (recordingStatus.enabled ? "ready" : "disabled");
+    if (results[0].value) renderRecordings(results[0].value, state !== "disabled");
     var capabilityText = "";
     var capabilityClass = "";
     if (state === "disabled") {
