@@ -272,6 +272,11 @@ func TestSharedMuxersSwitchFromDirectAACToTransformedAudio(t *testing.T) {
 				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
 				500, 500, []byte{0, 0, 0, 2, 0x41, 0x05},
 			))
+			// Establish the direct-AAC epoch before introducing an incompatible
+			// source codec. The live and transformed readers share an unbuffered
+			// delivery channel, so writing both epochs back-to-back would let
+			// scheduler timing discard an initial direct frame.
+			packets = waitForMuxerPayloads(t, format, initData, reader, packets, directAAC)
 			writeG711MuxerFrames(stream, 1000, 20, 0xff)
 			stream.WriteFrame(avframe.NewAVFrame(
 				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
