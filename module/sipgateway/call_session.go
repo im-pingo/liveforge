@@ -42,6 +42,7 @@ type CallSession struct {
 	state           CallState
 	startedAt       time.Time
 	lastError       string
+	publishStarted  atomic.Bool
 	lastRTPUnixNano atomic.Int64
 	rtpPacketsSent  atomic.Uint64
 	rtpPacketsRecv  atomic.Uint64
@@ -287,6 +288,32 @@ func (cs *CallSession) startInbound(stream *core.Stream, remoteIP string, remote
 		go cs.receiveInboundRTCPLoop(videoRTCPConn)
 	}
 	return nil
+}
+
+// startPublishLifecycle serializes the inbound publish-start event with
+// session termination. This prevents a stop event from overtaking a start
+// when a call is closed immediately after RTP setup.
+func (cs *CallSession) startPublishLifecycle(emit func()) bool {
+	cs.lifecycleMu.Lock()
+	defer cs.lifecycleMu.Unlock()
+	if cs.publishStarted.Load() {
+		return false
+	}
+	cs.mu.RLock()
+	active := cs.state == CallStateActive
+	cs.mu.RUnlock()
+	if !active {
+		return false
+	}
+	cs.publishStarted.Store(true)
+	if emit != nil {
+		emit()
+	}
+	return true
+}
+
+func (cs *CallSession) publishLifecycleStarted() bool {
+	return cs.publishStarted.Load()
 }
 
 func (cs *CallSession) receiveInboundRTCPLoop(conn *net.UDPConn) {

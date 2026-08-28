@@ -2,6 +2,7 @@ package sipgateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -342,6 +343,171 @@ func TestGatewayHandleInviteSuccess(t *testing.T) {
 	_, ok := hub.Find("sip/teststream")
 	if !ok {
 		t.Error("stream sip/teststream not found in hub")
+	}
+}
+
+func TestGatewayHandleInviteEmitsPublishLifecycle(t *testing.T) {
+	sipSvc := &mockSIPService{localAddr: "127.0.0.1:5060", serverID: "test", domain: "test.local"}
+	hub := newTestHub()
+	bus := core.NewEventBus()
+	published := make(chan *core.EventContext, 1)
+	bus.Register(core.HookRegistration{
+		Event:    core.EventPublish,
+		Mode:     core.HookAsync,
+		Consumer: "test",
+		Handler: func(ctx *core.EventContext) error {
+			published <- ctx
+			return nil
+		},
+	})
+
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	defer gw.Close()
+
+	offerSDP := "v=0\r\no=- 1 1 IN IP4 192.168.1.100\r\ns=-\r\nc=IN IP4 192.168.1.100\r\nt=0 0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n"
+	req := sip.NewRequest(sip.INVITE, sip.Uri{User: "publish-event", Host: "test.local"})
+	req.AppendHeader(sip.NewHeader("Call-ID", "publish-event-call"))
+	req.SetBody([]byte(offerSDP))
+	tx := &mockServerTx{}
+
+	sipSvc.mu.Lock()
+	handlers := append([]sipmod.InviteHandler(nil), sipSvc.inviteHandlers...)
+	sipSvc.mu.Unlock()
+	for _, handler := range handlers {
+		handler(req, tx)
+	}
+	if resp := tx.getResponse(); resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("INVITE response = %v, want 200", resp)
+	}
+
+	select {
+	case ctx := <-published:
+		if ctx.StreamKey != "sip/publish-event" {
+			t.Fatalf("publish stream = %q, want sip/publish-event", ctx.StreamKey)
+		}
+		if ctx.PublisherID != "sip-publish-event-call" {
+			t.Fatalf("publish publisher = %q, want sip-publish-event-call", ctx.PublisherID)
+		}
+		if ctx.Protocol != "sip" {
+			t.Fatalf("publish protocol = %q, want sip", ctx.Protocol)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful inbound SIP INVITE did not emit EventPublish")
+	}
+}
+
+func TestGatewayHandleInviteEmitsPublishStopLifecycle(t *testing.T) {
+	sipSvc := &mockSIPService{localAddr: "127.0.0.1:5060", serverID: "test", domain: "test.local"}
+	hub := newTestHub()
+	bus := core.NewEventBus()
+	published := make(chan *core.EventContext, 1)
+	stopped := make(chan *core.EventContext, 1)
+	bus.Register(core.HookRegistration{
+		Event:    core.EventPublish,
+		Mode:     core.HookAsync,
+		Consumer: "test-start",
+		Handler: func(ctx *core.EventContext) error {
+			published <- ctx
+			return nil
+		},
+	})
+	bus.Register(core.HookRegistration{
+		Event:    core.EventPublishStop,
+		Mode:     core.HookAsync,
+		Consumer: "test-stop",
+		Handler: func(ctx *core.EventContext) error {
+			stopped <- ctx
+			return nil
+		},
+	})
+
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	defer gw.Close()
+
+	offerSDP := "v=0\r\no=- 1 1 IN IP4 192.168.1.100\r\ns=-\r\nc=IN IP4 192.168.1.100\r\nt=0 0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n"
+	req := sip.NewRequest(sip.INVITE, sip.Uri{User: "publish-stop", Host: "test.local"})
+	req.AppendHeader(sip.NewHeader("Call-ID", "publish-stop-call"))
+	req.SetBody([]byte(offerSDP))
+	tx := &mockServerTx{}
+
+	sipSvc.mu.Lock()
+	handlers := append([]sipmod.InviteHandler(nil), sipSvc.inviteHandlers...)
+	sipSvc.mu.Unlock()
+	for _, handler := range handlers {
+		handler(req, tx)
+	}
+	if resp := tx.getResponse(); resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("INVITE response = %v, want 200", resp)
+	}
+
+	var start *core.EventContext
+	select {
+	case start = <-published:
+	case <-time.After(time.Second):
+		t.Fatal("successful inbound SIP INVITE did not emit EventPublish")
+	}
+	if err := gw.Hangup("publish-stop-call"); err != nil {
+		t.Fatalf("Hangup: %v", err)
+	}
+
+	select {
+	case stop := <-stopped:
+		if stop.StreamKey != start.StreamKey || stop.PublisherID != start.PublisherID {
+			t.Fatalf("publish stop = %+v, want stream/publisher from start %+v", stop, start)
+		}
+		if stop.Protocol != "sip" {
+			t.Fatalf("publish stop protocol = %q, want sip", stop.Protocol)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("inbound SIP Hangup did not emit EventPublishStop")
+	}
+}
+
+func TestGatewayHandleInviteRunsPublishAuthorizationBeforeAccepting(t *testing.T) {
+	sipSvc := &mockSIPService{localAddr: "127.0.0.1:5060", serverID: "test", domain: "test.local"}
+	hub := newTestHub()
+	bus := core.NewEventBus()
+	bus.Register(core.HookRegistration{
+		Event:    core.EventPublish,
+		Mode:     core.HookSync,
+		Priority: 10,
+		Handler: func(ctx *core.EventContext) error {
+			if ctx.Protocol != "sip" || ctx.PublisherID != "sip-auth-call" {
+				t.Fatalf("authorization context = %+v", ctx)
+			}
+			return errors.New("publish denied")
+		},
+	})
+
+	gw, err := NewGateway(newTestGatewayConfig(t), sipSvc, hub, bus)
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	defer gw.Close()
+
+	offerSDP := "v=0\r\no=- 1 1 IN IP4 192.168.1.100\r\ns=-\r\nc=IN IP4 192.168.1.100\r\nt=0 0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n"
+	req := sip.NewRequest(sip.INVITE, sip.Uri{User: "auth", Host: "test.local"})
+	req.AppendHeader(sip.NewHeader("Call-ID", "auth-call"))
+	req.SetBody([]byte(offerSDP))
+	tx := &mockServerTx{}
+
+	sipSvc.mu.Lock()
+	handlers := append([]sipmod.InviteHandler(nil), sipSvc.inviteHandlers...)
+	sipSvc.mu.Unlock()
+	for _, handler := range handlers {
+		handler(req, tx)
+	}
+	if resp := tx.getResponse(); resp == nil || resp.StatusCode != 403 {
+		t.Fatalf("INVITE response = %v, want 403", resp)
+	}
+	if gw.ActiveCalls() != 0 {
+		t.Fatalf("ActiveCalls after authorization rejection = %d, want 0", gw.ActiveCalls())
 	}
 }
 

@@ -3,16 +3,18 @@ package record
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/util"
 )
 
-// RecordSession reads frames from a stream's RingBuffer and writes them to an FLV file.
+// RecordSession reads frames from a stream's RingBuffer and writes them to a recording file.
 type RecordSession struct {
 	streamKey   string
 	stream      *core.Stream
@@ -21,6 +23,8 @@ type RecordSession struct {
 	cfg         config.RecordConfig
 	writer      *FileWriter
 	reader      *util.RingReader[*avframe.AVFrame]
+	inputVideo  avframe.CodecType
+	inputAudio  avframe.CodecType
 	done        chan struct{}
 	finished    chan struct{}
 	startedAt   time.Time
@@ -116,9 +120,42 @@ func (s *RecordSession) run() error {
 	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil
 	}
-	s.writer.SetExpectedTracks(snapshot.MediaInfo.VideoCodec, snapshot.MediaInfo.AudioCodec)
+	videoCodec := snapshot.MediaInfo.VideoCodec
+	audioCodec := snapshot.MediaInfo.AudioCodec
+	transcodedAudio := false
+	var releaseInput func()
+	releaseInput = func() {}
+
+	// fMP4 stores a browser-compatible audio track. G.711 has no sequence
+	// header and is not an ISO-BMFF audio sample entry, so use the same shared
+	// generation-bound AAC transform as the HTTP muxers when available.
+	if strings.EqualFold(strings.TrimSpace(s.cfg.Format), "fmp4") &&
+		!isRecordFMP4Audio(audioCodec) && audioCodec != 0 {
+		if tm := s.stream.TranscodeManager(); tm != nil &&
+			audiocodec.Global().CanTranscode(audioCodec, avframe.CodecAAC) &&
+			len(audiocodec.Global().SequenceHeader(avframe.CodecAAC)) > 0 {
+			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot)
+			if err == nil {
+				s.reader = reader
+				releaseInput = release
+				audioCodec = avframe.CodecAAC
+				transcodedAudio = true
+			} else {
+				slog.Warn("record: audio transcode unavailable", "stream", s.streamKey, "codec", audioCodec, "error", err)
+			}
+		}
+		if !transcodedAudio {
+			// Preserve a playable video-only recording when the optional audio
+			// dependency is unavailable instead of waiting for G.711 config.
+			audioCodec = 0
+		}
+	}
+	s.inputVideo = videoCodec
+	s.inputAudio = audioCodec
+	s.writer.SetExpectedTracks(videoCodec, audioCodec)
 	generationCtx, cancelGeneration := context.WithCancel(readCtx)
 	defer cancelGeneration()
+	defer releaseInput()
 	go func() {
 		select {
 		case <-snapshot.GenerationDone:
@@ -127,26 +164,47 @@ func (s *RecordSession) run() error {
 		}
 	}()
 
-	// Write the headers captured with the same snapshot as the replay frames.
-	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
-		if err := s.writer.WriteFrame(vsh); err != nil {
-			slog.Error("write video seq header error", "module", "record", "stream", s.streamKey, "error", err)
-			return err
+	// Transcoded input contains retained source video and generated AAC audio.
+	// Its source cursor can begin after the original video header, so write the
+	// captured video header and generated AAC header before consuming it.
+	if transcodedAudio {
+		if vsh := snapshot.VideoSequenceHeader; vsh != nil {
+			if err := s.writer.WriteFrame(vsh); err != nil {
+				return err
+			}
 		}
-	}
-	if ash := snapshot.AudioSequenceHeader; ash != nil {
+		ash := avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+			0, 0, audiocodec.Global().SequenceHeader(avframe.CodecAAC),
+		)
 		if err := s.writer.WriteFrame(ash); err != nil {
-			slog.Error("write audio seq header error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
 		}
-	}
-	for _, frame := range snapshot.ReplayFrames {
-		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-			return nil
+	} else {
+		// Write the headers captured with the same snapshot as the replay frames.
+		if vsh := snapshot.VideoSequenceHeader; vsh != nil && videoCodec != 0 {
+			if err := s.writer.WriteFrame(vsh); err != nil {
+				slog.Error("write video seq header error", "module", "record", "stream", s.streamKey, "error", err)
+				return err
+			}
 		}
-		if err := s.writer.WriteFrame(frame); err != nil {
-			slog.Error("write replay frame error", "module", "record", "stream", s.streamKey, "error", err)
-			return err
+		if ash := snapshot.AudioSequenceHeader; ash != nil && ash.Codec == audioCodec {
+			if err := s.writer.WriteFrame(ash); err != nil {
+				slog.Error("write audio seq header error", "module", "record", "stream", s.streamKey, "error", err)
+				return err
+			}
+		}
+		for _, frame := range snapshot.ReplayFrames {
+			if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return nil
+			}
+			if !recordFrameAccepted(frame, videoCodec, audioCodec) {
+				continue
+			}
+			if err := s.writer.WriteFrame(frame); err != nil {
+				slog.Error("write replay frame error", "module", "record", "stream", s.streamKey, "error", err)
+				return err
+			}
 		}
 	}
 	readerCursor := snapshot.LiveCursor
@@ -156,7 +214,9 @@ func (s *RecordSession) run() error {
 	if snapshot.Generation == 0 {
 		readerCursor = snapshot.GenerationStartCursor
 	}
-	s.reader = s.stream.RingBuffer().NewReaderAt(readerCursor)
+	if s.reader == nil {
+		s.reader = s.stream.RingBuffer().NewReaderAt(readerCursor)
+	}
 
 	for {
 		frame, ok := s.reader.ReadContext(generationCtx)
@@ -169,11 +229,31 @@ func (s *RecordSession) run() error {
 		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 			return nil
 		}
+		if !recordFrameAccepted(frame, videoCodec, audioCodec) {
+			continue
+		}
 		if err := s.writer.WriteFrame(frame); err != nil {
 			slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
 		}
 	}
+}
+
+func isRecordFMP4Audio(codec avframe.CodecType) bool {
+	return codec == avframe.CodecAAC || codec == avframe.CodecMP3 || codec == avframe.CodecOpus
+}
+
+func recordFrameAccepted(frame *avframe.AVFrame, videoCodec, audioCodec avframe.CodecType) bool {
+	if frame == nil {
+		return false
+	}
+	if frame.MediaType.IsVideo() {
+		return videoCodec != 0 && frame.Codec == videoCodec
+	}
+	if frame.MediaType.IsAudio() {
+		return audioCodec != 0 && frame.Codec == audioCodec
+	}
+	return false
 }
 
 func isRecordStopRequested(done <-chan struct{}) bool {
@@ -199,6 +279,9 @@ func (s *RecordSession) drainPendingFrames() error {
 		}
 		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
 			return nil
+		}
+		if !recordFrameAccepted(frame, s.inputVideo, s.inputAudio) {
+			continue
 		}
 		if err := s.writer.WriteFrame(frame); err != nil {
 			slog.Error("write drained frame error", "module", "record", "stream", s.streamKey, "error", err)

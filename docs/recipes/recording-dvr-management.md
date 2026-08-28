@@ -53,6 +53,20 @@ module is not enabled, `GET /api/v1/recordings/status` still returns HTTP 200 wi
 an explicit unavailable state. Recording item, download, and play routes return
 503 when the module itself is absent.
 
+For fMP4 recordings and DVR MPEG-TS segments, G.711 and other audio codecs that
+the target container cannot describe are converted to AAC through the shared
+`audiocodec`/FFmpeg path when the tagged build is available. Without that optional
+dependency, the incompatible audio track is omitted and the output remains
+playable video-only; AAC and MP3 tracks that the target supports are passed
+through. This keeps SIP/GB28181 G.711 recordings consistent with HTTP playback
+without claiming audio support in a portable no-CGO build.
+
+The same publisher lifecycle applies to SIP Gateway and GB28181 inbound media:
+the protocol must successfully establish its publisher before Record/DVR start,
+and the matching publisher stop event finalizes the active session. A SIP
+INVITE is rejected before RTP allocation when synchronous publish authorization
+fails.
+
 A publish session that ends before any media frame arrives is preserved as
 `state=failed` and is never offered as a completed playable recording. This
 prevents sequence-header-only or zero-byte files from returning a misleading

@@ -16,6 +16,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/internal/localfs"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 	"github.com/im-pingo/liveforge/pkg/util"
@@ -180,10 +181,38 @@ func (s *Session) Run() {
 	}
 	s.videoCodec = snapshot.MediaInfo.VideoCodec
 	s.audioCodec = snapshot.MediaInfo.AudioCodec
+	allowUndeclaredTracks := snapshot.Generation == 0 &&
+		snapshot.MediaInfo.VideoCodec == 0 && snapshot.MediaInfo.AudioCodec == 0
+	transcodedAudio := false
+	var releaseInput func()
+	releaseInput = func() {}
+	if s.audioCodec != 0 && !isDVRSupportedAudio(s.audioCodec) {
+		if tm := s.stream.TranscodeManager(); tm != nil &&
+			audiocodec.Global().CanTranscode(s.audioCodec, avframe.CodecAAC) &&
+			len(audiocodec.Global().SequenceHeader(avframe.CodecAAC)) > 0 {
+			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot)
+			if err == nil {
+				s.reader = reader
+				releaseInput = release
+				s.audioCodec = avframe.CodecAAC
+				s.audioSeq = append([]byte(nil), audiocodec.Global().SequenceHeader(avframe.CodecAAC)...)
+				transcodedAudio = true
+			} else {
+				slog.Warn("dvr: audio transcode unavailable", "stream", s.streamKey, "codec", s.audioCodec, "error", err)
+			}
+		}
+		if !transcodedAudio {
+			// Keep DVR segments playable as video-only when optional audio
+			// transcoding is not installed.
+			s.audioCodec = 0
+			s.audioSeq = nil
+		}
+	}
+	defer releaseInput()
 	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		s.videoSeq = append([]byte(nil), vsh.Payload...)
 	}
-	if ash := snapshot.AudioSequenceHeader; ash != nil {
+	if ash := snapshot.AudioSequenceHeader; ash != nil && ash.Codec == s.audioCodec {
 		s.audioSeq = append([]byte(nil), ash.Payload...)
 	}
 	generationCtx, cancelGeneration := context.WithCancel(readCtx)
@@ -196,13 +225,20 @@ func (s *Session) Run() {
 		}
 	}()
 
-	for _, frame := range snapshot.ReplayFrames {
-		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-			return
+	if !transcodedAudio {
+		for _, frame := range snapshot.ReplayFrames {
+			if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
+				continue
+			}
+			s.processFrame(frame)
 		}
-		s.processFrame(frame)
 	}
-	s.reader = s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+	if s.reader == nil {
+		s.reader = s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+	}
 
 	for {
 		frame, ok := s.reader.ReadContext(generationCtx)
@@ -212,8 +248,34 @@ func (s *Session) Run() {
 		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 			return
 		}
+		if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
+			continue
+		}
 		s.processFrame(frame)
 	}
+}
+
+func isDVRSupportedAudio(codec avframe.CodecType) bool {
+	return codec == avframe.CodecAAC || codec == avframe.CodecMP3
+}
+
+func dvrFrameAccepted(frame *avframe.AVFrame, videoCodec, audioCodec avframe.CodecType, allowUndeclaredTracks bool) bool {
+	if frame == nil {
+		return false
+	}
+	if frame.MediaType.IsVideo() {
+		if allowUndeclaredTracks && frame.FrameType == avframe.FrameTypeSequenceHeader {
+			return true
+		}
+		return videoCodec != 0 && frame.Codec == videoCodec
+	}
+	if frame.MediaType.IsAudio() {
+		if allowUndeclaredTracks && frame.FrameType == avframe.FrameTypeSequenceHeader {
+			return true
+		}
+		return audioCodec != 0 && frame.Codec == audioCodec
+	}
+	return false
 }
 
 func (s *Session) finish() {

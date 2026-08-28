@@ -58,22 +58,26 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "hls", "stream", h.streamKey)
 	defer slog.Info("manager stopped", "module", "hls", "stream", h.streamKey)
 
-	// Snapshot cache and open the live source before declaring the TS tracks so
-	// the PMT and the frames always use the same audio decision.
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
+	snapshot, ok := waitStreamStartup(h.done, stream)
+	if !ok {
+		return
+	}
+
+	// Use one generation-consistent snapshot for tracks, cached frames, and the
+	// live cursor. This keeps a late sequence header from being skipped after
+	// the muxer has already been initialized with an empty track.
+	gopCache := snapshot.ReplayFrames
+	audioPlan := selectMuxerAudioSnapshot(stream, snapshot, isFlvCompatibleAudio)
+	reader, release, audioPlan := muxerLiveReaderSnapshot(stream, snapshot, audioPlan)
 	defer release()
 	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
-	go func() {
-		<-h.done
-		reader.Close()
-	}()
+	stopReaderWatch := watchRingReader(reader, h.done, snapshot.GenerationDone)
+	defer stopReaderWatch()
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqData, audioSeqData []byte
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqData = vsh.Payload
 	}
@@ -123,6 +127,9 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	// different timestamp domains and a late audio frame must not hide a live
 	// video frame.
 	for _, f := range gopCache {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -154,7 +161,12 @@ func (h *HLSManager) Run(stream *core.Stream) {
 
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
-			finalize(segStartDTS)
+			if stream.IsPublisherGeneration(snapshot.Generation) {
+				finalize(segStartDTS)
+			}
+			return
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {

@@ -742,6 +742,66 @@ func waitMuxerStartup(inst *core.MuxerInstance, stream *core.Stream) (core.Strea
 		stream.IsPublisherGeneration(snapshot.Generation)
 }
 
+// waitStreamStartup waits for a stream generation to expose all of the
+// sequence headers required by its declared tracks. The manager's done signal
+// and the captured generation signal both cancel the wait, so a stopped or
+// replaced publisher cannot leave a segmenter blocked indefinitely.
+func waitStreamStartup(done <-chan struct{}, stream *core.Stream) (core.StreamStartupSnapshot, bool) {
+	pending := stream.StartupSnapshot()
+	if pending.Generation == 0 || pending.GenerationDone == nil {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		select {
+		case <-done:
+			return core.StreamStartupSnapshot{}, false
+		default:
+		}
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-done:
+			cancel()
+		case <-pending.GenerationDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(ctx)
+	cancel()
+	<-watcherDone
+	return snapshot, ok && snapshot.Generation == pending.Generation &&
+		stream.IsPublisherGeneration(snapshot.Generation)
+}
+
+// watchRingReader closes a ring reader when its manager or publisher
+// generation ends. The returned function synchronizes watcher shutdown so no
+// goroutine is left behind after a segmenter exits normally.
+func watchRingReader[T any](reader *util.RingReader[T], done, generationDone <-chan struct{}) func() {
+	stop := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-done:
+			reader.Close()
+		case <-generationDone:
+			reader.Close()
+		case <-stop:
+		}
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-watcherDone
+	}
+}
+
 func cachedVideoEndDTS(frames []*avframe.AVFrame) (int64, bool) {
 	var end int64
 	found := false

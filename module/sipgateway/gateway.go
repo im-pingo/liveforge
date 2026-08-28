@@ -178,6 +178,19 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
+	streamKey := gw.streamKeyFromRequest(req)
+	publishCtx := &core.EventContext{
+		StreamKey:   streamKey,
+		PublisherID: "sip-" + callID,
+		Protocol:    "sip",
+		RemoteAddr:  fmt.Sprintf("%s:%d", remoteAddress(offerSDP), audioMedia.Port),
+	}
+	if err := gw.eventBus.EmitSync(core.EventPublish, publishCtx); err != nil {
+		gw.metrics.setupFailures.Add(1)
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 403, "Forbidden", nil))
+		return
+	}
+
 	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
 	if err != nil {
 		gw.metrics.setupFailures.Add(1)
@@ -201,7 +214,6 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 	}
 
-	streamKey := gw.streamKeyFromRequest(req)
 	stream, _ := gw.hub.GetOrCreate(streamKey)
 
 	cs := newCallSession(callID, streamKey, nc, "inbound", rtpPort, rtcpPort)
@@ -227,6 +239,16 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 			"call", callID, "error", err)
 		resp := sip.NewResponseFromRequest(req, 500, "Server Error", nil)
 		_ = tx.Respond(resp)
+		return
+	}
+	if !cs.startPublishLifecycle(func() {
+		if err := gw.eventBus.EmitAsync(core.EventPublish, publishCtx); err != nil {
+			slog.Warn("failed to enqueue publish lifecycle event", "module", "sipgateway", "call", callID, "error", err)
+		}
+	}) {
+		gw.metrics.setupFailures.Add(1)
+		gw.finishSession(cs, CallStateEnded, errors.New("inbound session terminated during publish setup"))
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Error", nil))
 		return
 	}
 	gw.metrics.callsStarted.Add(1)
@@ -825,10 +847,24 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 		gw.portAlloc.Free(session.video.rtpPort, session.video.rtcpPort)
 	}
 	_ = session.dialog.teardown()
-	if session.direction == "inbound" && session.stream != nil && session.publisher != nil {
-		publisher := session.stream.Publisher()
-		if publisher != nil && publisher.ID() == session.publisher.id {
-			session.stream.RemovePublisherIf(publisher)
+	session.mu.RLock()
+	stream := session.stream
+	publisher := session.publisher
+	session.mu.RUnlock()
+	if session.direction == "inbound" && stream != nil && publisher != nil {
+		currentPublisher := stream.Publisher()
+		if currentPublisher != nil && currentPublisher.ID() == publisher.id {
+			stream.RemovePublisherIf(currentPublisher)
+		}
+		if session.publishLifecycleStarted() {
+			if eventErr := gw.eventBus.EmitAsync(core.EventPublishStop, &core.EventContext{
+				StreamKey:   session.streamKey,
+				PublisherID: publisher.ID(),
+				Protocol:    "sip",
+				RemoteAddr:  session.snapshot().RemoteAddress,
+			}); eventErr != nil {
+				slog.Warn("failed to enqueue publish stop lifecycle event", "module", "sipgateway", "call", session.callID, "error", eventErr)
+			}
 		}
 	}
 	return true

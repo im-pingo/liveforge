@@ -73,14 +73,23 @@ func NewDASHManager(streamKey, basePath string, targetDur float64, maxSegments i
 	}
 }
 
-// InitFromStream computes the fMP4 init segments synchronously so they are
-// available immediately after the manager is created (before Run starts).
+// InitFromStream computes the fMP4 init segments from the stream's current
+// startup snapshot. Run uses the same operation after waiting for startup, so
+// a caller cannot publish an init segment built from an incomplete track.
 func (d *DASHManager) InitFromStream(stream *core.Stream) {
+	snapshot := stream.StartupSnapshot()
+	if !snapshot.Ready {
+		return
+	}
+	d.initFromSnapshot(stream, snapshot)
+}
+
+func (d *DASHManager) initFromSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot) {
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
-	audioPlan := selectFMP4Audio(stream)
+	audioPlan := selectFMP4AudioSnapshot(stream, snapshot)
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
@@ -133,20 +142,23 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "dash", "stream", d.streamKey)
 	defer slog.Info("manager stopped", "module", "dash", "stream", d.streamKey)
 
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	audioPlan := selectFMP4Audio(stream)
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
+	snapshot, ok := waitStreamStartup(d.done, stream)
+	if !ok {
+		return
+	}
+	gopCache := snapshot.ReplayFrames
+	audioPlan := selectFMP4AudioSnapshot(stream, snapshot)
+	reader, release, audioPlan := muxerLiveReaderSnapshot(stream, snapshot, audioPlan)
 	defer release()
 	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
-	go func() {
-		<-d.done
-		reader.Close()
-	}()
+	stopReaderWatch := watchRingReader(reader, d.done, snapshot.GenerationDone)
+	defer stopReaderWatch()
+	d.initFromSnapshot(stream, snapshot)
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
@@ -176,30 +188,11 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		}
 	}
 
-	// Init segments may have already been computed by InitFromStream.
-	d.mu.RLock()
-	hasInit := d.videoInitSeg != nil
-	d.mu.RUnlock()
-	if !hasInit {
-		videoInit := videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
-		var audioInit []byte
-		if audioMuxer != nil {
-			audioInit = audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
-		}
-		d.mu.Lock()
-		if d.videoInitSeg == nil {
-			d.videoInitSeg = videoInit
-			d.audioInitSeg = audioInit
-			d.hasVideo = videoCodec.IsVideo()
-			d.hasAudio = audioCodec != 0
-			d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
-		}
-		d.mu.Unlock()
-	} else {
-		videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
-		if audioMuxer != nil {
-			audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
-		}
+	// Initialize the local muxers used for media fragments. The manager init
+	// data was already published from the same startup snapshot above.
+	videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
+	if audioMuxer != nil {
+		audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
 	}
 
 	var currentVideoFrames []*avframe.AVFrame
@@ -310,6 +303,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 	// Process GOP cache using the same audio policy as the live reader.
 	for _, f := range gopCache {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -344,7 +340,12 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
-			finalize(segStartDTS)
+			if stream.IsPublisherGeneration(snapshot.Generation) {
+				finalize(segStartDTS)
+			}
+			return
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {

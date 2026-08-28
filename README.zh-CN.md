@@ -121,14 +121,14 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **增量播放列表** — 支持 `_HLS_skip=YES` 减少传输量
 - **fMP4 容器** — 默认 fMP4，可选 TS 回退
 - **兼容旧播放器** — 无 LL-HLS 支持的播放器自动降级为缓冲分片模式
-- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；Hls.js 的初始清单等待一个完整分段但不重复公告其 part。等待上限覆盖配置的完整分段目标加一个 part（下限 10 秒、上限 30 秒）；若仍无完整分段则返回 503，而不是只包含 part 的清单。后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新。HLS、LL-HLS 和 DASH 清单会逐段转义流键，DASH URL 属性同时进行 XML 转义，媒体分片路由可保留任意深度的有效流键
+- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；HLS、LL-HLS 和 DASH 分段器会等待当前 publisher generation 的必要序列头，并从同一个启动快照绑定序列头、回放帧和实时游标。Hls.js 的初始清单等待一个完整分段但不重复公告其 part。等待上限覆盖配置的完整分段目标加一个 part（下限 10 秒、上限 30 秒）；若仍无完整分段则返回 503，而不是只包含 part 的清单。后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新。HLS、LL-HLS 和 DASH 清单会逐段转义流键，DASH URL 属性同时进行 XML 转义，媒体分片路由可保留任意深度的有效流键
 
 ### 管理与运维
 
 - **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
-- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；启用可选 `audiocodec`/FFmpeg 构建时，fMP4 录像和 DVR TS 分片会将 G.711 及其他 TS 不兼容音频统一转为 AAC，未启用时降级为可播放的纯视频输出；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
 - **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式先校验 H.264 加 G.711A，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
 - **协议实验室流键** — SIP 和 GB28181 接受最长 256 字节的可打印 ASCII 流键；以 `/` 分隔的每一段都不能为空，也不能是 `.` 或 `..`。GB28181 发布仅对 loopback 模拟器使用请求中的流键，真实设备仍使用 `{stream_prefix}/{channel_id}`
 - **实验室诊断** — Manager 保留全部活跃会话和最新 16 条终态记录。失败会话的有界 `last_error` 会先移除 SIP 凭据与 bearer token；会话视图展示接收端 RTCP 及独立音视频计数。播放路径会逐段转义流键，并按实际绑定监听器生成 RTMP/RTSP 绝对地址；Console 的 Lab Preview 直接使用这些返回路径
@@ -138,7 +138,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **限流** — IP 级令牌桶，防止连接洪泛
 - **慢消费者保护** — 基于 EWMA 的延迟检测，渐进式丢帧
 - **GCC 拥塞控制** — WebRTC WHEP 发送端带宽估计，自适应码率
-- **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体
+- **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。SIP inbound INVITE 会在分配 RTP 端口前执行同步发布鉴权，激活后发送匹配的 start/stop 生命周期事件，因此录制和 DVR 能跟随并收尾 SIP 会话。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体
 
 ## 架构
 

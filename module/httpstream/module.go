@@ -252,7 +252,6 @@ func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHMan
 
 	basePath := "/" + escapeStreamKeyPath(streamKey)
 	mgr := NewDASHManager(streamKey, basePath, targetDur, playlistSize)
-	mgr.InitFromStream(stream) // compute init segment synchronously
 	m.dashManagers[streamKey] = mgr
 	go mgr.Run(stream)
 	return mgr

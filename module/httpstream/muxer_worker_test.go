@@ -50,6 +50,11 @@ func newMuxerWorkerStream(t *testing.T, audioCodec avframe.CodecType) *core.Stre
 			avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeSequenceHeader,
 			0, 0, []byte("OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00"),
 		))
+	} else if audioCodec == avframe.CodecAAC {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+			0, 0, []byte{0x12, 0x10},
+		))
 	}
 	stream.WriteFrame(avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,

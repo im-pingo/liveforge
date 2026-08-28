@@ -428,11 +428,6 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	s.mu.Lock()
 	s.ua, s.peer = ua, peer
 	s.mu.Unlock()
-	peerPort, err := freeLabPort()
-	if err != nil {
-		return err
-	}
-	peerAddr := net.JoinHostPort("127.0.0.1", fmt.Sprint(peerPort))
 	peer.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		offer, parseErr := sdp.Parse(req.Body())
 		if parseErr != nil {
@@ -476,11 +471,33 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	s.peerCancel, s.peerDone = peerCancel, make(chan struct{})
 	peerDone := s.peerDone
 	s.mu.Unlock()
+	listenReady := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	listenCtx := context.WithValue(peerCtx, sipgo.ListenReadyCtxKey, sipgo.ListenReadyFuncCtxValue(func(_ string, addr string) {
+		select {
+		case listenReady <- addr:
+		default:
+		}
+	}))
 	go func() {
 		defer close(peerDone)
-		_ = peer.ListenAndServe(peerCtx, "udp4", peerAddr)
+		if err := peer.ListenAndServe(listenCtx, "udp4", "127.0.0.1:0"); err != nil && listenCtx.Err() == nil {
+			select {
+			case listenErr <- err:
+			default:
+			}
+		}
 	}()
-	time.Sleep(15 * time.Millisecond)
+	var peerAddr string
+	select {
+	case peerAddr = <-listenReady:
+	case err := <-listenErr:
+		return fmt.Errorf("start SIP lab peer: %w", err)
+	case <-requestContext.Done():
+		return requestContext.Err()
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
 
 	target := fmt.Sprintf("sip:%s@%s", s.request.DeviceID, peerAddr)
 	callID, err := s.gateway.Dial(requestContext, target, s.request.StreamKey)
@@ -962,15 +979,6 @@ func listenLabUDPPair() (*net.UDPConn, *net.UDPConn, error) {
 		_ = rtpConn.Close()
 	}
 	return nil, nil, errors.New("could not allocate a local RTP/RTCP pair")
-}
-
-func freeLabPort() (int, error) {
-	conn, err := listenLabUDP()
-	if err != nil {
-		return 0, err
-	}
-	port := conn.LocalAddr().(*net.UDPAddr).Port
-	return port, conn.Close()
 }
 
 func buildLabSDP(codec string, audioPort, videoPort int) []byte {
