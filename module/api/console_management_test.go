@@ -582,6 +582,25 @@ func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
 	}
 }
 
+func TestConsoleWHEPVideoAutoplayFallbackKeepsAudioControl(t *testing.T) {
+	doc, script := consoleDocument(t)
+	elements := consoleElementsByID(doc)
+	if elements["btn-player-audio"] == nil {
+		t.Fatal("player modal is missing the audio control")
+	}
+	for _, contract := range []string{
+		`function togglePlayerAudio()`,
+		`mediaElement.muted = true`,
+		`mediaElement.play()`,
+		`btn-player-audio`,
+		`setPlayerAudioControl`,
+	} {
+		if !strings.Contains(script, contract) && !strings.Contains(string(consoleHTML), contract) {
+			t.Errorf("WHEP autoplay fallback contract is missing %q", contract)
+		}
+	}
+}
+
 func TestConsoleManagementActionsAreConfirmedAndPermissionAware(t *testing.T) {
 	_, script := consoleDocument(t)
 	for _, contract := range []struct {

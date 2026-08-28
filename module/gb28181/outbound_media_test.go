@@ -28,10 +28,11 @@ func TestGBOutboundNegotiationCancelsWithPublisherGeneration(t *testing.T) {
 		t.Fatalf("GetOrCreate stream: %v", err)
 	}
 	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}); err != nil {
 		t.Fatalf("SetPublisher: %v", err)
 	}
@@ -97,6 +98,67 @@ func TestGBOutboundNegotiationCancelsWithPublisherGeneration(t *testing.T) {
 	}
 }
 
+func TestGBOutboundWaitsForPublisherReadinessBeforeSendingInvite(t *testing.T) {
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/late-header")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "late-header", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+	ports, err := portalloc.New(42320, 42321)
+	if err != nil {
+		t.Fatalf("New port allocator: %v", err)
+	}
+	h := &handler{sessions: NewSessionManager(), hub: hub, ports: ports}
+	inviteEntered := make(chan struct{})
+	m := &Module{
+		sipService: failingInviteService{},
+		handler:    h,
+		sendInvite: func(ctx context.Context, _ *sip.Request) (inviteDialog, error) {
+			close(inviteEntered)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := m.startOutboundMedia(ctx, &Device{
+			DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
+		}, "channel", stream.Key())
+		result <- err
+	}()
+
+	select {
+	case <-inviteEntered:
+		t.Fatal("GB28181 outbound sent INVITE before the video sequence header was ready")
+	case <-time.After(50 * time.Millisecond):
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	select {
+	case <-inviteEntered:
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound did not send INVITE after the publisher became ready")
+	}
+	cancel()
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("GB28181 outbound did not stop after test cancellation")
+	}
+}
+
 func TestGBOutboundGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
 	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
 	stream, err := hub.GetOrCreate("gb28181/accepted-generation-retirement")
@@ -104,10 +166,11 @@ func TestGBOutboundGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
 		t.Fatalf("GetOrCreate stream: %v", err)
 	}
 	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}); err != nil {
 		t.Fatalf("SetPublisher: %v", err)
 	}

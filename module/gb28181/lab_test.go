@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -29,6 +31,46 @@ func validGBLabRequest() LabSessionRequest {
 		DeviceID:  "34020000001320000001",
 		ChannelID: "34020000001320000002",
 		StreamKey: "gb28181/lab",
+	}
+}
+
+func TestGBLabPublishShutdownDoesNotUnderflowSIPUDPRefs(t *testing.T) {
+	var logs bytes.Buffer
+	sip.SetDefaultLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer sip.SetDefaultLogger(nil)
+
+	h := newRealGBLabHarness(t)
+	request := validGBLabRequest()
+	session, err := h.module.StartLabSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("StartLabSession publish: %v", err)
+	}
+	waitForGBLabSnapshot(t, h.module, session.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.State == LabSessionStateActive && snapshot.RTPPacketsSent > 0
+	})
+	if err := h.module.StopLabSession(session.ID); err != nil {
+		t.Fatalf("StopLabSession publish: %v", err)
+	}
+	if strings.Contains(logs.String(), "UDP ref went negative") {
+		t.Fatalf("Lab shutdown underflowed SIP UDP reference count: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "connection pool not clean cleanup") {
+		t.Fatalf("Lab shutdown left a SIP transport cleanup race: %s", logs.String())
+	}
+}
+
+func TestGBLabCleanupPreservesUnregisterSIPStatus(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	session := newGBLabSession("cleanup-sip-status", "cleanup-sip-status", validGBLabRequest(), h.module)
+	session.client = new(sipgo.Client)
+	session.unregisterFunc = func(context.Context, *sipgo.Client, string, int, string) (*sip.Response, error) {
+		return &sip.Response{StatusCode: 503, Reason: "Service Unavailable"}, nil
+	}
+
+	session.cleanup()
+	snapshot := session.snapshot()
+	if !strings.Contains(snapshot.LastError, "SIP response 503 Service Unavailable") {
+		t.Fatalf("cleanup LastError = %q, want SIP status", snapshot.LastError)
 	}
 }
 
@@ -595,10 +637,11 @@ func TestGBLabReceiveAcceptsRealLivePlayAndCountsMedia(t *testing.T) {
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
 	publisher := &gbLabSourcePublisher{id: "gb28181-source", info: avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}
 	if err := stream.SetPublisher(publisher); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
@@ -706,10 +749,11 @@ func TestGBLabReceiveRejectsSubscriberAdmissionBeforeActivation(t *testing.T) {
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
 	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "subscriber-limit-source", info: avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
 	}
@@ -769,10 +813,11 @@ func TestGBLabReceiveWorkerFailureTransitionsToFailedAndCleansUp(t *testing.T) {
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
 	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "worker-failure-source", info: avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
 	}
@@ -801,6 +846,9 @@ func TestGBLabReceiveWorkerFailureTransitionsToFailedAndCleansUp(t *testing.T) {
 	if moduleSnapshot.Sender == nil {
 		t.Fatal("active receive Lab has no outbound sender")
 	}
+	waitForGBLabSnapshot(t, h.module, active.ID, func(snapshot LabSessionSnapshot) bool {
+		return snapshot.RTPPacketsSent > 0
+	})
 	moduleRTP := moduleSnapshot.Sender.rtpConn.LocalAddr().String()
 	moduleRTCP := moduleSnapshot.Sender.rtcpConn.LocalAddr().String()
 	fakeRTP, fakeRTCP := lab.mediaAddresses()
@@ -932,7 +980,8 @@ func TestGBLabReceiveSocketFailureTransitionsToFailedAndCleansUp(t *testing.T) {
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
 	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "receive-socket-failure-source", info: avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecG711A, SampleRate: 8000, Channels: 1,
+		VideoCodec: avframe.CodecH264, VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec: avframe.CodecG711A, SampleRate: 8000, Channels: 1,
 	}}); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
 	}
@@ -1032,10 +1081,11 @@ func TestGBLabManagerBoundsTerminalHistoryAndReleasesReceiveResources(t *testing
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
 	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "history-source", info: avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
 	}

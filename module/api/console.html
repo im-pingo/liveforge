@@ -1161,6 +1161,7 @@ select:focus-visible {
     <div class="player-header">
       <div><h3 style="display:inline">Preview</h3><span class="stream-label" id="player-stream-key"></span></div>
       <div style="display:flex;align-items:center">
+        <button class="btn-stats" id="btn-player-audio" onclick="togglePlayerAudio()" aria-pressed="false" style="display:none">Unmute</button>
         <button class="btn-stats" id="btn-stats" onclick="toggleStatsOverlay()">Stats</button>
         <button class="player-close" onclick="closePlayer()">&times;</button>
       </div>
@@ -1780,14 +1781,17 @@ function destroyCurrentPlayer() {
   }
   var video = document.getElementById("player-video");
   video.pause();
+  video.muted = false;
   video.srcObject = null;
   video.src = "";
   video.load();
   var audio = document.getElementById("player-audio");
   audio.pause();
+  audio.muted = false;
   audio.srcObject = null;
   audio.src = "";
   audio.load();
+  setPlayerAudioControl(null, false);
 }
 
 function isCurrentPlayer(generation) {
@@ -1812,6 +1816,35 @@ function setPlayerURL(url) {
   var el = document.getElementById("player-url");
   el.textContent = url;
   el.style.display = url ? "block" : "none";
+}
+
+function setPlayerAudioControl(mediaElement, visible) {
+  var button = document.getElementById("btn-player-audio");
+  if (!button) return;
+  if (!visible || !mediaElement) {
+    button.style.display = "none";
+    button.setAttribute("aria-pressed", "false");
+    button.textContent = "Unmute";
+    return;
+  }
+  button.style.display = "inline-block";
+  button.setAttribute("aria-pressed", mediaElement.muted ? "false" : "true");
+  button.textContent = mediaElement.muted ? "Unmute" : "Mute";
+}
+
+function togglePlayerAudio() {
+  var video = document.getElementById("player-video");
+  var audio = document.getElementById("player-audio");
+  var mediaElement = video && video.style.display !== "none" ? video : audio;
+  if (!mediaElement || !mediaElement.srcObject) return;
+  mediaElement.muted = !mediaElement.muted;
+  setPlayerAudioControl(mediaElement, true);
+  var playPromise = mediaElement.play();
+  if (playPromise && playPromise.catch) {
+    playPromise.catch(function(e) {
+      if (isCurrentPlayer(playerGeneration)) setPlayerStatus("Audio play error: " + formatErr(e), "error");
+    });
+  }
 }
 
 function streamHasVideo(streamKey) {
@@ -2390,6 +2423,10 @@ function playWHEP(streamKey, mode, playbackPath) {
   var mediaElement = selectStreamMediaElement(streamKey);
   var hasVideo = streamHasVideo(streamKey);
   mediaElement.srcObject = remoteStream;
+  // ontrack runs asynchronously, outside the click gesture that opened the
+  // player. Start muted so browser autoplay policy cannot hide the media;
+  // the user can restore audio with the explicit player control.
+  mediaElement.muted = true;
 
   pc.ontrack = function(event) {
     if (!isCurrentPlayer(generation)) return;
@@ -2398,6 +2435,7 @@ function playWHEP(streamKey, mode, playbackPath) {
     // Rebind after the first track arrives so browsers refresh an element
     // that was initially attached to an empty MediaStream.
     mediaElement.srcObject = remoteStream;
+    if (event.track.kind === "audio") setPlayerAudioControl(mediaElement, true);
     if (!playbackMonitorStarted && (event.track.kind === "video" || !hasVideo)) {
       playbackMonitorStarted = true;
       var playPromise = mediaElement.play();

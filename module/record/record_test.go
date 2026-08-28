@@ -46,6 +46,11 @@ func (p *testPublisher) ID() string                    { return p.id }
 func (p *testPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *testPublisher) Close() error                  { return nil }
 
+func TestRecordSessionStopZeroValueIsNoOp(t *testing.T) {
+	var session RecordSession
+	session.Stop()
+}
+
 func TestMatchPattern(t *testing.T) {
 	tests := []struct {
 		pattern string
@@ -217,6 +222,43 @@ func TestRecordSessionStaleHistoryStartsAtCurrentGeneration(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte{0x65, 0xbb}) || !bytes.Contains(data, []byte{0x41, 0xbc}) {
 		t.Fatalf("recording does not contain publisher-B replay and live media: %x", data)
+	}
+}
+
+func TestStandaloneRecordSessionAcceptsUndeclaredTracks(t *testing.T) {
+	dir := t.TempDir()
+	stream := core.NewStream("live/standalone-undeclared", config.StreamConfig{
+		RingBufferSize: 32,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	defer stream.Close()
+	session, err := NewRecordSession("live/standalone-undeclared", stream, config.RecordConfig{
+		Format: "flv",
+		Path:   filepath.Join(dir, "{stream_key}", "record.flv"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		session.Run()
+		close(done)
+	}()
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
+	))
+	session.Stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("standalone record session did not stop")
+	}
+	if got := session.writer.BytesWritten(); got == 0 {
+		t.Fatal("standalone record session rejected all undeclared media")
 	}
 }
 

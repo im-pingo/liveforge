@@ -312,6 +312,96 @@ func TestSharedMuxersSwitchFromDirectAACToTransformedAudio(t *testing.T) {
 	}
 }
 
+func TestSharedMuxersDoNotDuplicateCachedDirectAACAtStartup(t *testing.T) {
+	directAAC := encodeMuxerWorkerAACFrames(t, 4)
+
+	for _, format := range []string{"flv", "ts", "fmp4"} {
+		t.Run(format, func(t *testing.T) {
+			stream := core.NewStream("live/"+format+"-cached-direct-aac", config.StreamConfig{
+				GOPCache: true, GOPCacheNum: 1, RingBufferSize: 256,
+			}, config.LimitsConfig{}, core.NewEventBus())
+			if err := stream.SetPublisher(&muxerWorkerPublisher{info: &avframe.MediaInfo{
+				VideoCodec:          avframe.CodecH264,
+				AudioCodec:          avframe.CodecAAC,
+				AudioSequenceHeader: []byte{0x12, 0x10},
+				SampleRate:          44100,
+				Channels:            2,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 256))
+			stream.WriteFrame(avframe.NewAVFrame(
+				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+				0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+			))
+			stream.WriteFrame(avframe.NewAVFrame(
+				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+				0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
+			))
+			for i, payload := range directAAC {
+				dts := int64(20 + i*23)
+				stream.WriteFrame(avframe.NewAVFrame(
+					avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+					dts, dts, payload,
+				))
+			}
+			stream.WriteFrame(avframe.NewAVFrame(
+				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+				150, 150, []byte{0, 0, 0, 2, 0x41, 0x05},
+			))
+
+			inst, reader := newMuxerWorkerInstance(stream)
+			workerDone := make(chan struct{})
+			go func() {
+				switch format {
+				case "flv":
+					new(Module).runFLVMuxer(inst, stream)
+				case "ts":
+					new(Module).runTSMuxer(inst, stream)
+				case "fmp4":
+					new(Module).runFMP4Muxer(inst, stream)
+				}
+				close(workerDone)
+			}()
+
+			var initData []byte
+			var packets [][]byte
+			if format == "ts" {
+				packets = append(packets, readMuxerPacket(t, reader))
+			} else {
+				initData = waitForMuxerInit(t, inst)
+			}
+			stream.RingBuffer().Close()
+			select {
+			case <-workerDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("muxer did not stop after source closed")
+			}
+			for {
+				packet, ok := reader.TryRead()
+				if !ok {
+					break
+				}
+				packets = append(packets, packet)
+			}
+
+			frames := demuxMuxerWorkerOutput(t, format, initData, packets)
+			counts := make(map[string]int, len(directAAC))
+			for _, frame := range frames {
+				if frame != nil && frame.MediaType.IsAudio() &&
+					frame.FrameType != avframe.FrameTypeSequenceHeader {
+					counts[string(frame.Payload)]++
+				}
+			}
+			for _, payload := range directAAC {
+				if got := counts[string(payload)]; got != 1 {
+					t.Fatalf("cached AAC payload occurrence count = %d, want 1", got)
+				}
+			}
+		})
+	}
+}
+
 // Catches making HTTP audio ownership one-way or closing a worker's shared
 // transform subscription at the direct AAC epoch. All three real muxer workers
 // share one producer and must independently reacquire transformed output when

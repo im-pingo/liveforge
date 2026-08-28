@@ -301,6 +301,31 @@ func TestDemuxerMultiSampleTrun(t *testing.T) {
 	}
 }
 
+func TestDemuxerParsesConcatenatedFragments(t *testing.T) {
+	muxer := NewMuxer(avframe.CodecH264, 0)
+	initSegment := muxer.Init(nil, nil, 640, 360, 0, 0)
+	first := muxer.WriteSegment([]*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0, 0, 0, 2, 0x65, 0x01}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 40, 40, []byte{0, 0, 0, 2, 0x41, 0x02}),
+	})
+	second := muxer.WriteSegment([]*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 80, 80, []byte{0, 0, 0, 2, 0x65, 0x03}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 120, 120, []byte{0, 0, 0, 2, 0x41, 0x04}),
+	})
+
+	demuxer, err := NewDemuxer(initSegment)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	frames, err := demuxer.Parse(append(first, second...))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(frames) != 4 {
+		t.Fatalf("concatenated fragments produced %d frames, want 4", len(frames))
+	}
+}
+
 func TestDemuxerInvalidInit(t *testing.T) {
 	_, err := NewDemuxer(nil)
 	if err == nil {
@@ -369,7 +394,7 @@ func TestDemuxerCompositionTimeOffset(t *testing.T) {
 	trunFlags := uint32(0x000001 | 0x000100 | 0x000200 | 0x000400 | 0x000800)
 	var trunPayload bytes.Buffer
 	binary.Write(&trunPayload, binary.BigEndian, uint32(len(samples))) // sample_count
-	binary.Write(&trunPayload, binary.BigEndian, uint32(0))           // data_offset placeholder
+	binary.Write(&trunPayload, binary.BigEndian, uint32(0))            // data_offset placeholder
 	for _, s := range samples {
 		binary.Write(&trunPayload, binary.BigEndian, s.duration)
 		binary.Write(&trunPayload, binary.BigEndian, s.size)

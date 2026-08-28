@@ -619,6 +619,55 @@ func TestGatewayOutboundNegotiationDoesNotMixPublisherGenerations(t *testing.T) 
 	}
 }
 
+func TestGatewayDialWaitsForPublisherReadinessBeforeSendingInvite(t *testing.T) {
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
+	stream, _ := hub.GetOrCreate("live/late-header")
+	if err := stream.SetPublisher(&gatewayTestPublisher{id: "late-header", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	inviteEntered := make(chan struct{})
+	gw.sendInvite = func(ctx context.Context, _ *sip.Request) (inviteDialog, error) {
+		close(inviteEntered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dialDone := make(chan error, 1)
+	go func() {
+		_, err := gw.Dial(ctx, "alice", stream.Key())
+		dialDone <- err
+	}()
+
+	select {
+	case <-inviteEntered:
+		t.Fatal("SIP Dial sent INVITE before the video sequence header was ready")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	select {
+	case <-inviteEntered:
+	case <-time.After(time.Second):
+		t.Fatal("SIP Dial did not send INVITE after the publisher became ready")
+	}
+	cancel()
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("SIP Dial did not stop after test cancellation")
+	}
+}
+
 func TestGatewayGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
 	for _, test := range []struct {
 		name   string

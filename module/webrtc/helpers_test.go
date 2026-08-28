@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -309,6 +310,48 @@ func TestWHIPBadSDP(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for bad SDP, got %d", rr.Code)
+	}
+}
+
+func TestWHEPWaitsForPublisherReadinessBeforeNegotiating(t *testing.T) {
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/whep-late-header")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id:   "whep-late-header-publisher",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/whep-late-header", strings.NewReader(createMinimalOffer(t)))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		m.httpSrv.Handler.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatalf("WHEP negotiated before the publisher sequence header, status=%d", rr.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("WHEP did not continue after the publisher became ready")
+	}
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("WHEP status = %d, want %d: %s", rr.Code, http.StatusCreated, rr.Body.String())
 	}
 }
 

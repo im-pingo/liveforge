@@ -40,17 +40,26 @@ SIP endpoint accepts the gateway outbound INVITE, receives the existing source
 without writing generated frames into that stream, counts audio/video RTP and
 RTCP, and sends periodic receiver reports for each track. Gateway sender reports
 use each RTP track's SSRC, RFC NTP time, and per-track payload packet/octet
-counts. Stop is idempotent;
-the start signaling context is derived from both the caller and session stop
-context, so `StopLabSession` and `Gateway.Close` cancel unanswered starts and
-release their sockets. This provider workflow requires an initialized SIP
-transport and enabled gateway.
+counts. Stop is idempotent; the start signaling context is derived from both
+the caller and session stop context, so `StopLabSession` and `Gateway.Close`
+cancel unanswered starts and release their sockets. Lab shutdown stops the
+transport reader before closing its fake SIP UA, so normal cleanup does not
+underflow sipgo UDP references or report an already-closed socket. This provider
+workflow requires an initialized SIP transport and enabled gateway. Receive mode
+waits for the selected publisher generation to become startup-ready before
+sending its INVITE; a source with a known unsupported audio codec is rejected
+before signaling, while a source with late sequence headers is waited on or
+canceled with the request context.
 The publish stream contains a dependency-free moving 160x90 constrained-baseline
 H.264 pattern at 25 fps, with one IDR per 25-frame loop, plus audible 20 ms
 PCMA/PCMU frames. The Console uses the video player and prefers WebRTC/WHEP for
-direct G.711 passthrough, so this path does not require FFmpeg. HTTP-FLV,
-HTTP-TS, fMP4, HLS, and DASH remain available as protocol outputs, but browser
-audio support for G.711 still depends on the selected output/player.
+direct G.711 passthrough, so this path does not require FFmpeg. WHEP starts
+asynchronously received media muted when browser autoplay policy requires it
+and exposes an Unmute/Mute control after audio arrives. HTTP-FLV, HTTP-TS, fMP4,
+HLS, and DASH remain available as protocol outputs, but browser audio support
+for G.711 still depends on the selected output/player. fMP4 consumers parse
+every concatenated `moof`/`mdat` fragment in a complete media segment instead
+of retaining only the last fragment.
 
 The HTTP control surface is:
 
@@ -107,7 +116,9 @@ and releases its dialog, module session, subscriber, sockets, and ports. The
 fake device only receives and counts RTP, RTCP, PS, audio, and video frames. The
 simulator binds only loopback sockets, requires no FFmpeg or external platform,
 and releases both SIP UAs, dialogs, RTP/RTCP ports, and session resources on
-stop or module close:
+stop or module close. The fake-client transport reader exits before its UA and
+the fake-peer listener exits before its peer UA, avoiding sipgo UDP reference
+underflow and closed-socket cleanup warnings.
 
 After the initial registration, each persistent fake device continues sending
 Keepalive messages at roughly one-third of the configured
@@ -125,7 +136,10 @@ curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
 
 `GET` requires `gb28181:read`; `POST` and `DELETE` require
 `gb28181:control`. Receive mode requires the requested stream to already have
-an H.264 video and G.711A audio publisher. The publish sample includes a moving constrained-baseline
+an H.264 video and G.711A audio publisher with the required startup sequence
+headers. The receive path waits for that publisher generation to become ready
+before sending its INVITE; a late header is not treated as a playable source
+until it arrives. The publish sample includes a moving constrained-baseline
 SPS/PPS/IDR/interframe pattern at 25 fps and audible 8 kHz mono G.711A audio, so the
 resulting stream can be decoded by the Console and other H.264-capable outputs.
 The lab Preview action uses the
@@ -135,6 +149,11 @@ playback paths. Lab responses and 400/404 errors use the management
 `{code,message,data}` envelope. A failed session keeps a bounded `last_error`
 with SIP credentials and bearer tokens removed before truncation; a disabled
 or uninitialized module returns 503.
+
+GB28181 outbound PS accepts internal Annex-B video and converts AVCC/HVCC H.264
+or H.265 samples to Annex-B before muxing. This keeps Lab receive output and
+normal GB28181 egress decodable when the source originated from an MP4-style
+length-prefixed protocol.
 
 SIP and GB28181 Lab `stream_key` values must be printable ASCII no longer than
 256 bytes. Every slash-separated segment must be non-empty and cannot be `.` or

@@ -308,6 +308,22 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		gw.metrics.codecFailures.Add(1)
 		return "", ErrCodecMismatch
 	}
+	if startupSnapshot.MediaInfo.AudioCodec != 0 {
+		if _, ok := configuredCodecForSource(gw.codecs, startupSnapshot.MediaInfo.AudioCodec); !ok {
+			gw.metrics.setupFailures.Add(1)
+			gw.metrics.codecFailures.Add(1)
+			return "", ErrCodecMismatch
+		}
+	}
+	var startupReady bool
+	startupSnapshot, startupReady = waitSIPStartup(ctx, stream, startupSnapshot)
+	if !startupReady {
+		gw.metrics.setupFailures.Add(1)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", errors.New("stream publisher generation is no longer active")
+	}
 	mediaInfo := &startupSnapshot.MediaInfo
 	sourceCodec, ok := configuredCodecForSource(gw.codecs, mediaInfo.AudioCodec)
 	if !ok {
@@ -524,6 +540,23 @@ func bindSIPGeneration(parent context.Context, snapshot core.StreamStartupSnapsh
 		}
 	}()
 	return bound, cancel
+}
+
+func waitSIPStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
+	if pending.Generation == 0 || pending.GenerationDone == nil || pending.PublisherID == "" {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+
+	startupCtx, cancel := bindSIPGeneration(ctx, pending)
+	snapshot, ok := stream.WaitForStartup(startupCtx)
+	cancel()
+	if !ok || snapshot.Generation != pending.Generation || snapshot.PublisherID != pending.PublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	return snapshot, stream.IsPublisherGeneration(snapshot.Generation)
 }
 
 func parseTargetURI(target, localDomain string) (sip.Uri, error) {

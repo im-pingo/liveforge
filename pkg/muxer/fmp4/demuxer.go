@@ -57,11 +57,14 @@ func (d *Demuxer) Parse(mediaSegment []byte) ([]*avframe.AVFrame, error) {
 		return nil, fmt.Errorf("fmp4: media segment too short (%d bytes)", len(mediaSegment))
 	}
 
+	var allFrames []*avframe.AVFrame
 	var moofData []byte
 	var moofOffset int
-	var mdatData []byte
+	parsedFragment := false
 
-	// Walk top-level boxes to find moof and mdat
+	// Walk top-level boxes and parse every moof+mdat pair. LL-HLS full
+	// segments are commonly assembled by concatenating their partial fMP4
+	// fragments, so retaining only the last moof would silently drop media.
 	offset := 0
 	for offset+8 <= len(mediaSegment) {
 		boxSize, boxType := readBoxHeader(mediaSegment[offset:])
@@ -71,19 +74,28 @@ func (d *Demuxer) Parse(mediaSegment []byte) ([]*avframe.AVFrame, error) {
 		if boxType == BoxMoof {
 			moofOffset = offset
 			moofData = mediaSegment[offset+8 : offset+int(boxSize)]
-		} else if boxType == BoxMdat {
-			mdatData = mediaSegment[offset+8 : offset+int(boxSize)]
+		} else if boxType == BoxMdat && moofData != nil {
+			frames, err := d.parseMoof(moofData, mediaSegment, moofOffset)
+			if err != nil {
+				return nil, fmt.Errorf("fmp4: %w", err)
+			}
+			allFrames = append(allFrames, frames...)
+			parsedFragment = true
+			moofData = nil
 		}
 		offset += int(boxSize)
 	}
 
-	if moofData == nil {
-		return nil, fmt.Errorf("fmp4: moof box not found in media segment")
-	}
-	if mdatData == nil {
+	if moofData != nil {
 		return nil, fmt.Errorf("fmp4: mdat box not found in media segment")
 	}
+	if !parsedFragment {
+		return nil, fmt.Errorf("fmp4: moof box not found in media segment")
+	}
+	return allFrames, nil
+}
 
+func (d *Demuxer) parseMoof(moofData, mediaSegment []byte, moofOffset int) ([]*avframe.AVFrame, error) {
 	// Parse all traf boxes inside moof
 	var allFrames []*avframe.AVFrame
 	inner := 0
@@ -102,8 +114,6 @@ func (d *Demuxer) Parse(mediaSegment []byte) ([]*avframe.AVFrame, error) {
 		}
 		inner += int(boxSize)
 	}
-
-	_ = mdatData // mdat is accessed via absolute offsets from mediaSegment
 
 	return allFrames, nil
 }
@@ -256,9 +266,9 @@ type trafInfo struct {
 
 // sampleEntry holds per-sample metadata from a trun box.
 type sampleEntry struct {
-	duration            uint32
-	size                uint32
-	flags               uint32
+	duration              uint32
+	size                  uint32
+	flags                 uint32
 	compositionTimeOffset int32
 }
 
@@ -505,7 +515,9 @@ func parseTrun(data []byte, info *trafInfo) {
 // isKeyframeSampleFlags checks sample flags to determine if a sample is a keyframe.
 // The muxer writes 0x02000000 for keyframes and 0x01010000 for non-keyframes.
 // In ISO 14496-12, bits 25-24 (0-indexed) encode sample_depends_on:
-//   0 = unknown, 1 = depends on others (non-key), 2 = does NOT depend (key)
+//
+//	0 = unknown, 1 = depends on others (non-key), 2 = does NOT depend (key)
+//
 // Also bit 16 (sample_is_non_sync_sample): 0 = sync/key, 1 = non-sync.
 func isKeyframeSampleFlags(flags uint32) bool {
 	dependsOn := (flags >> 24) & 0x03

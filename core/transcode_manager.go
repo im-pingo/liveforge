@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -13,11 +14,14 @@ import (
 
 // TranscodedTrack holds a ring buffer for a specific target codec.
 type TranscodedTrack struct {
-	targetCodec avframe.CodecType
-	ringBuffer  *util.RingBuffer[*avframe.AVFrame]
-	sourceStart int64
-	subCount    int
-	cancel      context.CancelFunc
+	targetCodec   avframe.CodecType
+	ringBuffer    *util.RingBuffer[*avframe.AVFrame]
+	sourceStart   int64
+	sourceCursor  atomic.Int64
+	sourceMu      sync.Mutex
+	sourceAdvance chan struct{}
+	subCount      int
+	cancel        context.CancelFunc
 }
 
 // TranscodeManager creates and manages on-demand audio transcoding goroutines.
@@ -138,12 +142,14 @@ func (tm *TranscodeManager) getOrCreateReaderAt(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	track := &TranscodedTrack{
-		targetCodec: targetCodec,
-		ringBuffer:  util.NewRingBuffer[*avframe.AVFrame](tm.bufSize),
-		sourceStart: sourceStart,
-		subCount:    1,
-		cancel:      cancel,
+		targetCodec:   targetCodec,
+		ringBuffer:    util.NewRingBuffer[*avframe.AVFrame](tm.bufSize),
+		sourceStart:   sourceStart,
+		subCount:      1,
+		cancel:        cancel,
+		sourceAdvance: make(chan struct{}),
 	}
+	track.sourceCursor.Store(sourceStart)
 	tracks[targetCodec] = track
 
 	// Attach the first reader before starting the producer so a non-history
@@ -158,6 +164,49 @@ func (tm *TranscodeManager) getOrCreateReaderAt(
 		})
 	}
 	return reader, release, nil
+}
+
+// WaitForSourceCursor waits until a combined transcode track has consumed all
+// source frames before sourceCursor. It is used by finite consumers, such as
+// recording, when they need to drain generated output after stopping input.
+func (tm *TranscodeManager) WaitForSourceCursor(targetCodec avframe.CodecType, sourceCursor int64, ctx context.Context) bool {
+	if sourceCursor <= 0 {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		tm.mu.Lock()
+		track := tm.tracks[targetCodec]
+		tm.mu.Unlock()
+		if track == nil {
+			return false
+		}
+		track.sourceMu.Lock()
+		current := track.sourceCursor.Load()
+		advance := track.sourceAdvance
+		track.sourceMu.Unlock()
+		if current >= sourceCursor {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-advance:
+		}
+	}
+}
+
+func (track *TranscodedTrack) advanceSourceCursor(cursor int64) {
+	track.sourceMu.Lock()
+	defer track.sourceMu.Unlock()
+	if cursor <= track.sourceCursor.Load() {
+		return
+	}
+	track.sourceCursor.Store(cursor)
+	close(track.sourceAdvance)
+	track.sourceAdvance = make(chan struct{})
 }
 
 func (tm *TranscodeManager) newTrackReader(
@@ -432,6 +481,7 @@ func (tm *TranscodeManager) transcodeLoop(
 					frameEpoch = sourceEpoch
 				}
 				if frameEpoch < audioEpochFloor {
+					track.advanceSourceCursor(reader.ReadCursor())
 					frame, ok = reader.TryRead()
 					if !ok {
 						break
@@ -465,6 +515,7 @@ func (tm *TranscodeManager) transcodeLoop(
 					pipeline.encode(frame)
 				}
 			}
+			track.advanceSourceCursor(reader.ReadCursor())
 
 			frame, ok = reader.TryRead()
 			if !ok {

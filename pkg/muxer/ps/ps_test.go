@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/rtp"
 )
 
 func TestMuxDemuxRoundTrip(t *testing.T) {
@@ -13,7 +14,7 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 
 	// Create a fake H.264 keyframe with SPS/PPS NALUs (Annex-B format)
 	sps := []byte{0x67, 0x42, 0x00, 0x1E, 0xAB, 0x40, 0x50} // SPS NAL type=7
-	pps := []byte{0x68, 0xCE, 0x38, 0x80}                     // PPS NAL type=8
+	pps := []byte{0x68, 0xCE, 0x38, 0x80}                   // PPS NAL type=8
 	idr := make([]byte, 100)
 	idr[0] = 0x65 // IDR NAL type=5
 	for i := 1; i < len(idr); i++ {
@@ -95,6 +96,33 @@ func TestMuxAudio(t *testing.T) {
 	if binary.BigEndian.Uint32(packed[0:4]) != PackHeaderStartCode {
 		t.Fatal("missing pack header")
 	}
+}
+
+func TestMuxDemuxAVCCVideoRoundTrip(t *testing.T) {
+	startCode := []byte{0x00, 0x00, 0x00, 0x01}
+	annexB := append(append(append([]byte{}, startCode...), []byte{0x67, 0x42, 0x00, 0x1e, 0xab, 0x40}...), startCode...)
+	annexB = append(annexB, []byte{0x68, 0xce, 0x38, 0x80}...)
+	annexB = append(annexB, startCode...)
+	annexB = append(annexB, []byte{0x65, 0x88, 0x01, 0x02}...)
+
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		1000, 1000, rtp.AnnexBToAVCC(annexB),
+	)
+	packed, err := NewMuxer().Pack(frame)
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	frames, err := NewDemuxer().Feed(packed)
+	if err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	for _, got := range frames {
+		if got.MediaType == avframe.MediaTypeVideo && got.FrameType == avframe.FrameTypeKeyframe {
+			return
+		}
+	}
+	t.Fatalf("AVCC video produced no keyframe: %+v", frames)
 }
 
 func TestDemuxEmptyData(t *testing.T) {

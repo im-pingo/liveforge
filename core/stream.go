@@ -401,17 +401,17 @@ func trackReady(codec avframe.CodecType, hasSequenceHeader bool) bool {
 	switch codec {
 	case avframe.CodecH264,
 		avframe.CodecH265,
-		avframe.CodecAV1,
-		avframe.CodecVP8,
-		avframe.CodecVP9,
-		avframe.CodecAAC,
-		avframe.CodecOpus:
+		avframe.CodecAAC:
 		return hasSequenceHeader
 	case avframe.CodecMP3,
 		avframe.CodecG711A,
 		avframe.CodecG711U,
 		avframe.CodecG722,
-		avframe.CodecG729:
+		avframe.CodecG729,
+		avframe.CodecAV1,
+		avframe.CodecVP8,
+		avframe.CodecVP9,
+		avframe.CodecOpus:
 		return true
 	default:
 		return false
@@ -507,6 +507,15 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 			s.audioCodecEpoch++
 		}
 		s.mediaInfo.AudioCodec = frame.Codec
+		switch frame.Codec {
+		case avframe.CodecG711A, avframe.CodecG711U:
+			// G.711 has a fixed RTP clock and mono channel layout. Some
+			// publishers, such as the GB28181 PS demuxer, discover the
+			// codec after SetPublisher and cannot provide these fields up
+			// front; keep the stream startup snapshot self-consistent.
+			s.mediaInfo.SampleRate = 8000
+			s.mediaInfo.Channels = 1
+		}
 		frame.AudioCodecEpoch = s.audioCodecEpoch
 		frame.AudioProvenance = avframe.FrameProvenanceSource
 	}
@@ -558,6 +567,7 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 // StreamStartupSnapshot is an atomic view of the current publisher generation's startup state.
 type StreamStartupSnapshot struct {
 	Generation            uint64
+	PublisherID           string
 	GenerationStartCursor int64
 	MediaInfo             avframe.MediaInfo
 	VideoSequenceHeader   *avframe.AVFrame
@@ -587,8 +597,13 @@ func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
 	for _, gop := range s.gopCache {
 		replayFrames = append(replayFrames, gop...)
 	}
+	publisherID := ""
+	if !isNilPublisher(s.publisher) {
+		publisherID = s.publisher.ID()
+	}
 	return StreamStartupSnapshot{
 		Generation:            s.publisherGeneration,
+		PublisherID:           publisherID,
 		GenerationStartCursor: s.generationStartCursor,
 		MediaInfo:             cloneMediaInfo(s.mediaInfo),
 		VideoSequenceHeader:   s.videoSeqHeader,

@@ -15,6 +15,7 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/internal/labmedia"
+	"github.com/im-pingo/liveforge/internal/sipclose"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	mediarp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/pkg/sdp"
@@ -225,6 +226,7 @@ type sipLabSession struct {
 	client    *sipgo.Client
 	ua        *sipgo.UserAgent
 	peer      *sipgo.Server
+	sipConns  []sip.Connection
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -357,14 +359,14 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	invite.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	invite.AppendHeader(sip.NewHeader(labStreamKeyHeader, s.request.StreamKey))
 	invite.SetTransport("udp")
-	response, err := sendLabInvite(requestContext, client, invite)
+	response, err := sendLabInvite(requestContext, client, invite, s.rememberSIPConnection)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.callID, s.invite, s.response = callID, invite, response
 	s.mu.Unlock()
-	if err := sendLabACK(requestContext, client, invite, response); err != nil {
+	if err := sendLabACK(requestContext, client, invite, response, s.rememberSIPConnection); err != nil {
 		return err
 	}
 	answer, err := sdp.Parse(response.Body())
@@ -741,7 +743,7 @@ func (s *sipLabSession) cleanup() {
 		var closeErr error
 		if mode == LabModePublish && client != nil && invite != nil && response != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			closeErr = sendLabBYE(ctx, client, invite, response)
+			closeErr = sendLabBYE(ctx, client, invite, response, s.rememberSIPConnection)
 			cancel()
 		}
 		if s.gateway != nil && callID != "" {
@@ -752,11 +754,14 @@ func (s *sipLabSession) cleanup() {
 		if peerCancel != nil {
 			peerCancel()
 		}
-		if ua != nil {
-			_ = ua.Close()
-		}
 		if peerDone != nil {
 			<-peerDone
+		}
+		if ua != nil {
+			s.mu.RLock()
+			sipConns := append([]sip.Connection(nil), s.sipConns...)
+			s.mu.RUnlock()
+			closeErr = errors.Join(closeErr, sipclose.CloseUserAgent(ua, sipConns))
 		}
 		s.mediaWG.Wait()
 		if closeErr != nil {
@@ -765,6 +770,20 @@ func (s *sipLabSession) cleanup() {
 			s.mu.Unlock()
 		}
 	})
+}
+
+func (s *sipLabSession) rememberSIPConnection(connection sip.Connection) {
+	if connection == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.sipConns {
+		if existing == connection {
+			return
+		}
+	}
+	s.sipConns = append(s.sipConns, connection)
 }
 
 func (s *sipLabSession) fail(err error) {
@@ -857,11 +876,12 @@ func newLabInvite(method sip.RequestMethod, recipient sip.Uri, user, domain, cal
 	return request
 }
 
-func sendLabInvite(ctx context.Context, client *sipgo.Client, invite *sip.Request) (*sip.Response, error) {
+func sendLabInvite(ctx context.Context, client *sipgo.Client, invite *sip.Request, onConnection ...func(sip.Connection)) (*sip.Response, error) {
 	tx, err := client.TransactionRequest(ctx, invite)
 	if err != nil {
 		return nil, err
 	}
+	observeSIPConnection(tx, onConnection)
 	defer tx.Terminate()
 	for {
 		select {
@@ -881,7 +901,7 @@ func sendLabInvite(ctx context.Context, client *sipgo.Client, invite *sip.Reques
 	}
 }
 
-func sendLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response) error {
+func sendLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response, onConnection ...func(sip.Connection)) error {
 	ack := newLabDialogRequest(sip.ACK, invite, response, 1)
 	if err := sipgo.ClientRequestBuild(client, ack); err != nil {
 		return err
@@ -890,13 +910,16 @@ func sendLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request, 
 	if err != nil {
 		return err
 	}
+	if len(onConnection) > 0 && onConnection[0] != nil {
+		onConnection[0](conn)
+	}
 	defer conn.TryClose()
 	return conn.WriteMsg(ack)
 }
 
-func sendLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response) error {
+func sendLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response, onConnection ...func(sip.Connection)) error {
 	bye := newLabDialogRequest(sip.BYE, invite, response, 2)
-	resp, err := sendLabRequest(ctx, client, bye)
+	resp, err := sendLabRequest(ctx, client, bye, onConnection...)
 	if err != nil {
 		return err
 	}
@@ -906,11 +929,12 @@ func sendLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request, 
 	return nil
 }
 
-func sendLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Request) (*sip.Response, error) {
+func sendLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Request, onConnection ...func(sip.Connection)) (*sip.Response, error) {
 	tx, err := client.TransactionRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
+	observeSIPConnection(tx, onConnection)
 	defer tx.Terminate()
 	for {
 		select {
@@ -924,6 +948,16 @@ func sendLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Requ
 				return response, nil
 			}
 		}
+	}
+}
+
+func observeSIPConnection(tx sip.ClientTransaction, observers []func(sip.Connection)) {
+	if len(observers) == 0 || observers[0] == nil {
+		return
+	}
+	connectionProvider, ok := tx.(interface{ Connection() sip.Connection })
+	if ok {
+		observers[0](connectionProvider.Connection())
 	}
 }
 

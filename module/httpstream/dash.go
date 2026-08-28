@@ -41,6 +41,7 @@ type DASHManager struct {
 	timeBase           float64 // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
 	streamKey          string
 	basePath           string // e.g., "/live/stream1"
+	publisherID        string
 	hasVideo           bool   // whether video track is present
 	hasAudio           bool   // whether audio track is present
 	audioCodec         string // e.g., "mp4a.40.2" for MPD codecs attribute
@@ -142,7 +143,7 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "dash", "stream", d.streamKey)
 	defer slog.Info("manager stopped", "module", "dash", "stream", d.streamKey)
 
-	snapshot, ok := waitStreamStartup(d.done, stream)
+	snapshot, ok := waitStreamStartupForPublisher(d.done, stream, d.publisherID)
 	if !ok {
 		return
 	}

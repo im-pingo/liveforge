@@ -14,15 +14,16 @@ import (
 
 // ForwardTarget manages forwarding a single stream to a single target.
 type ForwardTarget struct {
-	streamKey  string
-	targetURL  string
-	stream     *core.Stream
-	transport  RelayTransport
-	health     *HealthTracker
-	pool       *RelayPool
-	retryMax   int
-	retryDelay time.Duration
-	metrics    *RelayMetrics
+	streamKey   string
+	targetURL   string
+	stream      *core.Stream
+	publisherID string
+	transport   RelayTransport
+	health      *HealthTracker
+	pool        *RelayPool
+	retryMax    int
+	retryDelay  time.Duration
+	metrics     *RelayMetrics
 
 	mu            sync.Mutex
 	closed        chan struct{}
@@ -259,12 +260,26 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 	if !ok {
 		return nil
 	}
+	snapshot := stream.StartupSnapshot()
+	publisherID := ctx.PublisherID
+	if publisherID == "" {
+		publisherID = snapshot.PublisherID
+	}
+	if publisherID != "" && snapshot.PublisherID != "" && publisherID != snapshot.PublisherID {
+		return nil
+	}
 
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
-	if _, exists := fm.active[ctx.StreamKey]; exists {
-		return nil
+	if existing, exists := fm.active[ctx.StreamKey]; exists {
+		if len(existing) == 0 || existing[0].publisherID == publisherID {
+			return nil
+		}
+		for _, ft := range existing {
+			ft.Close()
+		}
+		delete(fm.active, ctx.StreamKey)
 	}
 
 	targets, err := fm.scheduler.Resolve("forward", ctx.StreamKey)
@@ -297,6 +312,7 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 		}
 
 		ft := NewForwardTarget(ctx.StreamKey, fullURL, stream, transport, fm.health, fm.pool, fm.retryMax, fm.retryDel, fm.metrics)
+		ft.publisherID = publisherID
 		fts = append(fts, ft)
 		go ft.Run()
 	}
@@ -315,6 +331,10 @@ func (fm *ForwardManager) onPublish(ctx *core.EventContext) error {
 func (fm *ForwardManager) onPublishStop(ctx *core.EventContext) error {
 	fm.mu.Lock()
 	fts, ok := fm.active[ctx.StreamKey]
+	if ok && ctx.PublisherID != "" && (len(fts) == 0 || fts[0].publisherID != ctx.PublisherID) {
+		fm.mu.Unlock()
+		return nil
+	}
 	delete(fm.active, ctx.StreamKey)
 	fm.mu.Unlock()
 

@@ -451,10 +451,11 @@ func TestSIPLabReceiveAcceptsGatewayInviteAndCleansUp(t *testing.T) {
 	if err := stream.SetPublisher(&gatewayTestPublisher{
 		id: "sip-lab-av-source",
 		info: &avframe.MediaInfo{
-			VideoCodec: avframe.CodecH264,
-			AudioCodec: avframe.CodecG711U,
-			SampleRate: 8000,
-			Channels:   1,
+			VideoCodec:          avframe.CodecH264,
+			VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+			AudioCodec:          avframe.CodecG711U,
+			SampleRate:          8000,
+			Channels:            1,
 		},
 	}); err != nil {
 		t.Fatalf("SetPublisher receive source: %v", err)
@@ -586,10 +587,11 @@ func TestSIPLabReceiveCallFailureTransitionsToFailedAndCleansUp(t *testing.T) {
 		t.Fatalf("GetOrCreate source: %v", err)
 	}
 	publisher := &gatewayTestPublisher{id: "receive-call-failure-source", info: &avframe.MediaInfo{
-		VideoCodec: avframe.CodecH264,
-		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
 	}}
 	if err := stream.SetPublisher(publisher); err != nil {
 		t.Fatalf("SetPublisher source: %v", err)
@@ -631,10 +633,11 @@ func TestSIPLabReceiveDoesNotMutateSourceStream(t *testing.T) {
 	if err := stream.SetPublisher(&gatewayTestPublisher{
 		id: "dedicated-receive-source",
 		info: &avframe.MediaInfo{
-			VideoCodec: avframe.CodecH264,
-			AudioCodec: avframe.CodecG711A,
-			SampleRate: 8000,
-			Channels:   1,
+			VideoCodec:          avframe.CodecH264,
+			VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+			AudioCodec:          avframe.CodecG711A,
+			SampleRate:          8000,
+			Channels:            1,
 		},
 	}); err != nil {
 		t.Fatalf("SetPublisher receive source: %v", err)
@@ -676,10 +679,11 @@ func TestSIPLabReceiveSendsPeriodicPerTrackReceiverReports(t *testing.T) {
 	if err := stream.SetPublisher(&gatewayTestPublisher{
 		id: "periodic-rr-source",
 		info: &avframe.MediaInfo{
-			VideoCodec: avframe.CodecH264,
-			AudioCodec: avframe.CodecG711A,
-			SampleRate: 8000,
-			Channels:   1,
+			VideoCodec:          avframe.CodecH264,
+			VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+			AudioCodec:          avframe.CodecG711A,
+			SampleRate:          8000,
+			Channels:            1,
 		},
 	}); err != nil {
 		t.Fatalf("SetPublisher receive source: %v", err)

@@ -2,6 +2,7 @@ package fmp4
 
 import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/codec/aac"
 	"github.com/im-pingo/liveforge/pkg/codec/h265"
 )
 
@@ -31,15 +32,43 @@ func (m *Muxer) Init(videoSeqHeader, audioSeqHeader *avframe.AVFrame, width, hei
 	if audioSeqHeader != nil {
 		audioData = audioSeqHeader.Payload
 	}
-	if sampleRate > 0 {
-		m.audioSampleRate = sampleRate
-	}
+	sampleRate, channels = resolveAudioConfig(m.audioCodec, audioData, sampleRate, channels)
+	m.audioSampleRate = sampleRate
 	if width <= 0 || height <= 0 {
 		if derivedWidth, derivedHeight := ParseVideoDimensions(m.videoCodec, videoData); derivedWidth > 0 && derivedHeight > 0 {
 			width, height = derivedWidth, derivedHeight
 		}
 	}
 	return BuildInitSegment(m.videoCodec, m.audioCodec, videoData, audioData, width, height, sampleRate, channels)
+}
+
+func resolveAudioConfig(codec avframe.CodecType, audioData []byte, sampleRate, channels int) (int, int) {
+	if sampleRate <= 0 {
+		switch codec {
+		case avframe.CodecAAC:
+			if info, err := aac.ParseAudioSpecificConfig(audioData); err == nil && info.SampleRate > 0 {
+				sampleRate = info.SampleRate
+			}
+		case avframe.CodecOpus:
+			sampleRate = 48000
+		case avframe.CodecMP3:
+			sampleRate = 44100
+		}
+		if sampleRate <= 0 {
+			sampleRate = timescaleAudio
+		}
+	}
+	if channels <= 0 {
+		if codec == avframe.CodecAAC {
+			if info, err := aac.ParseAudioSpecificConfig(audioData); err == nil && info.Channels > 0 {
+				channels = info.Channels
+			}
+		}
+		if channels <= 0 {
+			channels = 2
+		}
+	}
+	return sampleRate, channels
 }
 
 // ParseVideoDimensions extracts display dimensions from a codec configuration record.

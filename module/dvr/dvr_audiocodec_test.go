@@ -37,6 +37,14 @@ func TestDVRSessionTranscodesG711AudioToAAC(t *testing.T) {
 	}
 	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 256))
 
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo,
+		avframe.CodecH264,
+		avframe.FrameTypeSequenceHeader,
+		0,
+		0,
+		dvrTestAVCConfig(),
+	))
 	stream.WriteFrame(labmedia.VideoFrame(0))
 	session, err := NewSession("sip/dvr-g711", stream, config.DVRConfig{
 		Path:            filepath.Join(dir, "{stream_key}"),

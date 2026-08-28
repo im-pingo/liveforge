@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/codec/h264"
+	"github.com/im-pingo/liveforge/pkg/codec/h265"
 )
 
 // Muxer generates MPEG-PS packs from AVFrames.
@@ -45,10 +47,60 @@ func (m *Muxer) Pack(frame *avframe.AVFrame) ([]byte, error) {
 		streamID = byte(PESAudioStreamID)
 	}
 
-	pes := buildPES(streamID, frame.Payload, frame.DTS, frame.PTS)
+	payload := frame.Payload
+	if frame.MediaType.IsVideo() {
+		payload = normalizeVideoPayload(frame)
+	}
+	pes := buildPES(streamID, payload, frame.DTS, frame.PTS)
 	buf = append(buf, pes...)
 
 	return buf, nil
+}
+
+func normalizeVideoPayload(frame *avframe.AVFrame) []byte {
+	if isAnnexB(frame.Payload) {
+		return frame.Payload
+	}
+
+	switch frame.Codec {
+	case avframe.CodecH264:
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if sps, pps, err := h264.ExtractSPSPPSFromAVCRecord(frame.Payload); err == nil && len(sps) > 0 && len(pps) > 0 {
+				return annexBParameterSets(sps, pps)
+			}
+		}
+		if annexB := h264.AVCCToAnnexB(frame.Payload); len(annexB) > 0 {
+			return annexB
+		}
+	case avframe.CodecH265:
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if vps, sps, pps, err := h265.ExtractVPSSPSPPSFromHVCRecord(frame.Payload); err == nil {
+				return annexBParameterSets(vps, sps, pps)
+			}
+		}
+		if annexB := h265.HVCCToAnnexB(frame.Payload); len(annexB) > 0 {
+			return annexB
+		}
+	}
+	return frame.Payload
+}
+
+func isAnnexB(data []byte) bool {
+	return len(data) >= 3 && data[0] == 0 && data[1] == 0 &&
+		(data[2] == 1 || (len(data) >= 4 && data[2] == 0 && data[3] == 1))
+}
+
+func annexBParameterSets(sets ...[]byte) []byte {
+	const startCodeSize = 4
+	result := make([]byte, 0, startCodeSize*len(sets))
+	for _, set := range sets {
+		if len(set) == 0 {
+			continue
+		}
+		result = append(result, 0, 0, 0, 1)
+		result = append(result, set...)
+	}
+	return result
 }
 
 // buildPackHeader creates a 14-byte MPEG-2 PS pack header.
@@ -111,12 +163,12 @@ func (m *Muxer) buildSystemHeader() []byte {
 	// Video stream entry
 	buf[12] = PESVideoStreamID
 	buf[13] = 0xE0 | 0x08 // P-STD_buffer_bound_scale=1 (1024 units)
-	buf[14] = 0x80         // buffer size 128KB
+	buf[14] = 0x80        // buffer size 128KB
 
 	// Audio stream entry
 	buf[15] = PESAudioStreamID
 	buf[16] = 0xC0 | 0x04 // P-STD_buffer_bound_scale=0 (128 units)
-	buf[17] = 0x20         // buffer size 4KB
+	buf[17] = 0x20        // buffer size 4KB
 
 	return buf
 }
@@ -149,8 +201,8 @@ func buildPES(streamID byte, payload []byte, dtsMs, ptsMs int64) []byte {
 	buf = append(buf, byte(pesLen>>8), byte(pesLen))
 
 	// Optional PES header
-	buf = append(buf, 0x80)         // flags: MPEG-2
-	buf = append(buf, ptsDtsFlags)  // PTS/DTS flags
+	buf = append(buf, 0x80)        // flags: MPEG-2
+	buf = append(buf, ptsDtsFlags) // PTS/DTS flags
 	buf = append(buf, byte(headerDataLen))
 
 	if hasPTS {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
@@ -45,6 +46,8 @@ func (p *hlsPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 
 	lastSeq := -1
 	pollInterval := 1 * time.Second
+	var fmp4Demuxer *fmp4.Demuxer
+	var initURI string
 
 	for {
 		select {
@@ -70,7 +73,36 @@ func (p *hlsPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 			}
 		}
 
-		_, segments := parseM3U8(body)
+		playlist := parseLLHLSPlaylist(body)
+		segments := playlist.segments
+
+		// The regular HLS endpoint can serve an LL-HLS fMP4 playlist. The
+		// EXT-X-MAP contains the track metadata required by the fMP4 demuxer.
+		if playlist.initURI != "" {
+			if fmp4Demuxer == nil || initURI != playlist.initURI {
+				initURL := resolveSegmentURL(baseURL, playlist.initURI, cfg.Token)
+				initData, err := httpGetBytes(playCtx, initURL)
+				if err != nil {
+					if playCtx.Err() != nil {
+						return nil
+					}
+					select {
+					case <-playCtx.Done():
+						return nil
+					case <-time.After(pollInterval):
+						continue
+					}
+				}
+				fmp4Demuxer, err = fmp4.NewDemuxer(initData)
+				if err != nil {
+					return fmt.Errorf("hls: create fmp4 demuxer: %w", err)
+				}
+				initURI = playlist.initURI
+			}
+		} else {
+			fmp4Demuxer = nil
+			initURI = ""
+		}
 
 		// Filter to new segments only.
 		for _, seg := range segments {
@@ -87,9 +119,9 @@ func (p *hlsPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 			// Resolve segment URL against the base URL.
 			segURL := resolveSegmentURL(baseURL, seg.URI, cfg.Token)
 
-			// Download the TS segment. A 404 is normal when the segment
-			// has been evicted from the server's sliding window (live
-			// streams produce data fast and old segments are pruned).
+			// Download the segment. A 404 is normal when the segment has
+			// been evicted from the server's sliding window (live streams
+			// produce data fast and old segments are pruned).
 			// Skip evicted segments instead of failing.
 			segData, err := httpGetBytes(playCtx, segURL)
 			if err != nil {
@@ -101,12 +133,21 @@ func (p *hlsPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCallb
 				continue
 			}
 
-			// Create a fresh demuxer per segment to avoid state leakage.
-			demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
-				onFrame(frame)
-			})
-			demuxer.Feed(segData)
-			demuxer.Flush()
+			if fmp4Demuxer != nil {
+				frames, err := fmp4Demuxer.Parse(segData)
+				if err == nil {
+					for _, frame := range frames {
+						onFrame(frame)
+					}
+				}
+			} else {
+				// Create a fresh TS demuxer per segment to avoid state leakage.
+				demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+					onFrame(frame)
+				})
+				demuxer.Feed(segData)
+				demuxer.Flush()
+			}
 
 			lastSeq = seg.SeqNum
 		}

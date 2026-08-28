@@ -29,9 +29,10 @@ type HLSManager struct {
 	targetDur   float64 // target segment duration in seconds
 	maxSegments int     // max segments in sliding window
 
-	streamKey string
-	basePath  string // e.g., "/live/stream1"
-	done      chan struct{}
+	streamKey   string
+	basePath    string // e.g., "/live/stream1"
+	publisherID string
+	done        chan struct{}
 }
 
 // NewHLSManager creates a new HLS manager for a stream.
@@ -58,7 +59,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "hls", "stream", h.streamKey)
 	defer slog.Info("manager stopped", "module", "hls", "stream", h.streamKey)
 
-	snapshot, ok := waitStreamStartup(h.done, stream)
+	snapshot, ok := waitStreamStartupForPublisher(h.done, stream, h.publisherID)
 	if !ok {
 		return
 	}

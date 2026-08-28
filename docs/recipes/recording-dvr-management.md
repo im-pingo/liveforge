@@ -47,19 +47,27 @@ api:
 
 The default recording format is fMP4 and the default extension is `.mp4`. fMP4
 and MP4 are the preferred unified browser playback formats; media tracks are
-initialized lazily so a late audio track is not silently omitted. When the record
-module is not enabled, `GET /api/v1/recordings/status` still returns HTTP 200 with
+initialized lazily so a late audio track is not silently omitted. fMP4 writes AAC
+directly. Its init metadata derives omitted AAC sample rate and channel count
+from the AudioSpecificConfig and reuses the resolved sample rate as the media
+timescale, preserving source DTS intervals. When the record module is not enabled,
+`GET /api/v1/recordings/status` still returns HTTP 200 with
 `enabled=false`, `available=true`, and `state=disabled`, allowing Storage to render
 an explicit unavailable state. Recording item, download, and play routes return
 503 when the module itself is absent.
 
-For fMP4 recordings and DVR MPEG-TS segments, G.711 and other audio codecs that
-the target container cannot describe are converted to AAC through the shared
-`audiocodec`/FFmpeg path when the tagged build is available. Without that optional
-dependency, the incompatible audio track is omitted and the output remains
-playable video-only; AAC and MP3 tracks that the target supports are passed
-through. This keeps SIP/GB28181 G.711 recordings consistent with HTTP playback
-without claiming audio support in a portable no-CGO build.
+For fMP4 recordings, non-AAC source audio such as G.711, Opus, and MP3 is
+converted to AAC through the generation-bound shared `audiocodec`/FFmpeg path
+when the tagged build is available. Without that optional dependency, the
+unsupported audio track is omitted and the output remains playable video-only.
+DVR MPEG-TS applies the same conversion to audio unsupported by its target. When
+a transformed fMP4 recording is stopped, its source-cursor boundary is captured
+and generated output already owed for frames before that boundary is drained
+before the file is finalized; this prevents an immediate stop from producing a
+zero-media recording while the asynchronous AAC transform is catching up.
+AAC remains direct in fMP4, and SIP/GB28181 G.711 recordings retain the existing
+G.711-to-AAC behavior without claiming audio transcoding in a portable no-CGO
+build.
 
 The same publisher lifecycle applies to SIP Gateway and GB28181 inbound media:
 the protocol must successfully establish its publisher before Record/DVR start,

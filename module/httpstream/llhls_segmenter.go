@@ -59,11 +59,15 @@ func NewLLHLSSegmenter(partDuration, segmentDuration float64, container string, 
 }
 
 // Run starts the segmenter loop. Blocks until stream ends or Stop() is called.
-func (s *LLHLSSegmenter) Run(stream *core.Stream) {
+func (s *LLHLSSegmenter) Run(stream *core.Stream, publisherIDs ...string) {
 	slog.Info("segmenter started", "module", "llhls", "stream", stream.Key(), "container", s.container, "partDuration", s.partDuration)
 	defer slog.Info("segmenter stopped", "module", "llhls", "stream", stream.Key())
 
-	snapshot, ok := waitStreamStartup(s.done, stream)
+	expectedPublisherID := ""
+	if len(publisherIDs) > 0 {
+		expectedPublisherID = publisherIDs[0]
+	}
+	snapshot, ok := waitStreamStartupForPublisher(s.done, stream, expectedPublisherID)
 	if !ok {
 		return
 	}

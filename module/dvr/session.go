@@ -179,6 +179,14 @@ func (s *Session) Run() {
 	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 		return
 	}
+	if snapshot.Generation != 0 && !snapshot.Ready {
+		readySnapshot, ok := waitDVRStartup(readCtx, s.stream, snapshot)
+		if !ok {
+			return
+		}
+		snapshot = readySnapshot
+		s.snapshot = snapshot
+	}
 	s.videoCodec = snapshot.MediaInfo.VideoCodec
 	s.audioCodec = snapshot.MediaInfo.AudioCodec
 	allowUndeclaredTracks := snapshot.Generation == 0 &&
@@ -253,6 +261,33 @@ func (s *Session) Run() {
 		}
 		s.processFrame(frame)
 	}
+}
+
+func waitDVRStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
+	if pending.Generation == 0 || pending.GenerationDone == nil || pending.PublisherID == "" {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-pending.GenerationDone:
+			cancel()
+		case <-waitCtx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(waitCtx)
+	cancel()
+	<-watcherDone
+	if !ok || snapshot.Generation != pending.Generation || snapshot.PublisherID != pending.PublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	return snapshot, stream.IsPublisherGeneration(snapshot.Generation)
 }
 
 func isDVRSupportedAudio(codec avframe.CodecType) bool {

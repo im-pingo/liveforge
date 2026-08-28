@@ -747,8 +747,15 @@ func waitMuxerStartup(inst *core.MuxerInstance, stream *core.Stream) (core.Strea
 // and the captured generation signal both cancel the wait, so a stopped or
 // replaced publisher cannot leave a segmenter blocked indefinitely.
 func waitStreamStartup(done <-chan struct{}, stream *core.Stream) (core.StreamStartupSnapshot, bool) {
+	return waitStreamStartupForPublisher(done, stream, "")
+}
+
+func waitStreamStartupForPublisher(done <-chan struct{}, stream *core.Stream, expectedPublisherID string) (core.StreamStartupSnapshot, bool) {
 	pending := stream.StartupSnapshot()
 	if pending.Generation == 0 || pending.GenerationDone == nil {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if expectedPublisherID != "" && pending.PublisherID != expectedPublisherID {
 		return core.StreamStartupSnapshot{}, false
 	}
 	if pending.Ready {
@@ -757,7 +764,8 @@ func waitStreamStartup(done <-chan struct{}, stream *core.Stream) (core.StreamSt
 			return core.StreamStartupSnapshot{}, false
 		default:
 		}
-		return pending, stream.IsPublisherGeneration(pending.Generation)
+		return pending, stream.IsPublisherGeneration(pending.Generation) &&
+			(expectedPublisherID == "" || pending.PublisherID == expectedPublisherID)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -776,7 +784,8 @@ func waitStreamStartup(done <-chan struct{}, stream *core.Stream) (core.StreamSt
 	cancel()
 	<-watcherDone
 	return snapshot, ok && snapshot.Generation == pending.Generation &&
-		stream.IsPublisherGeneration(snapshot.Generation)
+		stream.IsPublisherGeneration(snapshot.Generation) &&
+		(expectedPublisherID == "" || snapshot.PublisherID == expectedPublisherID)
 }
 
 // watchRingReader closes a ring reader when its manager or publisher

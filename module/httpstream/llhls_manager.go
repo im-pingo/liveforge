@@ -24,6 +24,7 @@ type LLHLSManager struct {
 	playlist            *LLHLSPlaylist
 	streamKey           string
 	basePath            string
+	publisherID         string
 	container           string
 	segmentCount        int
 	partDuration        float64
@@ -106,7 +107,7 @@ func llhlsInitialPlaylistWaitDuration(segmentDuration, partDuration float64) tim
 func (m *LLHLSManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "llhls", "stream", m.streamKey)
 	defer slog.Info("manager stopped", "module", "llhls", "stream", m.streamKey)
-	m.segmenter.Run(stream)
+	m.segmenter.Run(stream, m.publisherID)
 }
 
 // Stop signals shutdown.

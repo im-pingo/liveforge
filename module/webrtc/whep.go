@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -82,17 +83,27 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	startup := stream.StartupSnapshot()
-	if !stream.IsPublisherGeneration(startup.Generation) ||
-		(!startup.MediaInfo.HasVideo() && !startup.MediaInfo.HasAudio()) {
+	pending := stream.StartupSnapshot()
+	if pending.Generation == 0 || !stream.IsPublisherGeneration(pending.Generation) {
 		releaseConn()
 		http.Error(w, "stream startup unavailable", http.StatusNotFound)
+		return
+	}
+	startup, ready := waitWHEPStartup(r.Context(), stream, pending)
+	if !ready {
+		releaseConn()
+		if r.Context().Err() != nil {
+			http.Error(w, "WHEP startup canceled", http.StatusServiceUnavailable)
+		} else {
+			http.Error(w, "stream startup unavailable", http.StatusNotFound)
+		}
 		return
 	}
 	info := &startup.MediaInfo
 
 	// Track subscriber limit.
-	if err := stream.AddSubscriber("webrtc"); err != nil {
+	releaseSubscriber, err := stream.AddSubscriberForGeneration("webrtc", startup.Generation)
+	if err != nil {
 		releaseConn()
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -131,7 +142,7 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	lifecycleCtx := *subscribeCtx
 	lifecycleCtx.SubscriberID = sessionID
 	sess.setCleanup(func() {
-		stream.RemoveSubscriber("webrtc")
+		releaseSubscriber()
 		sess.stopLifecycle(m.server.GetEventBus(), core.EventSubscribeStop, &lifecycleCtx)
 		releaseConn()
 	})
@@ -330,6 +341,33 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(pc.LocalDescription().SDP))
 
 	slog.Info("WHEP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
+}
+
+func waitWHEPStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
+	if pending.Generation == 0 || pending.GenerationDone == nil || pending.PublisherID == "" {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-pending.GenerationDone:
+			cancel()
+		case <-waitCtx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(waitCtx)
+	cancel()
+	<-watcherDone
+	if !ok || snapshot.Generation != pending.Generation || snapshot.PublisherID != pending.PublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	return snapshot, stream.IsPublisherGeneration(snapshot.Generation)
 }
 
 // normalizeH264Offer adds packetization-mode=1 to H264 fmtp attributes that

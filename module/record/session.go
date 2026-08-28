@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +24,9 @@ type RecordSession struct {
 	cfg         config.RecordConfig
 	writer      *FileWriter
 	reader      *util.RingReader[*avframe.AVFrame]
+	transcoder  *core.TranscodeManager
+	stopCursor  atomic.Int64
+	stopOnce    sync.Once
 	inputVideo  avframe.CodecType
 	inputAudio  avframe.CodecType
 	done        chan struct{}
@@ -122,6 +126,7 @@ func (s *RecordSession) run() error {
 	}
 	videoCodec := snapshot.MediaInfo.VideoCodec
 	audioCodec := snapshot.MediaInfo.AudioCodec
+	allowUndeclaredTracks := snapshot.Generation == 0
 	transcodedAudio := false
 	var releaseInput func()
 	releaseInput = func() {}
@@ -137,6 +142,7 @@ func (s *RecordSession) run() error {
 			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot)
 			if err == nil {
 				s.reader = reader
+				s.transcoder = tm
 				releaseInput = release
 				audioCodec = avframe.CodecAAC
 				transcodedAudio = true
@@ -152,7 +158,9 @@ func (s *RecordSession) run() error {
 	}
 	s.inputVideo = videoCodec
 	s.inputAudio = audioCodec
-	s.writer.SetExpectedTracks(videoCodec, audioCodec)
+	if !allowUndeclaredTracks {
+		s.writer.SetExpectedTracks(videoCodec, audioCodec)
+	}
 	generationCtx, cancelGeneration := context.WithCancel(readCtx)
 	defer cancelGeneration()
 	defer releaseInput()
@@ -198,9 +206,11 @@ func (s *RecordSession) run() error {
 			if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 				return nil
 			}
-			if !recordFrameAccepted(frame, videoCodec, audioCodec) {
+			if !recordFrameAccepted(frame, videoCodec, audioCodec, allowUndeclaredTracks) {
 				continue
 			}
+			videoCodec, audioCodec = recordFrameCodecs(frame, videoCodec, audioCodec, allowUndeclaredTracks)
+			s.inputVideo, s.inputAudio = videoCodec, audioCodec
 			if err := s.writer.WriteFrame(frame); err != nil {
 				slog.Error("write replay frame error", "module", "record", "stream", s.streamKey, "error", err)
 				return err
@@ -229,9 +239,11 @@ func (s *RecordSession) run() error {
 		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
 			return nil
 		}
-		if !recordFrameAccepted(frame, videoCodec, audioCodec) {
+		if !recordFrameAccepted(frame, videoCodec, audioCodec, allowUndeclaredTracks) {
 			continue
 		}
+		videoCodec, audioCodec = recordFrameCodecs(frame, videoCodec, audioCodec, allowUndeclaredTracks)
+		s.inputVideo, s.inputAudio = videoCodec, audioCodec
 		if err := s.writer.WriteFrame(frame); err != nil {
 			slog.Error("write frame error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
@@ -240,20 +252,39 @@ func (s *RecordSession) run() error {
 }
 
 func isRecordFMP4Audio(codec avframe.CodecType) bool {
-	return codec == avframe.CodecAAC || codec == avframe.CodecMP3 || codec == avframe.CodecOpus
+	return codec == avframe.CodecAAC
 }
 
-func recordFrameAccepted(frame *avframe.AVFrame, videoCodec, audioCodec avframe.CodecType) bool {
+func recordFrameAccepted(frame *avframe.AVFrame, videoCodec, audioCodec avframe.CodecType, allowUndeclaredTracks bool) bool {
 	if frame == nil {
 		return false
 	}
 	if frame.MediaType.IsVideo() {
+		if videoCodec == 0 {
+			return allowUndeclaredTracks && frame.Codec != 0
+		}
 		return videoCodec != 0 && frame.Codec == videoCodec
 	}
 	if frame.MediaType.IsAudio() {
+		if audioCodec == 0 {
+			return allowUndeclaredTracks && frame.Codec != 0
+		}
 		return audioCodec != 0 && frame.Codec == audioCodec
 	}
 	return false
+}
+
+func recordFrameCodecs(frame *avframe.AVFrame, videoCodec, audioCodec avframe.CodecType, allowUndeclaredTracks bool) (avframe.CodecType, avframe.CodecType) {
+	if !allowUndeclaredTracks || frame == nil {
+		return videoCodec, audioCodec
+	}
+	if frame.MediaType.IsVideo() && videoCodec == 0 {
+		videoCodec = frame.Codec
+	}
+	if frame.MediaType.IsAudio() && audioCodec == 0 {
+		audioCodec = frame.Codec
+	}
+	return videoCodec, audioCodec
 }
 
 func isRecordStopRequested(done <-chan struct{}) bool {
@@ -269,7 +300,13 @@ func (s *RecordSession) drainPendingFrames() error {
 	if s.reader == nil {
 		return nil
 	}
+	if s.transcoder != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		s.transcoder.WaitForSourceCursor(avframe.CodecAAC, s.stopCursor.Load(), ctx)
+		cancel()
+	}
 	for {
+		allowUndeclaredTracks := s.snapshot.Generation == 0
 		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
 			return nil
 		}
@@ -280,9 +317,10 @@ func (s *RecordSession) drainPendingFrames() error {
 		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
 			return nil
 		}
-		if !recordFrameAccepted(frame, s.inputVideo, s.inputAudio) {
+		if !recordFrameAccepted(frame, s.inputVideo, s.inputAudio, allowUndeclaredTracks) {
 			continue
 		}
+		s.inputVideo, s.inputAudio = recordFrameCodecs(frame, s.inputVideo, s.inputAudio, allowUndeclaredTracks)
 		if err := s.writer.WriteFrame(frame); err != nil {
 			slog.Error("write drained frame error", "module", "record", "stream", s.streamKey, "error", err)
 			return err
@@ -292,11 +330,15 @@ func (s *RecordSession) drainPendingFrames() error {
 
 // Stop signals the recording session to exit.
 func (s *RecordSession) Stop() {
-	select {
-	case <-s.done:
-	default:
-		close(s.done)
+	if s == nil || s.done == nil {
+		return
 	}
+	s.stopOnce.Do(func() {
+		if s.stream != nil {
+			s.stopCursor.Store(s.stream.RingBuffer().WriteCursor())
+		}
+		close(s.done)
+	})
 }
 
 func (s *RecordSession) updateStatus(state RecordingState, err error) {

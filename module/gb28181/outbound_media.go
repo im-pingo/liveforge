@@ -291,6 +291,14 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil, fmt.Errorf("%w: receive stream %q", ErrLabInvalidRequest, streamKey)
 	}
+	var startupReady bool
+	snapshot, startupReady = waitGBStartup(ctx, stream, snapshot)
+	if !startupReady {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("GB28181 outbound media source generation is not ready")
+	}
 	startupCtx, cancelStartup := bindGBGeneration(ctx, snapshot)
 	defer cancelStartup()
 	mediaInfo := &snapshot.MediaInfo
@@ -402,4 +410,21 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 	senderOwned = false
 	dialogOwned = false
 	return session, nil
+}
+
+func waitGBStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
+	if pending.Generation == 0 || pending.GenerationDone == nil || pending.PublisherID == "" {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+
+	startupCtx, cancel := bindGBGeneration(ctx, pending)
+	snapshot, ok := stream.WaitForStartup(startupCtx)
+	cancel()
+	if !ok || snapshot.Generation != pending.Generation || snapshot.PublisherID != pending.PublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	return snapshot, stream.IsPublisherGeneration(snapshot.Generation)
 }

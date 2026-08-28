@@ -316,11 +316,7 @@ func TestStreamReadinessRequiresSequenceHeadersForConfiguredCodecs(t *testing.T)
 	}{
 		{name: "h264", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecH264}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecH264},
 		{name: "h265", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecH265}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecH265},
-		{name: "av1", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecAV1}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecAV1},
-		{name: "vp8", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecVP8}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecVP8},
-		{name: "vp9", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecVP9}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecVP9},
 		{name: "aac", mediaInfo: avframe.MediaInfo{AudioCodec: avframe.CodecAAC}, mediaType: avframe.MediaTypeAudio, codec: avframe.CodecAAC},
-		{name: "opus", mediaInfo: avframe.MediaInfo{AudioCodec: avframe.CodecOpus}, mediaType: avframe.MediaTypeAudio, codec: avframe.CodecOpus},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,6 +380,27 @@ func TestStreamReadinessWithoutSequenceHeader(t *testing.T) {
 			}
 			if snapshot := s.StartupSnapshot(); !snapshot.Ready {
 				t.Fatal("observed configuration-free audio track was not ready")
+			}
+		})
+	}
+}
+
+func TestStreamReadinessWithoutSequenceHeaderForInBandVideo(t *testing.T) {
+	for _, codec := range []avframe.CodecType{
+		avframe.CodecAV1,
+		avframe.CodecVP8,
+		avframe.CodecVP9,
+	} {
+		t.Run(codec.String(), func(t *testing.T) {
+			s := NewStream("live/in-band/"+codec.String(), newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			if err := s.SetPublisher(&testPublisher{
+				id:   codec.String(),
+				info: &avframe.MediaInfo{VideoCodec: codec},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot := s.StartupSnapshot(); !snapshot.Ready {
+				t.Fatalf("in-band codec %s was not ready without an out-of-band sequence header", codec)
 			}
 		})
 	}

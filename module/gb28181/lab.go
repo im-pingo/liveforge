@@ -19,6 +19,7 @@ import (
 	"github.com/emiago/sipgo/sip"
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/internal/labmedia"
+	"github.com/im-pingo/liveforge/internal/sipclose"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
@@ -262,13 +263,15 @@ type gbLabSession struct {
 	workerDone  chan error
 	controlWG   sync.WaitGroup
 
-	client     *sipgo.Client
-	clientUA   *sipgo.UserAgent
-	peerUA     *sipgo.UserAgent
-	peer       *sipgo.Server
-	peerConn   net.PacketConn
-	peerCancel context.CancelFunc
-	peerDone   chan struct{}
+	client         *sipgo.Client
+	clientUA       *sipgo.UserAgent
+	sipConns       []sip.Connection
+	unregisterFunc func(context.Context, *sipgo.Client, string, int, string) (*sip.Response, error)
+	peerUA         *sipgo.UserAgent
+	peer           *sipgo.Server
+	peerConn       net.PacketConn
+	peerCancel     context.CancelFunc
+	peerDone       chan struct{}
 
 	inviteRequest  *sip.Request
 	inviteResponse *sip.Response
@@ -588,7 +591,7 @@ func (s *gbLabSession) register(ctx context.Context, host string, port int) (*si
 		req.AppendHeader(sip.NewHeader("Contact", fmt.Sprintf("<sip:%s@%s>", s.request.DeviceID, s.peerConn.LocalAddr())))
 	}
 	s.mu.RUnlock()
-	return sendGBLabRequest(ctx, s.client, req)
+	return sendGBLabRequest(ctx, s.client, req, s.rememberSIPConnection)
 }
 
 func (s *gbLabSession) sendKeepalive(ctx context.Context, host string, port int) error {
@@ -600,7 +603,7 @@ func (s *gbLabSession) sendKeepalive(ctx context.Context, host string, port int)
 	req := newGBLabRequest(sip.MESSAGE, sip.Uri{Scheme: "sip", User: s.module.sipService.ServerID(), Host: host, Port: port}, s.request.DeviceID, s.module.sipService.Domain(), uuid.NewString())
 	req.AppendHeader(sip.NewHeader("Content-Type", "Application/MANSCDP+xml"))
 	req.SetBody(append([]byte(xml.Header), data...))
-	response, err := sendGBLabRequest(ctx, s.client, req)
+	response, err := sendGBLabRequest(ctx, s.client, req, s.rememberSIPConnection)
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("GB28181 lab keepalive: %w", joinSIPResponseError(err, response))
 	}
@@ -656,7 +659,7 @@ func (s *gbLabSession) sendCatalog(ctx context.Context, host string, port int) e
 	req := newGBLabRequest(sip.MESSAGE, sip.Uri{Scheme: "sip", User: s.module.sipService.ServerID(), Host: host, Port: port}, s.request.DeviceID, s.module.sipService.Domain(), uuid.NewString())
 	req.AppendHeader(sip.NewHeader("Content-Type", "Application/MANSCDP+xml"))
 	req.SetBody(append([]byte(xml.Header), data...))
-	response, err := sendGBLabRequest(ctx, s.client, req)
+	response, err := sendGBLabRequest(ctx, s.client, req, s.rememberSIPConnection)
 	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("GB28181 lab catalog: %w", joinSIPResponseError(err, response))
 	}
@@ -858,7 +861,7 @@ func (s *gbLabSession) inboundReceiver() *RTPReceiver {
 func (s *gbLabSession) cleanup() {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
-		client, clientUA, peerUA, peer := s.client, s.clientUA, s.peerUA, s.peer
+		client, clientUA, peerUA := s.client, s.clientUA, s.peerUA
 		inviteTx, moduleSession := s.inviteTx, s.moduleSession
 		peerCancel, peerConn, peerDone := s.peerCancel, s.peerConn, s.peerDone
 		rtpConn, rtcpConn := s.rtpConn, s.rtcpConn
@@ -882,8 +885,12 @@ func (s *gbLabSession) cleanup() {
 		if client != nil {
 			if host, port, err := sipAddress(s.module.sipService.LocalAddr()); err == nil {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				if response, err := s.unregister(ctx, client, host, port, deviceID); err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
-					cleanupErr = errors.Join(cleanupErr, err)
+				unregister := s.unregister
+				if s.unregisterFunc != nil {
+					unregister = s.unregisterFunc
+				}
+				if response, err := unregister(ctx, client, host, port, deviceID); err != nil || response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+					cleanupErr = errors.Join(cleanupErr, joinSIPResponseError(err, response))
 				}
 				cancel()
 			}
@@ -897,20 +904,20 @@ func (s *gbLabSession) cleanup() {
 		if peerCancel != nil {
 			peerCancel()
 		}
-		if peer != nil {
-			_ = peer.Close()
-		}
 		if peerConn != nil {
 			_ = peerConn.Close()
-		}
-		if peerUA != nil {
-			_ = peerUA.Close()
 		}
 		if peerDone != nil {
 			<-peerDone
 		}
+		if peerUA != nil {
+			_ = peerUA.Close()
+		}
 		if clientUA != nil {
-			_ = clientUA.Close()
+			s.mu.RLock()
+			sipConns := append([]sip.Connection(nil), s.sipConns...)
+			s.mu.RUnlock()
+			cleanupErr = errors.Join(cleanupErr, sipclose.CloseUserAgent(clientUA, sipConns))
 		}
 		s.mediaWG.Wait()
 		if s.module.registry.Get(deviceID) != nil {
@@ -924,10 +931,24 @@ func (s *gbLabSession) cleanup() {
 	})
 }
 
+func (s *gbLabSession) rememberSIPConnection(connection sip.Connection) {
+	if connection == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.sipConns {
+		if existing == connection {
+			return
+		}
+	}
+	s.sipConns = append(s.sipConns, connection)
+}
+
 func (s *gbLabSession) unregister(ctx context.Context, client *sipgo.Client, host string, port int, deviceID string) (*sip.Response, error) {
 	req := newGBLabRequest(sip.REGISTER, sip.Uri{Scheme: "sip", User: deviceID, Host: host, Port: port}, deviceID, s.module.sipService.Domain(), uuid.NewString())
 	req.AppendHeader(sip.NewHeader("Expires", "0"))
-	return sendGBLabRequest(ctx, client, req)
+	return sendGBLabRequest(ctx, client, req, s.rememberSIPConnection)
 }
 
 func (s *gbLabSession) setState(state LabSessionState) {
@@ -994,19 +1015,20 @@ func newGBLabRequest(method sip.RequestMethod, recipient sip.Uri, user, domain, 
 	return req
 }
 
-func sendGBLabInvite(ctx context.Context, client *sipgo.Client, invite *sip.Request) (*sip.Response, error) {
-	return sendGBLabFinal(ctx, client, invite, true)
+func sendGBLabInvite(ctx context.Context, client *sipgo.Client, invite *sip.Request, onConnection ...func(sip.Connection)) (*sip.Response, error) {
+	return sendGBLabFinal(ctx, client, invite, true, onConnection...)
 }
 
-func sendGBLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Request) (*sip.Response, error) {
-	return sendGBLabFinal(ctx, client, request, false)
+func sendGBLabRequest(ctx context.Context, client *sipgo.Client, request *sip.Request, onConnection ...func(sip.Connection)) (*sip.Response, error) {
+	return sendGBLabFinal(ctx, client, request, false, onConnection...)
 }
 
-func sendGBLabFinal(ctx context.Context, client *sipgo.Client, request *sip.Request, invite bool) (*sip.Response, error) {
+func sendGBLabFinal(ctx context.Context, client *sipgo.Client, request *sip.Request, invite bool, onConnection ...func(sip.Connection)) (*sip.Response, error) {
 	tx, err := client.TransactionRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
+	observeGBSIPConnection(tx, onConnection)
 	defer tx.Terminate()
 	for {
 		select {
@@ -1027,7 +1049,7 @@ func sendGBLabFinal(ctx context.Context, client *sipgo.Client, request *sip.Requ
 	}
 }
 
-func sendGBLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response) error {
+func sendGBLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response, onConnection ...func(sip.Connection)) error {
 	ack := newGBLabDialogRequest(sip.ACK, invite, response, 1)
 	if err := sipgo.ClientRequestBuild(client, ack); err != nil {
 		return err
@@ -1036,13 +1058,16 @@ func sendGBLabACK(ctx context.Context, client *sipgo.Client, invite *sip.Request
 	if err != nil {
 		return err
 	}
+	if len(onConnection) > 0 && onConnection[0] != nil {
+		onConnection[0](conn)
+	}
 	defer conn.TryClose()
 	return conn.WriteMsg(ack)
 }
 
-func sendGBLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response) error {
+func sendGBLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request, response *sip.Response, onConnection ...func(sip.Connection)) error {
 	bye := newGBLabDialogRequest(sip.BYE, invite, response, 2)
-	response, err := sendGBLabRequest(ctx, client, bye)
+	response, err := sendGBLabRequest(ctx, client, bye, onConnection...)
 	if err != nil {
 		return err
 	}
@@ -1050,6 +1075,16 @@ func sendGBLabBYE(ctx context.Context, client *sipgo.Client, invite *sip.Request
 		return fmt.Errorf("GB28181 lab BYE rejected: %d %s", response.StatusCode, response.Reason)
 	}
 	return nil
+}
+
+func observeGBSIPConnection(tx sip.ClientTransaction, observers []func(sip.Connection)) {
+	if len(observers) == 0 || observers[0] == nil {
+		return
+	}
+	connectionProvider, ok := tx.(interface{ Connection() sip.Connection })
+	if ok {
+		observers[0](connectionProvider.Connection())
+	}
 }
 
 func newGBLabDialogRequest(method sip.RequestMethod, invite *sip.Request, response *sip.Response, cseq uint32) *sip.Request {

@@ -90,7 +90,7 @@ flowchart LR
 Stream 内部持有：
 
 - 主 `RingBuffer[*avframe.AVFrame]`；
-- 最近若干 GOP 和可选的音频时间缓存；
+- 最近若干个包含交错音视频帧的 GOP；纯音频不维护独立启动缓存；
 - 视频/音频 sequence header；
 - `MuxerManager`、`FeedbackRouter`、`TranscodeManager`；
 - 按协议统计的 subscriber 数量和流量统计；
@@ -111,6 +111,15 @@ Payload: 原始 codec payload，不包含 FLV、TS、RTP 等容器或传输封�
 ```
 
 接入模块负责把网络时间戳归一化到这个模型；输出模块再把它转回各协议需要的单位和封装。
+
+### 4.4 启动就绪
+
+启动就绪按当前 publisher generation 计算，并在更换 publisher 时重置：
+
+- H.264、H.265 和 AAC 需要先收到对应的 sequence header，避免用不完整的参数创建不可播放的容器或解码器；
+- AV1、VP8、VP9、Opus、MP3、G.711、G.722 和 G.729 的必要参数在媒体帧或 SDP/协议协商中内嵌，不等待不存在的独立 sequence header；
+- 当前已识别的每条轨道都必须满足自身规则；没有任何音视频轨道时不算就绪；
+- 纯音频没有视频关键帧，订阅者从当前 live cursor 接收，不回放独立音频缓存。
 
 ## 5. 推流数据流
 

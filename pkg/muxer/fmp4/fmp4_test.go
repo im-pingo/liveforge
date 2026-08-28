@@ -267,6 +267,61 @@ func TestMuxerFlow(t *testing.T) {
 	}
 }
 
+func TestMuxerDerivesAACConfigAndTimescaleWhenInitArgsOmitted(t *testing.T) {
+	// AAC-LC, 48000 Hz, stereo.
+	audioHeader := avframe.NewAVFrame(
+		avframe.MediaTypeAudio,
+		avframe.CodecAAC,
+		avframe.FrameTypeSequenceHeader,
+		0,
+		0,
+		[]byte{0x11, 0x90},
+	)
+	muxer := NewMuxer(0, avframe.CodecAAC)
+	initSegment := muxer.Init(nil, audioHeader, 0, 0, 0, 0)
+	firstSegment := muxer.WriteSegment([]*avframe.AVFrame{avframe.NewAVFrame(
+		avframe.MediaTypeAudio,
+		avframe.CodecAAC,
+		avframe.FrameTypeInterframe,
+		0,
+		0,
+		[]byte{1, 2, 3},
+	)})
+	secondSegment := muxer.WriteSegment([]*avframe.AVFrame{avframe.NewAVFrame(
+		avframe.MediaTypeAudio,
+		avframe.CodecAAC,
+		avframe.FrameTypeInterframe,
+		20,
+		20,
+		[]byte{4, 5, 6},
+	)})
+
+	demuxer, err := NewDemuxer(initSegment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFrames, err := demuxer.Parse(firstSegment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFrames, err := demuxer.Parse(secondSegment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstFrames) != 1 || !firstFrames[0].MediaType.IsAudio() {
+		t.Fatalf("first fragment frames = %+v, want one audio frame", firstFrames)
+	}
+	if len(secondFrames) != 1 || !secondFrames[0].MediaType.IsAudio() {
+		t.Fatalf("second fragment frames = %+v, want one audio frame", secondFrames)
+	}
+	if got := secondFrames[0].DTS - firstFrames[0].DTS; got != 20 {
+		t.Fatalf("demuxed AAC DTS interval = %d ms, want 20 ms", got)
+	}
+	if got := demuxer.timescale[audioTrackID]; got != 48000 {
+		t.Fatalf("AAC media timescale = %d, want 48000", got)
+	}
+}
+
 func TestFilterH264VCLNALUs(t *testing.T) {
 	// Build AVCC payload: SPS(7) + PPS(8) + IDR(5)
 	makeNAL := func(nalType byte, size int) []byte {

@@ -99,12 +99,12 @@ mutable publisher object.
 Readiness is evaluated for the current generation:
 
 - no observed audio or video track: not ready;
-- H.264, H.265, AV1, VP8, VP9, AAC, and Opus tracks that require container or
-  decoder configuration: ready only after the corresponding sequence header is
-  known;
-- MP3, G.711 A-law, G.711 mu-law, G.722, and G.729: ready after the first media
-  frame or an upfront `MediaInfo` declaration because no sequence header is
-  required;
+- H.264, H.265, and AAC tracks that require container or decoder configuration:
+  ready only after the corresponding sequence header is known;
+- AV1, VP8, VP9, Opus, MP3, G.711 A-law, G.711 mu-law, G.722, and G.729: ready
+  from the publisher declaration because their required parameters are carried
+  in media frames or protocol negotiation rather than a separate sequence
+  header;
 - every currently known track must satisfy its rule.
 
 The readiness signal is generation-specific and reset on every publisher
