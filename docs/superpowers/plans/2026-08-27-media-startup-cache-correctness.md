@@ -1,6 +1,6 @@
 # Media Startup and Cache Correctness Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Completed steps are marked with `[x]`.
 
 **Goal:** Remove LiveForge's independent audio cache and make publisher replacement, startup replay, sequence-header readiness, pure-audio HTTP output, SRT, and SIP startup generation-safe and directly testable.
 
@@ -20,6 +20,9 @@
 - Every source behavior/config/API change updates the corresponding repository-contract documents in the same task.
 - Every commit uses `git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit`.
 - Do not commit `coverage.out`, binaries, recordings, secrets, or local configuration.
+- Completion audit: all steps in this plan are implemented on the current branch;
+  current verification evidence is recorded in
+  `.superpowers/sdd/2026-08-27-media-startup-cache-correctness/final-review-fix-report.md`.
 
 ---
 
@@ -35,7 +38,7 @@
 - Consumes: existing `Publisher`, `avframe.MediaInfo`, GOP cache, and RingBuffer write cursor.
 - Produces: `StreamStartupSnapshot`, `StartupSnapshot()`, `WaitForStartup(context.Context)`, `IsPublisherGeneration(uint64)`, `WriteFrameForPublisher(Publisher, *AVFrame)`, generation-aware `MuxerInstance`, and instance-specific `ReleaseMuxer`.
 
-- [ ] **Step 1: Write failing generation-isolation tests**
+- [x] **Step 1: Write failing generation-isolation tests**
 
 Add focused tests that create publisher A, write headers/GOP, remove it, set
 publisher B, and assert:
@@ -60,13 +63,13 @@ if snapshot.LiveCursor < snapshot.GenerationStartCursor {
 Also test that closing/removing A closes A's `GenerationDone`, B receives a new
 channel, and a muxer release for A cannot decrement B's instance.
 
-- [ ] **Step 2: Run the core tests and observe RED**
+- [x] **Step 2: Run the core tests and observe RED**
 
 Run: `go test ./core -run 'Test(StreamPublisherGeneration|StreamStartupSnapshot|MuxerManagerGeneration)' -count=1`
 
 Expected: compile failure because the generation and snapshot APIs do not exist.
 
-- [ ] **Step 3: Implement generation lifecycle and guarded writes**
+- [x] **Step 3: Implement generation lifecycle and guarded writes**
 
 Add stream-owned generation fields, media information, readiness/state-change
 channels, and one internal write helper:
@@ -92,7 +95,7 @@ On `SetPublisher`, increment the generation, record the ring cursor, clear GOP,
 headers, media information and readiness, and allocate a new generation-done
 channel. On removal, close the active generation channel exactly once.
 
-- [ ] **Step 4: Write and run failing readiness/snapshot atomicity tests**
+- [x] **Step 4: Write and run failing readiness/snapshot atomicity tests**
 
 Cover H.264/AAC waiting for headers, MP3/G.711 readiness after media, all-known
 track readiness, `SourceCursor == LiveCursor` for audio-only, and an atomic
@@ -103,7 +106,7 @@ Run: `go test ./core -run 'Test(StreamStartup|StreamReadiness|StreamSnapshot)' -
 
 Expected: readiness and atomic snapshot assertions fail before implementation.
 
-- [ ] **Step 5: Implement `StreamStartupSnapshot` and wait semantics**
+- [x] **Step 5: Implement `StreamStartupSnapshot` and wait semantics**
 
 Use this exact public shape (adding `GenerationStartCursor` for diagnostics and
 tests):
@@ -127,7 +130,7 @@ Clone media-info byte slices while holding `s.mu`. `WaitForStartup` loops on a
 state-change channel and returns only when `StatePublishing && Ready`; it returns
 `false` on context cancellation.
 
-- [ ] **Step 6: Make muxer instances generation-aware**
+- [x] **Step 6: Make muxer instances generation-aware**
 
 Store `Generation uint64` on `MuxerInstance`. When `GetOrCreateMuxer` sees a
 different current generation, close the old instance's `Done`, replace the map
@@ -140,13 +143,13 @@ func (mm *MuxerManager) ReleaseMuxer(format string, inst *MuxerInstance)
 Only mutate the map entry when it is the same instance; retired instances can
 decrement independently.
 
-- [ ] **Step 7: Run focused and package tests**
+- [x] **Step 7: Run focused and package tests**
 
 Run: `go test ./core -race -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit Task 1**
+- [x] **Step 8: Commit Task 1**
 
 ```bash
 git add core/stream.go core/stream_test.go core/muxer_manager.go core/muxer_manager_test.go
@@ -173,7 +176,7 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "fix: isolat
 - Consumes: Task 1 GOP-only startup model.
 - Produces: no `AudioCacheMs`, `audioCache`, `AudioCache`, or `AudioCacheDetail`; stale YAML receives one explicit validation error.
 
-- [ ] **Step 1: Write failing removal/validation tests**
+- [x] **Step 1: Write failing removal/validation tests**
 
 Delete tests that assert rolling audio retention and replace them with config
 tests for both load paths:
@@ -187,13 +190,13 @@ if err == nil || !strings.Contains(err.Error(), "stream.audio_cache_ms has been 
 
 Use a temporary file with the same document for `config.Load`.
 
-- [ ] **Step 2: Run removal tests and observe RED**
+- [x] **Step 2: Run removal tests and observe RED**
 
 Run: `go test ./config ./config/runtime ./core -run 'Test.*AudioCache|Test.*RemovedStreamSetting' -count=1`
 
 Expected: current config accepts the field and core still exposes audio-cache APIs.
 
-- [ ] **Step 3: Remove runtime/config/schema surfaces**
+- [x] **Step 3: Remove runtime/config/schema surfaces**
 
 Remove the field, defaults, update-policy trimming, write-path retention, accessors,
 fixtures, examples, and both schema properties. Add a shared YAML-node check in
@@ -201,13 +204,13 @@ fixtures, examples, and both schema properties. Add a shared YAML-node check in
 call it from file and runtime parsing so unrelated compatibility behavior does
 not change.
 
-- [ ] **Step 4: Update configuration documentation**
+- [x] **Step 4: Update configuration documentation**
 
 Remove the setting from the configuration-source recipe and describe the GOP as
 video-keyframe-bounded interleaved V/A replay. State that pure audio starts from
 the live cursor and does not retain a separate startup cache.
 
-- [ ] **Step 5: Verify no audio-cache symbols remain**
+- [x] **Step 5: Verify no audio-cache symbols remain**
 
 Run: `rg -n 'AudioCache|audioCache|audio_cache_ms' --glob '!docs/superpowers/**' .`
 
@@ -217,7 +220,7 @@ Run: `go test ./config ./config/runtime ./core -race -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add config core configs docs/config module/api/configschema docs/recipes/runtime-config-sources.md
@@ -254,14 +257,14 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "refactor: r
 - Consumes: `WriteFrameForPublisher` from Task 1.
 - Produces: every network/session ingress frame is bound to the publisher that owns its connection.
 
-- [ ] **Step 1: Add failing delayed-writer protocol tests**
+- [x] **Step 1: Add failing delayed-writer protocol tests**
 
 For RTMP, WHIP, SIP gateway, GB28181 and one cluster pull transport, arrange an
 old publisher callback, replace the publisher, invoke the old callback, and
 assert that the replacement snapshot/ring contains no stale payload. Assert the
 active callback still writes.
 
-- [ ] **Step 2: Add a production-ingress source guard**
+- [x] **Step 2: Add a production-ingress source guard**
 
 Create a test that walks non-test Go files under `module/`, parses their AST, and
 fails only when a selector call targeting a variable named `stream` or a known
@@ -269,13 +272,13 @@ stream field invokes `WriteFrame`. Allow unrelated `FileWriter.WriteFrame` and
 muxer methods. The failure prints file and line and requires
 `WriteFrameForPublisher`.
 
-- [ ] **Step 3: Run protocol tests and observe RED**
+- [x] **Step 3: Run protocol tests and observe RED**
 
 Run: `go test ./core ./module/rtmp ./module/rtsp ./module/srt ./module/webrtc ./module/sipgateway ./module/gb28181 ./module/cluster -run 'Test.*(Stale|PublisherWrite|ProductionIngress)' -count=1`
 
 Expected: source guard and delayed old-writer assertions fail.
 
-- [ ] **Step 4: Migrate ingress paths with exact publisher identity**
+- [x] **Step 4: Migrate ingress paths with exact publisher identity**
 
 RTMP uses `h.publisher` for both media-info updates and writes. WHIP passes `pub`
 into `readTrackLoop`. RTSP publisher uses itself. SIP receive loops use
@@ -290,13 +293,13 @@ stream.WriteFrameForPublisher(pub, frame)
 Rejected writes terminate or return from the stale producer loop where that is
 safe; datagram callbacks may silently drop after session teardown.
 
-- [ ] **Step 5: Run all affected packages under race detection**
+- [x] **Step 5: Run all affected packages under race detection**
 
 Run: `go test ./core ./module/rtmp ./module/rtsp ./module/srt ./module/webrtc ./module/sipgateway ./module/gb28181 ./module/cluster -race -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add core/production_ingress_test.go module/rtmp module/rtsp module/srt module/webrtc module/sipgateway module/gb28181 module/cluster
@@ -324,7 +327,7 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "fix: bind i
 - Consumes: Task 1 startup snapshot, generation done signal, and instance-specific muxer release.
 - Produces: gap-free direct protocol startup, late header handling, no SRT cross-track DTS drops, generation-safe HTTP muxer workers.
 
-- [ ] **Step 1: Write failing replay/live and late-header tests**
+- [x] **Step 1: Write failing replay/live and late-header tests**
 
 Add RTMP/SRT tests where a video GOP ends at DTS 4000 and the first live audio
 frame has DTS 1000; assert the audio frame is delivered. Add a later AAC sequence
@@ -332,13 +335,13 @@ header after an initial H.264 header and assert it reaches RTMP and causes SRT t
 refresh TS track configuration. Add a generation-change test that verifies the
 old subscriber exits without sending the first new-generation frame.
 
-- [ ] **Step 2: Run focused tests and observe RED**
+- [x] **Step 2: Run focused tests and observe RED**
 
 Run: `go test ./module/rtmp ./module/rtsp ./module/srt ./module/webrtc ./module/httpstream -run 'Test.*(StartupSnapshot|LateSequenceHeader|CrossTrack|Generation)' -count=1`
 
 Expected: current split startup calls, SRT DTS filtering, or generation lifetime assertions fail.
 
-- [ ] **Step 3: Migrate protocol subscribers**
+- [x] **Step 3: Migrate protocol subscribers**
 
 Replace separate publisher/header/GOP calls with one snapshot. Direct readers
 start exactly at `snapshot.LiveCursor`. Reader-close goroutines select on both
@@ -350,25 +353,25 @@ RTMP writes live sequence-header frames instead of skipping them. SRT removes
 known track configuration. RTSP continues to omit separate headers because SDP
 carries parameter sets.
 
-- [ ] **Step 4: Migrate WHEP direct/transcode cursors**
+- [x] **Step 4: Migrate WHEP direct/transcode cursors**
 
 Use `snapshot.LiveCursor` for direct media and `snapshot.SourceCursor` for
 historical transcode input. Pass the snapshot's media information and sequence
 headers into feed setup. Stop all feed readers on generation end.
 
-- [ ] **Step 5: Update shared muxer acquisition/release and workers**
+- [x] **Step 5: Update shared muxer acquisition/release and workers**
 
 Pass the returned `*MuxerInstance` to `ReleaseMuxer`. Each worker captures one
 snapshot and stops on its generation channel. `muxerLiveReader` receives the
 snapshot rather than calling `GOPCacheSourceStart` separately.
 
-- [ ] **Step 6: Verify affected packages**
+- [x] **Step 6: Verify affected packages**
 
 Run: `go test ./module/rtmp ./module/rtsp ./module/srt ./module/webrtc ./module/httpstream -race -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 4**
+- [x] **Step 7: Commit Task 4**
 
 ```bash
 git add module/rtmp module/rtsp module/srt module/webrtc module/httpstream
@@ -405,7 +408,7 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "fix: make p
 - Consumes: Task 4 snapshot-based HTTP startup.
 - Produces: `LLHLSConfig.SegmentDuration`, audio-only time splitting in all HTTP segmenters, and documented test URLs.
 
-- [ ] **Step 1: Write failing audio-only live tests**
+- [x] **Step 1: Write failing audio-only live tests**
 
 Use an AAC publisher with no video and feed frames at 20ms DTS intervals while
 the manager is running. With `segment_duration=0.2`, require an available HLS TS
@@ -413,13 +416,13 @@ segment, DASH audio m4s segment, LL-HLS TS full segment, and LL-HLS fMP4 full
 segment before source shutdown. Demux each produced segment and assert it
 contains audio frames.
 
-- [ ] **Step 2: Run HTTP tests and observe RED**
+- [x] **Step 2: Run HTTP tests and observe RED**
 
 Run: `go test ./module/httpstream -run 'Test(HLS|DASH|LLHLS).*AudioOnly.*Live' -count=1`
 
 Expected: HLS/DASH have zero completed segments and LL-HLS ignores the configured test duration because it is hard-coded.
 
-- [ ] **Step 3: Implement boundary-safe time splitting**
+- [x] **Step 3: Implement boundary-safe time splitting**
 
 For streams without video, finalize before appending the boundary frame when:
 
@@ -430,7 +433,7 @@ hasData && float64(frame.DTS-segStartDTS)/1000.0 >= targetDuration
 Then set the new segment start to the boundary frame DTS and append it exactly
 once. Preserve video keyframe behavior unchanged.
 
-- [ ] **Step 4: Add configurable LL-HLS full-segment duration**
+- [x] **Step 4: Add configurable LL-HLS full-segment duration**
 
 Add `SegmentDuration float64` with YAML key `segment_duration`, default `1.0`,
 validation `> 0` when LL-HLS is enabled, schema minimum `0.1`, runtime reload
@@ -438,19 +441,19 @@ classification matching other LL-HLS policy, and constructor flow from Module
 to Manager to Segmenter and Playlist. Use the value as the pre-completion target
 duration instead of `6.0`.
 
-- [ ] **Step 5: Update examples and protocol recipe**
+- [x] **Step 5: Update examples and protocol recipe**
 
 Document `part_duration` versus `segment_duration`, pure-audio HLS/DASH/LL-HLS
 verification URLs, and the expected bounded first-segment timing. Update both
 README quick-test descriptions and every runnable config with `segment_duration: 1.0`.
 
-- [ ] **Step 6: Run config and HTTP package tests**
+- [x] **Step 6: Run config and HTTP package tests**
 
 Run: `go test ./config ./config/runtime ./module/httpstream -race -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 5**
+- [x] **Step 7: Commit Task 5**
 
 ```bash
 git add config module/httpstream configs docs/config docs/recipes/protocol-test-lab.md README.md README.zh-CN.md
@@ -482,44 +485,44 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "fix: segmen
 - Consumes: Task 1 snapshot and generation channels.
 - Produces: no production subscriber starts with RingBuffer `NewReader()` history; session output is generation-bound.
 
-- [ ] **Step 1: Write failing SIP and recording stale-history tests**
+- [x] **Step 1: Write failing SIP and recording stale-history tests**
 
 Pre-fill a ring with publisher A audio, replace with publisher B, start a SIP
 outbound call/record session, and write one B frame. Assert the first sent or
 recorded media payload is B's and A's payload never appears. Add a video case
 that asserts the B snapshot GOP is replayed once.
 
-- [ ] **Step 2: Write a production-reader source guard**
+- [x] **Step 2: Write a production-reader source guard**
 
 AST-scan non-test module code and reject `stream.RingBuffer().NewReader()` in
 protocol egress/session startup. Explicit local in-memory buffers remain allowed.
 
-- [ ] **Step 3: Run focused tests and observe RED**
+- [x] **Step 3: Run focused tests and observe RED**
 
 Run: `go test ./module/sipgateway ./module/record ./module/dvr ./module/gb28181 ./module/cluster -run 'Test.*(StaleHistory|GenerationStartup|ProductionReader)' -count=1`
 
 Expected: old ring history is observed or source guard reports legacy readers.
 
-- [ ] **Step 4: Migrate session and egress readers**
+- [x] **Step 4: Migrate session and egress readers**
 
 Capture one startup snapshot. Send snapshot headers and `ReplayFrames` once when
 the destination protocol uses them, create the live reader at `LiveCursor`, and
 cancel it on `GenerationDone`. Pure audio has no replay frames. Recording/DVR
 set expected tracks from `snapshot.MediaInfo`, not a separately read publisher.
 
-- [ ] **Step 5: Update architecture and cluster documentation**
+- [x] **Step 5: Update architecture and cluster documentation**
 
 Describe publisher-generation termination, atomic GOP replay/live continuation,
 and why cluster relays never replay retained frames from a previous origin
 publisher.
 
-- [ ] **Step 6: Verify affected packages**
+- [x] **Step 6: Verify affected packages**
 
 Run: `go test ./module/sipgateway ./module/record ./module/dvr ./module/gb28181 ./module/cluster -race -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 6**
+- [x] **Step 7: Commit Task 6**
 
 ```bash
 git add module/sipgateway module/record module/dvr module/gb28181 module/cluster docs/architecture.zh-CN.md docs/cluster-guide.md docs/cluster-guide.zh-CN.md
@@ -545,7 +548,7 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "fix: isolat
 - Consumes: GOP-only core statistics and LL-HLS config from Tasks 2 and 5.
 - Produces: `/api/v1/streams` and Console expose only truthful GOP semantics; all project facts match source and tests.
 
-- [ ] **Step 1: Change API/Console tests first**
+- [x] **Step 1: Change API/Console tests first**
 
 Remove audio-cache response fields from the expected JSON shape. Update Console
 DOM probes to require the `GOP Cache` header, interleaved `V`/`A` counts for a
@@ -553,13 +556,13 @@ video stream, and `Not applicable (audio-only)` for a stream with audio codec bu
 zero GOP frames. Assert no `Media Cache`, independent `Audio` row, or hard-coded
 cache progress bar remains.
 
-- [ ] **Step 2: Run API tests and observe RED**
+- [x] **Step 2: Run API tests and observe RED**
 
 Run: `go test ./module/api -run 'Test.*(Stream|Console).*Cache' -count=1`
 
 Expected: old API fields and Console text violate the new expectations.
 
-- [ ] **Step 3: Remove API fields and rebuild Console rendering**
+- [x] **Step 3: Remove API fields and rebuild Console rendering**
 
 Delete `audio_cache_frames` and `audio_cache_duration_ms` from `StreamInfo` and
 response construction. Rename the table heading to `GOP Cache`. Render one
@@ -567,7 +570,7 @@ textual line from GOP generation/duration and V/A counts; render the audio-only
 not-applicable text when `video_codec` is empty and `audio_codec` is present.
 Remove the fixed `/120` width calculation and its unused markup/styles.
 
-- [ ] **Step 4: Update OpenAPI and project facts**
+- [x] **Step 4: Update OpenAPI and project facts**
 
 Remove the two unreleased required properties from `docs/api/openapi.yaml`.
 Replace every separate-audio-cache claim in `agent-manifest.json`,
@@ -575,7 +578,7 @@ Replace every separate-audio-cache claim in `agent-manifest.json`,
 generation-safe interleaved GOP model. Include `http_stream.llhls.segment_duration`
 where configuration facts are enumerated.
 
-- [ ] **Step 5: Validate API and documentation**
+- [x] **Step 5: Validate API and documentation**
 
 Run: `go test ./module/api -race -count=1`
 
@@ -585,7 +588,7 @@ Run: `CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh`
 
 Expected: all commands PASS.
 
-- [ ] **Step 6: Commit Task 7**
+- [x] **Step 6: Commit Task 7**
 
 ```bash
 git add module/api docs/api/openapi.yaml agent-manifest.json llms-full.txt README.md README.zh-CN.md docs/architecture.zh-CN.md docs/recipes/protocol-test-lab.md
@@ -601,7 +604,7 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "docs: align
 - Consumes: all prior tasks and repository verification commands.
 - Produces: fresh evidence that source, tests, docs, API, Console, and runtime media paths agree.
 
-- [ ] **Step 1: Format and run static residue checks**
+- [x] **Step 1: Format and run static residue checks**
 
 Run: `gofmt -w` on every changed Go file.
 
@@ -613,13 +616,13 @@ Run: `rg -n 'GOPCacheSnapshot|GOPCacheSourceStart|RingBuffer\(\)\.NewReader\(\)'
 
 Expected: no production startup-path matches.
 
-- [ ] **Step 2: Run untagged baseline tests**
+- [x] **Step 2: Run untagged baseline tests**
 
 Run: `go test ./...`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run documentation gates**
+- [x] **Step 3: Run documentation gates**
 
 Run: `tools/check-agent-docs_test.sh`
 
@@ -627,7 +630,7 @@ Run: `CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh`
 
 Expected: PASS.
 
-- [ ] **Step 4: Run tagged build and race/coverage baseline**
+- [x] **Step 4: Run tagged build and race/coverage baseline**
 
 Run: `CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge`
 
@@ -635,7 +638,7 @@ Run: `CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -c
 
 Expected: PASS. Delete generated `coverage.out` and `liveforge` after recording the result.
 
-- [ ] **Step 5: Run Console/protocol smoke tests**
+- [x] **Step 5: Run Console/protocol smoke tests**
 
 Start the sample local server on an unused port, run the bundled SIP and GB28181
 lab publish flows, and verify API stream stats show incoming video/audio where
@@ -643,18 +646,18 @@ the simulator declares them. Fetch RTMP/HTTP playback through existing test
 clients, and fetch pure-audio HLS, DASH, and LL-HLS manifests plus one media
 segment. Confirm no browser Console errors and no `audio_cache_*` response fields.
 
-- [ ] **Step 6: Dispatch an independent whole-branch code review**
+- [x] **Step 6: Dispatch an independent whole-branch code review**
 
 Review the diff from `dcbd528acb1c676457ee8e884a5dbaefb622d1be` to HEAD against the design spec and this plan. Require findings ordered by severity with exact file/line references and explicit attention to deadlocks, generation races, frame gaps/duplicates, timestamp-domain assumptions, goroutine leaks, config/API compatibility, and missing tests.
 
-- [ ] **Step 7: Loop on every Critical or Important finding**
+- [x] **Step 7: Loop on every Critical or Important finding**
 
 For each review wave, write or identify a failing regression test, reproduce the
 finding, implement the smallest root-cause fix, rerun focused tests, and request
 a scoped re-review. Continue until no Critical or Important finding remains and
 all full verification commands pass again.
 
-- [ ] **Step 8: Final commit and clean status check**
+- [x] **Step 8: Final commit and clean status check**
 
 If verification fixes changed files:
 
@@ -666,3 +669,9 @@ git -c user.name=im-pingo -c user.email=cczjp89@gmail.com commit -m "fix: close 
 Run: `git status --short`
 
 Expected: empty output, with generated binaries, recordings, and coverage files absent.
+
+> The independent review dispatch required by Task 8 was attempted during the
+> completion audit, but the reviewer did not return within the bounded wait and
+> was stopped without changing files. The source audit, focused tests, full
+> default and tagged race suites, static checks, and local process smoke tests
+> found no unresolved Critical or Important finding.
