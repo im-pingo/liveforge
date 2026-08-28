@@ -8,7 +8,13 @@
 
 LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-All previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers.
+Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. A new Console WHEP regression for real H.264 input is open; the project is not considered fully complete until WEBRTC-001 in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md) is reproduced, fixed, and browser-verified.
+
+## Open Review Items
+
+- **WEBRTC-001 (P0)**: Console WHEP can show `No advancing media received (check codec support and keyframes)`. Root cause is confirmed: the default Console path requests realtime mode, which starts after `LiveCursor` and discards media until a later keyframe; the 8-second watchdog can report failure before a long GOP's next IDR arrives. `mode=live` and the current H.264 browser path can decode, but the default behavior, error state, media-write diagnostics, and real GB28181/SIP H.264 browser coverage remain open.
+- **WEBRTC-002 (P1)**: Add a browser regression path for real H.264 inputs and distinguish no keyframe, codec negotiation, malformed payload, and `WriteSample` failure.
+- Performance, lifecycle, resource, security, and functional-boundary findings are recorded with source locations in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md). They are not silently treated as completed work.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
 

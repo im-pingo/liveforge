@@ -16,6 +16,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Authentication and RBAC recipes: [docs/recipes/auth-and-tls.md](docs/recipes/auth-and-tls.md), [docs/recipes/rbac-audit.md](docs/recipes/rbac-audit.md)
 - Operations recipes: [WHIP H.265 + Opus playback](docs/recipes/whip-h265-opus-playback.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [release verification](docs/recipes/release-verification.md)
 - Architecture analysis: [中文架构分析](docs/architecture.zh-CN.md)（模块设计、数据流、GOP 缓存、RingBuffer、转发和转码）
+- Technical risks and open issues: [技术风险、性能瓶颈与问题记录](docs/TECHNICAL-RISKS.md)
 - Runnable recipes: [docs/recipes/](docs/recipes/)
 
 ## Identity
@@ -56,6 +57,7 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - RTSP supports separate audio/video SETUP tracks for TCP-interleaved and UDP sessions; track IDs are validated for uniqueness, range, and session eligibility before transport allocation.
 - WHIP and WHEP accept SDP offer bodies up to 1 MiB; larger bodies return HTTP 413 without creating session or stream state.
 - Console WHIP publishing with H.265 + Opus has a browser verification path across HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WHEP realtime, and WHEP Live. A visible `Playing` label is insufficient: require a decoded frame, non-zero dimensions, an advancing media clock, and no media error.
+- Known regression with confirmed root cause: Console WHEP can report `No advancing media received (check codec support and keyframes)` because the default realtime path gates video on a post-snapshot keyframe and a long GOP can outlast the watchdog. H.264 `mode=live` browser playback and Pion/VP8 automated paths pass; default behavior, write-error diagnostics, and real GB28181/SIP H.264 browser coverage remain open. Use [the technical risk record](docs/TECHNICAL-RISKS.md) for evidence and required diagnostics. Do not close this issue based only on SDP success or an `ontrack` callback.
 - TLS API listeners issue the `lf_session` console cookie with `Secure`; plain HTTP development listeners do not.
 - RTP/GB cluster signaling reads current credentials per request, preferring `api.auth.bearer_token`, then the first named admin token; configured auth without an admin credential fails locally.
 - High-concurrency forwarding uses reader-scoped condition waits (including concurrent WHEP source/audio feeds), reusable RTMP FLV encoding state, vectored RTSP interleaved writes, and batched relay-byte metrics; benchmark with `go test -bench='BenchmarkRingReader|BenchmarkRTMPConn' -benchmem ./pkg/util ./module/cluster`.

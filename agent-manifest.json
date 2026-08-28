@@ -17,6 +17,15 @@
     "config_schema": "docs/config/config.schema.json",
     "recipes": "docs/recipes/"
   },
+  "open_review": {
+    "technical_risks": "docs/TECHNICAL-RISKS.md",
+    "webrtc_regression": {
+      "status": "root_cause_confirmed_fix_open",
+      "symptom": "Console default realtime WHEP may report No advancing media received while waiting for the next H.264 keyframe after LiveCursor",
+      "automated_coverage": "Pion WHEP H.264 RTP and VP8 browser playback pass; current H.264 mode=live browser playback decodes, while real GB28181/SIP H.264 browser decode remains unverified",
+      "do_not_close_on": ["SDP success", "ontrack callback"]
+    }
+  },
   "configuration": {
     "runtime_loader": {
       "status": "available",
@@ -54,7 +63,7 @@
     {"id": "rtmp", "direction": ["publish", "play"], "status": "stable", "port": 1935, "url_templates": ["rtmp://HOST:1935/STREAM_KEY"]},
     {"id": "rtsp", "direction": ["publish", "play"], "status": "stable", "port": 8554, "url_templates": ["rtsp://HOST:8554/STREAM_KEY"], "setup_policy": "track IDs must be unique, valid, in range, and eligible for the announced or described media before transport allocation"},
     {"id": "srt", "direction": ["publish", "play"], "status": "stable", "port": 6000, "url_templates": ["srt://HOST:6000?streamid=publish:STREAM_KEY", "srt://HOST:6000?streamid=subscribe:STREAM_KEY"]},
-    {"id": "webrtc", "direction": ["publish", "play"], "status": "stable", "port": 8443, "entrypoints": ["POST /webrtc/whip/{stream_key}", "POST /webrtc/whep/{stream_key}"], "audio_codecs": ["opus", "PCMA", "PCMU"], "max_sdp_offer_bytes": 1048576, "requires": ["HTTPS or a browser-compatible secure context for browser camera and microphone access"]},
+    {"id": "webrtc", "direction": ["publish", "play"], "status": "stable_with_open_console_regression", "port": 8443, "entrypoints": ["POST /webrtc/whip/{stream_key}", "POST /webrtc/whep/{stream_key}"], "audio_codecs": ["opus", "PCMA", "PCMU"], "max_sdp_offer_bytes": 1048576, "requires": ["HTTPS or a browser-compatible secure context for browser camera and microphone access"], "known_issue": "Console WHEP may report No advancing media received for real H.264 input; automated Pion/VP8 paths pass while real H.264 browser decode is under investigation"},
     {"id": "hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8", "http://HOST:8080/STREAM_KEY/0.ts"], "startup_policy": "waits for the current publisher generation's required sequence headers and binds headers, GOP replay, and live cursor from one snapshot", "audio_only_segmentation": "elapsed media time; completed TS is available before source shutdown"},
     {"id": "ll-hls", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.m3u8", "http://HOST:8080/STREAM_KEY/0.ts", "http://HOST:8080/STREAM_KEY/0.m4s"], "requires": ["llhls.enabled=true"], "startup_policy": "waits for the current publisher generation's required sequence headers and binds headers, GOP replay, and live cursor from one snapshot; initial manifest waits for one complete segment without completed PART tags; blocking reloads retain the latest completed PART identity", "segment_policy": {"part_duration": "partial segment target", "segment_duration": "completed full-segment target", "segment_duration_default_seconds": 1.0, "segment_duration_schema_minimum_seconds": 0.1, "reload": "hot"}, "audio_only_segmentation": "elapsed media time; completed TS or fMP4 is available before source shutdown"},
     {"id": "dash", "direction": ["play"], "status": "stable", "port": 8080, "url_templates": ["http://HOST:8080/STREAM_KEY.mpd", "http://HOST:8080/STREAM_KEY/audio_init.mp4", "http://HOST:8080/STREAM_KEY/a1.m4s"], "startup_policy": "waits for the current publisher generation's required sequence headers and binds headers, GOP replay, and live cursor from one snapshot", "audio_only_segmentation": "elapsed media time; audio-only MPD omits video adaptation and completed m4s is available before source shutdown"},

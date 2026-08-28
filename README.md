@@ -258,6 +258,8 @@ Open `http://localhost:8090/console`, click **"+ WebRTC Publish"**, select camer
 
 The Console can publish H.265/HEVC video with Opus audio when the browser and platform expose an H.265 WebRTC encoder. WHIP maps audio and video RTP onto one session timeline, and HLS/DASH/FLV/TS use a combined transcode reader from the cached GOP source position so target audio history and live source video continue without a first-frame freeze or duplicate cached video. Its FMP4 preview preserves signed B-frame composition offsets on a near-zero timeline established when the shared muxer starts; later subscribers seek to their first buffered timestamp. WHEP Live replays the atomic cached GOP while source video continues from the matching ring cursor, with transcoded target audio read independently. The WebRTC transcode worker waits without consuming the source playback wakeup, so video pacing remains stable even when source audio pauses. The tagged audio build is the complete cross-protocol profile; see [WHIP H.265 + Opus playback verification](docs/recipes/whip-h265-opus-playback.md).
 
+Known review issue: the Console's default realtime WHEP preview can report `No advancing media received (check codec support and keyframes)` while it waits for the next H.264 keyframe after `LiveCursor`; a long GOP can outlast the 8-second watchdog. WHEP Live and the current H.264 browser path decode successfully, but the default behavior, write-error diagnostics, and real GB28181/SIP H.264 browser coverage remain open. See [the technical risk record](docs/TECHNICAL-RISKS.md); SDP success or an `ontrack` callback alone is not proof of playback.
+
 **GB28181:**
 Configure your IP camera's SIP server to point at `localhost:5060`, or use the built-in simulator:
 ```bash

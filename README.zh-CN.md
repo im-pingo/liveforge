@@ -260,6 +260,8 @@ ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish
 
 当浏览器和操作系统提供 H.265 WebRTC 编码器时，控制台可以推送 H.265/HEVC 视频和 Opus 音频。WHIP 会把音频和视频 RTP 映射到同一个会话时间线，HLS/DASH/FLV/TS 使用从缓存 GOP 源游标开始的组合转码 reader，让目标音频历史和实时视频连续进入输出，避免首帧冻结和重复缓存视频。FMP4 预览在共享 muxer 启动时建立接近零的时间线并保留 B 帧的有符号合成偏移，晚加入的订阅从自身首个缓冲时间戳开始播放。WHEP Live 回放原子缓存 GOP 后，从与快照匹配的 ring 游标继续读取源视频，并通过独立 reader 获取转码后的目标音频。WebRTC 转码 worker 等待新帧时不会消费源播放唤醒信号，因此即使源音频暂停，视频节奏也能保持稳定。带 `audiocodec` 标签的构建是完整跨协议配置，验收步骤见 [WHIP H.265 + Opus 播放验证](docs/recipes/whip-h265-opus-playback.md)。
 
+当前已确认一个待关闭问题：控制台默认的 realtime WHEP 在 `LiveCursor` 之后等待下一个 H.264 关键帧，长 GOP 可能超过 8 秒 watchdog，从而显示 `No advancing media received (check codec support and keyframes)`。WHEP Live 和当前 H.264 浏览器路径可以正常解码，但默认行为、写入错误诊断以及真实 GB28181/SIP H.264 浏览器覆盖仍需补齐。详见[技术风险记录](docs/TECHNICAL-RISKS.md)；SDP 协商成功或触发 `ontrack` 都不能单独证明已经播放。
+
 **GB28181：**
 将 IP 摄像头的 SIP 服务器指向 `localhost:5060`，或使用内置模拟器：
 ```bash

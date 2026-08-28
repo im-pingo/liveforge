@@ -8,6 +8,8 @@ LiveForge is an MIT-licensed Go 1.26+ live streaming server. It ingests, transmu
 
 For a source-oriented Chinese architecture walkthrough, see [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md). It documents the current module boundaries, AVFrame flow, GOP snapshot/cursor consistency, SPMC RingBuffer semantics, SharedBuffer/MuxerManager, protocol egress, cluster forwarding/origin pull, and on-demand audio transcoding. It is intentionally based on implemented code; older design drafts are not treated as runtime behavior.
 
+The current review record, including performance bottlenecks, lifecycle and resource risks, functional boundaries, and the open Console WHEP regression, is [docs/TECHNICAL-RISKS.md](docs/TECHNICAL-RISKS.md). The WHEP regression is not closed by SDP success or an `ontrack` callback: the browser must receive a decodable frame and an advancing media clock.
+
 Startup readiness requires a sequence header only for H.264, H.265, and AAC.
 AV1, VP8, VP9, Opus, MP3, G.711, G.722, and G.729 can start from the publisher
 declaration and their in-band media or protocol-negotiated parameters. A
@@ -48,6 +50,8 @@ Protocol Lab receive workflows use the same readiness rule: a known unsupported 
 | WebSocket-FLV | No | Yes | 8080, `/ws/{stream}.{format}` | `websocket.enabled=true` |
 
 The implementation supports protocol bridging through the shared stream hub. Exact codec compatibility depends on the source, destination, and whether the audio transcoding build is enabled.
+
+Known WebRTC regression status: the Console can report `No advancing media received (check codec support and keyframes)` because its default realtime feed starts after the captured live cursor and gates video until a later keyframe; a long GOP can outlast the eight-second watchdog. Current H.264 `mode=live` browser playback decodes and automated Pion/VP8 paths pass, but the default behavior, write-error diagnostics, and real GB28181/SIP H.264-to-browser path still require a fix and regression coverage. See the technical risk record before changing the feed loop.
 
 WebRTC registers Opus, PCMA, and PCMU. SIP Lab publish sessions carry H.264
 video plus PCMA/PCMU audio on separate RTP tracks; the Console selects a video
