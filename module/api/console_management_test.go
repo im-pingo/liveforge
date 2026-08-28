@@ -542,8 +542,27 @@ func TestConsoleStorageHidesRecordingPlaybackWhenDisabledAndKeepsFMP4Action(t *t
 		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
 			t.Fatalf("probe storage playback actions: %v", err)
 		}
-		if probe.DisabledActions != 0 || probe.EnabledActions != 1 || probe.Format != "fmp4" || !strings.HasSuffix(probe.PlayURL, "/archive/cam.mp4/play") {
+		if probe.DisabledActions != 0 || probe.EnabledActions != 1 || probe.Format != "fmp4" || probe.PlayURL != "/api/v1/recordings/archive/cam.mp4?action=play" {
 			t.Fatalf("storage playback actions = %#v", probe)
+		}
+	})
+}
+
+func TestConsoleRecordingActionURLsPreserveActionLookingIDs(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Play     string `json:"play"`
+			Download string `json:"download"`
+		}
+		expression := `({
+			play: recordingPlayURL("archive/play"),
+			download: recordingDownloadURL("archive/download")
+		})`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+			t.Fatalf("probe recording action URLs: %v", err)
+		}
+		if probe.Play != "/api/v1/recordings/archive/play?action=play" || probe.Download != "/api/v1/recordings/archive/download?action=download" {
+			t.Fatalf("recording action URLs = %#v", probe)
 		}
 	})
 }

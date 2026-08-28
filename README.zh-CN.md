@@ -130,7 +130,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
-- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；fMP4 仅直接写入 AAC，启用可选 `audiocodec`/FFmpeg 构建时会将 G.711、Opus、MP3 等非 AAC 音频转为 AAC，未启用时过滤音频并保留可播放的纯视频输出；转码录制停止时会先排空停止边界前已经提交的源帧再完成文件；DVR TS 同样会将目标不支持的音频统一转换；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；fMP4 仅直接写入 AAC，启用可选 `audiocodec`/FFmpeg 构建时会将 G.711、Opus、MP3 等非 AAC 音频转为 AAC，未启用时过滤音频并保留可播放的纯视频输出；转码录制停止时会先排空停止边界前已经提交的源帧再完成文件；DVR TS 同样会将目标不支持的音频统一转换；支持分段、存储健康、下载/Range/在线预览/删除管理、精确完整 ID 操作路由、清理失败后可重试且最后删除主文件、零字节会话保护和时移状态
 - **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流；接收模式会在发送信令前等待当前 publisher generation 的必要序列头，已知不支持的音频编码会立即拒绝。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式先校验 H.264 加 G.711A，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
 - **SIP RTP 端口所有权** — Gateway 媒体端口会跳过外部占用并在 SDP 协商期间保持 socket 已绑定；Lab 假端点同时避开 Gateway 配置的 RTP 范围
 - **SIP 出站退役** — 请求的 PCMA/PCMU 转换使用独立且绑定 publisher generation 的音频 reader。每个就绪的转码帧都会在发送 RTP 前立即复查 generation；publisher 退役会释放转码 reader、订阅者和已绑定 socket，回收 RTP/RTCP 端口对，并在并发触发其他清理时仍只发送一个 BYE

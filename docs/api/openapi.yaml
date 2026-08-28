@@ -400,15 +400,25 @@ paths:
     get:
       tags: [recording]
       operationId: getRecording
-      summary: Read recording metadata
+      summary: Read recording metadata or explicitly play/download the full recording ID
+      description: Without action, an existing exact recordingPath returns metadata. Set action=play or action=download to address that full ID unambiguously, including an ID whose final segment is play or download. Existing exact IDs take precedence over the backward-compatible suffix action forms.
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: Explicit media action for the complete recordingPath.
+          schema: {type: string, enum: [play, download]}
       x-liveforge-permission: recordings:read
       responses:
-        '200': {description: Recording metadata, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingResponse'}}}}
+        '200': {description: Recording metadata or complete media, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingResponse'}}, application/octet-stream: {schema: {type: string, format: binary}}, video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
+        '206': {description: Requested media byte range, content: {application/octet-stream: {schema: {type: string, format: binary}}, video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
+        '304': {description: Action response not modified}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+        '416': {description: Requested action range is not satisfiable}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/Unavailable'}
@@ -416,6 +426,7 @@ paths:
       tags: [recording]
       operationId: deleteRecording
       summary: Delete a completed recording
+      description: Always treats the complete recordingPath as the ID, even when its final segment is play or download. Local cleanup removes exact owned sidecars and metadata before the primary; a cleanup error leaves the primary available for retry.
       x-liveforge-permission: recordings:delete
       responses:
         '200': {$ref: '#/components/responses/Success'}
@@ -434,6 +445,7 @@ paths:
       tags: [recording]
       operationId: downloadRecording
       summary: Download a completed recording with HTTP range support
+      description: Backward-compatible suffix action used only when no exact recording ID includes the final /download segment. Use action=download on /api/v1/recordings/{recordingPath} for an unambiguous full-ID request.
       x-liveforge-permission: recordings:read
       responses:
         '200': {description: Complete recording, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
@@ -455,7 +467,7 @@ paths:
       tags: [recording]
       operationId: playRecording
       summary: Stream a completed recording inline with HTTP range support
-      description: Returns the recording with a media MIME type and Content-Disposition inline. The endpoint accepts HTTP Range requests for browser seeking; active or not-ready recordings return 409.
+      description: Backward-compatible suffix action used only when no exact recording ID includes the final /play segment. Use action=play on /api/v1/recordings/{recordingPath} for an unambiguous full-ID request. Returns the recording with a media MIME type and Content-Disposition inline. The endpoint accepts HTTP Range requests for browser seeking; active or not-ready recordings return 409.
       x-liveforge-permission: recordings:read
       responses:
         '200': {description: Complete recording media, content: {video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}

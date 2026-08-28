@@ -329,6 +329,15 @@ func (d *Dir) MoveToUnique(base string, candidate func(int) string) (string, err
 }
 
 func (d *Dir) List(ctx context.Context) ([]Entry, error) {
+	return d.list(ctx, false)
+}
+
+// ListAll reports every direct child without following symbolic links.
+func (d *Dir) ListAll(ctx context.Context) ([]Entry, error) {
+	return d.list(ctx, true)
+}
+
+func (d *Dir) list(ctx context.Context, includeNonRegular bool) ([]Entry, error) {
 	dup, err := unix.Openat(d.fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, mapPathError(err)
@@ -352,17 +361,31 @@ func (d *Dir) List(ctx context.Context) ([]Entry, error) {
 		if err := unix.Fstatat(d.fd, entry.Name(), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, mapPathError(err)
 		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG && !includeNonRegular {
 			continue
 		}
 		result = append(result, Entry{
 			RelPath: joinRel(d.rel, entry.Name()),
 			Size:    stat.Size,
-			Mode:    os.FileMode(stat.Mode),
+			Mode:    entryFileMode(uint32(stat.Mode)),
 			ModTime: statModTime(stat),
 		})
 	}
 	return result, nil
+}
+
+func entryFileMode(mode uint32) os.FileMode {
+	result := os.FileMode(mode)
+	switch mode & uint32(unix.S_IFMT) {
+	case uint32(unix.S_IFREG):
+		return result
+	case uint32(unix.S_IFDIR):
+		return result | os.ModeDir
+	case uint32(unix.S_IFLNK):
+		return result | os.ModeSymlink
+	default:
+		return result | os.ModeIrregular
+	}
 }
 
 func (r *Root) Fstatfs(stat *unix.Statfs_t) error { return unix.Fstatfs(r.fd, stat) }
@@ -423,6 +446,30 @@ func (p *Pending) StatSibling(base string) (os.FileInfo, error) {
 		return nil, ErrInvalidPath
 	}
 	return info, nil
+}
+
+// CreateSiblingPending creates an exclusive pending file in the directory
+// pinned by p. Later path replacement cannot redirect the new object.
+func (p *Pending) CreateSiblingPending(base string, perm os.FileMode) (*Pending, error) {
+	if !validBase(base) {
+		return nil, ErrInvalidPath
+	}
+	dirFD, err := unix.Openat(p.dirFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, mapPathError(err)
+	}
+	fd, err := unix.Openat(dirFD, base, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(perm.Perm()))
+	if err != nil {
+		_ = unix.Close(dirFD)
+		return nil, mapPathError(err)
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(p.rootPath, filepath.FromSlash(joinRel(p.dirRel, base))))
+	if file == nil {
+		_ = unix.Close(fd)
+		_ = unix.Close(dirFD)
+		return nil, fmt.Errorf("create sibling pending file")
+	}
+	return &Pending{File: file, dirFD: dirFD, dirRel: p.dirRel, base: base, rootPath: p.rootPath}, nil
 }
 
 func (p *Pending) WriteSiblingAtomic(base string, data []byte, perm os.FileMode) error {

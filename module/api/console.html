@@ -3496,8 +3496,16 @@ function recordingURL(recordingID) {
   return "/api/v1/recordings/" + String(recordingID || "").split("/").map(encodeURIComponent).join("/");
 }
 
+function recordingActionURL(recordingID, action) {
+  return recordingURL(recordingID) + "?action=" + encodeURIComponent(action);
+}
+
 function recordingPlayURL(recordingID) {
-  return recordingURL(recordingID) + "/play";
+  return recordingActionURL(recordingID, "play");
+}
+
+function recordingDownloadURL(recordingID) {
+  return recordingActionURL(recordingID, "download");
 }
 
 function renderRecordings(items, allowPlayback) {
@@ -3640,7 +3648,7 @@ function playRecording(recordingID, recordingFormat) {
 
 function downloadRecording(recordingID) {
   clearManagementError("storage");
-  return apiFetch(recordingURL(recordingID) + "/download", { responseType: "blob" })
+  return apiFetch(recordingDownloadURL(recordingID), { responseType: "blob" })
     .then(function(blob) {
       var url = URL.createObjectURL(blob);
       var link = document.createElement("a");

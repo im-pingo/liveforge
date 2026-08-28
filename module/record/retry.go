@@ -1,7 +1,9 @@
 package record
 
 import (
+	"errors"
 	"io"
+	"os"
 )
 
 type writeSeeker interface {
@@ -20,6 +22,22 @@ func (w *retryWriteSeeker) Name() string {
 		return named.Name()
 	}
 	return ""
+}
+
+func (w *retryWriteSeeker) CreateSidecar(base string, perm os.FileMode) (sidecarWriteObject, error) {
+	provider, ok := w.writeSeeker.(sidecarMediaFile)
+	if !ok {
+		return nil, errors.New("record storage does not support sidecar objects")
+	}
+	return provider.CreateSidecar(base, perm)
+}
+
+func (w *retryWriteSeeker) WriteSidecarAtomic(base string, data []byte, perm os.FileMode) error {
+	provider, ok := w.writeSeeker.(sidecarMediaFile)
+	if !ok {
+		return errors.New("record storage does not support sidecar objects")
+	}
+	return provider.WriteSidecarAtomic(base, data, perm)
 }
 
 func newRetryWriteSeeker(w writeSeeker, attempts int, onRetry func()) *retryWriteSeeker {

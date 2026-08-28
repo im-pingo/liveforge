@@ -94,6 +94,17 @@ type WriteObject interface {
 	Fail(context.Context, error) (RecordingInfo, error)
 }
 
+type sidecarWriteObject interface {
+	io.Writer
+	Complete() error
+	Fail() error
+}
+
+type sidecarMediaFile interface {
+	CreateSidecar(string, os.FileMode) (sidecarWriteObject, error)
+	WriteSidecarAtomic(string, []byte, os.FileMode) error
+}
+
 const metadataSuffix = ".liveforge.json"
 
 type LocalStorage struct {
@@ -227,7 +238,90 @@ func (s *LocalStorage) List(ctx context.Context) ([]RecordingInfo, error) {
 
 func isTSPlaybackArtifact(id string) bool {
 	base := filepath.Base(filepath.FromSlash(id))
-	return base == "index.m3u8" || (strings.HasPrefix(base, "segment_") && strings.HasSuffix(base, ".ts"))
+	if isOwnedTSPlaybackArtifact(base, "") {
+		return true
+	}
+	if marker := strings.LastIndex(base, ".ts.segment_"); marker > 0 {
+		return isOwnedTSPlaybackArtifact(base, base[:marker+len(".ts")])
+	}
+	if marker := strings.LastIndex(base, ".ts.m3u8"); marker > 0 {
+		return isOwnedTSPlaybackArtifact(base, base[:marker+len(".ts")])
+	}
+	return false
+}
+
+func isOwnedTSPlaybackArtifact(base, ownerBase string) bool {
+	playlistBase := "index.m3u8"
+	if ownerBase != "" {
+		playlistBase = ownerBase + ".m3u8"
+	}
+	if isTSArtifactVariant(base, playlistBase) {
+		return true
+	}
+	prefix := ownerBase + "segment_"
+	if ownerBase != "" {
+		prefix = ownerBase + ".segment_"
+	}
+	if !strings.HasPrefix(base, prefix) {
+		return false
+	}
+	remainder := strings.TrimPrefix(base, prefix)
+	dot := strings.IndexByte(remainder, '.')
+	if dot <= 0 {
+		return false
+	}
+	for _, digit := range remainder[:dot] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	artifactBase := prefix + remainder[:dot] + ".ts"
+	return isTSArtifactVariant(base, artifactBase)
+}
+
+func isTSArtifactVariant(base, artifactBase string) bool {
+	if base == artifactBase {
+		return true
+	}
+	if !strings.HasPrefix(base, artifactBase) {
+		return false
+	}
+	suffix := strings.TrimPrefix(base, artifactBase)
+	switch suffix {
+	case ".partial", ".failed":
+		return true
+	}
+	if !strings.HasPrefix(suffix, ".orphan-") || !strings.HasSuffix(suffix, ".failed") {
+		return false
+	}
+	orphan := strings.TrimSuffix(strings.TrimPrefix(suffix, ".orphan-"), ".failed")
+	return validOrphanSuffix(orphan)
+}
+
+func tsSidecarOwnerBase(recordingBase string) (string, bool) {
+	owner := recordingBase
+	if strings.HasSuffix(owner, ".failed") {
+		owner = strings.TrimSuffix(owner, ".failed")
+		if marker := strings.LastIndex(owner, ".orphan-"); marker > 0 && validOrphanSuffix(owner[marker+len(".orphan-"):]) {
+			owner = owner[:marker]
+		}
+	}
+	return owner, strings.EqualFold(filepath.Ext(owner), ".ts")
+}
+
+func validOrphanSuffix(value string) bool {
+	stamp, attempt, ok := strings.Cut(value, "-")
+	if !ok || stamp == "" || attempt == "" || strings.Contains(attempt, "-") {
+		return false
+	}
+	for _, part := range []string{stamp, attempt} {
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *LocalStorage) Stat(ctx context.Context, id string) (RecordingInfo, error) {
@@ -284,18 +378,46 @@ func (s *LocalStorage) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	fileInfo, err := s.fs.Stat(cleanID)
+	dirRel := filepath.ToSlash(filepath.Dir(filepath.FromSlash(cleanID)))
+	if dirRel == "." {
+		dirRel = ""
+	}
+	base := filepath.Base(filepath.FromSlash(cleanID))
+	dir, err := s.fs.OpenDir(dirRel, false)
+	if err != nil {
+		return mapStorageError(err)
+	}
+	defer dir.Close()
+	fileInfo, err := dir.Stat(base)
 	if err != nil {
 		return mapStorageError(err)
 	}
 	if !fileInfo.Mode().IsRegular() || strings.HasSuffix(cleanID, ".partial") {
 		return ErrRecordingNotReady
 	}
-	if err := s.fs.Remove(cleanID); err != nil {
-		return fmt.Errorf("delete recording: %w", mapStorageError(err))
+	if ownerBase, hasTSSidecars := tsSidecarOwnerBase(base); hasTSSidecars {
+		entries, err := dir.ListAll(ctx)
+		if err != nil {
+			return fmt.Errorf("list recording sidecars: %w", mapStorageError(err))
+		}
+		for _, entry := range entries {
+			entryBase := filepath.Base(filepath.FromSlash(entry.RelPath))
+			if !isOwnedTSPlaybackArtifact(entryBase, ownerBase) {
+				continue
+			}
+			if !entry.Mode.IsRegular() {
+				return fmt.Errorf("delete recording sidecar %q: non-regular entry", entryBase)
+			}
+			if err := dir.Remove(entryBase); err != nil && !errors.Is(err, localfs.ErrNotFound) {
+				return fmt.Errorf("delete recording sidecar: %w", mapStorageError(err))
+			}
+		}
 	}
-	if err := s.fs.Remove(cleanID + metadataSuffix); err != nil && !errors.Is(err, localfs.ErrNotFound) {
+	if err := dir.Remove(base + metadataSuffix); err != nil && !errors.Is(err, localfs.ErrNotFound) {
 		return fmt.Errorf("delete recording metadata: %w", mapStorageError(err))
+	}
+	if err := dir.Remove(base); err != nil {
+		return fmt.Errorf("delete recording: %w", mapStorageError(err))
 	}
 	return nil
 }
@@ -367,6 +489,79 @@ func (o *localWriteObject) Seek(offset int64, whence int) (int64, error) {
 }
 func (o *localWriteObject) Name() string { return o.pending.Name() }
 func (o *localWriteObject) Sync() error  { return o.file.Sync() }
+
+func (o *localWriteObject) CreateSidecar(base string, perm os.FileMode) (sidecarWriteObject, error) {
+	if o.closed {
+		return nil, ErrRecordingNotReady
+	}
+	pending, err := o.pending.CreateSiblingPending(base+".partial", perm)
+	if err != nil {
+		return nil, mapStorageError(err)
+	}
+	return &localSidecarWriteObject{pending: pending, file: pending.File, finalBase: base}, nil
+}
+
+func (o *localWriteObject) WriteSidecarAtomic(base string, data []byte, perm os.FileMode) error {
+	if o.closed {
+		return ErrRecordingNotReady
+	}
+	return mapStorageError(o.pending.WriteSiblingAtomic(base, data, perm))
+}
+
+type localSidecarWriteObject struct {
+	pending   *localfs.Pending
+	file      *os.File
+	finalBase string
+	closed    bool
+	finalized bool
+}
+
+func (o *localSidecarWriteObject) Write(data []byte) (int, error) {
+	if o.closed || o.finalized {
+		return 0, os.ErrClosed
+	}
+	return o.file.Write(data)
+}
+
+func (o *localSidecarWriteObject) Complete() error {
+	if o.finalized {
+		return ErrRecordingNotReady
+	}
+	if err := o.file.Sync(); err != nil {
+		return errors.Join(err, o.Fail())
+	}
+	if err := o.file.Close(); err != nil {
+		o.closed = true
+		return errors.Join(err, o.failClosed())
+	}
+	o.closed = true
+	if err := o.pending.PublishAs(o.finalBase); err != nil {
+		return errors.Join(err, o.failClosed())
+	}
+	o.finalized = true
+	return o.pending.Close()
+}
+
+func (o *localSidecarWriteObject) Fail() error {
+	if o.finalized {
+		return nil
+	}
+	if !o.closed {
+		closeErr := o.file.Close()
+		o.closed = true
+		return errors.Join(closeErr, o.failClosed())
+	}
+	return o.failClosed()
+}
+
+func (o *localSidecarWriteObject) failClosed() error {
+	if o.finalized {
+		return nil
+	}
+	o.finalized = true
+	_, moveErr := o.pending.PreserveAs(failedNameCandidate(o.finalBase))
+	return errors.Join(moveErr, o.pending.Close())
+}
 
 func (o *localWriteObject) Complete(ctx context.Context, update RecordingInfo) (RecordingInfo, error) {
 	if err := ctx.Err(); err != nil {
@@ -486,6 +681,9 @@ func (s *LocalStorage) recoverPartials(ctx context.Context) error {
 		failedID, err := s.fs.MoveToUnique(entry.RelPath, failedNameCandidate(original))
 		if err != nil {
 			return fmt.Errorf("recover recording partial %q: %w", entry.RelPath, mapStorageError(err))
+		}
+		if isTSPlaybackArtifact(original) {
+			continue
 		}
 		info := RecordingInfo{
 			ID:          failedID,

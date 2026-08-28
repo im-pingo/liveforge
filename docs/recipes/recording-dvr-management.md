@@ -92,9 +92,9 @@ curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
 curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
   "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4"
 curl -fS -H "Authorization: Bearer $VIEWER_TOKEN" -H 'Range: bytes=0-1023' \
-  "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4/download" -o /tmp/liveforge-recording.part
+  "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4?action=download" -o /tmp/liveforge-recording.part
 curl -fS -H "Authorization: Bearer $VIEWER_TOKEN" -H 'Range: bytes=0-1023' \
-  "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4/play" -o /tmp/liveforge-recording-preview.part
+  "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4?action=play" -o /tmp/liveforge-recording-preview.part
 curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
   "$LIVEFORGE_API/api/v1/dvr/status"
 curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
@@ -103,6 +103,8 @@ curl -fS http://127.0.0.1:8070/dvr/live/camera.m3u8 -o /tmp/liveforge-dvr.m3u8
 ```
 
 Successful metadata/status requests return 200. A complete download or inline play returns 200, a valid range returns 206, a cache validator can return 304, and an invalid range can return 416. Inline play sets a media MIME type and `Content-Disposition: inline`, so the Console can preview MP4/fMP4 natively and FLV/TS through mpegts.js. Invalid/traversing IDs return 400, missing objects 404, active/not-ready recordings 409, storage failures 500, and absent modules 503. Authentication failures return 401; a valid token without permission returns 403; rate limiting can return 429.
+
+The explicit `?action=play` and `?action=download` forms apply to the complete URL-decoded recording ID and are safe when that ID itself ends in `/play` or `/download`. The older `/{recordingPath}/play` and `/{recordingPath}/download` forms remain compatible only when no exact ID includes that final action-looking segment. A plain GET always returns an existing exact ID's metadata first. The Console uses the explicit query form.
 
 The Storage view exposes Play for completed recordings and for DVR sessions with available segments. Recording playback is served by the authenticated management API and reuses the Console session cookie. DVR playback is an HLS URL on the separate `dvr.listen` media listener; its playlist and segment requests run the normal synchronous subscribe authorization hooks. The media listener returns non-credentialed CORS headers so a Console on another port can fetch HLS resources. A Console session cookie is not automatically shared with that listener, and the Console never stores or appends a bearer token. Configure DVR subscribe authorization accordingly when using the online browser action.
 
@@ -115,7 +117,9 @@ curl -fsS -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
   "$LIVEFORGE_API/api/v1/recordings/live/camera.mp4"
 ```
 
-Success is 200. The same 400/404/409/500/503 storage states apply. A viewer or operator receives 403.
+Success is 200. DELETE always treats the complete path as the recording ID, including an ID ending in `/play` or `/download`. The same 400/404/409/500/503 storage states apply. A viewer or operator receives 403.
+
+Local TS deletion recognizes only `<owner>.ts.segment_<digits>.ts` and `<owner>.ts.m3u8`, plus their `.partial`, `.failed`, and `.orphan-<digits>-<digits>.failed` recovery variants, as owned sidecars. Arbitrary longer names such as `.ts.notes` remain independent recordings. Deletion removes owned sidecars and metadata before the primary. If cleanup returns 500, the primary remains authoritative; repair the filesystem problem and retry the same DELETE. Already removed cleanup artifacts do not make the retry fail.
 
 ## Metrics And Diagnostics
 

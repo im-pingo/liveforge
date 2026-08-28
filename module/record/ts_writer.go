@@ -2,7 +2,6 @@ package record
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,10 +21,10 @@ type tsFrameWriter struct {
 	audioSeq   []byte
 	videoCodec avframe.CodecType
 	audioCodec avframe.CodecType
-
-	segmentDir  string
-	segmentFile *os.File
-	segmentPath string
+	sidecars    sidecarMediaFile
+	sidecarBase string
+	segmentFile sidecarWriteObject
+	segmentName string
 	segmentIdx  int
 	segmentDur  time.Duration
 	segStartTS  int64 // DTS of first frame in segment (ms)
@@ -66,7 +65,15 @@ func (w *tsFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 
 	if w.muxer == nil {
 		w.muxer = ts.NewMuxer(w.videoCodec, w.audioCodec, w.videoSeq, w.audioSeq)
-		w.segmentDir = filepath.Dir(f.Name())
+		var ok bool
+		w.sidecars, ok = f.(sidecarMediaFile)
+		if !ok {
+			return fmt.Errorf("record storage does not support TS sidecars")
+		}
+		w.sidecarBase = strings.TrimSuffix(filepath.Base(f.Name()), ".partial")
+		if w.sidecarBase == "" || w.sidecarBase == "." {
+			return fmt.Errorf("record storage returned an invalid TS object name")
+		}
 	}
 
 	// Start new segment on keyframe or if no segment is open
@@ -110,16 +117,14 @@ func (w *tsFrameWriter) shouldSplit() bool {
 }
 
 func (w *tsFrameWriter) openSegment() error {
-	filename := fmt.Sprintf("segment_%05d.ts", w.segmentIdx)
-	path := filepath.Join(w.segmentDir, filename)
-
-	sf, err := os.Create(path + ".partial")
+	filename := fmt.Sprintf("%s.segment_%05d.ts", w.sidecarBase, w.segmentIdx)
+	sf, err := w.sidecars.CreateSidecar(filename, 0644)
 	if err != nil {
-		return fmt.Errorf("create segment %s: %w", path, err)
+		return fmt.Errorf("create segment %s: %w", filename, err)
 	}
 
 	w.segmentFile = sf
-	w.segmentPath = path
+	w.segmentName = filename
 	w.segStartTS = -1
 	return nil
 }
@@ -129,20 +134,7 @@ func (w *tsFrameWriter) closeSegment() error {
 		return nil
 	}
 
-	partialPath := w.segmentFile.Name()
-	if err := w.segmentFile.Sync(); err != nil {
-		_ = w.segmentFile.Close()
-		_ = os.Rename(partialPath, w.segmentPath+".failed")
-		w.segmentFile = nil
-		return fmt.Errorf("sync TS segment: %w", err)
-	}
-	if err := w.segmentFile.Close(); err != nil {
-		_ = os.Rename(partialPath, w.segmentPath+".failed")
-		w.segmentFile = nil
-		return fmt.Errorf("close TS segment: %w", err)
-	}
-	if err := os.Rename(partialPath, w.segmentPath); err != nil {
-		_ = os.Rename(partialPath, w.segmentPath+".failed")
+	if err := w.segmentFile.Complete(); err != nil {
 		w.segmentFile = nil
 		return fmt.Errorf("finalize TS segment: %w", err)
 	}
@@ -153,7 +145,7 @@ func (w *tsFrameWriter) closeSegment() error {
 	}
 
 	w.segments = append(w.segments, segmentInfo{
-		filename: filepath.Base(w.segmentPath),
+		filename: w.segmentName,
 		duration: dur,
 	})
 	w.segmentIdx++
@@ -174,9 +166,7 @@ func (w *tsFrameWriter) abort() {
 	if w.segmentFile == nil {
 		return
 	}
-	partialPath := w.segmentFile.Name()
-	_ = w.segmentFile.Close()
-	_ = os.Rename(partialPath, w.segmentPath+".failed")
+	_ = w.segmentFile.Fail()
 	w.segmentFile = nil
 }
 
@@ -184,9 +174,6 @@ func (w *tsFrameWriter) writePlaylist() error {
 	if len(w.segments) == 0 {
 		return nil
 	}
-
-	dir := w.segmentDir
-	playlistPath := filepath.Join(dir, "index.m3u8")
 
 	var maxDur float64
 	for _, seg := range w.segments {
@@ -209,13 +196,5 @@ func (w *tsFrameWriter) writePlaylist() error {
 
 	b.WriteString("#EXT-X-ENDLIST\n")
 
-	tempPath := playlistPath + ".partial"
-	if err := os.WriteFile(tempPath, []byte(b.String()), 0644); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, playlistPath); err != nil {
-		_ = os.Remove(tempPath)
-		return err
-	}
-	return nil
+	return w.sidecars.WriteSidecarAtomic(w.sidecarBase+".m3u8", []byte(b.String()), 0644)
 }

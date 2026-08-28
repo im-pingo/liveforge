@@ -328,3 +328,55 @@ func TestRecordingAndDVRRoutesUseRegisteredProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordingRoutesPreserveExactActionLookingIDs(t *testing.T) {
+	provider := &recordingProviderStub{
+		items: []record.RecordingInfo{
+			{ID: "archive/play", Format: "fmp4", State: record.RecordingCompleted},
+			{ID: "archive/download", Format: "fmp4", State: record.RecordingCompleted},
+			{ID: "legacy/cam.mp4", Format: "fmp4", State: record.RecordingCompleted},
+		},
+		content: []byte("media"),
+	}
+	server := core.NewServer(newTestConfig())
+	server.RegisterModule(provider)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, server)
+
+	request := func(method, target string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(method, target, nil))
+		return w
+	}
+
+	for _, id := range []string{"archive/play", "archive/download"} {
+		w := request(http.MethodGet, "/api/v1/recordings/"+id)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+id+`"`) {
+			t.Errorf("detail %q status=%d body=%s", id, w.Code, w.Body.String())
+		}
+	}
+
+	for _, test := range []struct {
+		target      string
+		disposition string
+	}{
+		{target: "/api/v1/recordings/archive/play?action=play", disposition: "inline"},
+		{target: "/api/v1/recordings/archive/download?action=download", disposition: "attachment"},
+		{target: "/api/v1/recordings/legacy/cam.mp4/play", disposition: "inline"},
+		{target: "/api/v1/recordings/legacy/cam.mp4/download", disposition: "attachment"},
+	} {
+		w := request(http.MethodGet, test.target)
+		if w.Code != http.StatusOK || w.Body.String() != "media" || !strings.HasPrefix(w.Header().Get("Content-Disposition"), test.disposition) {
+			t.Errorf("GET %s status=%d disposition=%q body=%q", test.target, w.Code, w.Header().Get("Content-Disposition"), w.Body.String())
+		}
+	}
+
+	for _, id := range []string{"archive/play", "archive/download"} {
+		provider.deleted = ""
+		w := request(http.MethodDelete, "/api/v1/recordings/"+id)
+		if w.Code != http.StatusOK || provider.deleted != id {
+			t.Errorf("delete %q status=%d deleted=%q body=%s", id, w.Code, provider.deleted, w.Body.String())
+		}
+	}
+}

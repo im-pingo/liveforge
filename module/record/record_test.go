@@ -1014,9 +1014,12 @@ func TestLocalStorageListOmitsTSPlaylistArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, data := range map[string][]byte{
-		"record.ts":        []byte("primary"),
-		"segment_00000.ts": []byte("segment"),
-		"index.m3u8":       []byte("#EXTM3U"),
+		"record.ts":                  []byte("primary"),
+		"record.ts.segment_00000.ts": []byte("segment"),
+		"record.ts.m3u8":             []byte("#EXTM3U"),
+		"legacy-owner.ts":            []byte("primary"),
+		"segment_00000.ts":           []byte("legacy segment"),
+		"index.m3u8":                 []byte("#EXTM3U"),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
 			t.Fatal(err)
@@ -1030,8 +1033,12 @@ func TestLocalStorageListOmitsTSPlaylistArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].ID != "live/ts/record.ts" {
+	if len(items) != 2 {
 		t.Fatalf("playlist artifacts leaked into recording list: %+v", items)
+	}
+	ids := map[string]bool{items[0].ID: true, items[1].ID: true}
+	if !ids["live/ts/record.ts"] || !ids["live/ts/legacy-owner.ts"] {
+		t.Fatalf("recording list = %+v, want only primary TS files", items)
 	}
 }
 
@@ -1147,6 +1154,133 @@ func TestTSRecordingCreatesSegmentsAndPlaylist(t *testing.T) {
 			t.Error("playlist missing #EXT-X-ENDLIST")
 		}
 		t.Logf("TS segments: %v, playlist:\n%s", tsFiles, content)
+	}
+}
+
+func TestTSRecordingsInSharedDirectoryUseOwnedSidecarsAndDeleteIndependently(t *testing.T) {
+	root := t.TempDir()
+	recordings := []struct {
+		id      string
+		payload byte
+	}{
+		{id: "first.ts", payload: 0x88},
+		{id: "second.ts", payload: 0x89},
+	}
+
+	for _, recording := range recordings {
+		cfg := config.RecordConfig{
+			Format: "ts",
+			Path:   filepath.Join(root, recording.id),
+		}
+		writer, err := NewFileWriter("live/shared", cfg)
+		if err != nil {
+			t.Fatalf("create %s writer: %v", recording.id, err)
+		}
+		sequenceHeader := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+			0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+		)
+		keyframe := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			0, 0, []byte{0x00, 0x00, 0x00, 0x02, 0x65, recording.payload},
+		)
+		if err := writer.WriteFrame(sequenceHeader); err != nil {
+			t.Fatalf("write %s sequence header: %v", recording.id, err)
+		}
+		if err := writer.WriteFrame(keyframe); err != nil {
+			t.Fatalf("write %s keyframe: %v", recording.id, err)
+		}
+		if err := writer.CloseWithError(nil); err != nil {
+			t.Fatalf("close %s writer: %v", recording.id, err)
+		}
+	}
+
+	for _, recording := range recordings {
+		segmentName := recording.id + ".segment_00000.ts"
+		playlistName := recording.id + ".m3u8"
+		for _, name := range []string{recording.id, recording.id + metadataSuffix, segmentName, playlistName} {
+			if info, err := os.Stat(filepath.Join(root, name)); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("generated artifact %q info=%v err=%v", name, info, err)
+			}
+		}
+		playlist, err := os.ReadFile(filepath.Join(root, playlistName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(playlist), segmentName) {
+			t.Fatalf("playlist %q does not own segment %q:\n%s", playlistName, segmentName, playlist)
+		}
+	}
+	for _, legacyName := range []string{"segment_00000.ts", "index.m3u8"} {
+		if _, err := os.Lstat(filepath.Join(root, legacyName)); !os.IsNotExist(err) {
+			t.Fatalf("new TS recordings created shared legacy artifact %q: %v", legacyName, err)
+		}
+	}
+
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.Delete(context.Background(), recordings[0].id); err != nil {
+		t.Fatalf("delete generated recording %q: %v", recordings[0].id, err)
+	}
+	for _, suffix := range []string{"", metadataSuffix, ".segment_00000.ts", ".m3u8"} {
+		if _, err := os.Lstat(filepath.Join(root, recordings[0].id+suffix)); !os.IsNotExist(err) {
+			t.Errorf("deleted recording artifact %q remains: %v", recordings[0].id+suffix, err)
+		}
+		if info, err := os.Stat(filepath.Join(root, recordings[1].id+suffix)); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("other recording artifact %q info=%v err=%v", recordings[1].id+suffix, info, err)
+		}
+	}
+}
+
+func TestTSRecordingSidecarsStayInPinnedDirectoryAfterPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	cfg := config.RecordConfig{
+		Format: "ts",
+		Path:   filepath.Join(root, "{stream_key}", "record.ts"),
+	}
+	w, err := NewFileWriter("live/camera", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalDir := filepath.Join(root, "live", "camera")
+	pinnedDir := filepath.Join(root, "live", "camera-pinned")
+	if err := os.Rename(originalDir, pinnedDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, originalDir); err != nil {
+		t.Fatal(err)
+	}
+
+	sequenceHeader := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+	)
+	keyframe := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88},
+	)
+	if err := w.WriteFrame(sequenceHeader); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFrame(keyframe); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CloseWithError(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"record.ts.segment_00000.ts", "record.ts.m3u8"} {
+		if _, err := os.Stat(filepath.Join(pinnedDir, name)); err != nil {
+			t.Fatalf("pinned TS sidecar %q unavailable: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(outside, name)); !os.IsNotExist(err) {
+			t.Fatalf("TS sidecar %q escaped through replacement symlink: %v", name, err)
+		}
 	}
 }
 

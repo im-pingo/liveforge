@@ -48,6 +48,33 @@ func (h *Handlers) handleRecordingStatus(w http.ResponseWriter, r *http.Request)
 
 func (h *Handlers) handleRecordingRoute(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("recording_path")
+	r.SetPathValue("id", id)
+	if r.Method == http.MethodDelete {
+		h.handleRecording(w, r)
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("action"))) {
+	case "download":
+		h.handleRecordingDownload(w, r)
+		return
+	case "play":
+		h.handleRecordingPlay(w, r)
+		return
+	}
+	provider, ok := h.recordingProvider()
+	if !ok {
+		h.handleRecording(w, r)
+		return
+	}
+	info, err := provider.Recording(r.Context(), id)
+	if err == nil {
+		writeJSON(w, http.StatusOK, info)
+		return
+	}
+	if !errors.Is(err, record.ErrRecordingNotFound) {
+		writeRecordingError(w, err)
+		return
+	}
 	if strings.HasSuffix(id, "/download") {
 		r.SetPathValue("id", strings.TrimSuffix(id, "/download"))
 		h.handleRecordingDownload(w, r)
@@ -58,8 +85,7 @@ func (h *Handlers) handleRecordingRoute(w http.ResponseWriter, r *http.Request) 
 		h.handleRecordingPlay(w, r)
 		return
 	}
-	r.SetPathValue("id", id)
-	h.handleRecording(w, r)
+	writeRecordingError(w, err)
 }
 
 func (h *Handlers) handleRecording(w http.ResponseWriter, r *http.Request) {
