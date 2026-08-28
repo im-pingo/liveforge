@@ -130,6 +130,11 @@ read-only Validate, and use Apply & Refresh. Viewer
 tokens have `config:read`; Apply and Refresh require `config:reload` (operator or
 admin).
 
+The editor starts fail-closed while source metadata is loading. Read-only sources
+and failed refreshes keep the editor read-only and Apply disabled; the page only
+enables writing after a successful response confirms that the selected source
+implements `ConfigWriter`.
+
 Apply writes the complete document through the selected source and then schedules
 the normal background refresh. The writer behavior is:
 
