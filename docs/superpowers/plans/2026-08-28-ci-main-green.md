@@ -10,6 +10,13 @@
 
 **Spec:** `docs/TECHNICAL-RISKS.md` and `AGENTS.md`.
 
+The shared HTTP muxer codec-epoch regression must establish the direct AAC
+output before injecting the next source codec. FLV and TS emit that output
+immediately, while fMP4 requires the DTS=500 video boundary to flush its
+fragment; the test therefore waits after that boundary and before G.711
+input. This keeps the test independent of goroutine scheduling while still
+covering the direct-to-transformed transition.
+
 ## Global Constraints
 
 - Use Go 1.26 or newer and the repository's `audiocodec` build tag for the tagged baseline.
