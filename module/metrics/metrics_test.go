@@ -32,7 +32,7 @@ func testConfig() *config.Config {
 		},
 		Metrics: config.MetricsConfig{
 			Enabled: true,
-			Listen:  ":0", // random port
+			Listen:  "127.0.0.1:0", // random loopback port
 			Path:    "/metrics",
 		},
 	}
