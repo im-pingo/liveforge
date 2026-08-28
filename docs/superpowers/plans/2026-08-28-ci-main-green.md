@@ -28,11 +28,11 @@
 
 **Interfaces:** `NewRTPReceiver(port int, publisher *Publisher)` keeps its public signature; port zero must result in RTCP listening on the assigned RTP port plus one.
 
-- [ ] **Step 1: Add the failing regression test.** Add `TestNewRTPReceiverUsesAssignedPortForRTCP`, call `NewRTPReceiver(0, NewPublisher("ephemeral-port", nil))`, defer `receiver.Close`, read `receiver.LocalPort()` and `receiver.rtcpConn.LocalAddr().(*net.UDPAddr).Port`, assert RTP is positive and RTCP equals RTP plus one.
-- [ ] **Step 2: Run `go test -tags audiocodec ./module/gb28181 -run TestNewRTPReceiverUsesAssignedPortForRTCP -count=1` and verify it fails because the current code attempts UDP port 1.
-- [ ] **Step 3: After the RTP bind succeeds, compute RTCP port from the actual RTP local port when the requested port is zero; retain `port + 1` for explicitly allocated ports; close RTP if RTCP binding fails.
-- [ ] **Step 4: Run `go test -tags audiocodec ./module/gb28181 -run 'TestNewRTPReceiverUsesAssignedPortForRTCP|TestRTPReceiver|TestMediaSessionCloseOwnsReceiverAndAllowsPortReuse' -count=1` and then `go test -tags audiocodec ./module/gb28181 -count=1`.
-- [ ] **Step 5: Commit with `git add module/gb28181/rtp_receiver.go module/gb28181/rtp_receiver_test.go && git commit -m "fix: derive GB28181 RTCP port from ephemeral RTP port"`.
+- [x] **Step 1: Add the failing regression test.** Add `TestNewRTPReceiverUsesAssignedPortForRTCP`, call `NewRTPReceiver(0, NewPublisher("ephemeral-port", nil))`, defer `receiver.Close`, read `receiver.LocalPort()` and `receiver.rtcpConn.LocalAddr().(*net.UDPAddr).Port`, assert RTP is positive and RTCP equals RTP plus one.
+- [x] **Step 2: Run `go test -tags audiocodec ./module/gb28181 -run TestNewRTPReceiverUsesAssignedPortForRTCP -count=1` and verify it fails because the current code attempts UDP port 1.
+- [x] **Step 3: After the RTP bind succeeds, compute RTCP port from the actual RTP local port when the requested port is zero; retain `port + 1` for explicitly allocated ports; close RTP if RTCP binding fails.
+- [x] **Step 4: Run `go test -tags audiocodec ./module/gb28181 -run 'TestNewRTPReceiverUsesAssignedPortForRTCP|TestRTPReceiver|TestMediaSessionCloseOwnsReceiverAndAllowsPortReuse' -count=1` and then `go test -tags audiocodec ./module/gb28181 -count=1`.
+- [x] **Step 5: Commit with `git add module/gb28181/rtp_receiver.go module/gb28181/rtp_receiver_test.go && git commit -m "fix: derive GB28181 RTCP port from ephemeral RTP port"`.
 
 ### Task 2: Make lint deterministic on PRs and main pushes
 
@@ -41,24 +41,24 @@
 
 **Interfaces:** The `Lint` job must remain a required quality gate for pull requests and must check only the new diff on `main` pushes.
 
-- [ ] **Step 1: Pin `golangci-lint-action` to the repository's Node 24-compatible action major and replace `version: latest` with the verified `v2.13.2` release; retain `only-new-issues: true`, which the action maps to the PR patch or push commit diff automatically.
-- [ ] **Step 2: Validate the workflow diff with `git diff --check` and inspect `.github/workflows/ci.yml` for valid YAML and no unrelated changes.
-- [ ] **Step 3: Commit with `git add .github/workflows/ci.yml && git commit -m "ci: lint only changes on main pushes"`.
+- [x] **Step 1: Pin `golangci-lint-action` to the repository's Node 24-compatible action major and replace `version: latest` with the verified `v2.13.2` release; retain `only-new-issues: true`, which the action maps to the PR patch or push commit diff automatically.
+- [x] **Step 2: Validate the workflow diff with `git diff --check` and inspect `.github/workflows/ci.yml` for valid YAML and no unrelated changes.
+- [x] **Step 3: Commit with `git add .github/workflows/ci.yml && git commit -m "ci: lint only changes on main pushes"`.
 
 ### Task 3: Documentation and full verification
 
 **Files:** Inspect `agent-manifest.json`, `llms.txt`, `llms-full.txt`, `README.md`, `README.zh-CN.md`, `docs/TECHNICAL-RISKS.md`, and `docs/PROGRESS.md`; modify only if the final behavior or CI contract changes a documented fact.
 
-- [ ] **Step 1: Confirm the port fix changes no public API, configuration, prerequisite, or supported protocol; document any changed CI version or workflow fact in the required AI-facing files.
-- [ ] **Step 2: Run `go test ./...`, `go test -tags audiocodec ./module/gb28181 -count=1`, `tools/check-agent-docs_test.sh`, `CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh`, `git diff --check`, and `jq empty agent-manifest.json`.
-- [ ] **Step 3: When FFmpeg development libraries are available, run `CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge` and `CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...`.
+- [x] **Step 1: Confirm the port fix changes no public API, configuration, prerequisite, or supported protocol; document any changed CI version or workflow fact in the required AI-facing files.
+- [x] **Step 2: Run `go test ./...`, `go test -tags audiocodec ./module/gb28181 -count=1`, `tools/check-agent-docs_test.sh`, `CHECK_AGENT_DOCS_DIFF=1 tools/check-agent-docs.sh`, `git diff --check`, and `jq empty agent-manifest.json`.
+- [x] **Step 3: When FFmpeg development libraries are available, run `CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge` and `CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...`.
 - [ ] **Step 4: Push the fix branch, create or update its PR, wait for all checks, merge only after they pass, then verify the post-merge `main` run has successful Agent Documentation, Lint, Test, Security Scan, and Docker Build jobs.
 
 ### Task 4: Delete confirmed-unused branches
 
 **Files:** Git refs only.
 
-- [ ] **Step 1: Delete local and remote `codex/liveforge-completion` and `codex/p0-p1-main-playback`; both corresponding PRs are merged.
-- [ ] **Step 2: Delete local-only stale `codex/forwarding-performance-optimization` and `playback-startup-fixes`; their remote refs are already gone.
+- [x] **Step 1: Delete local and remote `codex/liveforge-completion` and `codex/p0-p1-main-playback`; both corresponding PRs are merged.
+- [x] **Step 2: Delete local-only stale `codex/forwarding-performance-optimization` and `playback-startup-fixes`; their remote refs are already gone.
 - [ ] **Step 3: Preserve `fix/p0-p1-hardening` because PR #16 was closed without merge and its commits may not exist in main; delete it only after explicit disposal authorization.
 - [ ] **Step 4: Verify with `git fetch origin --prune`, `git branch -vv --all`, and `gh api repos/im-pingo/liveforge/branches --paginate --jq '.[].name'`; `main` and `codex/webrtc-playback-fix` must remain.
