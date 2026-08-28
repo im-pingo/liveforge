@@ -326,11 +326,11 @@ func (s *sipLabSession) protocolContext(caller context.Context) (context.Context
 }
 
 func (s *sipLabSession) startPublish(requestContext context.Context) error {
-	rtpConn, rtcpConn, err := listenLabUDPPair()
+	rtpConn, rtcpConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		return err
 	}
-	videoRTPConn, videoRTCPConn, err := listenLabUDPPair()
+	videoRTPConn, videoRTCPConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		_ = rtpConn.Close()
 		_ = rtcpConn.Close()
@@ -401,14 +401,17 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 		return fmt.Errorf("%w: receive stream %q", ErrStreamNotFound, s.request.StreamKey)
 	}
 	mediaInfo := stream.Publisher().MediaInfo()
-	if mediaInfo == nil || codecNameForAV(mediaInfo.AudioCodec) != strings.ToUpper(strings.TrimSpace(s.request.Codec)) || mediaInfo.VideoCodec != avframe.CodecH264 {
+	if mediaInfo == nil || mediaInfo.VideoCodec != avframe.CodecH264 {
 		return ErrCodecMismatch
 	}
-	rtpConn, rtcpConn, err := listenLabUDPPair()
+	if _, ok := s.gateway.outboundCodec(stream, mediaInfo.AudioCodec, s.request.Codec); !ok {
+		return ErrCodecMismatch
+	}
+	rtpConn, rtcpConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		return err
 	}
-	videoRTPConn, videoRTCPConn, err := listenLabUDPPair()
+	videoRTPConn, videoRTCPConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		_ = rtpConn.Close()
 		_ = rtcpConn.Close()
@@ -443,7 +446,7 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 			return
 		}
 		codec := codecNameFromMedia(audio)
-		if codec != "PCMA" && codec != "PCMU" {
+		if codec != strings.ToUpper(strings.TrimSpace(s.request.Codec)) {
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 			return
 		}
@@ -502,7 +505,7 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	}
 
 	target := fmt.Sprintf("sip:%s@%s", s.request.DeviceID, peerAddr)
-	callID, err := s.gateway.Dial(requestContext, target, s.request.StreamKey)
+	callID, err := s.gateway.dial(requestContext, target, s.request.StreamKey, s.request.Codec)
 	if err != nil {
 		return err
 	}
@@ -1000,12 +1003,24 @@ func listenLabUDP() (*net.UDPConn, error) {
 }
 
 func listenLabUDPPair() (*net.UDPConn, *net.UDPConn, error) {
+	return listenLabUDPPairOutside(0, 0)
+}
+
+func (gw *Gateway) listenLabUDPPair() (*net.UDPConn, *net.UDPConn, error) {
+	return listenLabUDPPairOutside(gw.rtpPortMin, gw.rtpPortMax)
+}
+
+func listenLabUDPPairOutside(excludedMin, excludedMax int) (*net.UDPConn, *net.UDPConn, error) {
 	for attempt := 0; attempt < 20; attempt++ {
 		rtpConn, err := listenLabUDP()
 		if err != nil {
 			return nil, nil, err
 		}
 		rtpPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
+		if excludedMin > 0 && excludedMax >= excludedMin && rtpPort <= excludedMax && rtpPort+1 >= excludedMin {
+			_ = rtpConn.Close()
+			continue
+		}
 		rtcpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: rtpPort + 1})
 		if err == nil {
 			return rtpConn, rtcpConn, nil

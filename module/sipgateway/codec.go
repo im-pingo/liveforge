@@ -52,6 +52,14 @@ func configuredCodecForSource(configured []string, source avframe.CodecType) (ne
 	return negotiatedCodec{}, false
 }
 
+func configuredCodecForEncoding(configured []string, encoding string) (negotiatedCodec, bool) {
+	requested, ok := codecForEncoding(encoding)
+	if !ok {
+		return negotiatedCodec{}, false
+	}
+	return configuredCodecForSource(configured, requested.Codec)
+}
+
 type negotiatedCodec struct {
 	Codec        avframe.CodecType
 	PT           int

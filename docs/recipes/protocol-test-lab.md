@@ -50,6 +50,14 @@ waits for the selected publisher generation to become startup-ready before
 sending its INVITE; a source with a known unsupported audio codec is rejected
 before signaling, while a source with late sequence headers is waited on or
 canceled with the request context.
+
+Gateway RTP/RTCP pairs are socket-bound before SDP and remain owned by the call
+until teardown. For a transcoded outbound call, every ready target-audio frame
+rechecks its captured publisher generation immediately before RTP send. Source
+retirement closes and releases the target reader, generation subscriber, and
+media sockets, returns the exact port pair to the allocator, and sends one BYE
+even if another local teardown races with retirement.
+
 The publish stream contains a dependency-free moving 160x90 constrained-baseline
 H.264 pattern at 25 fps, with one IDR per 25-frame loop, plus audible 20 ms
 PCMA/PCMU frames. The Console uses the video player and prefers WebRTC/WHEP for

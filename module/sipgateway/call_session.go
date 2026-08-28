@@ -377,8 +377,7 @@ func (cs *CallSession) startOutbound(stream *core.Stream, startupSnapshot core.S
 	audioOwned := releaseAudio != nil
 	defer func() {
 		if audioOwned {
-			transcodedAudio.Close()
-			releaseAudio()
+			cs.releaseTranscodedAudio(transcodedAudio, releaseAudio)
 		}
 	}()
 
@@ -634,11 +633,8 @@ func (cs *CallSession) sendLoop() {
 	transcodedAudio := cs.transcodedAudio
 	releaseAudio := cs.releaseAudio
 	cs.mu.RUnlock()
-	if releaseAudio != nil {
-		defer releaseAudio()
-	}
-	if transcodedAudio != nil {
-		defer transcodedAudio.Close()
+	if transcodedAudio != nil || releaseAudio != nil {
+		defer cs.releaseTranscodedAudio(transcodedAudio, releaseAudio)
 	}
 	var videoSession *rtp.Session
 	var videoPacketizer rtp.Packetizer
@@ -832,6 +828,10 @@ func (cs *CallSession) sendTranscodedAudioAndVideo(
 			if frame.FrameType == avframe.FrameTypeSequenceHeader || !frame.MediaType.IsAudio() || frame.Codec != cs.codec.Codec {
 				continue
 			}
+			if ctx.Err() != nil || !stream.IsPublisherGeneration(snapshot.Generation) {
+				cs.ended()
+				return
+			}
 			if !cs.sendFrame(frame, audioPacketizer, audioSession, audioConn, audioRTCPConn, audioRemote, &cs.rtcpSender) {
 				return
 			}
@@ -841,6 +841,21 @@ func (cs *CallSession) sendTranscodedAudioAndVideo(
 		}
 	}
 	cs.ended()
+}
+
+func (cs *CallSession) releaseTranscodedAudio(reader *util.RingReader[*avframe.AVFrame], release func()) {
+	if reader != nil {
+		reader.Close()
+	}
+	if release != nil {
+		release()
+	}
+	cs.mu.Lock()
+	if cs.transcodedAudio == reader {
+		cs.transcodedAudio = nil
+		cs.releaseAudio = nil
+	}
+	cs.mu.Unlock()
 }
 
 func (cs *CallSession) sendFrame(frame *avframe.AVFrame, packetizer rtp.Packetizer, session *rtp.Session, conn, rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, reportState *rtcpSenderState) bool {

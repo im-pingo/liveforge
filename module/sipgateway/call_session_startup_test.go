@@ -54,19 +54,17 @@ func TestCallSessionOutboundGenerationStartupSkipsStaleHistory(t *testing.T) {
 	}
 	localRTPPort := localRTP.LocalAddr().(*net.UDPAddr).Port
 	localRTCPPort := localRTCP.LocalAddr().(*net.UDPAddr).Port
-	localRTP.Close()
-	localRTCP.Close()
 	localVideoRTP, localVideoRTCP, err := listenLabUDPPair()
 	if err != nil {
 		t.Fatal(err)
 	}
 	localVideoRTPPort := localVideoRTP.LocalAddr().(*net.UDPAddr).Port
 	localVideoRTCPPort := localVideoRTCP.LocalAddr().(*net.UDPAddr).Port
-	localVideoRTP.Close()
-	localVideoRTCP.Close()
 
 	call := newCallSession("startup-call", stream.Key(), codec, "outbound", localRTPPort, localRTCPPort)
+	call.configureMediaSockets(localRTP, localRTCP)
 	call.configureVideo(videoCodec, localVideoRTPPort, localVideoRTCPPort, "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port)
+	call.configureVideoSockets(localVideoRTP, localVideoRTCP)
 	defer call.Close()
 	if err := call.startOutbound(stream, stream.StartupSnapshot(), "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port); err != nil {
 		t.Fatal(err)

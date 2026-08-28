@@ -161,6 +161,67 @@ func TestGatewayReportsPortExhaustion(t *testing.T) {
 	}
 }
 
+func TestGatewaySkipsExternallyOccupiedRTPPair(t *testing.T) {
+	start, occupiedRTP, occupiedRTCP := reserveFirstSIPGatewayPair(t)
+	defer occupiedRTP.Close()
+	defer occupiedRTCP.Close()
+
+	cfg := newTestGatewayConfig(t)
+	cfg.RTPPortRange = []int{start, start + 3}
+	gw, svc, _ := newControlPlaneGateway(t, cfg)
+	resp := inviteGateway(t, svc, "external-port-owner", "external-port-owner", []byte(testAudioOffer))
+	if resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("INVITE status = %v, want 200 after skipping occupied pair", resp)
+	}
+	call, ok := gw.Call("external-port-owner")
+	if !ok {
+		t.Fatal("active call was not retained")
+	}
+	if call.RTPPort != start+2 || call.RTCPPort != start+3 {
+		t.Fatalf("call ports = %d/%d, want unoccupied pair %d/%d", call.RTPPort, call.RTCPPort, start+2, start+3)
+	}
+}
+
+func reserveFirstSIPGatewayPair(t *testing.T) (int, *net.UDPConn, *net.UDPConn) {
+	t.Helper()
+	loopback := net.ParseIP("127.0.0.1")
+	for attempt := 0; attempt < 128; attempt++ {
+		probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback})
+		if err != nil {
+			t.Fatalf("probe SIP Gateway range: %v", err)
+		}
+		start := probe.LocalAddr().(*net.UDPAddr).Port
+		_ = probe.Close()
+		if start%2 != 0 {
+			start--
+		}
+		if start < 1024 || start+3 > 65535 {
+			continue
+		}
+
+		conns := make([]*net.UDPConn, 0, 4)
+		for port := start; port <= start+3; port++ {
+			conn, listenErr := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
+			if listenErr != nil {
+				for _, opened := range conns {
+					_ = opened.Close()
+				}
+				conns = nil
+				break
+			}
+			conns = append(conns, conn)
+		}
+		if len(conns) != 4 {
+			continue
+		}
+		_ = conns[2].Close()
+		_ = conns[3].Close()
+		return start, conns[0], conns[1]
+	}
+	t.Fatal("could not reserve two consecutive SIP Gateway UDP pairs")
+	return 0, nil, nil
+}
+
 func TestGatewayRespondsToUnknownBYE(t *testing.T) {
 	_, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	req := sip.NewRequest(sip.BYE, sip.Uri{User: "missing", Host: "test.local"})
