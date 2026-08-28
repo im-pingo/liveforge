@@ -78,6 +78,45 @@ func TestHLSManagerSegmentCount(t *testing.T) {
 	}
 }
 
+func TestHLSManagerAudioOnlyProducesLiveSegments(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/hls-audio-only")
+	mgr := NewHLSManager(stream.Key(), "/live/hls-audio-only", 0.2, 5)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	payloads := writeLiveAACFrames(stream, 22, 20)
+	waitForSegmentCount(t, mgr.SegmentCount, 2)
+	select {
+	case <-done:
+		t.Fatal("HLS manager stopped before the live source")
+	default:
+	}
+
+	first, ok := mgr.GetSegment(0)
+	if !ok {
+		t.Fatal("first audio-only HLS segment is unavailable while source is live")
+	}
+	second, ok := mgr.GetSegment(1)
+	if !ok {
+		t.Fatal("second audio-only HLS segment is unavailable while source is live")
+	}
+	firstFrames := demuxTSAudioFrames(first)
+	secondFrames := demuxTSAudioFrames(second)
+	if len(firstFrames) == 0 || len(secondFrames) == 0 {
+		t.Fatalf("audio-only HLS demuxed frames = %d/%d, want audio in both segments", len(firstFrames), len(secondFrames))
+	}
+	assertBoundaryPayloadStartsNextSegmentOnce(t, firstFrames, secondFrames, payloads[10])
+}
+
 func TestCopyBytesAndBufCopyAndReset(t *testing.T) {
 	src := []byte("hello world")
 	dst := copyBytes(src)
@@ -391,4 +430,86 @@ func newVideoStreamWithoutGOPCache(t *testing.T) *core.Stream {
 		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
 	))
 	return stream
+}
+
+func newAudioOnlyAACStream(t *testing.T, key string) *core.Stream {
+	t.Helper()
+	stream := core.NewStream(key, config.StreamConfig{
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 256,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&muxerWorkerPublisher{info: &avframe.MediaInfo{
+		AudioCodec:          avframe.CodecAAC,
+		AudioSequenceHeader: []byte{0x12, 0x10},
+		SampleRate:          44100,
+		Channels:            2,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return stream
+}
+
+func writeLiveAACFrames(stream *core.Stream, count int, intervalMS int64) [][]byte {
+	return writeLiveAACFramesFromDTS(stream, count, intervalMS, 0)
+}
+
+func writeLiveAACFramesFromDTS(stream *core.Stream, count int, intervalMS, originDTS int64) [][]byte {
+	payloads := make([][]byte, count)
+	for i := range count {
+		payload := []byte{0x21, byte(i), 0x34, 0x55}
+		payloads[i] = payload
+		dts := originDTS + int64(i)*intervalMS
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			dts, dts, payload,
+		))
+	}
+	return payloads
+}
+
+func waitForSegmentCount(t *testing.T, count func() int, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for count() < want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := count(); got < want {
+		t.Fatalf("completed live segments = %d, want at least %d", got, want)
+	}
+}
+
+func demuxTSAudioFrames(segment []byte) []*avframe.AVFrame {
+	var frames []*avframe.AVFrame
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+			frames = append(frames, frame)
+		}
+	})
+	demuxer.Feed(segment)
+	demuxer.Flush()
+	return frames
+}
+
+func assertBoundaryPayloadStartsNextSegmentOnce(
+	t *testing.T,
+	first, second []*avframe.AVFrame,
+	boundaryPayload []byte,
+) {
+	t.Helper()
+	firstCount := 0
+	for _, frame := range first {
+		if bytes.Equal(frame.Payload, boundaryPayload) {
+			firstCount++
+		}
+	}
+	secondCount := 0
+	for _, frame := range second {
+		if bytes.Equal(frame.Payload, boundaryPayload) {
+			secondCount++
+		}
+	}
+	if firstCount != 0 || secondCount != 1 {
+		t.Fatalf("boundary payload occurrences in previous/next segment = %d/%d, want 0/1", firstCount, secondCount)
+	}
 }

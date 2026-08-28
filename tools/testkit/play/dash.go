@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 )
 
@@ -38,10 +40,10 @@ type mpdAdaptationSet struct {
 }
 
 type mpdSegmentTemplate struct {
-	StartNumber    int                  `xml:"startNumber,attr"`
-	Initialization string               `xml:"initialization,attr"`
-	Media          string               `xml:"media,attr"`
-	Timeline       *mpdSegmentTimeline  `xml:"SegmentTimeline"`
+	StartNumber    int                 `xml:"startNumber,attr"`
+	Initialization string              `xml:"initialization,attr"`
+	Media          string              `xml:"media,attr"`
+	Timeline       *mpdSegmentTimeline `xml:"SegmentTimeline"`
 }
 
 type mpdSegmentTimeline struct {
@@ -59,8 +61,8 @@ type mpdTimelineEntry struct {
 // ---------------------------------------------------------------------------
 
 type dashTrackState struct {
-	demuxer     *fmp4.Demuxer
-	lastSegNum  int // last successfully fetched segment number
+	demuxer    *fmp4.Demuxer
+	lastSegNum int // last successfully fetched segment number
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +182,7 @@ func (p *dashPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCall
 				}
 			}
 			videoTrack = vt
+			videoTrack.lastSegNum = dashInitialSegmentNumber(videoAS.SegmentTemplate) - 1
 
 			if audioAS != nil {
 				at, err := initTrack(playCtx, baseURL, cfg.Token, audioAS)
@@ -190,20 +193,27 @@ func (p *dashPlayer) Play(ctx context.Context, cfg PlayConfig, onFrame FrameCall
 					// Audio init failure is non-fatal; proceed without audio.
 				} else {
 					audioTrack = at
+					audioTrack.lastSegNum = dashInitialSegmentNumber(audioAS.SegmentTemplate) - 1
 				}
 			}
 
 			initialised = true
 		}
 
-		// Fetch new video segments.
+		// Fetch new segments from both adaptations, then deliver them in
+		// timeline order. A player should not observe an entire video batch
+		// followed by an entire audio batch from the same MPD update.
+		var frames []*avframe.AVFrame
 		if videoAS.SegmentTemplate != nil && videoTrack != nil {
-			fetchSegments(playCtx, baseURL, cfg.Token, videoAS.SegmentTemplate, videoTrack, onFrame)
+			frames = append(frames, fetchSegments(playCtx, baseURL, cfg.Token, videoAS.SegmentTemplate, videoTrack)...)
 		}
 
-		// Fetch new audio segments.
 		if audioAS != nil && audioAS.SegmentTemplate != nil && audioTrack != nil {
-			fetchSegments(playCtx, baseURL, cfg.Token, audioAS.SegmentTemplate, audioTrack, onFrame)
+			frames = append(frames, fetchSegments(playCtx, baseURL, cfg.Token, audioAS.SegmentTemplate, audioTrack)...)
+		}
+		sortDASHFrames(frames)
+		for _, frame := range frames {
+			onFrame(frame)
 		}
 
 		// Wait before next MPD poll.
@@ -256,6 +266,28 @@ func timelineSegmentCount(tl *mpdSegmentTimeline) int {
 	return count
 }
 
+const dashInitialPlaybackSegments = 3
+
+// dashInitialSegmentNumber starts a live player close to the MPD live edge.
+// Loading the whole time-shift window makes a short verification/playback
+// request spend its lifetime draining old media before it reaches live data.
+func dashInitialSegmentNumber(tmpl *mpdSegmentTemplate) int {
+	if tmpl == nil {
+		return 0
+	}
+	count := timelineSegmentCount(tmpl.Timeline)
+	if count <= dashInitialPlaybackSegments {
+		return tmpl.StartNumber
+	}
+	return tmpl.StartNumber + count - dashInitialPlaybackSegments
+}
+
+func sortDASHFrames(frames []*avframe.AVFrame) {
+	sort.SliceStable(frames, func(i, j int) bool {
+		return frames[i].DTS < frames[j].DTS
+	})
+}
+
 // initTrack fetches the init segment for an AdaptationSet and creates an
 // fmp4.Demuxer for it.
 func initTrack(ctx context.Context, baseURL, token string, as *mpdAdaptationSet) (*dashTrackState, error) {
@@ -278,16 +310,17 @@ func initTrack(ctx context.Context, baseURL, token string, as *mpdAdaptationSet)
 
 	return &dashTrackState{
 		demuxer:    demuxer,
-		lastSegNum: 0, // no segments fetched yet
+		lastSegNum: -1, // no segments fetched yet
 	}, nil
 }
 
 // fetchSegments downloads any new media segments for a track, demuxes them,
 // and delivers the resulting frames.
-func fetchSegments(ctx context.Context, baseURL, token string, tmpl *mpdSegmentTemplate, track *dashTrackState, onFrame FrameCallback) {
+func fetchSegments(ctx context.Context, baseURL, token string, tmpl *mpdSegmentTemplate, track *dashTrackState) []*avframe.AVFrame {
+	var frames []*avframe.AVFrame
 	count := timelineSegmentCount(tmpl.Timeline)
 	if count == 0 {
-		return
+		return frames
 	}
 
 	startNum := tmpl.StartNumber
@@ -296,7 +329,7 @@ func fetchSegments(ctx context.Context, baseURL, token string, tmpl *mpdSegmentT
 	for segNum := startNum; segNum <= endNum; segNum++ {
 		select {
 		case <-ctx.Done():
-			return
+			return frames
 		default:
 		}
 
@@ -312,24 +345,23 @@ func fetchSegments(ctx context.Context, baseURL, token string, tmpl *mpdSegmentT
 		segData, err := httpGetBytes(ctx, segURL)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return frames
 			}
 			// Skip segments that are no longer available (404 from sliding window).
 			track.lastSegNum = segNum
 			continue
 		}
 
-		frames, err := track.demuxer.Parse(segData)
+		segmentFrames, err := track.demuxer.Parse(segData)
 		if err != nil {
 			// Skip malformed segments.
 			track.lastSegNum = segNum
 			continue
 		}
 
-		for _, frame := range frames {
-			onFrame(frame)
-		}
+		frames = append(frames, segmentFrames...)
 
 		track.lastSegNum = segNum
 	}
+	return frames
 }

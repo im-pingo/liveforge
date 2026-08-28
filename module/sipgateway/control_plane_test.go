@@ -50,7 +50,7 @@ func newControlPlaneGateway(t *testing.T, cfg config.SIPGatewayConfig) (*Gateway
 }
 
 func TestGatewayListsAndDescribesInboundCalls(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	resp := inviteGateway(t, svc, "snapshot-inbound", "camera", []byte(testAudioOffer))
 	if resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("INVITE status = %v, want 200", resp)
@@ -81,7 +81,7 @@ func TestGatewayListsAndDescribesInboundCalls(t *testing.T) {
 }
 
 func TestGatewayRejectsDuplicateCallID(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	if resp := inviteGateway(t, svc, "duplicate", "first", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("first INVITE status = %v, want 200", resp)
 	}
@@ -98,7 +98,7 @@ func TestGatewayRejectsDuplicateCallID(t *testing.T) {
 }
 
 func TestGatewayReservesCallIDOnceConcurrently(t *testing.T) {
-	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	const attempts = 32
 	start := make(chan struct{})
 	results := make(chan error, attempts)
@@ -134,7 +134,7 @@ func TestGatewayReservesCallIDOnceConcurrently(t *testing.T) {
 }
 
 func TestGatewayReportsCodecMismatch(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	offer := []byte("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49998 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\n")
 	if resp := inviteGateway(t, svc, "codec-mismatch", "camera", offer); resp == nil || resp.StatusCode != 488 {
 		t.Fatalf("INVITE status = %v, want 488", resp)
@@ -146,8 +146,8 @@ func TestGatewayReportsCodecMismatch(t *testing.T) {
 }
 
 func TestGatewayReportsPortExhaustion(t *testing.T) {
-	cfg := newTestGatewayConfig()
-	cfg.RTPPortRange = []int{44000, 44001}
+	cfg := newTestGatewayConfig(t)
+	cfg.RTPPortRange = freeSIPGatewayRTPPortRange(t, 1)
 	gw, svc, _ := newControlPlaneGateway(t, cfg)
 	if resp := inviteGateway(t, svc, "port-first", "first", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("first INVITE status = %v, want 200", resp)
@@ -162,7 +162,7 @@ func TestGatewayReportsPortExhaustion(t *testing.T) {
 }
 
 func TestGatewayRespondsToUnknownBYE(t *testing.T) {
-	_, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	_, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	req := sip.NewRequest(sip.BYE, sip.Uri{User: "missing", Host: "test.local"})
 	req.AppendHeader(sip.NewHeader("Call-ID", "missing-call"))
 	tx := &mockServerTx{}
@@ -181,8 +181,8 @@ func TestGatewayRespondsToUnknownBYE(t *testing.T) {
 }
 
 func TestGatewayRTPTimeoutReleasesSessionAndPortOnce(t *testing.T) {
-	cfg := newTestGatewayConfig()
-	cfg.RTPPortRange = []int{44100, 44101}
+	cfg := newTestGatewayConfig(t)
+	cfg.RTPPortRange = freeSIPGatewayRTPPortRange(t, 1)
 	gw, svc, hub := newControlPlaneGateway(t, cfg)
 	gw.rtpIdleTimeout = 20 * time.Millisecond
 
@@ -228,6 +228,7 @@ type fakeInviteDialog struct {
 	mu                sync.Mutex
 	acks              int
 	byes              int
+	closes            int
 	ackHook           func()
 	responseHook      func()
 	rejectCanceledACK bool
@@ -246,7 +247,11 @@ func (d *fakeInviteDialog) Response() *sip.Response {
 	}
 	return response
 }
-func (d *fakeInviteDialog) Close() {}
+func (d *fakeInviteDialog) Close() {
+	d.mu.Lock()
+	d.closes++
+	d.mu.Unlock()
+}
 func (d *fakeInviteDialog) SendACK(ctx context.Context) error {
 	d.mu.Lock()
 	d.acks++
@@ -275,7 +280,7 @@ func (d *fakeInviteDialog) SendBYE(context.Context) error {
 }
 
 func TestGatewayDialsListsAndHangsUpOutboundCall(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/outbound")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -338,7 +343,10 @@ func TestGatewayDialsListsAndHangsUpOutboundCall(t *testing.T) {
 }
 
 func TestGatewayCountsInboundRTPPacketsAndBytes(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	cfg := newTestGatewayConfig(t)
+	rtpPort := evenSIPLabPort(t)
+	cfg.RTPPortRange = []int{rtpPort, rtpPort + 1}
+	gw, svc, _ := newControlPlaneGateway(t, cfg)
 	if resp := inviteGateway(t, svc, "rtp-counters", "counter-stream", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("INVITE status = %v, want 200", resp)
 	}
@@ -377,8 +385,89 @@ func TestGatewayCountsInboundRTPPacketsAndBytes(t *testing.T) {
 	}
 }
 
+func TestSIPGatewayStalePublisherCallbackCannotWriteReplacementGeneration(t *testing.T) {
+	cfg := newTestGatewayConfig(t)
+	rtpPort := evenSIPLabPort(t)
+	cfg.RTPPortRange = []int{rtpPort, rtpPort + 1}
+	gw, svc, hub := newControlPlaneGateway(t, cfg)
+	if resp := inviteGateway(t, svc, "stale-writer", "stale-writer", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
+		t.Fatalf("INVITE status = %v, want 200", resp)
+	}
+	call, ok := gw.Call("stale-writer")
+	if !ok {
+		t.Fatal("active inbound call not found")
+	}
+	stream, ok := hub.Find("sip/stale-writer")
+	if !ok {
+		t.Fatal("inbound stream not found")
+	}
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: call.RTPPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	sendPacket := func(sequence uint16) {
+		t.Helper()
+		packet := &pionrtp.Packet{
+			Header:  pionrtp.Header{Version: 2, PayloadType: 8, SequenceNumber: sequence, Timestamp: uint32(sequence) * 160, SSRC: 1},
+			Payload: []byte{byte(sequence), 2, 3, 4},
+		}
+		data, marshalErr := packet.Marshal()
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, writeErr := conn.Write(data); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	waitForReceived := func(want uint64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for gw.Metrics().RTPPacketsRecv < want && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := gw.Metrics().RTPPacketsRecv; got < want {
+			t.Fatalf("received RTP packets = %d, want at least %d", got, want)
+		}
+	}
+
+	sendPacket(1)
+	waitForReceived(1)
+	deadline := time.Now().Add(time.Second)
+	for stream.RingBuffer().WriteCursor() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != 1 {
+		t.Fatalf("active SIP callback cursor = %d, want 1", got)
+	}
+	oldPublisher := stream.Publisher()
+	if !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("old SIP publisher was not removed")
+	}
+	replacement := &sipPublisher{id: "sip-replacement", info: &avframe.MediaInfo{AudioCodec: avframe.CodecG711A}}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	startCursor := stream.StartupSnapshot().GenerationStartCursor
+
+	sendPacket(2)
+	waitForReceived(2)
+	time.Sleep(10 * time.Millisecond)
+	if got := stream.RingBuffer().WriteCursor(); got != startCursor {
+		t.Fatalf("stale SIP callback advanced replacement cursor to %d, want %d", got, startCursor)
+	}
+	deadline = time.Now().Add(time.Second)
+	for gw.ActiveCalls() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := gw.ActiveCalls(); got != 0 {
+		t.Fatalf("stale SIP publisher left %d active calls", got)
+	}
+}
+
 func TestGatewayCleansUpWhenRTPNetworkReadFails(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	if resp := inviteGateway(t, svc, "read-failure", "live-test", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("INVITE status = %v, want 200", resp)
 	}
@@ -431,7 +520,7 @@ func TestCallSessionCannotStartAfterTermination(t *testing.T) {
 }
 
 func TestConcurrentHangupSignalsAndCleansOutboundCallOnce(t *testing.T) {
-	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	stream, _ := hub.GetOrCreate("live/concurrent-hangup")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{
@@ -495,7 +584,7 @@ func TestModuleExposesGatewayProviderMethodsWhenDisabled(t *testing.T) {
 }
 
 func TestGatewayControlPlaneErrorsAreClassifiable(t *testing.T) {
-	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, _, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	if err := gw.Hangup("missing"); !errors.Is(err, ErrCallNotFound) {
 		t.Fatalf("Hangup error = %v, want ErrCallNotFound", err)
 	}
@@ -505,7 +594,7 @@ func TestGatewayControlPlaneErrorsAreClassifiable(t *testing.T) {
 }
 
 func TestModuleExposesBoundedPrometheusMetrics(t *testing.T) {
-	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig())
+	gw, svc, _ := newControlPlaneGateway(t, newTestGatewayConfig(t))
 	if resp := inviteGateway(t, svc, "metrics-call-id", "metrics-stream", []byte(testAudioOffer)); resp == nil || resp.StatusCode != 200 {
 		t.Fatalf("INVITE status = %v, want 200", resp)
 	}

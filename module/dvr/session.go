@@ -16,6 +16,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/internal/localfs"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 	"github.com/im-pingo/liveforge/pkg/util"
@@ -25,6 +26,7 @@ import (
 type Session struct {
 	streamKey   string
 	stream      *core.Stream
+	snapshot    core.StreamStartupSnapshot
 	publisherID string
 	cfg         config.DVRConfig
 	index       *SegmentIndex
@@ -127,6 +129,7 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 	session := &Session{
 		streamKey:   streamKey,
 		stream:      stream,
+		snapshot:    stream.StartupSnapshot(),
 		cfg:         cfg,
 		index:       idx,
 		segDir:      segDir,
@@ -136,14 +139,10 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 		segStartDTS: -1,
 		lastDTS:     -1,
 		segSeqNum:   startSeq,
-		reader:      stream.RingBuffer().NewReader(),
 		done:        make(chan struct{}),
 		finished:    make(chan struct{}),
 		startedAt:   time.Now().UTC(),
 		metrics:     metrics,
-	}
-	if publisher := stream.Publisher(); publisher != nil {
-		session.publisherID = publisher.ID()
 	}
 	if recoveredPartials > 0 {
 		metrics.writeFailures.Add(uint64(recoveredPartials))
@@ -176,23 +175,142 @@ func (s *Session) Run() {
 		case <-readCtx.Done():
 		}
 	}()
-
-	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
-		s.videoSeq = append([]byte(nil), vsh.Payload...)
-		s.videoCodec = vsh.Codec
+	snapshot := s.snapshot
+	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+		return
 	}
-	if ash := s.stream.AudioSeqHeader(); ash != nil {
-		s.audioSeq = append([]byte(nil), ash.Payload...)
-		s.audioCodec = ash.Codec
-	}
-
-	for {
-		frame, ok := s.reader.ReadContext(readCtx)
+	if snapshot.Generation != 0 && !snapshot.Ready {
+		readySnapshot, ok := waitDVRStartup(readCtx, s.stream, snapshot)
 		if !ok {
 			return
 		}
+		snapshot = readySnapshot
+		s.snapshot = snapshot
+	}
+	s.videoCodec = snapshot.MediaInfo.VideoCodec
+	s.audioCodec = snapshot.MediaInfo.AudioCodec
+	allowUndeclaredTracks := snapshot.Generation == 0 &&
+		snapshot.MediaInfo.VideoCodec == 0 && snapshot.MediaInfo.AudioCodec == 0
+	transcodedAudio := false
+	var releaseInput func()
+	releaseInput = func() {}
+	if s.audioCodec != 0 && !isDVRSupportedAudio(s.audioCodec) {
+		if tm := s.stream.TranscodeManager(); tm != nil &&
+			audiocodec.Global().CanTranscode(s.audioCodec, avframe.CodecAAC) &&
+			len(audiocodec.Global().SequenceHeader(avframe.CodecAAC)) > 0 {
+			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot)
+			if err == nil {
+				s.reader = reader
+				releaseInput = release
+				s.audioCodec = avframe.CodecAAC
+				s.audioSeq = append([]byte(nil), audiocodec.Global().SequenceHeader(avframe.CodecAAC)...)
+				transcodedAudio = true
+			} else {
+				slog.Warn("dvr: audio transcode unavailable", "stream", s.streamKey, "codec", s.audioCodec, "error", err)
+			}
+		}
+		if !transcodedAudio {
+			// Keep DVR segments playable as video-only when optional audio
+			// transcoding is not installed.
+			s.audioCodec = 0
+			s.audioSeq = nil
+		}
+	}
+	defer releaseInput()
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
+		s.videoSeq = append([]byte(nil), vsh.Payload...)
+	}
+	if ash := snapshot.AudioSequenceHeader; ash != nil && ash.Codec == s.audioCodec {
+		s.audioSeq = append([]byte(nil), ash.Payload...)
+	}
+	generationCtx, cancelGeneration := context.WithCancel(readCtx)
+	defer cancelGeneration()
+	go func() {
+		select {
+		case <-snapshot.GenerationDone:
+			cancelGeneration()
+		case <-generationCtx.Done():
+		}
+	}()
+
+	if !transcodedAudio {
+		for _, frame := range snapshot.ReplayFrames {
+			if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
+				continue
+			}
+			s.processFrame(frame)
+		}
+	}
+	if s.reader == nil {
+		s.reader = s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+	}
+
+	for {
+		frame, ok := s.reader.ReadContext(generationCtx)
+		if !ok {
+			return
+		}
+		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
+		if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
+			continue
+		}
 		s.processFrame(frame)
 	}
+}
+
+func waitDVRStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
+	if pending.Generation == 0 || pending.GenerationDone == nil || pending.PublisherID == "" {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-pending.GenerationDone:
+			cancel()
+		case <-waitCtx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(waitCtx)
+	cancel()
+	<-watcherDone
+	if !ok || snapshot.Generation != pending.Generation || snapshot.PublisherID != pending.PublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	return snapshot, stream.IsPublisherGeneration(snapshot.Generation)
+}
+
+func isDVRSupportedAudio(codec avframe.CodecType) bool {
+	return codec == avframe.CodecAAC || codec == avframe.CodecMP3
+}
+
+func dvrFrameAccepted(frame *avframe.AVFrame, videoCodec, audioCodec avframe.CodecType, allowUndeclaredTracks bool) bool {
+	if frame == nil {
+		return false
+	}
+	if frame.MediaType.IsVideo() {
+		if allowUndeclaredTracks && frame.FrameType == avframe.FrameTypeSequenceHeader {
+			return true
+		}
+		return videoCodec != 0 && frame.Codec == videoCodec
+	}
+	if frame.MediaType.IsAudio() {
+		if allowUndeclaredTracks && frame.FrameType == avframe.FrameTypeSequenceHeader {
+			return true
+		}
+		return audioCodec != 0 && frame.Codec == audioCodec
+	}
+	return false
 }
 
 func (s *Session) finish() {

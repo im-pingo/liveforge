@@ -15,7 +15,7 @@ func TestLLHLSSegmenter_PartDurationSplit(t *testing.T) {
 	var parts []*LLHLSPart
 	var mu sync.Mutex
 
-	seg := NewLLHLSSegmenter(0.2, "ts", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "ts", LLHLSSegmenterCallbacks{
 		OnPart: func(p *LLHLSPart) {
 			mu.Lock()
 			parts = append(parts, p)
@@ -56,7 +56,7 @@ func TestLLHLSSegmenter_KeyframeSplitsSegment(t *testing.T) {
 	var segments []*LLHLSSegment
 	var mu sync.Mutex
 
-	seg := NewLLHLSSegmenter(0.2, "ts", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "ts", LLHLSSegmenterCallbacks{
 		OnPart: func(p *LLHLSPart) {},
 		OnSegment: func(s *LLHLSSegment) {
 			mu.Lock()
@@ -102,7 +102,7 @@ func TestLLHLSSegmenter_AudioOnlyTimeBasedSplit(t *testing.T) {
 	var parts []*LLHLSPart
 	var mu sync.Mutex
 
-	seg := NewLLHLSSegmenter(0.2, "ts", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "ts", LLHLSSegmenterCallbacks{
 		OnPart: func(p *LLHLSPart) {
 			mu.Lock()
 			parts = append(parts, p)
@@ -143,7 +143,7 @@ func TestLLHLSSegmenter_SkipsFramesBeforeFirstKeyframe(t *testing.T) {
 	var parts []*LLHLSPart
 	var mu sync.Mutex
 
-	seg := NewLLHLSSegmenter(0.2, "ts", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "ts", LLHLSSegmenterCallbacks{
 		OnPart: func(p *LLHLSPart) {
 			mu.Lock()
 			parts = append(parts, p)
@@ -200,7 +200,7 @@ func TestLLHLSSegmenter_VideoSegmentsOnlySplitOnKeyframes(t *testing.T) {
 	stream := newMuxerWorkerStream(t, avframe.CodecAAC)
 	var initData []byte
 	var segments []*LLHLSSegment
-	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "fmp4", LLHLSSegmenterCallbacks{
 		OnInit: func(data []byte) {
 			initData = append([]byte(nil), data...)
 		},
@@ -283,7 +283,7 @@ func TestLLHLSSegmenter_CachedGOPContinuesWithLiveInterframes(t *testing.T) {
 	var segments []*LLHLSSegment
 	cachedPartReady := make(chan struct{})
 	var cachedPartOnce sync.Once
-	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "fmp4", LLHLSSegmenterCallbacks{
 		OnInit: func(data []byte) {
 			initData = append([]byte(nil), data...)
 		},
@@ -382,7 +382,7 @@ func TestLLHLSSegmenter_CachedGOPContinuesWithLiveInterframes(t *testing.T) {
 func TestLLHLSFMP4SynthesizesWHIPOpusTrackConfiguration(t *testing.T) {
 	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
 	var initData []byte
-	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "fmp4", LLHLSSegmenterCallbacks{
 		OnInit: func(data []byte) {
 			initData = append([]byte(nil), data...)
 		},
@@ -397,7 +397,7 @@ func TestLLHLSFMP4SynthesizesWHIPOpusTrackConfiguration(t *testing.T) {
 func TestLLHLSFMP4DerivesH265TrackDimensions(t *testing.T) {
 	stream := newH265MuxerWorkerStream(t)
 	var initData []byte
-	seg := NewLLHLSSegmenter(0.2, "fmp4", LLHLSSegmenterCallbacks{
+	seg := NewLLHLSSegmenter(0.2, 1.0, "fmp4", LLHLSSegmenterCallbacks{
 		OnInit: func(data []byte) {
 			initData = append([]byte(nil), data...)
 		},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/im-pingo/liveforge/internal/labmedia"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pionrtp "github.com/pion/rtp/v2"
 )
@@ -93,6 +94,32 @@ func TestH264DepacketizeSingleNAL(t *testing.T) {
 	}
 }
 
+func TestH264DepacketizerEmitsSequenceHeaderForSeparateSPSAndPPSPackets(t *testing.T) {
+	packets, err := (&H264Packetizer{}).Packetize(labmedia.VideoFrame(0), 1200)
+	if err != nil {
+		t.Fatalf("Packetize test pattern: %v", err)
+	}
+	depacketizer := &H264Depacketizer{}
+	var sequenceHeaders, keyframes int
+	for _, packet := range packets {
+		frames, depacketizeErr := DepacketizeFrames(depacketizer, packet)
+		if depacketizeErr != nil {
+			t.Fatalf("DepacketizeFrames: %v", depacketizeErr)
+		}
+		for _, frame := range frames {
+			switch frame.FrameType {
+			case avframe.FrameTypeSequenceHeader:
+				sequenceHeaders++
+			case avframe.FrameTypeKeyframe:
+				keyframes++
+			}
+		}
+	}
+	if sequenceHeaders != 1 || keyframes == 0 {
+		t.Fatalf("decoded sequence headers/keyframes = %d/%d, want 1/at least 1", sequenceHeaders, keyframes)
+	}
+}
+
 func TestH264DepacketizeRoundTrip(t *testing.T) {
 	nalData := make([]byte, 3000)
 	for i := range nalData {
@@ -139,7 +166,7 @@ func TestH264DepacketizeRoundTrip(t *testing.T) {
 func TestH264DepacketizeSTAPA(t *testing.T) {
 	// Construct a STAP-A with SPS + PPS
 	sps := []byte{0x67, 0x42, 0xC0, 0x0D} // NAL type 7
-	pps := []byte{0x68, 0xCB, 0x83}        // NAL type 8
+	pps := []byte{0x68, 0xCB, 0x83}       // NAL type 8
 
 	// STAP-A format: [NAL header=24] [2-byte len][SPS] [2-byte len][PPS]
 	payload := []byte{0x18} // NAL type 24

@@ -26,6 +26,9 @@ func TestRTSPTransportPushBadURL(t *testing.T) {
 
 	hub, _ := newTestHub()
 	stream, _ := hub.GetOrCreate("live/test")
+	if err := stream.SetPublisher(&originPublisher{id: "rtsp-bad-url", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 	err := tr.Push(ctx, "rtsp://127.0.0.1:19999/live/test", stream)

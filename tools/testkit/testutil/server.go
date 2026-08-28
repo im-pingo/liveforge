@@ -131,8 +131,6 @@ func WithGB28181() Option {
 	}
 }
 
-
-
 // TestServer wraps a running LiveForge server for integration testing.
 type TestServer struct {
 	server *core.Server
@@ -267,6 +265,13 @@ func (ts *TestServer) SIPAddr() string {
 // Config returns the server configuration.
 func (ts *TestServer) Config() *config.Config {
 	return ts.cfg
+}
+
+// StreamHasVideoGOP reports whether a published stream has a decodable video
+// start point available for playback integration tests.
+func (ts *TestServer) StreamHasVideoGOP(streamKey string) bool {
+	stream, ok := ts.server.StreamHub().Find(streamKey)
+	return ok && stream.Publisher() != nil && stream.GOPCacheDetail().VideoFrames > 0
 }
 
 // Shutdown stops the server. It is safe to call multiple times; only the first

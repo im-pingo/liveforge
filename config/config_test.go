@@ -23,7 +23,6 @@ rtmp:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 512
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -225,6 +224,7 @@ http_stream:
   llhls:
     enabled: true
     part_duration: 0.3
+    segment_duration: 0.8
     segment_count: 5
     container: "ts"
 `
@@ -239,6 +239,9 @@ http_stream:
 	}
 	if cfg.HTTP.LLHLS.PartDuration != 0.3 {
 		t.Errorf("part_duration = %v, want 0.3", cfg.HTTP.LLHLS.PartDuration)
+	}
+	if cfg.HTTP.LLHLS.SegmentDuration != 0.8 {
+		t.Errorf("segment_duration = %v, want 0.8", cfg.HTTP.LLHLS.SegmentDuration)
 	}
 	if cfg.HTTP.LLHLS.SegmentCount != 5 {
 		t.Errorf("segment_count = %v, want 5", cfg.HTTP.LLHLS.SegmentCount)
@@ -264,6 +267,9 @@ http_stream:
 	}
 	if cfg.HTTP.LLHLS.PartDuration != 0.2 {
 		t.Errorf("default part_duration = %v, want 0.2", cfg.HTTP.LLHLS.PartDuration)
+	}
+	if cfg.HTTP.LLHLS.SegmentDuration != 1.0 {
+		t.Errorf("default segment_duration = %v, want 1.0", cfg.HTTP.LLHLS.SegmentDuration)
 	}
 	if cfg.HTTP.LLHLS.Container != "fmp4" {
 		t.Errorf("default container = %q, want %q", cfg.HTTP.LLHLS.Container, "fmp4")

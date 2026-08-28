@@ -177,7 +177,7 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 			go requestWHIPKeyframes(pc, uint32(track.SSRC()), sess.done, 2*time.Second)
 		}
 
-		readTrackLoop(track, dp, stream, pub.done, avCodec, mediaClock)
+		readTrackLoop(track, dp, stream, pub, pub.done, avCodec, mediaClock)
 	})
 
 	// Cleanup on ICE disconnect.
@@ -268,7 +268,7 @@ func requestWHIPKeyframes(pc *webrtc.PeerConnection, mediaSSRC uint32, done <-ch
 // AVFrames so the ring buffer and GOP cache stay consistent:
 //   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
 //   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
-func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, _ <-chan struct{}, codec avframe.CodecType, mediaClock *whipMediaClock) {
+func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, pub *WHIPPublisher, _ <-chan struct{}, codec avframe.CodecType, mediaClock *whipMediaClock) {
 	var (
 		accPayload    []byte
 		accFrame      avframe.FrameType
@@ -288,6 +288,16 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 	}
 	if mediaClock == nil {
 		mediaClock = newWHIPMediaClock()
+	}
+	writeFrame := func(frame *avframe.AVFrame) bool {
+		if stream.WriteFrameForPublisher(pub, frame) {
+			return true
+		}
+		if stream.Publisher() == pub {
+			return true
+		}
+		_ = pub.Close()
+		return false
 	}
 
 	buf := make([]byte, 1500)
@@ -319,14 +329,16 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 				if frameType == 0 {
 					frameType = avframe.FrameTypeInterframe
 				}
-				stream.WriteFrame(avframe.NewAVFrame(
+				if !writeFrame(avframe.NewAVFrame(
 					avframe.MediaTypeAudio,
 					codec,
 					frameType,
 					dts,
 					dts,
 					frame.Payload,
-				))
+				)) {
+					return
+				}
 				continue
 			}
 			if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -335,7 +347,9 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 				if len(accPayload) > 0 {
 					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 					avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
-					stream.WriteFrame(avF)
+					if !writeFrame(avF) {
+						return
+					}
 					accPayload = nil
 					accFrame = 0
 				}
@@ -347,7 +361,9 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 				if len(accSeqPayload) > 0 {
 					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 					seqF := avframe.NewAVFrame(accMedia, codec, avframe.FrameTypeSequenceHeader, dts, dts, accSeqPayload)
-					stream.WriteFrame(seqF)
+					if !writeFrame(seqF) {
+						return
+					}
 					accSeqPayload = nil
 				}
 				accPayload = append(accPayload, frame.Payload...)
@@ -363,7 +379,9 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 		if pkt.Marker && len(accPayload) > 0 {
 			dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
 			avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
-			stream.WriteFrame(avF)
+			if !writeFrame(avF) {
+				return
+			}
 			accPayload = nil
 			accFrame = 0
 		}

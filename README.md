@@ -31,7 +31,7 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 | 📡 | **GB28181 video surveillance** | Full SIP signaling stack, device registration, live invite, playback, PTZ control, alarm handling — plus a built-in device simulator for testing |
 | 🌐 | **Multi-protocol cluster** | Origin-edge cascading via RTMP / SRT / RTSP / RTP / GB28181 with HTTP scheduler callback for dynamic topology |
 | ⚡ | **LL-HLS** | Low-Latency HLS with fMP4 partial segments, blocking playlist reload (`_HLS_msn`/`_HLS_part`), and delta playlist updates |
-| 🖥️ | **Web console** | Permission-aware tabs for Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security; Recent Audit is inside Security; includes browser preview/publish |
+| 🖥️ | **Web console** | Permission-aware tabs for Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security; Recent Audit is inside Security; grouped as Workspace, Operations, and System so Config/Security are not peer stream pages; includes browser preview/publish |
 | 🛡️ | **Production-ready** | Slow consumer protection (EWMA frame dropping), GCC congestion control, per-IP rate limiting, Prometheus metrics |
 
 ## Features
@@ -118,22 +118,28 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **Blocking playlist reload** — `_HLS_msn` and `_HLS_part` query parameters for server-push style updates
 - **Delta playlist** — `_HLS_skip=YES` support to reduce playlist transfer size
 - **fMP4 container** — Default fMP4 with TS fallback option
+- **fMP4 fragment parsing** — Complete media segments assembled from multiple `moof`/`mdat` fragments are parsed without dropping earlier fragments
+- **fMP4 AAC timing** — Omitted AAC sample rate and channel count are derived from the AudioSpecificConfig; the resolved sample rate is reused as the media timescale so DTS intervals remain stable
 - **Legacy player compat** — Graceful degradation for players without LL-HLS support (buffered segment delivery)
-- **Keyframe-aligned startup** — Cached and live GOP frames remain continuous; the initial Hls.js manifest waits for one complete segment without duplicating its parts, then blocking reloads retain the latest completed part identities while consuming new low-latency parts. DASH also starts after one complete segment, uses a one-fragment live delay, and refreshes its MPD within two seconds
+- **Keyframe-aligned startup** — Cached and live GOP frames remain continuous; HLS, LL-HLS, and DASH segmenters wait for the current publisher generation's required sequence headers and bind those headers, replay frames, and the live cursor from one startup snapshot. The initial Hls.js manifest waits for one complete segment without duplicating its parts. Its bounded wait covers the configured full-segment target plus one part (10-second floor, 30-second cap), and returns 503 instead of a part-only manifest if no full segment becomes available. Blocking reloads retain the latest completed part identities while consuming new low-latency parts. DASH also starts after one complete segment, uses a one-fragment live delay, and refreshes its MPD within two seconds. HLS, LL-HLS, and DASH manifests escape each stream-key segment, DASH URL attributes are XML-safe, and media-segment routing preserves valid keys at arbitrary path depth
 
 ### Management & Operations
 
 - **Web console** — Seven permission-aware tabs with multi-protocol preview and WHIP publish: Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab.
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
-- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; segmentation, storage health, download/range/inline-play/delete management, and time-shift status
+- **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; new recordings default to fMP4/`.mp4`; fMP4 declares AAC directly, converts non-AAC source audio such as G.711, Opus, and MP3 to AAC through the optional `audiocodec`/FFmpeg build, and filters audio to keep playable video-only output when that path is unavailable; a stopped transformed recording drains source frames already committed before finalizing; DVR TS similarly normalizes audio unsupported by its target; segmentation, storage health, download/range/inline-play/delete management, zero-byte session protection, and time-shift status
+- **Local protocol labs** — SIP and GB28181 pages run one-shot and persistent fake-device checks locally without another platform or device. SIP uses separate H.264 and PCMA/PCMU RTP/RTCP tracks and never mutates a receive-mode source stream. Receive mode waits for the selected publisher generation's required sequence headers before signaling, while known unsupported codecs are rejected immediately. GB28181 publish registers a listening fake device and exercises LiveForge's normal server-initiated live-play and real RTP/RTCP receive path; receive validates H.264 plus G.711A and admits its source subscriber before module-owned PS/RTP/RTCP egress becomes active. Subscriber-limit rejection fails startup synchronously, while a later media-send failure moves the Lab to `failed` and releases signaling and media resources. The dependency-free moving 160x90 test pattern runs at 25 fps with one IDR per second and audible 20 ms audio frames. Persistent GB28181 sessions renew Keepalive at roughly one-third of `gb28181.keepalive.timeout`. When both modules share one SIP listener, H.264 plus PCMA/PCMU RTP offers route to SIP Gateway while PS/90000 offers route to GB28181
+- **Protocol Lab stream keys** — SIP and GB28181 accept printable ASCII keys up to 256 bytes whose slash-separated segments are non-empty and are neither `.` nor `..`. GB28181 publish uses that requested key only for the loopback simulator; real devices retain `{stream_prefix}/{channel_id}`
+- **GB28181 PS compatibility** — Outbound PS converts internal AVCC/HVCC video samples to Annex-B so real GB28181 receivers can decode video
+- **Lab diagnostics** — Managers retain all active sessions plus the newest 16 terminal records. Failed sessions expose a bounded `last_error` with SIP credentials and bearer tokens removed; session views expose receiver-side RTCP and separate audio/video counters. Playback paths escape each stream-key segment and use actual bound listeners for absolute RTMP/RTSP URLs; Console Lab Preview consumes those returned paths directly
 - **Startup rollback** — Listener or module initialization failures report the original error, close only modules whose initialization was attempted, and do not panic while rolling back later uninitialized modules
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
 - **Rate limiting** — Per-IP token bucket for connection flood protection
 - **Slow consumer protection** — EWMA-based lag detection with progressive frame dropping
 - **GCC congestion control** — Send-side bandwidth estimation for WebRTC WHEP with adaptive bitrate pacing
-- **GOP cache** — New subscribers receive the latest keyframe group instantly for fast startup
+- **Generation-bound startup** — SIP, GB28181, recording, DVR, and cluster egress capture one publisher snapshot, replay only the required current headers/GOP once, then continue from its live cursor. SIP inbound INVITEs run synchronous publish authorization before RTP allocation and emit matching start/stop lifecycle events after activation, so recording and DVR follow the call. Publisher replacement cancels old readers, pure-audio streams never replay retained history, and sequence-header-only recordings are failed rather than published as successful media
 
 ## Architecture
 
@@ -252,6 +258,8 @@ Open `http://localhost:8090/console`, click **"+ WebRTC Publish"**, select camer
 
 The Console can publish H.265/HEVC video with Opus audio when the browser and platform expose an H.265 WebRTC encoder. WHIP maps audio and video RTP onto one session timeline, and HLS/DASH/FLV/TS use a combined transcode reader from the cached GOP source position so target audio history and live source video continue without a first-frame freeze or duplicate cached video. Its FMP4 preview preserves signed B-frame composition offsets on a near-zero timeline established when the shared muxer starts; later subscribers seek to their first buffered timestamp. WHEP Live replays the atomic cached GOP while source video continues from the matching ring cursor, with transcoded target audio read independently. The WebRTC transcode worker waits without consuming the source playback wakeup, so video pacing remains stable even when source audio pauses. The tagged audio build is the complete cross-protocol profile; see [WHIP H.265 + Opus playback verification](docs/recipes/whip-h265-opus-playback.md).
 
+Known review issue: the Console's default realtime WHEP preview can report `No advancing media received (check codec support and keyframes)` while it waits for the next H.264 keyframe after `LiveCursor`; a long GOP can outlast the 8-second watchdog. WHEP Live and the current H.264 browser path decode successfully, but the default behavior, write-error diagnostics, and real GB28181/SIP H.264 browser coverage remain open. See [the technical risk record](docs/TECHNICAL-RISKS.md); SDP success or an `ontrack` callback alone is not proof of playback.
+
 **GB28181:**
 Configure your IP camera's SIP server to point at `localhost:5060`, or use the built-in simulator:
 ```bash
@@ -273,26 +281,40 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 | FMP4 | `http://localhost:8080/live/stream1.mp4` |
 | WebRTC | Open console → Preview → WebRTC tab |
 
+Pure-audio AAC publishers produce completed HLS, DASH, and LL-HLS segments while
+the source is still live. For stream key `live/audio`, inspect the HLS or LL-HLS
+playlist at `/live/audio.m3u8` and a full segment at `/live/audio/0.ts` or
+`/live/audio/0.m4s`; inspect DASH at `/live/audio.mpd`, with audio init
+`/live/audio/audio_init.mp4` and media `/live/audio/a1.m4s`. LL-HLS
+`part_duration` controls partial segments, while `segment_duration` controls
+completed full segments and defaults to `1.0` seconds. Without video keyframes,
+the first full segment completes near the configured segment target instead of
+waiting for source shutdown. DASH media fragments retain one continuous relative
+decode timeline even when the publisher's first DTS is zero.
+
 ### Web Console
 
 Open `http://localhost:8090/console` for the real-time management dashboard. Preview URLs use the active HTTP/WebRTC listener reported by the server. If another process (for example nginx or a local helper) owns `127.0.0.1:8080`, RTMP and WHEP can work while HTTP-FLV/HLS/DASH/FMP4 preview requests receive that process's 404; release the port or set `http_stream.listen` to an unused address.
 
-The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
+The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. The visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security). When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
 
 - Live stream list with state, codecs, bitrate, FPS
-- GOP cache visualization
+- GOP Cache visualization with keyframe-driven generation, interleaved video/audio frame counts, and duration; audio-only streams show `Not applicable (audio-only)`
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WebRTC realtime, and WebRTC Live)
 - WebRTC publish with camera/mic and outbound stats
 - Permission-aware stream kick/delete and runtime config refresh
 - Cluster relay/peer status and SIP call dial/detail/hangup
 - Recording metadata/download/inline-play/delete, DVR session/storage status and online HLS preview, security posture, and bounded audit events
+- WHEP preview starts asynchronously received media muted when browser autoplay policy requires it and exposes an Unmute/Mute control without dropping the audio track
+- Complete redacted Config document/schema display, read-only Validate, source-aware Apply & Refresh, and writable/read-only status for file, HTTP/HTTPS, Consul, and Redis
+- SIP and GB28181 local protocol Test Lab results, including unavailable-module states; both provider sessions can publish or receive persistent H.264 plus G.711 loopback media, show per-track RTP/RTCP/PS counters, stop cleanly, and preview through the available output protocols
 
 DVR playlist and segment GETs run synchronous subscribe authorization hooks only; they do not emit asynchronous subscribe lifecycle events.
 Recording preview uses the authenticated management API session. DVR preview uses the separate `dvr.listen` HLS listener with non-credentialed CORS, so its subscribe authorization still applies; the Console does not persist or append bearer tokens.
 
 ## Configuration
 
-LiveForge uses a single YAML configuration file. See [`configs/liveforge.yaml`](configs/liveforge.yaml) for the full reference.
+LiveForge uses a bootstrap YAML configuration plus an optional runtime source. See [`configs/liveforge.yaml`](configs/liveforge.yaml) for the full reference. The Config page displays the complete redacted effective/desired document and schema, validates candidates, and applies them through file, HTTP/HTTPS, Consul, or Redis when the source is writable; read-only sources return 409. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md).
 
 The checked-in sample is for local development only: it disables TLS and authentication and uses `admin/admin`. Never expose it publicly unchanged.
 
@@ -302,10 +324,10 @@ Key sections:
 |---------|---------|
 | `rtmp` | RTMP ingest/playback (default `:1935`) |
 | `rtsp` | RTSP ingest/playback with TCP + UDP (default `:8554`) |
-| `http_stream` | HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket (default `:8080`) |
+| `http_stream` | HLS, LL-HLS, DASH, HTTP-FLV, HTTP-TS, FMP4, WebSocket (default `:8080`); `http_stream.llhls.segment_duration` controls completed LL-HLS segments |
 | `webrtc` | WHIP/WHEP with ICE servers and UDP port range (default `:8443`) |
 | `srt` | SRT ingest/playback with AES encryption (default `:6000`) |
-| `sip` | SIP signaling server for GB28181 (default `:5060`) |
+| `sip` | SIP signaling server and local SIP Gateway lab (default `:5060`) |
 | `gb28181` | GB28181 device management, RTP port range, keepalive, auto-invite |
 | `audio_codec` | Enable/disable on-demand audio transcoding |
 | `api` | REST API and web console (default `:8090`) |
@@ -318,13 +340,13 @@ Key sections:
 | `limits` | Global connection, stream, and subscriber limits |
 | `tls` | TLS certificate and key for HTTPS/secure protocols |
 | `stream` | GOP cache, ring buffer, idle timeout, slow consumer, feedback; Simulcast fields are deferred |
-| `runtime` | Background configuration refresh source: file, HTTP, Consul, or Redis |
+| `runtime` | Background configuration refresh source: file, HTTP/HTTPS, Consul, or Redis |
 
 Environment variable expansion is supported: `${API_TOKEN}`, `${AUTH_JWT_SECRET}`.
 
 ### Runtime configuration refresh
 
-The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source failures retain the last valid snapshot. For HTTP sources, the selected `http` or `https` source must match the URL scheme, redirects are disabled, and ETag/Last-Modified validators advance only after a document is accepted; `X-Config-Version` is separate version metadata. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, HTTPS, Consul, and Redis examples.
+The bootstrap file is loaded once. A background manager then polls the selected `runtime.source` and atomically publishes validated snapshots. Application reads use the in-memory snapshot only, so they never block on file or network I/O. Source loads, Config Apply writes, and source close are serialized; Apply waits for the source write before returning 202 and schedules parsing/application/publication asynchronously. The Config page shows the complete versioned JSON Schema and retains raw desired source YAML, including comments and fields not represented by the typed runtime struct. Source failures retain the last valid snapshot. For HTTP sources, the selected `http` or `https` source must match the URL scheme, redirects are disabled, and ETag/Last-Modified validators advance only after a document is accepted; `X-Config-Version` is separate version metadata. `SIGHUP` and `POST /api/v1/server/config/refresh` schedule asynchronous refresh; listener/module/TLS/port changes are reported as restart-required and are not partially applied. Status and Prometheus expose accepted, rejected, application-failed, callback-failed, coalesced callback, and pending-restart state. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md) for file, HTTP, HTTPS, Consul, Redis, Config Validate, and Config Apply examples.
 
 Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
 
@@ -336,7 +358,7 @@ A comprehensive integration testing tool (`tools/lf-test`) for validating all se
 
 ```bash
 # Push test (supports: rtmp, rtsp, srt, whip, gb28181)
-go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test
+go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test --realtime
 
 # Play test (supports: rtmp, rtsp, srt, whep, httpflv, wsflv, hls, llhls, dash)
 go run ./tools/lf-test play --protocol hls --url http://localhost:8080/live/test.m3u8
@@ -444,7 +466,7 @@ The first command skips FFmpeg-tagged transcoding integration tests. The second 
 
 For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](agent-manifest.json), and [`llms.txt`](llms.txt). The API contract, configuration schema, and runnable recipes are kept in `docs/` and checked by CI.
 
-Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [authentication/TLS](docs/recipes/auth-and-tls.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [RBAC/audit](docs/recipes/rbac-audit.md), and [release verification](docs/recipes/release-verification.md).
+Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [authentication/TLS](docs/recipes/auth-and-tls.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [SIP/GB28181 protocol test lab](docs/recipes/protocol-test-lab.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [RBAC/audit](docs/recipes/rbac-audit.md), and [release verification](docs/recipes/release-verification.md).
 
 | Topic | EN | 中文 |
 |-------|-----|------|

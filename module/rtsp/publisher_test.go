@@ -37,10 +37,10 @@ func TestRTSPPublisherClose(t *testing.T) {
 	if err := pub.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// After close, FeedRTP should silently return
+	// A kicked publisher must reject later packets so its ingress loop can stop.
 	pkt := &pionrtp.Packet{Header: pionrtp.Header{PayloadType: 96}}
-	if err := pub.FeedRTP(pkt); err != nil {
-		t.Fatalf("FeedRTP after close: %v", err)
+	if err := pub.FeedRTP(pkt); err == nil {
+		t.Fatal("FeedRTP after close succeeded, want stale publisher error")
 	}
 }
 

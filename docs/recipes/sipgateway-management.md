@@ -42,6 +42,18 @@ api:
 
 SIP module and gateway configuration is restart-required.
 
+Inbound SIP Gateway INVITEs run the normal synchronous `EventPublish`
+authorization check before allocating RTP ports or accepting the call. After
+RTP setup succeeds, the gateway emits a publisher-generation start event, and
+the matching stop event is emitted when the call ends. This allows Record and
+DVR consumers to follow SIP streams and finalize their files when the SIP
+session is hung up.
+
+For a local protocol check that does not require a remote SIP peer, run the
+[SIP and GB28181 Protocol Test Lab](protocol-test-lab.md) or use the Test Lab
+section on the Console SIP page. The SIP self-test validates SDP/codec selection,
+RTP/RTCP allocation, and localhost UDP loopback before any dial attempt.
+
 ## List And Dial
 
 ```bash

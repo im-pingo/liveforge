@@ -1,6 +1,9 @@
 package core
 
 import (
+	"context"
+	"encoding/binary"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,7 +15,6 @@ func newTestStreamConfig() config.StreamConfig {
 	return config.StreamConfig{
 		GOPCache:           true,
 		GOPCacheNum:        1,
-		AudioCacheMs:       1000,
 		RingBufferSize:     256,
 		IdleTimeout:        5 * time.Second,
 		NoPublisherTimeout: 3 * time.Second,
@@ -27,6 +29,12 @@ type testPublisher struct {
 func (p *testPublisher) ID() string                    { return p.id }
 func (p *testPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *testPublisher) Close() error                  { return nil }
+
+type typedNilTestPublisher struct{}
+
+func (*typedNilTestPublisher) ID() string                    { return "typed-nil" }
+func (*typedNilTestPublisher) MediaInfo() *avframe.MediaInfo { return nil }
+func (*typedNilTestPublisher) Close() error                  { return nil }
 
 func TestStreamStateTransitions(t *testing.T) {
 	bus := NewEventBus()
@@ -54,6 +62,63 @@ func TestStreamStateTransitions(t *testing.T) {
 	}
 }
 
+func TestStreamRejectsNilPublisherWithoutMutation(t *testing.T) {
+	var typedNil *typedNilTestPublisher
+	tests := []struct {
+		name string
+		pub  Publisher
+	}{
+		{name: "nil"},
+		{name: "typed nil", pub: typedNil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewStream("live/nil-publisher", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			defer s.Close()
+			valid := &testPublisher{id: "valid", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+			if err := s.SetPublisher(valid); err != nil {
+				t.Fatal(err)
+			}
+			if !s.RemovePublisherIf(valid) {
+				t.Fatal("valid publisher was not removed")
+			}
+
+			before := s.StartupSnapshot()
+			beforeNoPublisherTimer := s.noPublisherTimer
+			beforeIdleTimer := s.idleTimer
+			beforeCursor := s.RingBuffer().WriteCursor()
+
+			if err := s.SetPublisher(tt.pub); err == nil {
+				t.Error("SetPublisher accepted a nil publisher")
+			}
+			if s.State() != StreamStateNoPublisher {
+				t.Errorf("state = %s after rejected publisher, want no_publisher", s.State())
+			}
+			if s.Publisher() != nil {
+				t.Error("rejected publisher became active")
+			}
+			after := s.StartupSnapshot()
+			if after.Generation != before.Generation || after.GenerationDone != before.GenerationDone {
+				t.Errorf("rejected publisher changed generation from %d to %d", before.Generation, after.Generation)
+			}
+			if s.noPublisherTimer != beforeNoPublisherTimer || s.idleTimer != beforeIdleTimer {
+				t.Error("rejected publisher changed stream timers")
+			}
+			frame := avframe.NewAVFrame(
+				avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+				0, 0, []byte{0xff},
+			)
+			if s.WriteFrameForPublisher(tt.pub, frame) {
+				t.Fatal("nil publisher frame was accepted")
+			}
+			if cursor := s.RingBuffer().WriteCursor(); cursor != beforeCursor {
+				t.Fatalf("nil publisher advanced ring cursor from %d to %d", beforeCursor, cursor)
+			}
+		})
+	}
+}
+
 func TestRemovePublisherIfKeepsReplacement(t *testing.T) {
 	s := NewStream("live/reorder", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
 	oldPublisher := &testPublisher{id: "old"}
@@ -71,6 +136,455 @@ func TestRemovePublisherIfKeepsReplacement(t *testing.T) {
 	if s.Publisher() != newPublisher {
 		t.Fatal("replacement publisher was detached")
 	}
+}
+
+func TestWithActivePublisherLinearizesActivityAndReplacement(t *testing.T) {
+	s := NewStream("live/linearized-activity", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	oldPublisher := &testPublisher{id: "old"}
+	if err := s.SetPublisher(oldPublisher); err != nil {
+		t.Fatal(err)
+	}
+	activityEntered := make(chan struct{})
+	releaseActivity := make(chan struct{})
+	activityDone := make(chan bool, 1)
+	go func() {
+		activityDone <- s.WithActivePublisher(oldPublisher, func() {
+			close(activityEntered)
+			<-releaseActivity
+		})
+	}()
+
+	select {
+	case <-activityEntered:
+	case <-time.After(time.Second):
+		t.Fatal("active publisher activity did not start")
+	}
+	removeStarted := make(chan struct{})
+	removeDone := make(chan bool, 1)
+	go func() {
+		close(removeStarted)
+		removeDone <- s.RemovePublisherIf(oldPublisher)
+	}()
+	<-removeStarted
+	select {
+	case <-removeDone:
+		t.Fatal("publisher replacement crossed active activity boundary")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseActivity)
+	if accepted := <-activityDone; !accepted {
+		t.Fatal("active publisher activity was rejected")
+	}
+	if removed := <-removeDone; !removed {
+		t.Fatal("old publisher was not removed after activity completed")
+	}
+
+	replacement := &testPublisher{id: "replacement"}
+	if err := s.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	staleActivityRan := false
+	if s.WithActivePublisher(oldPublisher, func() { staleActivityRan = true }) {
+		t.Fatal("stale publisher activity was accepted")
+	}
+	if staleActivityRan {
+		t.Fatal("stale publisher activity callback ran")
+	}
+	activeActivityRan := false
+	if !s.WithActivePublisher(replacement, func() { activeActivityRan = true }) {
+		t.Fatal("replacement publisher activity was rejected")
+	}
+	if !activeActivityRan {
+		t.Fatal("replacement publisher activity callback did not run")
+	}
+}
+
+func TestStreamPublisherGenerationIsolation(t *testing.T) {
+	s := NewStream("live/generation", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pubA := &testPublisher{
+		id: "publisher-a",
+		info: &avframe.MediaInfo{
+			VideoCodec:          avframe.CodecH264,
+			AudioCodec:          avframe.CodecAAC,
+			VideoSequenceHeader: []byte{0x01, 0x64},
+			AudioSequenceHeader: []byte{0x12, 0x10},
+		},
+	}
+	if err := s.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+	if !s.WriteFrameForPublisher(pubA, avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x01},
+	)) {
+		t.Fatal("active publisher A frame was rejected")
+	}
+
+	snapshotA := s.StartupSnapshot()
+	if snapshotA.Generation != 1 {
+		t.Fatalf("publisher A generation = %d, want 1", snapshotA.Generation)
+	}
+	if snapshotA.GenerationDone == nil {
+		t.Fatal("publisher A generation has no completion signal")
+	}
+	if !s.RemovePublisherIf(pubA) {
+		t.Fatal("active publisher A was not removed")
+	}
+	select {
+	case <-snapshotA.GenerationDone:
+	default:
+		t.Fatal("publisher A generation completion signal was not closed")
+	}
+	// Repeated removal must not close an already-closed generation channel again.
+	s.RemovePublisher()
+
+	pubB := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := s.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	staleFrame := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		40, 40, []byte{0x65, 0x02},
+	)
+	if s.WriteFrameForPublisher(pubA, staleFrame) {
+		t.Fatal("stale publisher frame was accepted")
+	}
+	freshFrame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+		0, 0, []byte{0xff, 0xfb},
+	)
+	if !s.WriteFrameForPublisher(pubB, freshFrame) {
+		t.Fatal("active publisher frame was rejected")
+	}
+
+	snapshotB := s.StartupSnapshot()
+	if snapshotB.Generation != 2 || len(snapshotB.ReplayFrames) != 0 ||
+		snapshotB.VideoSequenceHeader != nil || snapshotB.AudioSequenceHeader != nil {
+		t.Fatalf("replacement snapshot leaked old generation: %+v", snapshotB)
+	}
+	if snapshotB.LiveCursor < snapshotB.GenerationStartCursor {
+		t.Fatalf("live cursor %d precedes generation start %d", snapshotB.LiveCursor, snapshotB.GenerationStartCursor)
+	}
+	if snapshotB.GenerationDone == nil || snapshotB.GenerationDone == snapshotA.GenerationDone {
+		t.Fatal("replacement publisher did not receive a new generation completion signal")
+	}
+	select {
+	case <-snapshotB.GenerationDone:
+		t.Fatal("replacement publisher generation completion signal is already closed")
+	default:
+	}
+	if !s.IsPublisherGeneration(snapshotB.Generation) {
+		t.Fatal("active publisher generation was not recognized")
+	}
+	if s.IsPublisherGeneration(snapshotA.Generation) {
+		t.Fatal("retired publisher generation remained active")
+	}
+}
+
+func TestStreamWaitForStartupContextCancellation(t *testing.T) {
+	t.Run("not ready", func(t *testing.T) {
+		s := NewStream("live/startup-cancel", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, ok := s.WaitForStartup(ctx); ok {
+			t.Fatal("startup wait succeeded after context cancellation")
+		}
+	})
+
+	t.Run("already ready", func(t *testing.T) {
+		s := NewStream("live/startup-cancel-ready", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+		if err := s.SetPublisher(&testPublisher{
+			id:   "publisher",
+			info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, ok := s.WaitForStartup(ctx); ok {
+			t.Fatal("ready startup ignored context cancellation")
+		}
+	})
+}
+
+func TestStreamReadinessRequiresSequenceHeadersForConfiguredCodecs(t *testing.T) {
+	tests := []struct {
+		name      string
+		mediaInfo avframe.MediaInfo
+		mediaType avframe.MediaType
+		codec     avframe.CodecType
+	}{
+		{name: "h264", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecH264}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecH264},
+		{name: "h265", mediaInfo: avframe.MediaInfo{VideoCodec: avframe.CodecH265}, mediaType: avframe.MediaTypeVideo, codec: avframe.CodecH265},
+		{name: "aac", mediaInfo: avframe.MediaInfo{AudioCodec: avframe.CodecAAC}, mediaType: avframe.MediaTypeAudio, codec: avframe.CodecAAC},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewStream("live/requires-header/"+tt.name, newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			pub := &testPublisher{id: tt.name, info: &tt.mediaInfo}
+			if err := s.SetPublisher(pub); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot := s.StartupSnapshot(); snapshot.Ready {
+				t.Fatal("generation became ready before its required sequence header")
+			}
+			if !s.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+				tt.mediaType, tt.codec, avframe.FrameTypeSequenceHeader,
+				0, 0, []byte{0x01, 0x02},
+			)) {
+				t.Fatal("active publisher sequence header was rejected")
+			}
+			if snapshot := s.StartupSnapshot(); !snapshot.Ready {
+				t.Fatal("generation did not become ready after its required sequence header")
+			}
+		})
+	}
+}
+
+func TestStreamReadinessWithoutSequenceHeader(t *testing.T) {
+	codecs := []avframe.CodecType{
+		avframe.CodecMP3,
+		avframe.CodecG711A,
+		avframe.CodecG711U,
+		avframe.CodecG722,
+		avframe.CodecG729,
+	}
+	for _, codec := range codecs {
+		t.Run(codec.String()+"_declared", func(t *testing.T) {
+			s := NewStream("live/declared/"+codec.String(), newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			if err := s.SetPublisher(&testPublisher{
+				id:   codec.String(),
+				info: &avframe.MediaInfo{AudioCodec: codec},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot := s.StartupSnapshot(); !snapshot.Ready {
+				t.Fatal("declared configuration-free audio track was not ready")
+			}
+		})
+
+		t.Run(codec.String()+"_observed", func(t *testing.T) {
+			s := NewStream("live/observed/"+codec.String(), newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			pub := &testPublisher{id: codec.String(), info: &avframe.MediaInfo{}}
+			if err := s.SetPublisher(pub); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot := s.StartupSnapshot(); snapshot.Ready {
+				t.Fatal("trackless generation became ready")
+			}
+			if !s.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+				avframe.MediaTypeAudio, codec, avframe.FrameTypeInterframe,
+				0, 0, []byte{0x01},
+			)) {
+				t.Fatal("active publisher media frame was rejected")
+			}
+			if snapshot := s.StartupSnapshot(); !snapshot.Ready {
+				t.Fatal("observed configuration-free audio track was not ready")
+			}
+		})
+	}
+}
+
+func TestStreamReadinessWithoutSequenceHeaderForInBandVideo(t *testing.T) {
+	for _, codec := range []avframe.CodecType{
+		avframe.CodecAV1,
+		avframe.CodecVP8,
+		avframe.CodecVP9,
+	} {
+		t.Run(codec.String(), func(t *testing.T) {
+			s := NewStream("live/in-band/"+codec.String(), newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+			if err := s.SetPublisher(&testPublisher{
+				id:   codec.String(),
+				info: &avframe.MediaInfo{VideoCodec: codec},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot := s.StartupSnapshot(); !snapshot.Ready {
+				t.Fatalf("in-band codec %s was not ready without an out-of-band sequence header", codec)
+			}
+		})
+	}
+}
+
+func TestStreamReadinessRequiresEveryKnownTrack(t *testing.T) {
+	s := NewStream("live/all-tracks", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pub := &testPublisher{
+		id: "publisher",
+		info: &avframe.MediaInfo{
+			VideoCodec: avframe.CodecH264,
+			AudioCodec: avframe.CodecAAC,
+		},
+	}
+	if err := s.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	if !s.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64},
+	)) {
+		t.Fatal("video sequence header was rejected")
+	}
+	if snapshot := s.StartupSnapshot(); snapshot.Ready {
+		t.Fatal("generation became ready before every known track was configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	waitResult := make(chan StreamStartupSnapshot, 1)
+	go func() {
+		if snapshot, ok := s.WaitForStartup(ctx); ok {
+			waitResult <- snapshot
+		}
+	}()
+	if !s.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x12, 0x10},
+	)) {
+		t.Fatal("audio sequence header was rejected")
+	}
+	select {
+	case snapshot := <-waitResult:
+		if !snapshot.Ready || snapshot.VideoSequenceHeader == nil || snapshot.AudioSequenceHeader == nil {
+			t.Fatalf("startup wait returned incomplete snapshot: %+v", snapshot)
+		}
+	case <-ctx.Done():
+		t.Fatal("startup wait did not observe readiness state change")
+	}
+}
+
+func TestStreamStartupSnapshotClonesMediaInfo(t *testing.T) {
+	info := &avframe.MediaInfo{
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: []byte{0x01, 0x64, 0x00, 0x1f},
+	}
+	s := NewStream("live/media-copy", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	if err := s.SetPublisher(&testPublisher{id: "publisher", info: info}); err != nil {
+		t.Fatal(err)
+	}
+	info.VideoSequenceHeader[0] = 0xff
+
+	first := s.StartupSnapshot()
+	if got := first.MediaInfo.VideoSequenceHeader[0]; got != 0x01 {
+		t.Fatalf("publisher mutation changed stream media info to %#x", got)
+	}
+	first.MediaInfo.VideoSequenceHeader[0] = 0xee
+	second := s.StartupSnapshot()
+	if got := second.MediaInfo.VideoSequenceHeader[0]; got != 0x01 {
+		t.Fatalf("snapshot mutation changed stream media info to %#x", got)
+	}
+	if second.VideoSequenceHeader == nil || second.VideoSequenceHeader.Payload[0] != 0x01 {
+		t.Fatal("publisher media info did not populate an isolated startup sequence header")
+	}
+}
+
+func TestStreamStartupSnapshotAudioOnlyUsesLiveCursor(t *testing.T) {
+	s := NewStream("live/audio-cursor", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pub := &testPublisher{id: "publisher", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := s.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if !s.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+			int64(i*20), int64(i*20), []byte{byte(i)},
+		)) {
+			t.Fatal("audio frame was rejected")
+		}
+	}
+	snapshot := s.StartupSnapshot()
+	if snapshot.SourceCursor != snapshot.LiveCursor {
+		t.Fatalf("audio-only source cursor = %d, want live cursor %d", snapshot.SourceCursor, snapshot.LiveCursor)
+	}
+	if len(snapshot.ReplayFrames) != 0 {
+		t.Fatalf("audio-only startup replayed %d frames", len(snapshot.ReplayFrames))
+	}
+}
+
+func TestStreamSnapshotConcurrentGOPRolloverHasNoDuplicateIdentity(t *testing.T) {
+	cfg := newTestStreamConfig()
+	cfg.GOPCacheNum = 3
+	cfg.RingBufferSize = 4096
+	s := NewStream("live/atomic-rollover", cfg, config.LimitsConfig{}, NewEventBus())
+	pub := &testPublisher{id: "publisher", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := s.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+
+	const frameCount = 2000
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < frameCount; i++ {
+			payload := make([]byte, 8)
+			binary.BigEndian.PutUint64(payload, uint64(i+1))
+			frameType := avframe.FrameTypeInterframe
+			if i%5 == 0 {
+				frameType = avframe.FrameTypeKeyframe
+			}
+			if !s.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+				avframe.MediaTypeVideo, avframe.CodecH264, frameType,
+				int64(i*40), int64(i*40), payload,
+			)) {
+				return
+			}
+			if i == 0 {
+				close(started)
+			}
+			if i%8 == 0 {
+				runtime.Gosched()
+			}
+		}
+	}()
+	<-started
+
+	var snapshots []StreamStartupSnapshot
+	for {
+		snapshots = append(snapshots, s.StartupSnapshot())
+		select {
+		case <-done:
+			goto writerDone
+		default:
+			runtime.Gosched()
+		}
+	}
+
+writerDone:
+	finalCursor := s.RingBuffer().WriteCursor()
+	if len(snapshots) < 2 {
+		t.Fatalf("captured %d snapshots during rollover, want at least 2", len(snapshots))
+	}
+	for snapshotIndex, snapshot := range snapshots {
+		seen := make(map[uint64]struct{}, len(snapshot.ReplayFrames)+int(finalCursor-snapshot.LiveCursor))
+		for _, frame := range snapshot.ReplayFrames {
+			id := startupTestFrameIdentity(t, frame)
+			if _, duplicate := seen[id]; duplicate {
+				t.Fatalf("snapshot %d contains duplicate replay frame %d", snapshotIndex, id)
+			}
+			seen[id] = struct{}{}
+		}
+
+		reader := s.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+		for reader.ReadCursor() < finalCursor {
+			frame, ok := reader.TryRead()
+			if !ok {
+				t.Fatalf("snapshot %d could not read live cursor %d before final cursor %d", snapshotIndex, reader.ReadCursor(), finalCursor)
+			}
+			id := startupTestFrameIdentity(t, frame)
+			if _, duplicate := seen[id]; duplicate {
+				t.Fatalf("snapshot %d replay/live boundary duplicated frame %d", snapshotIndex, id)
+			}
+			seen[id] = struct{}{}
+		}
+	}
+}
+
+func startupTestFrameIdentity(t *testing.T, frame *avframe.AVFrame) uint64 {
+	t.Helper()
+	if frame == nil || len(frame.Payload) != 8 {
+		t.Fatalf("frame has invalid identity payload: %+v", frame)
+	}
+	return binary.BigEndian.Uint64(frame.Payload)
 }
 
 func TestStreamRejectDuplicatePublisher(t *testing.T) {
@@ -214,33 +728,6 @@ func TestStreamGOPCacheSourceStartTracksOldestCachedGOP(t *testing.T) {
 	}
 }
 
-func TestStreamAudioCacheMs(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	cfg.GOPCache = false
-	cfg.AudioCacheMs = 500
-	s := NewStream("live/audio-cache", cfg, config.LimitsConfig{}, bus)
-
-	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC}}
-	_ = s.SetPublisher(pub)
-
-	// Write 10 audio frames at 100ms DTS intervals (0, 100, 200, ..., 900)
-	for i := 0; i < 10; i++ {
-		af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, int64(i*100), int64(i*100), []byte{0xFF})
-		s.WriteFrame(af)
-	}
-
-	// With AudioCacheMs=500, last frame DTS=900, minDTS=400
-	// Frames with DTS >= 400 remain: 400, 500, 600, 700, 800, 900 = 6 frames
-	ac := s.AudioCache()
-	if len(ac) != 6 {
-		t.Errorf("expected 6 audio cache frames, got %d", len(ac))
-	}
-	if len(ac) > 0 && ac[0].DTS != 400 {
-		t.Errorf("expected first audio frame DTS=400, got %d", ac[0].DTS)
-	}
-}
-
 func TestStreamIdleTimeout(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
@@ -283,25 +770,6 @@ func TestStreamIdleTimeoutCancelledBySubscriber(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if s.State() == StreamStateDestroying {
 		t.Error("stream should not be destroying — subscriber cancelled idle timeout")
-	}
-}
-
-func TestStreamAudioCacheDisabled(t *testing.T) {
-	bus := NewEventBus()
-	cfg := newTestStreamConfig()
-	cfg.GOPCache = false
-	cfg.AudioCacheMs = 0
-	s := NewStream("live/audio-disabled", cfg, config.LimitsConfig{}, bus)
-
-	pub := &testPublisher{id: "pub1", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC}}
-	_ = s.SetPublisher(pub)
-
-	af := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 100, 100, []byte{0xFF})
-	s.WriteFrame(af)
-
-	ac := s.AudioCache()
-	if len(ac) != 0 {
-		t.Errorf("expected empty audio cache when disabled, got %d frames", len(ac))
 	}
 }
 
@@ -509,6 +977,37 @@ func TestStreamMaxSubscribers(t *testing.T) {
 	}
 }
 
+func TestStreamGenerationSubscriberReleaseDoesNotTouchReplacement(t *testing.T) {
+	s := NewStream("live/generation-subs", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pubA := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := s.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+	releaseA, err := s.AddSubscriberForGeneration("sipgateway", s.StartupSnapshot().Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.RemovePublisherIf(pubA)
+	pubB := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := s.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	releaseB, err := s.AddSubscriberForGeneration("sipgateway", s.StartupSnapshot().Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseA()
+	if got := s.Subscribers()["sipgateway"]; got != 1 {
+		t.Fatalf("replacement subscriber count after old release = %d, want 1", got)
+	}
+	releaseB()
+	if got := s.Subscribers()["sipgateway"]; got != 0 {
+		t.Fatalf("subscriber count after replacement release = %d, want 0", got)
+	}
+}
+
 func TestStreamSeqHeaderCaching(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
@@ -544,8 +1043,8 @@ func TestStreamGOPCacheDetail(t *testing.T) {
 
 	// Empty GOP cache detail
 	d := s.GOPCacheDetail()
-	if d.TotalFrames != 0 {
-		t.Errorf("expected 0 total frames, got %d", d.TotalFrames)
+	if d.TotalFrames != 0 || d.Generation != 0 {
+		t.Errorf("empty GOP detail = %+v, want zero frames and generation", d)
 	}
 
 	// Write keyframe + interframe + late-arriving audio with an older DTS.
@@ -568,6 +1067,14 @@ func TestStreamGOPCacheDetail(t *testing.T) {
 	}
 	if d.DurationMs != 60 {
 		t.Errorf("expected duration 60ms, got %d", d.DurationMs)
+	}
+	if d.Generation != 1 {
+		t.Errorf("expected generation 1 after first keyframe, got %d", d.Generation)
+	}
+
+	s.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 200, 200, []byte{0x65}))
+	if got := s.GOPCacheDetail().Generation; got != 2 {
+		t.Errorf("expected generation 2 after second keyframe, got %d", got)
 	}
 }
 

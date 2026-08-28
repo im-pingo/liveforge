@@ -81,6 +81,9 @@ func (w *tsFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 
 	data := w.muxer.WriteFrame(frame)
 	if data != nil {
+		if _, err := f.Write(data); err != nil {
+			return fmt.Errorf("write primary TS recording: %w", err)
+		}
 		if _, err := w.segmentFile.Write(data); err != nil {
 			return fmt.Errorf("write TS data: %w", err)
 		}

@@ -1,0 +1,4 @@
+document_defaults: &document_defaults
+  stream:
+    audio_cache_ms: 1000
+<<: *document_defaults

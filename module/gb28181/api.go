@@ -31,6 +31,16 @@ func registerAPI(s *core.Server, m *Module) {
 	// Sessions
 	s.RegisterAPIHandler("GET "+apiPrefix+"/sessions", http.HandlerFunc(m.apiListSessions))
 	s.RegisterAPIHandler("DELETE "+apiPrefix+"/sessions/", http.HandlerFunc(m.apiDeleteSession))
+	s.RegisterAPIHandler("GET "+apiPrefix+"/test", http.HandlerFunc(m.apiSelfTest))
+}
+
+func (m *Module) apiSelfTest(w http.ResponseWriter, r *http.Request) {
+	report, err := m.RunSelfTest(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 // extractPathParam extracts the remaining path after the given prefix.

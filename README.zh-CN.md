@@ -16,6 +16,8 @@
 
 *完整的部署指南、配置说明、集群拓扑、GB28181、音频转码等详细文档。*
 
+源码级架构说明：[中文架构分析](docs/architecture.zh-CN.md)
+
 </div>
 
 ---
@@ -31,7 +33,7 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 | 📡 | **GB28181 视频监控** | 完整 SIP 信令栈，设备注册、实时拉流、录像回放、云台控制、报警处理 —— 附带内置设备模拟器 |
 | 🌐 | **多协议集群** | 支持 RTMP / SRT / RTSP / RTP / GB28181 的 Origin-Edge 级联，支持 HTTP 调度回调动态拓扑 |
 | ⚡ | **LL-HLS 低延迟** | fMP4 部分分片、阻塞式播放列表刷新（`_HLS_msn`/`_HLS_part`）、增量播放列表 |
-| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；支持浏览器预览/推流 |
+| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；按 Workspace、Operations、System 分组，Config/Security 不再与视频流页面平级；支持浏览器预览/推流 |
 | 🛡️ | **生产级可靠性** | 慢消费者保护（EWMA 丢帧）、GCC 拥塞控制、IP 级限流、Prometheus 监控 |
 
 ## 特性
@@ -118,22 +120,28 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **阻塞式播放列表刷新** — 支持 `_HLS_msn` 和 `_HLS_part` 查询参数
 - **增量播放列表** — 支持 `_HLS_skip=YES` 减少传输量
 - **fMP4 容器** — 默认 fMP4，可选 TS 回退
+- **fMP4 分片解析** — 可解析由多个 `moof`/`mdat` fragment 拼接成的完整媒体分片，不会丢弃前面的 fragment
+- **fMP4 AAC 时间** — 未显式提供 AAC 采样率和声道数时从 AudioSpecificConfig 推导，并复用解析出的采样率作为媒体 timescale，保持 DTS 间隔稳定
 - **兼容旧播放器** — 无 LL-HLS 支持的播放器自动降级为缓冲分片模式
-- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；Hls.js 的初始清单等待一个完整分段但不重复公告其 part，后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新
+- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；HLS、LL-HLS 和 DASH 分段器会等待当前 publisher generation 的必要序列头，并从同一个启动快照绑定序列头、回放帧和实时游标。Hls.js 的初始清单等待一个完整分段但不重复公告其 part。等待上限覆盖配置的完整分段目标加一个 part（下限 10 秒、上限 30 秒）；若仍无完整分段则返回 503，而不是只包含 part 的清单。后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新。HLS、LL-HLS 和 DASH 清单会逐段转义流键，DASH URL 属性同时进行 XML 转义，媒体分片路由可保留任意深度的有效流键
 
 ### 管理与运维
 
 - **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
-- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制，分段、存储健康、下载/Range/在线预览/删除管理和时移状态
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；fMP4 仅直接写入 AAC，启用可选 `audiocodec`/FFmpeg 构建时会将 G.711、Opus、MP3 等非 AAC 音频转为 AAC，未启用时过滤音频并保留可播放的纯视频输出；转码录制停止时会先排空停止边界前已经提交的源帧再完成文件；DVR TS 同样会将目标不支持的音频统一转换；支持分段、存储健康、下载/Range/在线预览/删除管理、零字节会话保护和时移状态
+- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流；接收模式会在发送信令前等待当前 publisher generation 的必要序列头，已知不支持的音频编码会立即拒绝。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式先校验 H.264 加 G.711A，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
+- **协议实验室流键** — SIP 和 GB28181 接受最长 256 字节的可打印 ASCII 流键；以 `/` 分隔的每一段都不能为空，也不能是 `.` 或 `..`。GB28181 发布仅对 loopback 模拟器使用请求中的流键，真实设备仍使用 `{stream_prefix}/{channel_id}`
+- **GB28181 PS 兼容性** — PS 出站会把内部 AVCC/HVCC 视频样本转换为 Annex-B，保证真实 GB28181 接收端能解码视频
+- **实验室诊断** — Manager 保留全部活跃会话和最新 16 条终态记录。失败会话的有界 `last_error` 会先移除 SIP 凭据与 bearer token；会话视图展示接收端 RTCP 及独立音视频计数。播放路径会逐段转义流键，并按实际绑定监听器生成 RTMP/RTSP 绝对地址；Console 的 Lab Preview 直接使用这些返回路径
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
 - **限流** — IP 级令牌桶，防止连接洪泛
 - **慢消费者保护** — 基于 EWMA 的延迟检测，渐进式丢帧
 - **GCC 拥塞控制** — WebRTC WHEP 发送端带宽估计，自适应码率
-- **GOP 缓存** — 新订阅者即时收到最新关键帧组，实现快速起播
+- **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。SIP inbound INVITE 会在分配 RTP 端口前执行同步发布鉴权，激活后发送匹配的 start/stop 生命周期事件，因此录制和 DVR 能跟随并收尾 SIP 会话。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体
 
 ## 架构
 
@@ -252,6 +260,8 @@ ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish
 
 当浏览器和操作系统提供 H.265 WebRTC 编码器时，控制台可以推送 H.265/HEVC 视频和 Opus 音频。WHIP 会把音频和视频 RTP 映射到同一个会话时间线，HLS/DASH/FLV/TS 使用从缓存 GOP 源游标开始的组合转码 reader，让目标音频历史和实时视频连续进入输出，避免首帧冻结和重复缓存视频。FMP4 预览在共享 muxer 启动时建立接近零的时间线并保留 B 帧的有符号合成偏移，晚加入的订阅从自身首个缓冲时间戳开始播放。WHEP Live 回放原子缓存 GOP 后，从与快照匹配的 ring 游标继续读取源视频，并通过独立 reader 获取转码后的目标音频。WebRTC 转码 worker 等待新帧时不会消费源播放唤醒信号，因此即使源音频暂停，视频节奏也能保持稳定。带 `audiocodec` 标签的构建是完整跨协议配置，验收步骤见 [WHIP H.265 + Opus 播放验证](docs/recipes/whip-h265-opus-playback.md)。
 
+当前已确认一个待关闭问题：控制台默认的 realtime WHEP 在 `LiveCursor` 之后等待下一个 H.264 关键帧，长 GOP 可能超过 8 秒 watchdog，从而显示 `No advancing media received (check codec support and keyframes)`。WHEP Live 和当前 H.264 浏览器路径可以正常解码，但默认行为、写入错误诊断以及真实 GB28181/SIP H.264 浏览器覆盖仍需补齐。详见[技术风险记录](docs/TECHNICAL-RISKS.md)；SDP 协商成功或触发 `ontrack` 都不能单独证明已经播放。
+
 **GB28181：**
 将 IP 摄像头的 SIP 服务器指向 `localhost:5060`，或使用内置模拟器：
 ```bash
@@ -273,26 +283,39 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 | FMP4 | `http://localhost:8080/live/stream1.mp4` |
 | WebRTC | 打开控制台 → 点击 Preview → 选择 WebRTC 标签页 |
 
+纯 AAC 音频源在推流仍进行时就会产生完整的 HLS、DASH 和 LL-HLS
+分片。以 `live/audio` 为流 key 时，HLS/LL-HLS 播放列表为
+`/live/audio.m3u8`，完整分片为 `/live/audio/0.ts` 或
+`/live/audio/0.m4s`；DASH MPD 为 `/live/audio.mpd`，音频 init 为
+`/live/audio/audio_init.mp4`，媒体分片为 `/live/audio/a1.m4s`。LL-HLS
+的 `part_duration` 控制 part，`segment_duration` 控制完整 segment 且
+默认为 `1.0` 秒。没有视频关键帧时，首个完整分片会在配置目标时长
+附近完成，无需等待源停止。即使发布端的首个 DTS 为零，DASH 媒体分片
+也会保持同一条连续的相对解码时间线。
+
 ### Web 控制台
 
 访问 `http://localhost:8090/console` 打开实时管理仪表盘。预览 URL 使用服务端报告的实际 HTTP/WebRTC 监听地址。如果 nginx 或其他本地进程占用了 `127.0.0.1:8080`，RTMP 和 WHEP 可能正常，但 HTTP-FLV/HLS/DASH/FMP4 预览会收到占用进程的 404；请释放该端口，或将 `http_stream.listen` 改为未占用的地址。
 
-标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
+标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。视觉分组为 Workspace（Streams、GB28181、SIP Calls、Storage）、Operations（Cluster）和 System（Config、Security）。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
 
 - 流列表：状态、编解码器、码率、帧率
-- GOP 缓存可视化
+- GOP Cache 可视化，显示随关键帧递增的 generation、交错的视频/音频帧数和时长；纯音频流显示 `Not applicable (audio-only)`
 - 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、HLS、DASH、WebRTC 实时模式和 WebRTC Live 模式）
 - WebRTC 推流（摄像头/麦克风 + 发送端统计）
 - 权限感知的踢流、删流和运行时配置刷新
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
 - 录制详情/下载/在线预览/删除、DVR 会话/存储状态及 HLS 在线预览、安全状态和有界审计事件
+- WHEP 预览在浏览器自动播放策略需要时会让异步收到的媒体先静音启动，并提供 Unmute/Mute 控件恢复音频，不丢失音频轨
+- 完整脱敏 Config 文档/schema 展示、只读 Validate、按数据源执行 Apply & Refresh，并显示 file、HTTP/HTTPS、Consul、Redis 的可写/只读状态
+- SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；两者都支持无需外部平台的持久 H.264 加 G.711 模拟设备发布/接收，会话显示分轨 RTP/RTCP/PS 计数，停止时清理资源，并可通过已启用的其他输出协议预览
 
 DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
 录制预览复用已认证的管理 API 会话；DVR 预览使用带非凭据 CORS 的独立 `dvr.listen` HLS 监听器，因此仍执行订阅鉴权，控制台不会持久化或拼接 bearer token。
 
 ## 配置
 
-LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.yaml`](configs/liveforge.yaml)。
+LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读取配置。完整参考见 [`configs/liveforge.yaml`](configs/liveforge.yaml)。Config 页面会展示完整脱敏的 effective/desired 文档和 schema，支持校验，并在 file、HTTP/HTTPS、Consul、Redis 数据源可写时执行 Apply；只读数据源返回 409。详见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 仓库内示例配置仅用于本地开发：它关闭 TLS 和鉴权，并使用 `admin/admin`。禁止不做修改就暴露到公网。
 
@@ -302,10 +325,10 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 |--------|------|
 | `rtmp` | RTMP 推拉流（默认 `:1935`） |
 | `rtsp` | RTSP 推拉流，TCP + UDP（默认 `:8554`） |
-| `http_stream` | HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket（默认 `:8080`） |
+| `http_stream` | HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket（默认 `:8080`）；`http_stream.llhls.segment_duration` 控制 LL-HLS 完整分段 |
 | `webrtc` | WHIP/WHEP，ICE 服务器和 UDP 端口范围（默认 `:8443`） |
 | `srt` | SRT 推拉流，AES 加密（默认 `:6000`） |
-| `sip` | GB28181 SIP 信令服务器（默认 `:5060`） |
+| `sip` | GB28181 SIP 信令服务器和本地 SIP Gateway 实验室（默认 `:5060`） |
 | `gb28181` | GB28181 设备管理、RTP 端口范围、心跳、自动拉流 |
 | `audio_codec` | 启用/禁用按需音频转码 |
 | `api` | REST API 和 Web 控制台（默认 `:8090`） |
@@ -318,13 +341,13 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 | `limits` | 全局连接数、流数、订阅者数限制 |
 | `tls` | TLS 证书和密钥配置 |
 | `stream` | GOP 缓存、环形缓冲区、空闲超时、慢消费者、反馈；Simulcast 字段仍延期 |
-| `runtime` | 后台配置刷新源：文件、HTTP、Consul 或 Redis |
+| `runtime` | 后台配置刷新源：文件、HTTP/HTTPS、Consul 或 Redis |
 
 支持环境变量展开：`${API_TOKEN}`、`${AUTH_JWT_SECRET}`。
 
 ### 运行时配置刷新
 
-进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
+进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。源加载、Config Apply 写入和关闭操作会串行执行；Apply 会等待数据源写入完成后返回 202，再异步执行解析、模块应用和发布。Config 页面展示完整的版本化 JSON Schema，并保留 source 原始 desired YAML，包括注释和 typed runtime struct 未映射的字段。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 以及 Config Validate/Apply 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
 
@@ -336,7 +359,7 @@ LiveForge 使用单个 YAML 配置文件。完整参考见 [`configs/liveforge.y
 
 ```bash
 # 推流测试（支持：rtmp, rtsp, srt, whip, gb28181）
-go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test
+go run ./tools/lf-test push --protocol rtmp --target rtmp://localhost:1935/live/test --realtime
 
 # 拉流测试（支持：rtmp, rtsp, srt, whep, httpflv, wsflv, hls, llhls, dash）
 go run ./tools/lf-test play --protocol hls --url http://localhost:8080/live/test.m3u8
@@ -444,7 +467,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 
 面向 AI Agent 的入口是 [`AGENTS.md`](AGENTS.md)、[`agent-manifest.json`](agent-manifest.json) 和 [`llms.txt`](llms.txt)。API 契约、配置 schema 和可执行场景文档位于 `docs/`，并由 CI 校验同步状态。
 
-运维 recipes：[运行时配置](docs/recipes/runtime-config-sources.md)、[鉴权/TLS](docs/recipes/auth-and-tls.md)、[录制/DVR](docs/recipes/recording-dvr-management.md)、[SIP Gateway](docs/recipes/sipgateway-management.md)、[集群 relay](docs/recipes/cluster-relay-operations.md)、[RBAC/审计](docs/recipes/rbac-audit.md) 和[发布验证](docs/recipes/release-verification.md)。
+运维 recipes：[运行时配置](docs/recipes/runtime-config-sources.md)、[鉴权/TLS](docs/recipes/auth-and-tls.md)、[录制/DVR](docs/recipes/recording-dvr-management.md)、[SIP Gateway](docs/recipes/sipgateway-management.md)、[SIP/GB28181 协议实验室](docs/recipes/protocol-test-lab.md)、[集群 relay](docs/recipes/cluster-relay-operations.md)、[RBAC/审计](docs/recipes/rbac-audit.md) 和[发布验证](docs/recipes/release-verification.md)。
 
 | 主题 | 中文 | EN |
 |------|------|-----|

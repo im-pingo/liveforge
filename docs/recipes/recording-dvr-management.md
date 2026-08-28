@@ -45,6 +45,41 @@ api:
 
 `record.enabled`, `record.path`, `dvr.enabled`, `dvr.listen`, and `dvr.path` require a restart. Recording format, stream pattern, segmentation, DVR window, segment duration, and cleanup interval are hot-reload candidates. Formats are `flv`, `fmp4`, `mp4`, `ts`, and `hls`.
 
+The default recording format is fMP4 and the default extension is `.mp4`. fMP4
+and MP4 are the preferred unified browser playback formats; media tracks are
+initialized lazily so a late audio track is not silently omitted. fMP4 writes AAC
+directly. Its init metadata derives omitted AAC sample rate and channel count
+from the AudioSpecificConfig and reuses the resolved sample rate as the media
+timescale, preserving source DTS intervals. When the record module is not enabled,
+`GET /api/v1/recordings/status` still returns HTTP 200 with
+`enabled=false`, `available=true`, and `state=disabled`, allowing Storage to render
+an explicit unavailable state. Recording item, download, and play routes return
+503 when the module itself is absent.
+
+For fMP4 recordings, non-AAC source audio such as G.711, Opus, and MP3 is
+converted to AAC through the generation-bound shared `audiocodec`/FFmpeg path
+when the tagged build is available. Without that optional dependency, the
+unsupported audio track is omitted and the output remains playable video-only.
+DVR MPEG-TS applies the same conversion to audio unsupported by its target. When
+a transformed fMP4 recording is stopped, its source-cursor boundary is captured
+and generated output already owed for frames before that boundary is drained
+before the file is finalized; this prevents an immediate stop from producing a
+zero-media recording while the asynchronous AAC transform is catching up.
+AAC remains direct in fMP4, and SIP/GB28181 G.711 recordings retain the existing
+G.711-to-AAC behavior without claiming audio transcoding in a portable no-CGO
+build.
+
+The same publisher lifecycle applies to SIP Gateway and GB28181 inbound media:
+the protocol must successfully establish its publisher before Record/DVR start,
+and the matching publisher stop event finalizes the active session. A SIP
+INVITE is rejected before RTP allocation when synchronous publish authorization
+fails.
+
+A publish session that ends before any media frame arrives is preserved as
+`state=failed` and is never offered as a completed playable recording. This
+prevents sequence-header-only or zero-byte files from returning a misleading
+successful playback response.
+
 DVR playlist and segment GETs run only synchronous `EventSubscribe` authorization hooks. They do not emit asynchronous subscribe lifecycle, notification, or cluster-origin work. Authorization denial keeps the existing 401/403 response behavior.
 
 ## Inspect And Download

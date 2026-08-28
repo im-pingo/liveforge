@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/tools/testkit/analyzer"
 	"github.com/im-pingo/liveforge/tools/testkit/push"
 	"github.com/im-pingo/liveforge/tools/testkit/source"
@@ -433,8 +434,19 @@ func TestWHEPPlay(t *testing.T) {
 		pushDone <- err
 	}()
 
-	// WebRTC needs extra time for negotiation.
-	time.Sleep(2 * time.Second)
+	readyTimer := time.NewTimer(10 * time.Second)
+	defer readyTimer.Stop()
+	readyTicker := time.NewTicker(10 * time.Millisecond)
+	defer readyTicker.Stop()
+	for !srv.StreamHasVideoGOP("live/test") {
+		select {
+		case err := <-pushDone:
+			t.Fatalf("RTMP pusher stopped before a video GOP was available: %v", err)
+		case <-readyTimer.C:
+			t.Fatal("timed out waiting for RTMP video GOP before WHEP playback")
+		case <-readyTicker.C:
+		}
+	}
 
 	// Play via WHEP.
 	player, err := NewPlayer("whep")
@@ -653,6 +665,50 @@ func TestHLSPlay(t *testing.T) {
 		rpt.Video.FrameCount, rpt.Audio.FrameCount, rpt.DurationMs)
 }
 
+func TestHLSPlayFMP4(t *testing.T) {
+	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithLLHLS("fmp4"), testutil.WithAPI())
+
+	src := source.NewFLVSourceLoop(0)
+	pusher, err := push.NewPusher("rtmp")
+	if err != nil {
+		t.Fatalf("NewPusher: %v", err)
+	}
+	pushURL := fmt.Sprintf("rtmp://%s/live/hls-fmp4", srv.RTMPAddr())
+	pushCtx, pushCancel := context.WithCancel(context.Background())
+	defer pushCancel()
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pusher.Push(pushCtx, src, push.PushConfig{Protocol: "rtmp", Target: pushURL})
+		pushDone <- err
+	}()
+
+	time.Sleep(3 * time.Second)
+	player, err := NewPlayer("hls")
+	if err != nil {
+		t.Fatalf("NewPlayer: %v", err)
+	}
+	a := analyzer.New()
+	playCtx, playCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer playCancel()
+	if err := player.Play(playCtx, PlayConfig{
+		Protocol: "hls",
+		URL:      fmt.Sprintf("http://%s/live/hls-fmp4.m3u8", srv.HTTPAddr()),
+		Duration: 3 * time.Second,
+	}, a.Feed); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	pushCancel()
+	<-pushDone
+	rpt := a.Report()
+	if rpt.Video.FrameCount == 0 {
+		t.Fatal("no video frames received from fMP4 HLS")
+	}
+	if rpt.Audio.FrameCount == 0 {
+		t.Fatal("no audio frames received from fMP4 HLS")
+	}
+}
+
 func TestWSFLVPlay(t *testing.T) {
 	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithHTTPStream(), testutil.WithAPI())
 
@@ -832,10 +888,10 @@ func TestParseLLHLSPlaylist_TS(t *testing.T) {
 
 func TestParseAttributeValue(t *testing.T) {
 	tests := []struct {
-		name  string
-		line  string
-		attr  string
-		want  string
+		name string
+		line string
+		attr string
+		want string
 	}{
 		{
 			name: "quoted URI",
@@ -1150,6 +1206,30 @@ func TestTimelineSegmentCount(t *testing.T) {
 				t.Errorf("timelineSegmentCount = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDASHInitialSegmentNumberStartsNearLiveEdge(t *testing.T) {
+	tmpl := &mpdSegmentTemplate{
+		StartNumber: 100,
+		Timeline:    &mpdSegmentTimeline{Entries: make([]mpdTimelineEntry, 30)},
+	}
+	if got, want := dashInitialSegmentNumber(tmpl), 127; got != want {
+		t.Fatalf("dashInitialSegmentNumber = %d, want %d", got, want)
+	}
+}
+
+func TestDASHFramesAreSortedByDTS(t *testing.T) {
+	frames := []*avframe.AVFrame{
+		{MediaType: avframe.MediaTypeVideo, DTS: 40},
+		{MediaType: avframe.MediaTypeAudio, DTS: 0},
+		{MediaType: avframe.MediaTypeAudio, DTS: 20},
+	}
+	sortDASHFrames(frames)
+	for i, want := range []int64{0, 20, 40} {
+		if frames[i].DTS != want {
+			t.Fatalf("sorted frame %d DTS = %d, want %d", i, frames[i].DTS, want)
+		}
 	}
 }
 

@@ -1,0 +1,6 @@
+recursive_defaults: &recursive_defaults
+  <<: *recursive_defaults
+removed_defaults: &removed_defaults
+  audio_cache_ms: 1000
+stream:
+  <<: [*recursive_defaults, *removed_defaults]

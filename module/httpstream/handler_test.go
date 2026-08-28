@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -32,6 +33,7 @@ func TestParseStreamPath(t *testing.T) {
 		{"/live/test.ts", "live", "test", "ts", true},
 		{"/app/stream.mp4", "app", "stream", "mp4", true},
 		{"/live/multi/part.flv", "live", "multi/part", "flv", true},
+		{"/s1.flv", "", "s1", "flv", true},
 		{"/noext", "", "", "", false},
 		{"/", "", "", "", false},
 		{"/.flv", "", "", "", false},
@@ -60,6 +62,7 @@ func TestParseSegmentPath(t *testing.T) {
 		{"/live/test/a1.m4s", "live", "test", "a1", "m4s", true},
 		{"/live/test/vinit.mp4", "live", "test", "vinit", "mp4", true},
 		{"/live/test/audio_init.mp4", "live", "test", "audio_init", "mp4", true},
+		{"/s1/0.ts", "", "s1", "0", "ts", true},
 		{"/notenough", "", "", "", "", false},
 		{"/a/b", "", "", "", "", false},
 		{"/a/b/nodot", "", "", "", "", false},
@@ -243,6 +246,39 @@ func TestHandlerFLVStream(t *testing.T) {
 	}
 	if !strings.Contains(content, "flv-data-1") {
 		t.Error("response should contain flv-data-1")
+	}
+
+	unprefixed, err := srv.StreamHub().GetOrCreate("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unprefixed.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	m.registeredMu.Lock()
+	m.registered[unprefixed] = true
+	m.registeredMu.Unlock()
+	unprefixed.MuxerManager().RegisterMuxerStart("flv", func(inst *core.MuxerInstance, _ *core.Stream) {
+		go func() {
+			defer inst.Buffer.Close()
+			inst.SetInitData([]byte("UNPREFIXED-FLV-HEADER"))
+			inst.Buffer.Write([]byte("unprefixed-flv-data"))
+		}()
+	})
+	resp, err = client.Get(addr + "/s1.flv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unprefixed FLV status = %d", resp.StatusCode)
+	}
+	unprefixedBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unprefixedBody), "unprefixed-flv-data") {
+		t.Fatalf("unprefixed FLV body = %q", unprefixedBody)
 	}
 }
 
@@ -635,7 +671,7 @@ func TestHandlerLLHLSInitialPlaylistWaitsForCompletedSegment(t *testing.T) {
 	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
 		t.Fatal(err)
 	}
-	mgr := NewLLHLSManager("live/llhls-part", "/live/llhls-part", 0.2, 5, "fmp4")
+	mgr := NewLLHLSManager("live/llhls-part", "/live/llhls-part", 0.2, 1.0, 5, "fmp4")
 	m.llhlsMu.Lock()
 	m.llhlsManagers["live/llhls-part"] = mgr
 	m.llhlsMu.Unlock()
@@ -695,6 +731,115 @@ func TestHandlerLLHLSInitialPlaylistWaitsForCompletedSegment(t *testing.T) {
 	}
 	if strings.Contains(got.body, "/live/llhls-part/0.0.m4s") {
 		t.Fatalf("initial playlist advertised completed segment parts alongside the full segment: %q", got.body)
+	}
+}
+
+func TestHandlerLLHLSInitialPlaylistNeverReturnsPartsAfterManagerStops(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	srv.Config().HTTP.LLHLS.Enabled = true
+	srv.Config().HTTP.LLHLS.Container = "fmp4"
+	srv.Config().HTTP.LLHLS.PartDuration = 0.2
+	srv.Config().HTTP.LLHLS.SegmentDuration = 15
+
+	stream, err := srv.StreamHub().GetOrCreate("live/llhls-stopped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewLLHLSManager("live/llhls-stopped", "/live/llhls-stopped", 0.2, 15, 5, "fmp4")
+	m.llhlsMu.Lock()
+	m.llhlsManagers["live/llhls-stopped"] = mgr
+	m.llhlsMu.Unlock()
+
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(addr + "/live/llhls-stopped.m3u8")
+		if err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(resp.Body)
+		resultCh <- result{status: resp.StatusCode, body: string(body), err: readErr}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	mgr.segmenter.callbacks.OnPart(&LLHLSPart{
+		Index:       0,
+		Duration:    0.2,
+		Independent: true,
+		Data:        []byte("part"),
+	})
+	select {
+	case got := <-resultCh:
+		t.Fatalf("part-only initial playlist returned before manager stop: status %d body %q error %v", got.status, got.body, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mgr.Stop()
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.status != http.StatusServiceUnavailable {
+			t.Fatalf("stopped initial playlist response = status %d body %q, want status %d", got.status, got.body, http.StatusServiceUnavailable)
+		}
+		if strings.Contains(got.body, "#EXT-X-PART") {
+			t.Fatalf("stopped initial playlist returned part-only media: %q", got.body)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("initial playlist did not stop waiting after manager shutdown")
+	}
+}
+
+func TestHandlerLLHLSInitialPlaylistTimeoutNeverReturnsParts(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	srv.Config().HTTP.LLHLS.Enabled = true
+	srv.Config().HTTP.LLHLS.Container = "fmp4"
+	srv.Config().HTTP.LLHLS.PartDuration = 0.2
+	srv.Config().HTTP.LLHLS.SegmentDuration = 15
+
+	stream, err := srv.StreamHub().GetOrCreate("live/llhls-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewLLHLSManager("live/llhls-timeout", "/live/llhls-timeout", 0.2, 15, 5, "fmp4")
+	mgr.initialPlaylistWait = 10 * time.Millisecond
+	mgr.segmenter.callbacks.OnPart(&LLHLSPart{
+		Index:       0,
+		Duration:    0.2,
+		Independent: true,
+		Data:        []byte("part"),
+	})
+	m.llhlsMu.Lock()
+	m.llhlsManagers["live/llhls-timeout"] = mgr
+	m.llhlsMu.Unlock()
+
+	resp, err := (&http.Client{Timeout: time.Second}).Get(addr + "/live/llhls-timeout.m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("timed-out initial playlist response = status %d body %q, want status %d", resp.StatusCode, body, http.StatusServiceUnavailable)
+	}
+	if strings.Contains(string(body), "#EXT-X-PART") {
+		t.Fatalf("timed-out initial playlist returned part-only media: %q", body)
 	}
 }
 
@@ -770,6 +915,165 @@ func TestHandlerHLSSegmentServing(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp2.StatusCode)
+	}
+}
+
+func TestHandlerHLSManifestAndSegmentSupportEscapedDeepStreamKey(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	const streamKey = "tenant/deep/cam?variant#one%raw"
+	const escapedBase = "/tenant/deep/cam%3Fvariant%23one%25raw"
+
+	stream, err := srv.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := m.getOrCreateHLS(streamKey, stream)
+	mgr.mu.Lock()
+	mgr.segments = []*HLSSegment{{SeqNum: 0, Duration: 2, Data: []byte("escaped-hls-segment")}}
+	mgr.nextSeqNum = 1
+	mgr.mu.Unlock()
+
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(addr + escapedBase + ".m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manifest status = %d, want 200: %s", resp.StatusCode, manifest)
+	}
+	if !strings.Contains(string(manifest), escapedBase+"/0.ts") {
+		t.Fatalf("manifest does not preserve escaped deep stream key: %s", manifest)
+	}
+
+	resp, err = (&http.Client{Timeout: 2 * time.Second}).Get(addr + escapedBase + "/0.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	segment, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(segment) != "escaped-hls-segment" {
+		t.Fatalf("segment status/body = %d/%q, want 200/%q", resp.StatusCode, segment, "escaped-hls-segment")
+	}
+}
+
+func TestHandlerDASHManifestAndSegmentsSupportEscapedDeepStreamKey(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	const streamKey = "tenant/deep/cam?variant#one%raw"
+	const escapedBase = "/tenant/deep/cam%3Fvariant%23one%25raw"
+
+	stream, err := srv.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := m.getOrCreateDASH(streamKey, stream)
+	mgr.mu.Lock()
+	mgr.videoInitSeg = []byte("escaped-dash-init")
+	mgr.videoSegments = []*DASHSegment{{SeqNum: 0, Duration: 2, Data: []byte("escaped-dash-segment")}}
+	mgr.nextSeqNum = 1
+	mgr.mu.Unlock()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(addr + escapedBase + ".mpd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manifest status = %d, want 200: %s", resp.StatusCode, manifest)
+	}
+	for _, want := range []string{escapedBase + "/vinit.mp4", escapedBase + "/v$Number$.m4s"} {
+		if !strings.Contains(string(manifest), want) {
+			t.Errorf("manifest is missing escaped path %q: %s", want, manifest)
+		}
+	}
+
+	for path, want := range map[string]string{
+		escapedBase + "/vinit.mp4": "escaped-dash-init",
+		escapedBase + "/v1.m4s":    "escaped-dash-segment",
+	} {
+		resp, err = client.Get(addr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("GET %s status/body = %d/%q, want 200/%q", path, resp.StatusCode, body, want)
+		}
+	}
+}
+
+func TestHandlerDASHManifestEscapesXMLSensitiveStreamKey(t *testing.T) {
+	m, srv, addr := newHTTPTestServer(t)
+	const streamKey = "tenant/deep/cam&one"
+	const escapedBase = "/tenant/deep/cam&one"
+
+	stream, err := srv.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := m.getOrCreateDASH(streamKey, stream)
+	mgr.mu.Lock()
+	mgr.videoInitSeg = []byte("xml-safe-dash-init")
+	mgr.videoSegments = []*DASHSegment{{SeqNum: 0, Duration: 2, Data: []byte("xml-safe-dash-segment")}}
+	mgr.nextSeqNum = 1
+	mgr.mu.Unlock()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(addr + escapedBase + ".mpd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manifest status = %d, want 200: %s", resp.StatusCode, manifest)
+	}
+	var document struct {
+		Period struct {
+			AdaptationSets []struct {
+				SegmentTemplate struct {
+					Initialization string `xml:"initialization,attr"`
+					Media          string `xml:"media,attr"`
+				} `xml:"SegmentTemplate"`
+			} `xml:"AdaptationSet"`
+		} `xml:"Period"`
+	}
+	if err := xml.Unmarshal(manifest, &document); err != nil {
+		t.Fatalf("parse MPD containing ampersand stream key: %v\n%s", err, manifest)
+	}
+	if len(document.Period.AdaptationSets) == 0 {
+		t.Fatalf("MPD has no adaptation sets: %s", manifest)
+	}
+	template := document.Period.AdaptationSets[0].SegmentTemplate
+	if !strings.HasPrefix(template.Initialization, escapedBase+"/vinit.mp4") || template.Media != escapedBase+"/v$Number$.m4s" {
+		t.Fatalf("decoded MPD paths = init %q media %q, want base %q", template.Initialization, template.Media, escapedBase)
+	}
+
+	for path, want := range map[string]string{
+		template.Initialization:                             "xml-safe-dash-init",
+		strings.Replace(template.Media, "$Number$", "1", 1): "xml-safe-dash-segment",
+	} {
+		resp, err = client.Get(addr + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("GET %s status/body = %d/%q, want 200/%q", path, resp.StatusCode, body, want)
+		}
 	}
 }
 
@@ -888,7 +1192,7 @@ func TestHandlerLLHLSInitIsNotCachedAcrossPublishers(t *testing.T) {
 	srv.Config().HTTP.LLHLS.Enabled = true
 	srv.Config().HTTP.LLHLS.Container = "fmp4"
 
-	mgr := NewLLHLSManager("live/llhls-init", "/live/llhls-init", 0.2, 5, "fmp4")
+	mgr := NewLLHLSManager("live/llhls-init", "/live/llhls-init", 0.2, 1.0, 5, "fmp4")
 	mgr.mu.Lock()
 	mgr.initSegment = []byte("llhls-init")
 	mgr.mu.Unlock()

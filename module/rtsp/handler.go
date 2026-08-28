@@ -16,14 +16,22 @@ import (
 
 // Handler processes RTSP requests.
 type Handler struct {
-	server    *core.Server
-	ports     *portalloc.PortAllocator
-	multicast *config.MulticastConfig // nil if multicast disabled
+	server                 *core.Server
+	ports                  *portalloc.PortAllocator
+	multicast              *config.MulticastConfig // nil if multicast disabled
+	writeFrameForPublisher func(*core.Stream, core.Publisher, *avframe.AVFrame) bool
 }
 
 // NewHandler creates a new RTSP handler.
 func NewHandler(server *core.Server, ports *portalloc.PortAllocator, multicast *config.MulticastConfig) *Handler {
-	return &Handler{server: server, ports: ports, multicast: multicast}
+	return &Handler{
+		server:    server,
+		ports:     ports,
+		multicast: multicast,
+		writeFrameForPublisher: func(stream *core.Stream, pub core.Publisher, frame *avframe.AVFrame) bool {
+			return stream.WriteFrameForPublisher(pub, frame)
+		},
+	}
 }
 
 // newResponse creates a base response with CSeq from request.
@@ -61,11 +69,14 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 		return resp
 	}
 	stream, ok := h.server.StreamHub().Find(streamKey)
-	if !ok || stream.Publisher() == nil {
+	if !ok {
 		return newResponse(404, "Stream Not Found", req)
 	}
-	mediaInfo := stream.Publisher().MediaInfo()
-	sd := sdp.BuildFromMediaInfo(mediaInfo, req.URL, "0.0.0.0")
+	startup := stream.StartupSnapshot()
+	if !startup.Ready || !stream.IsPublisherGeneration(startup.Generation) {
+		return newResponse(404, "Stream Not Found", req)
+	}
+	sd := sdp.BuildFromMediaInfo(&startup.MediaInfo, req.URL, "0.0.0.0")
 	body := sd.Marshal()
 	slog.Debug("DESCRIBE SDP", "module", "rtsp", "body", string(body))
 	resp := newResponse(200, "OK", req)
@@ -74,7 +85,7 @@ func (h *Handler) HandleDescribe(req *Request, session *RTSPSession) *Response {
 	resp.Headers.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	resp.Body = body
 	if session != nil {
-		if !session.SetDescription(mediaInfo, stream) {
+		if !session.SetDescription(startup, stream) {
 			return newResponse(454, "Session Not Found", req)
 		}
 		if err := session.Transition(StateDescribed); err != nil {
@@ -223,6 +234,26 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 			_ = pub.Close()
 			return newResponse(454, "Session Not Found", req)
 		}
+
+		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
+		// SequenceHeader frame so the stream caches it for late-joining subscribers.
+		if len(mediaInfo.VideoSequenceHeader) > 0 {
+			seqFrame := avframe.NewAVFrame(
+				avframe.MediaTypeVideo,
+				avframe.CodecH264,
+				avframe.FrameTypeSequenceHeader,
+				0, 0,
+				mediaInfo.VideoSequenceHeader,
+			)
+			if !h.writeFrameForPublisher(stream, pub, seqFrame) {
+				session.ClearPublisher(pub)
+				stream.RemovePublisherIf(pub)
+				_ = pub.Close()
+				return newResponse(500, "Internal Server Error", req)
+			}
+			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
+		}
+
 		if err := session.Transition(StateAnnounced); err != nil {
 			session.ClearPublisher(pub)
 			stream.RemovePublisherIf(pub)
@@ -235,22 +266,6 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 		session.startPublishLifecycle(func() {
 			h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
 		})
-
-		// If SPS/PPS were in the SDP (sprop-parameter-sets), feed a synthetic
-		// SequenceHeader frame so the stream caches it for late-joining subscribers.
-		if len(mediaInfo.VideoSequenceHeader) > 0 {
-			seqFrame := avframe.NewAVFrame(
-				avframe.MediaTypeVideo,
-				avframe.CodecH264,
-				avframe.FrameTypeSequenceHeader,
-				0, 0,
-				mediaInfo.VideoSequenceHeader,
-			)
-			if stream.Publisher() == pub {
-				stream.WriteFrame(seqFrame)
-			}
-			slog.Debug("injected SPS/PPS from SDP", "module", "rtsp", "bytes", len(mediaInfo.VideoSequenceHeader))
-		}
 	}
 
 	if session != nil && h.server == nil {
@@ -284,6 +299,10 @@ func (h *Handler) HandlePlay(req *Request, session *RTSPSession, remoteAddr stri
 			return newResponse(454, "Session Not Found", req)
 		}
 		snapshot := session.Snapshot()
+		if snapshot.Stream == nil || !snapshot.Startup.Ready ||
+			!snapshot.Stream.IsPublisherGeneration(snapshot.Startup.Generation) {
+			return newResponse(455, "Method Not Valid in This State", req)
+		}
 		// Authorization runs before subscriber mutation. The asynchronous start
 		// event is emitted only after runSubscriberLoop installs the subscriber.
 		if err := h.server.GetEventBus().EmitSync(core.EventSubscribe, &core.EventContext{

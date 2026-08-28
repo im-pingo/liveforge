@@ -50,10 +50,12 @@ var rolePermissions = map[string]map[string]bool{
 	"viewer": {
 		"server:read": true, "streams:read": true, "cluster:read": true,
 		"sip:read": true, "recordings:read": true, "audit:read": true, "gb28181:read": true,
+		"config:read": true,
 	},
 	"operator": {
 		"server:read": true, "streams:read": true, "cluster:read": true,
 		"sip:read": true, "recordings:read": true, "audit:read": true, "gb28181:read": true,
+		"config:read":  true,
 		"streams:kick": true, "sip:calls": true, "config:reload": true, "gb28181:control": true,
 	},
 	"admin": {"*": true},
@@ -84,9 +86,17 @@ func permissionForRequest(r *http.Request) string {
 		return "streams:delete"
 	case r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/streams/") && strings.HasSuffix(p, "/kick"):
 		return "streams:kick"
-	case r.Method == http.MethodPost && p == "/api/v1/server/config/refresh":
+	case r.Method == http.MethodPost && (p == "/api/v1/server/config/refresh" || p == "/api/v1/server/config/apply"):
 		return "config:reload"
+	case r.Method == http.MethodPost && p == "/api/v1/server/config/validate":
+		return "config:read"
+	case strings.HasPrefix(p, "/api/v1/server/config"):
+		return "config:read"
 	case strings.HasPrefix(p, "/api/v1/sipgateway/calls") && r.Method != http.MethodGet:
+		return "sip:calls"
+	case p == "/api/v1/sipgateway/test":
+		return "sip:read"
+	case strings.HasPrefix(p, "/api/v1/sipgateway/lab/sessions") && r.Method != http.MethodGet:
 		return "sip:calls"
 	case strings.HasPrefix(p, "/api/v1/sipgateway/"):
 		return "sip:read"
@@ -95,6 +105,8 @@ func permissionForRequest(r *http.Request) string {
 	case r.Method == http.MethodDelete && (strings.HasPrefix(p, "/api/v1/gb28181/devices/") || strings.HasPrefix(p, "/api/v1/gb28181/sessions/")):
 		return "gb28181:delete"
 	case r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/gb28181/channels/"):
+		return "gb28181:control"
+	case strings.HasPrefix(p, "/api/v1/gb28181/lab/sessions") && r.Method != http.MethodGet:
 		return "gb28181:control"
 	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/v1/gb28181/channels/") && (strings.HasSuffix(p, "/play") || strings.HasSuffix(p, "/playback")):
 		return "gb28181:control"

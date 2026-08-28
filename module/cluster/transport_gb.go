@@ -78,6 +78,12 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	if err != nil {
 		return fmt.Errorf("parse target URL: %w", err)
 	}
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
+	defer cancelGeneration()
 
 	// Allocate local port pair
 	rtpPort, _, err := t.ports.AllocatePair()
@@ -90,7 +96,7 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s&port=%d",
 		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
 
-	body, err := t.postSignal(ctx, sigURL)
+	body, err := t.postSignal(relayCtx, sigURL)
 	if err != nil {
 		return fmt.Errorf("signaling request: %w", err)
 	}
@@ -111,11 +117,14 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 		return fmt.Errorf("dial UDP: %w", err)
 	}
 	defer conn.Close()
-	stopCancelWatch := closeOnContextDone(ctx, conn)
+	stopCancelWatch := closeOnContextDone(relayCtx, conn)
 	defer stopCancelWatch()
 
 	slog.Info("gb relay push connected", "module", "cluster", "target", targetURL, "remote_port", remotePort)
-	markRelayConnected(ctx)
+	markRelayConnected(relayCtx)
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
 
 	muxer := ps.NewMuxer()
 	var seq uint16
@@ -123,20 +132,31 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	ssrc := uint32(rtpPort) // simple SSRC
 
 	// Send sequence headers first
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
-		if err := t.sendPSFrameObserved(ctx, conn, muxer, vsh, &seq, &ts, ssrc); err != nil {
-			return fmt.Errorf("send video seq header: %w", err)
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
+		if err := t.sendPSFrameObserved(relayCtx, conn, muxer, vsh, &seq, &ts, ssrc); err != nil {
+			return fmt.Errorf("send video sequence header: %w", err)
+		}
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if err := t.sendPSFrameObserved(relayCtx, conn, muxer, frame, &seq, &ts, ssrc); err != nil {
+			return fmt.Errorf("send replay frame: %w", err)
 		}
 	}
 
-	reader := stream.RingBuffer().NewReader()
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(ctx)
+		frame, ok := reader.ReadContext(relayCtx)
 		if !ok {
 			return nil
 		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
 
-		if err := t.sendPSFrameObserved(ctx, conn, muxer, frame, &seq, &ts, ssrc); err != nil {
+		if err := t.sendPSFrameObserved(relayCtx, conn, muxer, frame, &seq, &ts, ssrc); err != nil {
 			return fmt.Errorf("send frame: %w", err)
 		}
 	}
@@ -179,6 +199,9 @@ func (t *GBTransport) sendPSFrameObserved(ctx context.Context, conn *net.UDPConn
 		}
 		n, err := conn.Write(data)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("write RTP: %w", err)
 		}
 		recordRelayBytes(ctx, int64(n))
@@ -277,7 +300,9 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 				if pub.info.AudioCodec == 0 && frame.MediaType == avframe.MediaTypeAudio {
 					pub.info.AudioCodec = frame.Codec
 				}
-				stream.WriteFrame(frame)
+				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+					return nil
+				}
 			}
 			psBuf = psBuf[:0]
 		}
@@ -351,9 +376,18 @@ func (t *GBTransport) handlePullSignal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stream not found", http.StatusNotFound)
 		return
 	}
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		http.Error(w, "stream not found or no publisher", http.StatusNotFound)
+		return
+	}
 
 	// Start background sender
-	go t.sendPull(stream, r.RemoteAddr, remotePort)
+	go func() {
+		if err := t.sendPull(stream, snapshot, r.RemoteAddr, remotePort); err != nil {
+			slog.Warn("gb pull sender stopped", "module", "cluster", "error", err)
+		}
+	}()
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -408,21 +442,25 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 				if pub.info.VideoCodec == 0 && frame.MediaType == avframe.MediaTypeVideo {
 					pub.info.VideoCodec = frame.Codec
 				}
-				stream.WriteFrame(frame)
+				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+					return
+				}
 			}
 			psBuf = psBuf[:0]
 		}
 	}
 }
 
-func (t *GBTransport) sendPull(stream *core.Stream, remoteAddr string, remotePort int) {
+func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupSnapshot, remoteAddr string, remotePort int) error {
+	ctx, cancelGeneration := bindRelayGeneration(context.Background(), snapshot)
+	defer cancelGeneration()
 	host, _, _ := net.SplitHostPort(remoteAddr)
 	remote := &net.UDPAddr{IP: net.ParseIP(host), Port: remotePort}
 
 	conn, err := net.DialUDP("udp", nil, remote)
 	if err != nil {
 		slog.Error("gb pull sender dial failed", "module", "cluster", "error", err)
-		return
+		return fmt.Errorf("dial UDP: %w", err)
 	}
 	defer conn.Close()
 
@@ -435,23 +473,39 @@ func (t *GBTransport) sendPull(stream *core.Stream, remoteAddr string, remotePor
 	sendFrame := func(frame *avframe.AVFrame) error {
 		mu.Lock()
 		defer mu.Unlock()
-		return t.sendPSFrame(conn, muxer, frame, &seq, &ts, ssrc)
+		return t.sendPSFrameObserved(ctx, conn, muxer, frame, &seq, &ts, ssrc)
 	}
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
-		sendFrame(vsh) //nolint:errcheck
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
+		if err := sendFrame(vsh); err != nil {
+			return fmt.Errorf("send video sequence header: %w", err)
+		}
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if err := sendFrame(frame); err != nil {
+			return fmt.Errorf("send replay frame: %w", err)
+		}
 	}
 
-	reader := stream.RingBuffer().NewReader()
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.Read()
+		frame, ok := reader.ReadContext(ctx)
 		if !ok {
-			return
+			return nil
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
 		}
 
 		if err := sendFrame(frame); err != nil {
 			slog.Warn("gb pull send error", "module", "cluster", "error", err)
-			return
+			return fmt.Errorf("send frame: %w", err)
 		}
 	}
 }

@@ -35,14 +35,17 @@ type DASHManager struct {
 	nextSeqNum  int
 	seqBase     int // sequence number of first segment in window
 
-	startTime  time.Time // for MPD availabilityStartTime
-	dtsBase    int64     // DTS of first frame (ms); aligns timeline with segment data
-	timeBase   float64   // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
-	streamKey  string
-	basePath   string // e.g., "/live/stream1"
-	hasAudio   bool   // whether audio track is present
-	audioCodec string // e.g., "mp4a.40.2" for MPD codecs attribute
-	done       chan struct{}
+	startTime          time.Time // for MPD availabilityStartTime
+	dtsBase            int64     // DTS of first frame (ms); aligns timeline with segment data
+	dtsBaseInitialized bool
+	timeBase           float64 // cumulative duration (seconds) of trimmed segments; used for SegmentTimeline @t
+	streamKey          string
+	basePath           string // e.g., "/live/stream1"
+	publisherID        string
+	hasVideo           bool   // whether video track is present
+	hasAudio           bool   // whether audio track is present
+	audioCodec         string // e.g., "mp4a.40.2" for MPD codecs attribute
+	done               chan struct{}
 
 	// Video metadata extracted from sequence header for MPD Representation.
 	videoCodecStr string // e.g., "avc1.640028"
@@ -71,14 +74,23 @@ func NewDASHManager(streamKey, basePath string, targetDur float64, maxSegments i
 	}
 }
 
-// InitFromStream computes the fMP4 init segments synchronously so they are
-// available immediately after the manager is created (before Run starts).
+// InitFromStream computes the fMP4 init segments from the stream's current
+// startup snapshot. Run uses the same operation after waiting for startup, so
+// a caller cannot publish an init segment built from an incomplete track.
 func (d *DASHManager) InitFromStream(stream *core.Stream) {
+	snapshot := stream.StartupSnapshot()
+	if !snapshot.Ready {
+		return
+	}
+	d.initFromSnapshot(stream, snapshot)
+}
+
+func (d *DASHManager) initFromSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot) {
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
-	audioPlan := selectFMP4Audio(stream)
+	audioPlan := selectFMP4AudioSnapshot(stream, snapshot)
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
@@ -114,6 +126,7 @@ func (d *DASHManager) InitFromStream(stream *core.Stream) {
 	d.mu.Lock()
 	d.videoInitSeg = videoInit
 	d.audioInitSeg = audioInit
+	d.hasVideo = videoCodec.IsVideo()
 	d.hasAudio = audioCodec != 0
 	d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
 	d.videoWidth = videoWidth
@@ -130,20 +143,23 @@ func (d *DASHManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "dash", "stream", d.streamKey)
 	defer slog.Info("manager stopped", "module", "dash", "stream", d.streamKey)
 
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	audioPlan := selectFMP4Audio(stream)
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
+	snapshot, ok := waitStreamStartupForPublisher(d.done, stream, d.publisherID)
+	if !ok {
+		return
+	}
+	gopCache := snapshot.ReplayFrames
+	audioPlan := selectFMP4AudioSnapshot(stream, snapshot)
+	reader, release, audioPlan := muxerLiveReaderSnapshot(stream, snapshot, audioPlan)
 	defer release()
 	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
-	go func() {
-		<-d.done
-		reader.Close()
-	}()
+	stopReaderWatch := watchRingReader(reader, d.done, snapshot.GenerationDone)
+	defer stopReaderWatch()
+	d.initFromSnapshot(stream, snapshot)
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
@@ -173,29 +189,11 @@ func (d *DASHManager) Run(stream *core.Stream) {
 		}
 	}
 
-	// Init segments may have already been computed by InitFromStream.
-	d.mu.RLock()
-	hasInit := d.videoInitSeg != nil
-	d.mu.RUnlock()
-	if !hasInit {
-		videoInit := videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
-		var audioInit []byte
-		if audioMuxer != nil {
-			audioInit = audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
-		}
-		d.mu.Lock()
-		if d.videoInitSeg == nil {
-			d.videoInitSeg = videoInit
-			d.audioInitSeg = audioInit
-			d.hasAudio = audioCodec != 0
-			d.audioCodec = dashAudioCodecString(audioCodec, audioSeqHeader)
-		}
-		d.mu.Unlock()
-	} else {
-		videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
-		if audioMuxer != nil {
-			audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
-		}
+	// Initialize the local muxers used for media fragments. The manager init
+	// data was already published from the same startup snapshot above.
+	videoMuxer.Init(videoSeqHeader, nil, videoWidth, videoHeight, 0, 0)
+	if audioMuxer != nil {
+		audioMuxer.Init(nil, audioSeqHeader, 0, 0, audioSampleRate, audioChannels)
 	}
 
 	var currentVideoFrames []*avframe.AVFrame
@@ -215,8 +213,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			dur = d.targetDur
 		}
 
-		if d.dtsBase == 0 {
+		if !d.dtsBaseInitialized {
 			d.dtsBase = segStartDTS
+			d.dtsBaseInitialized = true
 		}
 
 		// Split audio frames at the segment boundary. Audio frames read
@@ -286,7 +285,14 @@ func (d *DASHManager) Run(stream *core.Stream) {
 			d.seqBase += excess
 		}
 		if len(d.audioSegments) > keepCount {
-			d.audioSegments = d.audioSegments[len(d.audioSegments)-keepCount:]
+			excess := len(d.audioSegments) - keepCount
+			if len(d.videoSegments) == 0 {
+				for _, seg := range d.audioSegments[:excess] {
+					d.timeBase += seg.Duration
+				}
+				d.seqBase += excess
+			}
+			d.audioSegments = d.audioSegments[excess:]
 		}
 		d.mu.Unlock()
 
@@ -298,6 +304,9 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 	// Process GOP cache using the same audio policy as the live reader.
 	for _, f := range gopCache {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -332,7 +341,12 @@ func (d *DASHManager) Run(stream *core.Stream) {
 
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
-			finalize(segStartDTS)
+			if stream.IsPublisherGeneration(snapshot.Generation) {
+				finalize(segStartDTS)
+			}
+			return
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -349,6 +363,11 @@ func (d *DASHManager) Run(stream *core.Stream) {
 				continue
 			}
 			gotFirstKeyframe = true
+		}
+		if !videoCodec.IsVideo() && hasData && float64(frame.DTS-segStartDTS)/1000.0 >= d.targetDur {
+			carryOver := finalize(frame.DTS)
+			segStartDTS = frame.DTS
+			currentAudioFrames = append(currentAudioFrames, carryOver...)
 		}
 
 		// Split on video keyframes

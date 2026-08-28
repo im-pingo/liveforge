@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -19,7 +20,7 @@ func nextSubscriberID(protocol, streamKey string) string {
 	return fmt.Sprintf("%s-sub-%s-%d", protocol, streamKey, subscriberSequence.Add(1))
 }
 
-// parseStreamPath parses "/app/key.format" from the URL path.
+// parseStreamPath parses "/app/key.format" or "/key.format" from the URL path.
 // Returns app, key, format, and whether the parse succeeded.
 func parseStreamPath(urlPath string) (app, key, format string, ok bool) {
 	// Clean the path
@@ -28,12 +29,13 @@ func parseStreamPath(urlPath string) (app, key, format string, ok bool) {
 
 	// Split into segments: app/key.format
 	parts := strings.SplitN(urlPath, "/", 2)
-	if len(parts) != 2 {
-		return "", "", "", false
+	var rest string
+	if len(parts) == 1 {
+		rest = parts[0]
+	} else {
+		app = parts[0]
+		rest = parts[1]
 	}
-
-	app = parts[0]
-	rest := parts[1]
 
 	// Extract format extension
 	dotIdx := strings.LastIndex(rest, ".")
@@ -44,29 +46,24 @@ func parseStreamPath(urlPath string) (app, key, format string, ok bool) {
 	key = rest[:dotIdx]
 	format = rest[dotIdx+1:]
 
-	if app == "" || key == "" || format == "" {
+	if key == "" || format == "" {
 		return "", "", "", false
 	}
 
 	return app, key, format, true
 }
 
-// parseSegmentPath parses "/app/key/seg.ext" from the URL path.
-// Used for HLS segments (/app/key/N.ts) and DASH segments (/app/key/N.m4s, /app/key/init.mp4).
+// parseSegmentPath treats the final path component as the segment filename and
+// preserves every preceding component as the stream key.
 func parseSegmentPath(urlPath string) (app, key, segName, ext string, ok bool) {
 	urlPath = path.Clean(urlPath)
 	urlPath = strings.TrimPrefix(urlPath, "/")
-
-	// Need at least 3 parts: app/key/seg.ext
-	parts := strings.SplitN(urlPath, "/", 3)
-	if len(parts) != 3 {
+	parts := strings.Split(urlPath, "/")
+	if len(parts) < 2 {
 		return "", "", "", "", false
 	}
 
-	app = parts[0]
-	key = parts[1]
-	seg := parts[2]
-
+	seg := parts[len(parts)-1]
 	dotIdx := strings.LastIndex(seg, ".")
 	if dotIdx < 0 {
 		return "", "", "", "", false
@@ -75,11 +72,74 @@ func parseSegmentPath(urlPath string) (app, key, segName, ext string, ok bool) {
 	segName = seg[:dotIdx]
 	ext = seg[dotIdx+1:]
 
-	if app == "" || key == "" || segName == "" || ext == "" {
+	keyParts := parts[:len(parts)-1]
+	for _, part := range keyParts {
+		if part == "" {
+			return "", "", "", "", false
+		}
+	}
+	if segName == "" || ext == "" {
 		return "", "", "", "", false
 	}
+	if len(keyParts) == 1 {
+		if !isUnprefixedSegmentName(segName, ext) {
+			return "", "", "", "", false
+		}
+		return "", keyParts[0], segName, ext, true
+	}
+
+	app = keyParts[0]
+	key = strings.Join(keyParts[1:], "/")
 
 	return app, key, segName, ext, true
+}
+
+func isUnprefixedSegmentName(segName, ext string) bool {
+	switch ext {
+	case "ts":
+		parts := strings.Split(segName, ".")
+		for _, part := range parts {
+			if _, err := strconv.Atoi(part); err != nil {
+				return false
+			}
+		}
+		return len(parts) <= 2
+	case "m4s":
+		parts := strings.Split(segName, ".")
+		if len(parts) == 2 {
+			_, err1 := strconv.Atoi(parts[0])
+			_, err2 := strconv.Atoi(parts[1])
+			return err1 == nil && err2 == nil
+		}
+		if len(parts) != 1 || len(segName) < 1 {
+			return false
+		}
+		if _, err := strconv.Atoi(segName); err == nil {
+			return true
+		}
+		if len(segName) > 1 && (segName[0] == 'v' || segName[0] == 'a') {
+			_, err := strconv.Atoi(segName[1:])
+			return err == nil
+		}
+	case "mp4":
+		return segName == "init" || segName == "vinit" || segName == "audio_init"
+	}
+	return false
+}
+
+func escapeStreamKeyPath(streamKey string) string {
+	segments := strings.Split(streamKey, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
+}
+
+func streamKeyFromPath(app, key string) string {
+	if app == "" {
+		return key
+	}
+	return app + "/" + key
 }
 
 func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +166,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 	if app, key, segName, ext, ok := parseSegmentPath(r.URL.Path); ok {
 		switch ext {
 		case "ts":
-			streamKey := app + "/" + key
+			streamKey := streamKeyFromPath(app, key)
 			if err := m.authorizeSubscribe(r, streamKey, "hls"); err != nil {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
@@ -143,7 +203,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			m.serveHLSSegment(w, r, streamKey, seqNum)
 			return
 		case "m4s":
-			streamKey := app + "/" + key
+			streamKey := streamKeyFromPath(app, key)
 			protocol := "dash"
 			m.llhlsMu.Lock()
 			_, hasLLHLS := m.llhlsManagers[streamKey]
@@ -206,7 +266,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 			//   /app/key/init.mp4       — LL-HLS combined (video+audio) init, or DASH video-only fallback
 			//   /app/key/vinit.mp4      — DASH video-only init
 			//   /app/key/audio_init.mp4 — DASH audio-only init
-			streamKey := app + "/" + key
+			streamKey := streamKeyFromPath(app, key)
 			if err := m.authorizeSubscribe(r, streamKey, "dash"); err != nil {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
@@ -241,7 +301,7 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamKey := app + "/" + key
+	streamKey := streamKeyFromPath(app, key)
 
 	switch format {
 	case "m3u8":
@@ -334,7 +394,11 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 
 	mm := stream.MuxerManager()
 	reader, inst := mm.GetOrCreateMuxer(format)
-	defer mm.ReleaseMuxer(format)
+	if reader == nil || inst == nil {
+		http.Error(w, "stream not publishing", http.StatusNotFound)
+		return
+	}
+	defer mm.ReleaseMuxer(format, inst)
 
 	// Set response headers
 	switch format {

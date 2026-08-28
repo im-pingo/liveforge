@@ -22,6 +22,9 @@ func Validate(cfg *Config) error {
 	if role := strings.ToLower(strings.TrimSpace(cfg.API.Console.Role)); role != "" && !validAPIRole(role) {
 		return fmt.Errorf("api.console.role must be viewer, operator, or admin")
 	}
+	if cfg.HTTP.LLHLS.Enabled && cfg.HTTP.LLHLS.SegmentDuration <= 0 {
+		return fmt.Errorf("http_stream.llhls.segment_duration must be greater than zero")
+	}
 
 	seenTokens := make(map[string]struct{}, len(cfg.API.Auth.Tokens))
 	for i, binding := range cfg.API.Auth.Tokens {

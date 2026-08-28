@@ -244,7 +244,9 @@ func (m *Module) handleConn(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				m.processInterleaved(session, ch, data)
+				if err := m.processInterleaved(session, ch, data); err != nil {
+					return
+				}
 				continue
 			}
 		}
@@ -371,8 +373,12 @@ func (m *Module) startWorker(run func()) bool {
 
 // runSubscriberLoop creates a subscriber and feeds frames from the stream to the RTSP client.
 func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
-	snapshot := session.Snapshot()
-	if snapshot.Closed || snapshot.Stream == nil || snapshot.MediaInfo == nil {
+	sessionSnapshot := session.Snapshot()
+	if sessionSnapshot.Closed || sessionSnapshot.Stream == nil || sessionSnapshot.MediaInfo == nil {
+		return
+	}
+	startup := sessionSnapshot.Startup
+	if !startup.Ready || !sessionSnapshot.Stream.IsPublisherGeneration(startup.Generation) {
 		return
 	}
 
@@ -380,7 +386,7 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	var videoChannel, audioChannel uint8
 	var videoUDP, audioUDP *UDPTransport
 	var videoMcast, audioMcast *MulticastTransport
-	for _, t := range snapshot.Tracks {
+	for _, t := range sessionSnapshot.Tracks {
 		if t.Codec.IsVideo() {
 			if t.Transport.IsTCP {
 				videoChannel = uint8(t.Transport.Interleaved[0])
@@ -401,42 +407,42 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		}
 	}
 
-	sub, err := NewRTSPSubscriber(snapshot.ID, snapshot.MediaInfo, conn, videoChannel, audioChannel)
+	sub, err := NewRTSPSubscriber(sessionSnapshot.ID, &startup.MediaInfo, conn, videoChannel, audioChannel)
 	if err != nil {
-		slog.Error("failed to create subscriber", "module", "rtsp", "session", snapshot.ID, "error", err)
+		slog.Error("failed to create subscriber", "module", "rtsp", "session", sessionSnapshot.ID, "error", err)
 		return
 	}
 	sub.videoUDP = videoUDP
 	sub.audioUDP = audioUDP
 	sub.videoMulticast = videoMcast
 	sub.audioMulticast = audioMcast
-	if err := snapshot.Stream.AddSubscriber("rtsp"); err != nil {
-		slog.Warn("subscriber limit reached", "module", "rtsp", "session", snapshot.ID, "error", err)
+	if err := sessionSnapshot.Stream.AddSubscriber("rtsp"); err != nil {
+		slog.Warn("subscriber limit reached", "module", "rtsp", "session", sessionSnapshot.ID, "error", err)
 		sub.Close()
 		return
 	}
 	if !session.SetSubscriber(sub) {
-		snapshot.Stream.RemoveSubscriber("rtsp")
+		sessionSnapshot.Stream.RemoveSubscriber("rtsp")
 		sub.Close()
 		return
 	}
 	if !session.startSubscribeLifecycle(func() {
 		m.server.GetEventBus().EmitAsync(core.EventSubscribe, &core.EventContext{
-			StreamKey:    snapshot.StreamKey,
-			SubscriberID: snapshot.ID,
+			StreamKey:    sessionSnapshot.StreamKey,
+			SubscriberID: sessionSnapshot.ID,
 			Protocol:     "rtsp",
-			RemoteAddr:   snapshot.RemoteAddr,
+			RemoteAddr:   sessionSnapshot.RemoteAddr,
 		})
 	}) {
 		session.ClearSubscriber(sub)
-		snapshot.Stream.RemoveSubscriber("rtsp")
+		sessionSnapshot.Stream.RemoveSubscriber("rtsp")
 		sub.Close()
 		return
 	}
 
 	defer func() {
 		sub.Close()
-		snapshot.Stream.RemoveSubscriber("rtsp")
+		sessionSnapshot.Stream.RemoveSubscriber("rtsp")
 		session.ClearSubscriber(sub)
 	}()
 
@@ -446,8 +452,10 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 
 	// Send GOP cache for instant playback (atomic snapshot with cursor).
 	// Skip SequenceHeader frames — SPS/PPS is delivered via SDP sprop-parameter-sets.
-	gopCache, startPos := snapshot.Stream.GOPCacheSnapshot()
-	for _, frame := range gopCache {
+	for _, frame := range startup.ReplayFrames {
+		if !sessionSnapshot.Stream.IsPublisherGeneration(startup.Generation) {
+			return
+		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -457,11 +465,21 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	}
 
 	// Start reading right after the snapshot position to avoid duplicating GOP frames.
-	ringReader := snapshot.Stream.RingBuffer().NewReaderAt(startPos)
-	filter := core.NewSlowConsumerFilter(ringReader, snapshot.Stream.Config().SlowConsumer, m.server.Config().RTSP.SkipTracker)
+	ringReader := sessionSnapshot.Stream.RingBuffer().NewReaderAt(startup.LiveCursor)
+	filter := core.NewSlowConsumerFilter(ringReader, sessionSnapshot.Stream.Config().SlowConsumer, m.server.Config().RTSP.SkipTracker)
+	go func() {
+		select {
+		case <-sub.Done():
+		case <-startup.GenerationDone:
+		}
+		filter.Close()
+	}()
 	for {
 		frame, ok := filter.NextFrame()
 		if !ok {
+			return
+		}
+		if !sessionSnapshot.Stream.IsPublisherGeneration(startup.Generation) {
 			return
 		}
 		select {
@@ -494,30 +512,74 @@ func (m *Module) udpPublishLoop(ut *UDPTransport, session *RTSPSession) {
 		if err != nil {
 			return
 		}
-		session.Touch()
-		publisher := session.Snapshot().Publisher
-		if publisher != nil {
-			pkt := &pionrtp.Packet{}
-			if err := pkt.Unmarshal(buf[:n]); err == nil {
-				publisher.FeedRTP(pkt)
+		publisher, err := activePublisherForIngress(session)
+		if err != nil {
+			return
+		}
+		pkt := &pionrtp.Packet{}
+		if err := pkt.Unmarshal(buf[:n]); err == nil {
+			if err := publisher.FeedRTP(pkt); err != nil {
+				return
 			}
+		}
+		if err := touchActivePublisherSession(session, publisher); err != nil {
+			return
 		}
 	}
 }
 
-func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []byte) {
+func (m *Module) processInterleaved(session *RTSPSession, channel uint8, data []byte) error {
 	if session == nil {
-		return
+		return nil
 	}
-	session.Touch()
-	publisher := session.Snapshot().Publisher
-	if channel%2 != 0 || publisher == nil {
-		return
+	publisher, err := activePublisherForIngress(session)
+	if err != nil {
+		return err
+	}
+	if channel%2 != 0 {
+		return touchActivePublisherSession(session, publisher)
 	}
 	pkt := &pionrtp.Packet{}
 	if err := pkt.Unmarshal(data); err == nil {
-		publisher.FeedRTP(pkt)
+		if err := publisher.FeedRTP(pkt); err != nil {
+			return err
+		}
 	}
+	return touchActivePublisherSession(session, publisher)
+}
+
+func activePublisherForIngress(session *RTSPSession) (*RTSPPublisher, error) {
+	snapshot := session.Snapshot()
+	publisher := snapshot.Publisher
+	if snapshot.Closed || publisher == nil || snapshot.Stream == nil || publisher.stream != snapshot.Stream {
+		return nil, fmt.Errorf("RTSP session %s has no active publisher", snapshot.ID)
+	}
+	publisher.mu.Lock()
+	closed := publisher.closed
+	publisher.mu.Unlock()
+	if closed || snapshot.Stream.Publisher() != publisher {
+		return nil, fmt.Errorf("RTSP publisher %s no longer owns stream", publisher.id)
+	}
+	return publisher, nil
+}
+
+func touchActivePublisherSession(session *RTSPSession, publisher *RTSPPublisher) error {
+	if publisher == nil || publisher.stream == nil {
+		return fmt.Errorf("RTSP session %s has no active publisher", session.ID)
+	}
+	touched := false
+	active := publisher.stream.WithActivePublisher(publisher, func() {
+		publisher.mu.Lock()
+		defer publisher.mu.Unlock()
+		if publisher.closed {
+			return
+		}
+		touched = session.touchPublisherIfCurrent(publisher.stream, publisher)
+	})
+	if !active || !touched {
+		return fmt.Errorf("RTSP publisher %s no longer owns session activity", publisher.id)
+	}
+	return nil
 }
 
 func (m *Module) cleanupSession(session *RTSPSession) bool {

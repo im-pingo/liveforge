@@ -2,9 +2,11 @@ package rtmp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +28,7 @@ type Subscriber struct {
 	caps      PeerCapabilities
 	onFailure func(error)
 	closed    chan struct{}
+	startup   *core.StreamStartupSnapshot
 
 	// Reusable per-frame encoding state to avoid heap allocations on the hot path.
 	flvBuf bytes.Buffer
@@ -82,35 +85,57 @@ func (s *Subscriber) Close() error {
 func (s *Subscriber) WriteLoop() {
 	defer s.Close()
 
-	// Wait for video sequence header (SPS/PPS) — required for decoder init.
-	// If publisher hasn't started yet, poll until available or closed.
-	if !s.waitForSequenceHeaders() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	var snapshot core.StreamStartupSnapshot
+	if s.startup != nil {
+		snapshot = *s.startup
+	} else {
+		pending := s.stream.StartupSnapshot()
+		if pending.GenerationDone != nil {
+			go func() {
+				select {
+				case <-pending.GenerationDone:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+		}
+		var ok bool
+		snapshot, ok = s.stream.WaitForStartup(ctx)
+		if !ok || (pending.Generation != 0 && snapshot.Generation != pending.Generation) {
+			return
+		}
+	}
+	if !snapshot.Ready || !s.stream.IsPublisherGeneration(snapshot.Generation) {
 		return
 	}
 
-	var mediaInfo *avframe.MediaInfo
-	if pub := s.stream.Publisher(); pub != nil {
-		mediaInfo = pub.MediaInfo()
-	}
-	policy, err := chooseOutputPolicy(mediaInfo, s.caps)
+	policy, err := chooseOutputPolicy(&snapshot.MediaInfo, s.caps)
 	if err != nil {
 		s.fail(err)
 		return
 	}
 	s.muxer = flvpkg.NewMuxerWithModes(policy.videoMode, policy.audioMode)
 
-	var transcodeRelease func()
 	needsTranscode := policy.transcodeAudio
 
 	// Send sequence headers
-	if vsh := s.stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		if err := s.sendFrame(vsh); err != nil {
 			slog.Error("video seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
 			return
 		}
 	}
 	if !needsTranscode {
-		if ash := s.stream.AudioSeqHeader(); ash != nil {
+		if ash := snapshot.AudioSequenceHeader; ash != nil {
 			if err := s.sendFrame(ash); err != nil {
 				slog.Error("audio seq header send error", "module", "rtmp", "subscriber", s.id, "error", err)
 				return
@@ -118,13 +143,12 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Snapshot GOP cache and write cursor atomically so no frame written
-	// between the two is delivered twice (GOP cache + ring buffer).
-	gopCache, startPos := s.stream.GOPCacheSnapshot()
-
 	// Send GOP cache if in GOP mode
 	if s.opts.StartMode == core.StartModeGOP {
-		for _, frame := range gopCache {
+		for _, frame := range snapshot.ReplayFrames {
+			if !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
 			// Skip audio from GOP cache when transcoding; transcoded audio
 			// comes from the TranscodeManager reader.
 			if needsTranscode && frame.MediaType.IsAudio() {
@@ -137,34 +161,31 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}
 
-	// Set up the live reader. The legacy transcode reader provides source video
-	// passthrough together with target audio for RTMP subscribers; it starts at
-	// the post-snapshot cursor so cached video is not replayed twice.
-	var reader *util.RingReader[*avframe.AVFrame]
 	if needsTranscode {
-		if tm := s.stream.TranscodeManager(); tm != nil {
-			var err error
-			reader, transcodeRelease, err = tm.GetOrCreateReaderAt(avframe.CodecAAC, startPos)
-			if err != nil {
-				s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
-				return
-			}
-		} else {
+		tm := s.stream.TranscodeManager()
+		if tm == nil {
 			s.fail(fmt.Errorf("rtmp: audio transcode unavailable"))
 			return
 		}
-	} else {
-		reader = s.stream.RingBuffer().NewReaderAt(startPos)
-	}
-	if transcodeRelease != nil {
-		defer transcodeRelease()
+		audioReader, release, err := tm.GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot)
+		if err != nil {
+			s.fail(fmt.Errorf("rtmp: audio transcode unavailable: %w", err))
+			return
+		}
+		defer release()
+		s.writeTranscodedLoop(snapshot, s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor), audioReader)
+		return
 	}
 
+	reader := s.stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	filter := core.NewSlowConsumerFilter(reader, s.stream.Config().SlowConsumer, s.skipCfg)
 
 	// Watch for subscriber close and unblock any in-progress Read().
 	go func() {
-		<-s.closed
+		select {
+		case <-s.closed:
+		case <-snapshot.GenerationDone:
+		}
 		filter.Close()
 	}()
 
@@ -173,10 +194,8 @@ func (s *Subscriber) WriteLoop() {
 		if !ok {
 			return
 		}
-
-		// Skip sequence headers (already sent during init)
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			continue
+		if !s.stream.IsPublisherGeneration(snapshot.Generation) {
+			return
 		}
 
 		start := time.Now()
@@ -187,18 +206,72 @@ func (s *Subscriber) WriteLoop() {
 	}
 }
 
-// waitForSequenceHeaders blocks until at least one sequence header is available,
-// or returns false if the subscriber is closed while waiting.
-func (s *Subscriber) waitForSequenceHeaders() bool {
-	// Fast path: already available
-	if s.stream.VideoSeqHeader() != nil || s.stream.AudioSeqHeader() != nil {
-		return true
+type rtmpFrameDelivery struct {
+	frame  *avframe.AVFrame
+	filter *core.SlowConsumerFilter
+}
+
+func (s *Subscriber) writeTranscodedLoop(snapshot core.StreamStartupSnapshot, sourceReader, audioReader *util.RingReader[*avframe.AVFrame]) {
+	sourceFilter := core.NewSlowConsumerFilter(sourceReader, s.stream.Config().SlowConsumer, s.skipCfg)
+	audioFilter := core.NewSlowConsumerFilter(audioReader, s.stream.Config().SlowConsumer, s.skipCfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	deliveries := make(chan rtmpFrameDelivery)
+	sourceDone := make(chan struct{})
+	audioDone := make(chan struct{})
+
+	var pumps sync.WaitGroup
+	pump := func(filter *core.SlowConsumerFilter, done chan<- struct{}, accept func(*avframe.AVFrame) bool) {
+		defer pumps.Done()
+		defer close(done)
+		for {
+			frame, ok := filter.NextFrame()
+			if !ok || !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			if !accept(frame) {
+				continue
+			}
+			select {
+			case deliveries <- rtmpFrameDelivery{frame: frame, filter: filter}:
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
-	select {
-	case <-s.stream.SeqHeaderReady():
-		return true
-	case <-s.closed:
-		return false
+	pumps.Add(2)
+	go pump(sourceFilter, sourceDone, func(frame *avframe.AVFrame) bool {
+		return frame.MediaType.IsVideo()
+	})
+	go pump(audioFilter, audioDone, func(frame *avframe.AVFrame) bool {
+		return frame.MediaType.IsAudio() && frame.Codec == avframe.CodecAAC
+	})
+	defer func() {
+		cancel()
+		sourceFilter.Close()
+		audioFilter.Close()
+		pumps.Wait()
+	}()
+
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-snapshot.GenerationDone:
+			return
+		case <-sourceDone:
+			return
+		case <-audioDone:
+			return
+		case delivery := <-deliveries:
+			if !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			start := time.Now()
+			if err := s.sendFrame(delivery.frame); err != nil {
+				return
+			}
+			delivery.filter.ReportSendTime(time.Since(start))
+		}
 	}
 }
 

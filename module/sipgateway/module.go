@@ -6,6 +6,7 @@ import (
 
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/protocoltest"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -92,12 +93,45 @@ func (m *Module) Hangup(callID string) error {
 	return m.gw.Hangup(callID)
 }
 
+// StartLabSession starts a persistent in-process fake SIP device.
+func (m *Module) StartLabSession(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if m.gw == nil {
+		return LabSessionSnapshot{}, ErrGatewayDisabled
+	}
+	return m.gw.StartLabSession(ctx, request)
+}
+
+// ListLabSessions returns persistent fake SIP device snapshots.
+func (m *Module) ListLabSessions() []LabSessionSnapshot {
+	if m.gw == nil {
+		return []LabSessionSnapshot{}
+	}
+	return m.gw.ListLabSessions()
+}
+
+// StopLabSession stops a persistent fake SIP device. Repeated stops are safe.
+func (m *Module) StopLabSession(id string) error {
+	if m.gw == nil {
+		return ErrGatewayDisabled
+	}
+	return m.gw.StopLabSession(id)
+}
+
 // Metrics returns bounded-cardinality gateway metrics.
 func (m *Module) Metrics() MetricsSnapshot {
 	if m.gw == nil {
 		return MetricsSnapshot{}
 	}
 	return m.gw.Metrics()
+}
+
+// RunSelfTest runs the local protocol lab. It is safe when the gateway is
+// disabled and never contacts a remote SIP endpoint.
+func (m *Module) RunSelfTest(ctx context.Context) (protocoltest.Report, error) {
+	if m.gw == nil {
+		return protocoltest.Report{}, ErrGatewayDisabled
+	}
+	return m.gw.RunSelfTest(ctx), nil
 }
 
 // PrometheusCollectors exposes gateway metrics to the shared metrics module.

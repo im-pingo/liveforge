@@ -7,6 +7,8 @@ LiveForge supports multi-node cluster relay with two modes:
 
 Both modes support multiple transport protocols: **RTMP**, **SRT**, **RTSP**, and **RTP**. The protocol is determined by the URL scheme in the configuration (`rtmp://`, `srt://`, `rtsp://`, `rtp://`).
 
+Every relay push is bound to one publisher generation. The transport captures one atomic startup snapshot, sends the snapshot's headers and cached GOP once when the protocol/container needs them, then starts its AVFrame reader at `LiveCursor`. It listens for generation completion and verifies the generation after each blocking read, so a replacement publisher's first frame cannot leak into an old relay and a relay never starts at the ring's retained oldest frame. A GB28181 PS relay propagates a video sequence-header send failure and stops before replay/live media. SIP and GB28181 outbound startup cleanup sends one BYE when a 2xx dialog is accepted before generation retirement, while cancellation before acceptance only closes the pending transaction. Audio-only streams have no replay history and begin at the live cursor.
+
 ## Protocol Selection
 
 | Protocol | Use Case | Latency | Notes |
@@ -73,7 +75,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -134,7 +135,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -189,7 +189,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -287,7 +286,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -341,7 +339,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -458,7 +455,7 @@ cluster:
     retry_interval: 3s
 ```
 
-**How it works**: When a stream is published on this node, it is automatically pushed to all configured `targets`. The stream name from the publish URL is appended to each target URL.
+**How it works**: When a stream is published on this node, it is automatically pushed to all configured `targets`. The stream name from the publish URL is appended to each target URL. Each target starts from the active publisher generation's snapshot; RTMP and PS transports preserve header/container ordering, while RTP/RTSP omit sequence-header media because SDP carries the parameters. A publisher stop or replacement ends the current push and causes a later retry to capture a fresh snapshot. A GB28181 PS header-send failure is reported with its startup stage and prevents replay/live media from following it.
 
 **Multiple targets**: You can list multiple targets with different protocols. All targets receive the stream simultaneously.
 
@@ -481,7 +478,7 @@ cluster:
     retry_delay: 2s
 ```
 
-**How it works**: When a subscriber requests a stream that doesn't exist locally, the node tries each origin server in order until one succeeds. The stream is relayed locally for all subscribers. When the last subscriber leaves, the relay is torn down after `idle_timeout`.
+**How it works**: When a subscriber requests a stream that doesn't exist locally, the node tries each origin server in order until one succeeds. The stream is relayed locally for all subscribers. When the last subscriber leaves, the relay is torn down after `idle_timeout`. A downstream relay uses the source generation snapshot and live cursor as its only replay/live boundary; it never forwards retained frames from a previous origin publisher.
 
 ### Protocol-Specific Settings
 

@@ -32,6 +32,7 @@ type Manager struct {
 	initialResult chan error
 	refreshCh     chan struct{}
 	closeOnce     sync.Once
+	sourceIO      chan struct{}
 
 	statusMu sync.RWMutex
 	status   Status
@@ -84,8 +85,10 @@ func NewManager(opts Options) (*Manager, error) {
 		callbackCh:    make(chan struct{}, 1),
 		callbackDone:  make(chan struct{}),
 		keyNames:      make(map[string]struct{}),
+		sourceIO:      make(chan struct{}, 1),
 		status:        Status{Source: name},
 	}
+	m.sourceIO <- struct{}{}
 	if opts.Initial != nil {
 		if err := validateConfig(opts.Initial); err != nil {
 			return nil, fmt.Errorf("invalid initial config: %w", err)
@@ -185,7 +188,12 @@ func (m *Manager) load(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, m.loadTimeout)
 	defer cancel()
 	m.setAttempt()
-	result, err := m.source.Load(ctx, previous)
+	var result Snapshot
+	err := m.withSourceIO(ctx, func() error {
+		var err error
+		result, err = m.source.Load(ctx, previous)
+		return err
+	})
 	if err != nil {
 		m.setRejected(err)
 		return err
@@ -219,6 +227,9 @@ func (m *Manager) load(parent context.Context) error {
 		unchanged.Version = version
 		unchanged.LoadedAt = time.Now()
 		unchanged.LastModified = result.LastModified
+		if len(result.Data) > 0 {
+			unchanged.DesiredDocument = append([]byte(nil), result.Data...)
+		}
 		m.active.Store(&unchanged)
 		m.setUnchangedVersion(version)
 		return nil
@@ -257,7 +268,17 @@ func (m *Manager) load(parent context.Context) error {
 			pending = append(pending, change.Path)
 		}
 	}
-	next := &ConfigSnapshot{Config: applied, DesiredConfig: owned, Version: version, Source: m.sourceName, LoadedAt: time.Now(), LastModified: result.LastModified, Changes: changes, PendingRestart: pending}
+	next := &ConfigSnapshot{
+		Config:          applied,
+		DesiredConfig:   owned,
+		DesiredDocument: append([]byte(nil), result.Data...),
+		Version:         version,
+		Source:          m.sourceName,
+		LoadedAt:        time.Now(),
+		LastModified:    result.LastModified,
+		Changes:         changes,
+		PendingRestart:  pending,
+	}
 	set := ChangeSet{Previous: previous, Current: version, Changes: append([]Change(nil), changes...), Restart: append([]string(nil), pending...)}
 	if (old == nil || len(changes) > 0) && m.apply != nil {
 		if err := m.apply(next, set); err != nil {
@@ -313,7 +334,57 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// ValidateDocument parses and validates a complete source document without
+// changing the active snapshot or the backing source.
+func ValidateDocument(data []byte) (*config.Config, error) {
+	return ParseDocument(data)
+}
+
+// Write validates and persists a complete configuration document when the
+// selected source supports writes, then schedules the normal background
+// refresh path. It never applies a document directly on the request goroutine.
+func (m *Manager) Write(ctx context.Context, data []byte) error {
+	if _, err := ValidateDocument(data); err != nil {
+		return err
+	}
+	writer, ok := m.source.(ConfigWriter)
+	if !ok {
+		return fmt.Errorf("config source %q is read-only", m.sourceName)
+	}
+	if err := m.withSourceIO(ctx, func() error {
+		m.mu.Lock()
+		closed := m.closed
+		m.mu.Unlock()
+		if closed {
+			return ErrClosed
+		}
+		return writer.Write(ctx, append([]byte(nil), data...))
+	}); err != nil {
+		return err
+	}
+	return m.Refresh(ctx)
+}
+
+func (m *Manager) withSourceIO(ctx context.Context, operation func() error) error {
+	select {
+	case <-m.sourceIO:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { m.sourceIO <- struct{}{} }()
+	return operation()
+}
+
 func (m *Manager) Snapshot() *ConfigSnapshot { return m.active.Load() }
+
+// SourceName returns the configured source kind used for status and UI labels.
+func (m *Manager) SourceName() string { return m.sourceName }
+
+// SourceWritable reports whether the selected source implements ConfigWriter.
+func (m *Manager) SourceWritable() bool {
+	_, ok := m.source.(ConfigWriter)
+	return ok
+}
 
 func (m *Manager) Status() Status {
 	m.statusMu.RLock()
@@ -339,7 +410,7 @@ func (m *Manager) Close() error {
 		}
 		close(m.callbackCh)
 		<-m.callbackDone
-		err = m.source.Close()
+		err = m.withSourceIO(context.Background(), m.source.Close)
 	})
 	return err
 }

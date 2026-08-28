@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -89,16 +90,25 @@ type Stream struct {
 	state     StreamState
 	publisher Publisher
 
-	ringBuffer   *util.RingBuffer[*avframe.AVFrame]
-	muxerManager *MuxerManager
-	gopCache     [][]*avframe.AVFrame
-	gopStarts    []int64
-	audioCache   []*avframe.AVFrame
-	subscribers  map[string]int // protocol -> count (e.g. "rtmp" -> 2)
+	ringBuffer            *util.RingBuffer[*avframe.AVFrame]
+	muxerManager          *MuxerManager
+	gopCache              [][]*avframe.AVFrame
+	gopStarts             []int64
+	gopGeneration         uint64
+	subscribers           map[string]int // protocol -> count (e.g. "rtmp" -> 2)
+	generationSubscribers map[uint64]map[string]int
 
 	videoSeqHeader *avframe.AVFrame
 	audioSeqHeader *avframe.AVFrame
 	seqHeaderReady chan struct{} // closed when first sequence header arrives
+
+	publisherGeneration   uint64
+	generationStartCursor int64
+	mediaInfo             avframe.MediaInfo
+	audioCodecEpoch       uint64
+	generationDone        chan struct{}
+	startupStateChanged   chan struct{}
+	startupReady          bool
 
 	stats            StreamStats
 	eventBus         *EventBus
@@ -111,14 +121,16 @@ type Stream struct {
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *Stream {
 	s := &Stream{
-		key:            key,
-		config:         cfg,
-		limits:         limits,
-		state:          StreamStateIdle,
-		ringBuffer:     util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
-		eventBus:       bus,
-		subscribers:    make(map[string]int),
-		seqHeaderReady: make(chan struct{}),
+		key:                   key,
+		config:                cfg,
+		limits:                limits,
+		state:                 StreamStateIdle,
+		ringBuffer:            util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
+		eventBus:              bus,
+		subscribers:           make(map[string]int),
+		generationSubscribers: make(map[uint64]map[string]int),
+		seqHeaderReady:        make(chan struct{}),
+		startupStateChanged:   make(chan struct{}),
 	}
 	s.muxerManager = NewMuxerManager(s, cfg.RingBufferSize)
 	s.feedbackRouter = NewFeedbackRouter(cfg.Feedback)
@@ -151,18 +163,6 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 		s.gopCache = append([][]*avframe.AVFrame(nil), s.gopCache[len(s.gopCache)-cfg.GOPCacheNum:]...)
 		s.gopStarts = append([]int64(nil), s.gopStarts[len(s.gopStarts)-cfg.GOPCacheNum:]...)
 	}
-	if cfg.AudioCacheMs <= 0 {
-		s.audioCache = nil
-	} else if len(s.audioCache) > 0 {
-		cutoff := s.audioCache[len(s.audioCache)-1].DTS - int64(cfg.AudioCacheMs)
-		first := 0
-		for first < len(s.audioCache) && s.audioCache[first].DTS < cutoff {
-			first++
-		}
-		if first > 0 {
-			s.audioCache = append([]*avframe.AVFrame(nil), s.audioCache[first:]...)
-		}
-	}
 	if s.noPublisherTimer != nil {
 		s.noPublisherTimer.Stop()
 		s.noPublisherTimer = nil
@@ -173,6 +173,7 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 			defer s.mu.Unlock()
 			if s.state == StreamStateNoPublisher {
 				s.state = StreamStateDestroying
+				s.signalStartupStateChangedLocked()
 			}
 		})
 	}
@@ -197,6 +198,10 @@ func (s *Stream) State() StreamState {
 
 // SetPublisher assigns a publisher to this stream.
 func (s *Stream) SetPublisher(pub Publisher) error {
+	if isNilPublisher(pub) {
+		return errors.New("publisher is nil")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -220,9 +225,32 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 		s.transcodeManager.Reset()
 	}
 
+	s.closeGenerationLocked()
+	s.publisherGeneration++
+	s.generationStartCursor = s.ringBuffer.WriteCursor()
+	s.gopCache = nil
+	s.gopStarts = nil
+	s.gopGeneration = 0
+	s.videoSeqHeader = nil
+	s.audioSeqHeader = nil
+	s.seqHeaderReady = make(chan struct{})
+	s.mediaInfo = avframe.MediaInfo{}
+	s.audioCodecEpoch = 0
+	s.startupReady = false
+	s.generationDone = make(chan struct{})
+	s.mergePublisherMediaInfoLocked(pub.MediaInfo())
+	if s.mediaInfo.AudioCodec != 0 {
+		s.audioCodecEpoch = 1
+		if s.audioSeqHeader != nil {
+			s.audioSeqHeader.AudioCodecEpoch = s.audioCodecEpoch
+			s.audioSeqHeader.AudioProvenance = avframe.FrameProvenanceSource
+		}
+	}
 	s.publisher = pub
 	s.state = StreamStatePublishing
+	s.startupReady = s.startupReadyLocked()
 	s.stats.initStats()
+	s.signalStartupStateChangedLocked()
 
 	return nil
 }
@@ -247,8 +275,11 @@ func (s *Stream) RemovePublisherIf(pub Publisher) bool {
 }
 
 func (s *Stream) removePublisherLocked() {
+	s.closeGenerationLocked()
 	s.publisher = nil
 	s.state = StreamStateNoPublisher
+	s.startupReady = false
+	s.signalStartupStateChangedLocked()
 
 	if s.config.NoPublisherTimeout > 0 {
 		s.noPublisherTimer = time.AfterFunc(s.config.NoPublisherTimeout, func() {
@@ -256,6 +287,7 @@ func (s *Stream) removePublisherLocked() {
 			defer s.mu.Unlock()
 			if s.state == StreamStateNoPublisher {
 				s.state = StreamStateDestroying
+				s.signalStartupStateChangedLocked()
 			}
 		})
 	}
@@ -264,14 +296,126 @@ func (s *Stream) removePublisherLocked() {
 }
 
 func samePublisher(left, right Publisher) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
+	if isNilPublisher(left) || isNilPublisher(right) {
+		return false
 	}
 	leftType := reflect.TypeOf(left)
 	if leftType != reflect.TypeOf(right) || !leftType.Comparable() {
 		return false
 	}
 	return left == right
+}
+
+func isNilPublisher(pub Publisher) bool {
+	if pub == nil {
+		return true
+	}
+	value := reflect.ValueOf(pub)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func (s *Stream) closeGenerationLocked() {
+	if s.generationDone == nil {
+		return
+	}
+	select {
+	case <-s.generationDone:
+	default:
+		close(s.generationDone)
+	}
+}
+
+func (s *Stream) signalStartupStateChangedLocked() {
+	close(s.startupStateChanged)
+	s.startupStateChanged = make(chan struct{})
+}
+
+func (s *Stream) mergePublisherMediaInfoLocked(info *avframe.MediaInfo) {
+	if info == nil {
+		return
+	}
+	s.mediaInfo = cloneMediaInfo(*info)
+	if len(s.mediaInfo.VideoSequenceHeader) > 0 && s.mediaInfo.VideoCodec != 0 {
+		s.videoSeqHeader = avframe.NewAVFrame(
+			avframe.MediaTypeVideo,
+			s.mediaInfo.VideoCodec,
+			avframe.FrameTypeSequenceHeader,
+			0,
+			0,
+			append([]byte(nil), s.mediaInfo.VideoSequenceHeader...),
+		)
+	}
+	if len(s.mediaInfo.AudioSequenceHeader) > 0 && s.mediaInfo.AudioCodec != 0 {
+		s.audioSeqHeader = avframe.NewAVFrame(
+			avframe.MediaTypeAudio,
+			s.mediaInfo.AudioCodec,
+			avframe.FrameTypeSequenceHeader,
+			0,
+			0,
+			append([]byte(nil), s.mediaInfo.AudioSequenceHeader...),
+		)
+	}
+	if s.videoSeqHeader != nil || s.audioSeqHeader != nil {
+		close(s.seqHeaderReady)
+	}
+}
+
+func cloneMediaInfo(info avframe.MediaInfo) avframe.MediaInfo {
+	info.VideoSequenceHeader = append([]byte(nil), info.VideoSequenceHeader...)
+	info.AudioSequenceHeader = append([]byte(nil), info.AudioSequenceHeader...)
+	return info
+}
+
+func (s *Stream) updateStartupReadyLocked() {
+	ready := s.startupReadyLocked()
+	if ready == s.startupReady {
+		return
+	}
+	s.startupReady = ready
+	s.signalStartupStateChangedLocked()
+}
+
+func (s *Stream) startupReadyLocked() bool {
+	hasTrack := false
+	if codec := s.mediaInfo.VideoCodec; codec != 0 {
+		hasTrack = true
+		if !trackReady(codec, s.videoSeqHeader != nil || len(s.mediaInfo.VideoSequenceHeader) > 0) {
+			return false
+		}
+	}
+	if codec := s.mediaInfo.AudioCodec; codec != 0 {
+		hasTrack = true
+		if !trackReady(codec, s.audioSeqHeader != nil || len(s.mediaInfo.AudioSequenceHeader) > 0) {
+			return false
+		}
+	}
+	return hasTrack
+}
+
+func trackReady(codec avframe.CodecType, hasSequenceHeader bool) bool {
+	switch codec {
+	case avframe.CodecH264,
+		avframe.CodecH265,
+		avframe.CodecAAC:
+		return hasSequenceHeader
+	case avframe.CodecMP3,
+		avframe.CodecG711A,
+		avframe.CodecG711U,
+		avframe.CodecG722,
+		avframe.CodecG729,
+		avframe.CodecAV1,
+		avframe.CodecVP8,
+		avframe.CodecVP9,
+		avframe.CodecOpus:
+		return true
+	default:
+		return false
+	}
 }
 
 // Close force-closes the stream: closes the ring buffer, removes the publisher,
@@ -299,7 +443,10 @@ func (s *Stream) Close() {
 		s.publisher = nil
 	}
 
+	s.closeGenerationLocked()
+	s.startupReady = false
 	s.state = StreamStateDestroying
+	s.signalStartupStateChangedLocked()
 	s.ringBuffer.Close()
 }
 
@@ -315,7 +462,33 @@ func (s *Stream) Publisher() Publisher {
 func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.writeFrameLocked(frame)
+}
 
+// WriteFrameForPublisher writes a frame only when pub still owns the active generation.
+func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if isNilPublisher(pub) || !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
+		return false
+	}
+	return s.writeFrameLocked(frame)
+}
+
+// WithActivePublisher runs activity while pub owns the active publishing
+// generation. activity executes with the stream lock held and must not call
+// any Stream method.
+func (s *Stream) WithActivePublisher(pub Publisher, activity func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if isNilPublisher(pub) || !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
+		return false
+	}
+	activity()
+	return true
+}
+
+func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 	// Enforce max_bitrate_per_stream: reject non-header frames when over limit
 	if maxKbps := s.limits.MaxBitratePerStream; maxKbps > 0 {
 		if frame.FrameType != avframe.FrameTypeSequenceHeader {
@@ -327,11 +500,32 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 	}
 
 	// Store sequence headers separately for late-joining subscribers
+	if frame.MediaType.IsVideo() {
+		s.mediaInfo.VideoCodec = frame.Codec
+	} else if frame.MediaType.IsAudio() {
+		if s.audioCodecEpoch == 0 || s.mediaInfo.AudioCodec != frame.Codec {
+			s.audioCodecEpoch++
+		}
+		s.mediaInfo.AudioCodec = frame.Codec
+		switch frame.Codec {
+		case avframe.CodecG711A, avframe.CodecG711U:
+			// G.711 has a fixed RTP clock and mono channel layout. Some
+			// publishers, such as the GB28181 PS demuxer, discover the
+			// codec after SetPublisher and cannot provide these fields up
+			// front; keep the stream startup snapshot self-consistent.
+			s.mediaInfo.SampleRate = 8000
+			s.mediaInfo.Channels = 1
+		}
+		frame.AudioCodecEpoch = s.audioCodecEpoch
+		frame.AudioProvenance = avframe.FrameProvenanceSource
+	}
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
 		if frame.MediaType.IsVideo() {
 			s.videoSeqHeader = frame
+			s.mediaInfo.VideoSequenceHeader = append([]byte(nil), frame.Payload...)
 		} else if frame.MediaType.IsAudio() {
 			s.audioSeqHeader = frame
+			s.mediaInfo.AudioSequenceHeader = append([]byte(nil), frame.Payload...)
 		}
 		// Signal waiters that at least one sequence header is available.
 		select {
@@ -341,12 +535,14 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 			close(s.seqHeaderReady)
 		}
 	}
+	s.updateStartupReadyLocked()
 
 	// Update GOP cache for video frames
 	if s.config.GOPCache {
 		if frame.MediaType.IsVideo() {
 			if frame.FrameType.IsKeyframe() {
 				// Start new GOP
+				s.gopGeneration++
 				gopStart := s.ringBuffer.WriteCursor()
 				s.gopCache = append(s.gopCache, []*avframe.AVFrame{frame})
 				s.gopStarts = append(s.gopStarts, gopStart)
@@ -363,22 +559,101 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 		}
 	}
 
-	// Update audio cache for late-joining subscribers
-	if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && s.config.AudioCacheMs > 0 {
-		s.audioCache = append(s.audioCache, frame)
-		minDTS := frame.DTS - int64(s.config.AudioCacheMs)
-		trimIdx := 0
-		for trimIdx < len(s.audioCache) && s.audioCache[trimIdx].DTS < minDTS {
-			trimIdx++
-		}
-		if trimIdx > 0 {
-			s.audioCache = s.audioCache[trimIdx:]
-		}
-	}
-
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
 	return true
+}
+
+// StreamStartupSnapshot is an atomic view of the current publisher generation's startup state.
+type StreamStartupSnapshot struct {
+	Generation            uint64
+	PublisherID           string
+	GenerationStartCursor int64
+	MediaInfo             avframe.MediaInfo
+	VideoSequenceHeader   *avframe.AVFrame
+	AudioSequenceHeader   *avframe.AVFrame
+	ReplayFrames          []*avframe.AVFrame
+	LiveCursor            int64
+	SourceCursor          int64
+	GenerationDone        <-chan struct{}
+	Ready                 bool
+	audioCodecEpoch       uint64
+}
+
+// StartupSnapshot captures media information, headers, replay frames, and cursors atomically.
+func (s *Stream) StartupSnapshot() StreamStartupSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.startupSnapshotLocked()
+}
+
+func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
+	liveCursor := s.ringBuffer.WriteCursor()
+	sourceCursor := liveCursor
+	if len(s.gopStarts) > 0 {
+		sourceCursor = s.gopStarts[0]
+	}
+	var replayFrames []*avframe.AVFrame
+	for _, gop := range s.gopCache {
+		replayFrames = append(replayFrames, gop...)
+	}
+	publisherID := ""
+	if !isNilPublisher(s.publisher) {
+		publisherID = s.publisher.ID()
+	}
+	return StreamStartupSnapshot{
+		Generation:            s.publisherGeneration,
+		PublisherID:           publisherID,
+		GenerationStartCursor: s.generationStartCursor,
+		MediaInfo:             cloneMediaInfo(s.mediaInfo),
+		VideoSequenceHeader:   s.videoSeqHeader,
+		AudioSequenceHeader:   s.audioSeqHeader,
+		ReplayFrames:          replayFrames,
+		LiveCursor:            liveCursor,
+		SourceCursor:          sourceCursor,
+		GenerationDone:        s.generationDone,
+		Ready:                 s.startupReady,
+		audioCodecEpoch:       s.audioCodecEpoch,
+	}
+}
+
+// WaitForStartup waits until the current generation is publishing and ready.
+func (s *Stream) WaitForStartup(ctx context.Context) (StreamStartupSnapshot, bool) {
+	for {
+		if ctx.Err() != nil {
+			return StreamStartupSnapshot{}, false
+		}
+		s.mu.RLock()
+		if s.state == StreamStatePublishing && s.startupReady {
+			snapshot := s.startupSnapshotLocked()
+			s.mu.RUnlock()
+			return snapshot, true
+		}
+		changed := s.startupStateChanged
+		s.mu.RUnlock()
+
+		select {
+		case <-ctx.Done():
+			return StreamStartupSnapshot{}, false
+		case <-changed:
+		}
+	}
+}
+
+// IsPublisherGeneration reports whether generation is the active publishing generation.
+func (s *Stream) IsPublisherGeneration(generation uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state == StreamStatePublishing && s.publisherGeneration == generation
+}
+
+func (s *Stream) activePublisherGeneration() (uint64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state != StreamStatePublishing || isNilPublisher(s.publisher) {
+		return 0, false
+	}
+	return s.publisherGeneration, true
 }
 
 // GOPCacheLen returns the total number of frames across all cached GOPs.
@@ -398,13 +673,14 @@ type GOPCacheDetail struct {
 	VideoFrames int
 	AudioFrames int
 	DurationMs  int64
+	Generation  uint64
 }
 
 func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var d GOPCacheDetail
+	d := GOPCacheDetail{Generation: s.gopGeneration}
 	for _, gop := range s.gopCache {
 		d.TotalFrames += len(gop)
 	}
@@ -484,16 +760,6 @@ func (s *Stream) GOPCacheSourceStart() int64 {
 	return s.gopStarts[0]
 }
 
-// AudioCache returns a copy of the current audio cache.
-func (s *Stream) AudioCache() []*avframe.AVFrame {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]*avframe.AVFrame, len(s.audioCache))
-	copy(result, s.audioCache)
-	return result
-}
-
 // VideoSeqHeader returns the cached video sequence header (SPS/PPS), if any.
 func (s *Stream) VideoSeqHeader() *avframe.AVFrame {
 	s.mu.RLock()
@@ -508,9 +774,17 @@ func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
 	return s.audioSeqHeader
 }
 
+func (s *Stream) audioCodecState() (avframe.CodecType, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mediaInfo.AudioCodec, s.audioCodecEpoch
+}
+
 // SeqHeaderReady returns a channel that is closed when the first sequence header
 // (video or audio) is stored. Subscribers can select on this instead of polling.
 func (s *Stream) SeqHeaderReady() <-chan struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.seqHeaderReady
 }
 
@@ -544,7 +818,10 @@ func (s *Stream) TranscodeManager() *TranscodeManager {
 func (s *Stream) AddSubscriber(protocol string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.addSubscriberLocked(protocol)
+}
 
+func (s *Stream) addSubscriberLocked(protocol string) error {
 	if max := s.limits.MaxSubscribersPerStream; max > 0 {
 		total := 0
 		for _, n := range s.subscribers {
@@ -567,6 +844,54 @@ func (s *Stream) AddSubscriber(protocol string) error {
 	}
 
 	return nil
+}
+
+// AddSubscriberForGeneration admits a subscriber and returns a release function
+// that can only remove the lease created for this publisher generation.
+func (s *Stream) AddSubscriberForGeneration(protocol string, generation uint64) (func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != StreamStatePublishing || s.publisherGeneration != generation {
+		return nil, fmt.Errorf("publisher generation %d is no longer active", generation)
+	}
+	if err := s.addSubscriberLocked(protocol); err != nil {
+		return nil, err
+	}
+	byProtocol := s.generationSubscribers[generation]
+	if byProtocol == nil {
+		byProtocol = make(map[string]int)
+		s.generationSubscribers[generation] = byProtocol
+	}
+	byProtocol[protocol]++
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { s.removeSubscriberForGeneration(protocol, generation) })
+	}, nil
+}
+
+func (s *Stream) removeSubscriberForGeneration(protocol string, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byProtocol := s.generationSubscribers[generation]
+	if byProtocol == nil || byProtocol[protocol] <= 0 {
+		return
+	}
+	byProtocol[protocol]--
+	if byProtocol[protocol] == 0 {
+		delete(byProtocol, protocol)
+	}
+	if len(byProtocol) == 0 {
+		delete(s.generationSubscribers, generation)
+	}
+	if s.subscribers[protocol] > 0 {
+		s.subscribers[protocol]--
+		if s.subscribers[protocol] == 0 {
+			delete(s.subscribers, protocol)
+		}
+	}
+	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
+	s.checkIdleTimeout()
 }
 
 // RemoveSubscriber decrements the subscriber count for a protocol.

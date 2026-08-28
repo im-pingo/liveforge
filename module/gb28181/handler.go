@@ -1,17 +1,20 @@
 package gb28181
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
+	"github.com/im-pingo/liveforge/pkg/sdp"
 )
 
 // handler processes SIP requests for the GB28181 module.
@@ -24,6 +27,8 @@ type handler struct {
 	prefix   string
 	auth     *sipmod.DigestAuth
 }
+
+const labStreamKeyHeader = "X-LiveForge-Lab-Stream-Key"
 
 func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 	from := req.From()
@@ -50,6 +55,11 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 
 	deviceID := from.Address.User
 	remoteAddr := req.Source()
+	if contact := req.GetHeader("Contact"); contact != nil {
+		if address, ok := sipContactAddress(contact.Value()); ok {
+			remoteAddr = address
+		}
+	}
 	transport := "udp"
 	if via := req.Via(); via != nil {
 		transport = strings.ToLower(via.Transport)
@@ -71,7 +81,36 @@ func (h *handler) handleRegister(req *sip.Request, tx sip.ServerTransaction) {
 	tx.Respond(resp)
 }
 
+func sipContactAddress(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "<") {
+		end := strings.IndexByte(value, '>')
+		if end <= 1 {
+			return "", false
+		}
+		value = value[1:end]
+	} else if end := strings.IndexByte(value, ';'); end >= 0 {
+		value = value[:end]
+	}
+	var uri sip.Uri
+	if err := sip.ParseUri(value, &uri); err != nil || uri.Host == "" {
+		return "", false
+	}
+	port := uri.Port
+	if port <= 0 {
+		port = 5060
+	}
+	return net.JoinHostPort(strings.Trim(uri.Host, "[]"), fmt.Sprint(port)), true
+}
+
 func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
+	// SIP and GB28181 share one transport. Only claim video PS offers; audio
+	// INVITEs must remain available for the SIP gateway handler registered after
+	// this module.
+	if !isGB28181VideoInvite(req) {
+		return
+	}
+
 	from := req.From()
 	if from == nil {
 		resp := sip.NewResponseFromRequest(req, 400, "Bad Request", nil)
@@ -98,7 +137,7 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	remotePort := parseSDPPort(string(body))
 	remoteIP := extractIP(req.Source())
-	streamKey := fmt.Sprintf("%s/%s", h.prefix, channelID)
+	streamKey := inboundStreamKey(req, h.prefix, channelID)
 	publishCtx := sipPublishContext(req, streamKey, "")
 	if err := h.bus.EmitSync(core.EventPublish, publishCtx); err != nil {
 		resp := sip.NewResponseFromRequest(req, 403, "Forbidden", nil)
@@ -126,10 +165,11 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	// Create publisher
-	pub := NewPublisher(
+	var pub *Publisher
+	pub = NewPublisher(
 		newPublisherID("live", channelID),
 		func(frame *avframe.AVFrame) {
-			stream.WriteFrame(frame)
+			stream.WriteFrameForPublisher(pub, frame)
 		},
 	)
 
@@ -173,7 +213,7 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 	h.sessions.Add(session)
-	go receiver.Run()
+	h.runReceiver(session, receiver)
 
 	// Build SDP answer
 	localIP := getLocalIP()
@@ -206,6 +246,56 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		"stream", streamKey, "local_port", rtpPort)
 }
 
+func isGB28181VideoInvite(req *sip.Request) bool {
+	if req == nil || len(req.Body()) == 0 {
+		return false
+	}
+	offer, err := sdp.Parse(req.Body())
+	if err != nil {
+		return false
+	}
+	for _, media := range offer.Media {
+		if media == nil || !strings.EqualFold(media.Type, "video") || !strings.EqualFold(media.Proto, "RTP/AVP") {
+			continue
+		}
+		for _, payloadType := range media.Formats {
+			if payloadType != 96 {
+				continue
+			}
+			mapping := media.RTPMap(payloadType)
+			// Some older devices omit rtpmap for the GB28181 static lab-style
+			// offer. Keep accepting that established shape while rejecting an
+			// explicitly announced non-PS video codec.
+			if mapping == nil || (strings.EqualFold(mapping.EncodingName, "PS") && mapping.ClockRate == 90000) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func inboundStreamKey(req *sip.Request, prefix, channelID string) string {
+	defaultKey := fmt.Sprintf("%s/%s", prefix, channelID)
+	if req == nil || !isLoopbackSIPSource(req.Source()) {
+		return defaultKey
+	}
+	header := req.GetHeader(labStreamKeyHeader)
+	if header == nil || !validGBLabStreamKey(header.Value()) {
+		return defaultKey
+	}
+	return header.Value()
+}
+
+func isLoopbackSIPSource(source string) bool {
+	host := source
+	if parsedHost, _, err := net.SplitHostPort(source); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (h *handler) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 	callID := getCallID(req)
 	session := h.sessions.Get(callID)
@@ -235,6 +325,16 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 	if snapshot.Stream != nil && snapshot.Publisher != nil {
 		snapshot.Stream.RemovePublisherIf(snapshot.Publisher)
 	}
+	if snapshot.InviteTx != nil {
+		if remoteAddr == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			if err := snapshot.InviteTx.SendBYE(ctx); err != nil {
+				slog.Debug("failed to send session BYE", "module", "gb28181", "session", snapshot.ID, "error", err)
+			}
+			cancel()
+		}
+		snapshot.InviteTx.Close()
+	}
 	if snapshot.ID != "" && h.sessions != nil {
 		h.sessions.RemoveIf(snapshot.ID, session)
 	}
@@ -255,6 +355,16 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 		})
 	}
 	return true
+}
+
+func (h *handler) runReceiver(session *MediaSession, receiver *RTPReceiver) {
+	go func() {
+		receiver.Run()
+		if err := receiver.Err(); err != nil {
+			slog.Warn("media receiver terminated", "module", "gb28181", "session", session.Snapshot().ID, "error", err)
+			h.closeSession(session, "")
+		}
+	}()
 }
 
 func (h *handler) rollbackSession(session *MediaSession, removeStream bool) {

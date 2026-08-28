@@ -36,7 +36,92 @@ var (
 	ErrPortExhausted = errors.New("SIP gateway RTP ports exhausted")
 	// ErrCodecMismatch indicates that the remote side selected no configured codec.
 	ErrCodecMismatch = errors.New("SIP gateway codec mismatch")
+	// ErrLabInvalidRequest indicates that a protocol lab start request is invalid.
+	ErrLabInvalidRequest = errors.New("SIP gateway lab request is invalid")
+	// ErrLabDuplicateIdentity indicates that a lab identity is already active.
+	ErrLabDuplicateIdentity = errors.New("SIP gateway lab identity is already active")
+	// ErrLabSessionNotFound indicates that a lab session does not exist.
+	ErrLabSessionNotFound = errors.New("SIP gateway lab session not found")
+	// ErrLabManagerUnimplemented indicates that a standalone contract manager has
+	// no SIP gateway to attach a transport session to.
+	ErrLabManagerUnimplemented = errors.New("SIP gateway lab manager is not implemented")
 )
+
+// LabMode selects the direction of a local protocol lab.
+type LabMode string
+
+const (
+	LabModePublish LabMode = "publish"
+	LabModeReceive LabMode = "receive"
+)
+
+// LabDirection describes the media direction relative to LiveForge.
+type LabDirection string
+
+const (
+	LabDirectionInbound  LabDirection = "inbound"
+	LabDirectionOutbound LabDirection = "outbound"
+)
+
+// LabSessionState describes the lifecycle state of a local protocol lab.
+type LabSessionState string
+
+const (
+	LabSessionStateStarting LabSessionState = "starting"
+	LabSessionStateActive   LabSessionState = "active"
+	// LabSessionStateContract identifies a transportless contract-only manager
+	// session; it has no SIP signaling, media, sockets, or availability.
+	LabSessionStateContract LabSessionState = "contract"
+	LabSessionStateStopped  LabSessionState = "stopped"
+	LabSessionStateFailed   LabSessionState = "failed"
+)
+
+// LabSessionRequest contains the protocol-neutral portion of a SIP lab start.
+type LabSessionRequest struct {
+	Mode      LabMode `json:"mode"`
+	DeviceID  string  `json:"device_id"`
+	StreamKey string  `json:"stream_key"`
+	Codec     string  `json:"codec,omitempty"`
+}
+
+// LabSessionSnapshot is an immutable point-in-time view of a SIP lab session.
+type LabSessionSnapshot struct {
+	ID                  string          `json:"id"`
+	Identity            string          `json:"identity"`
+	DeviceID            string          `json:"device_id"`
+	StreamKey           string          `json:"stream_key"`
+	Mode                LabMode         `json:"mode"`
+	State               LabSessionState `json:"state"`
+	Direction           LabDirection    `json:"direction"`
+	Codec               string          `json:"codec,omitempty"`
+	LastError           string          `json:"last_error,omitempty"`
+	RTPPacketsSent      uint64          `json:"rtp_packets_sent"`
+	RTPPacketsRecv      uint64          `json:"rtp_packets_received"`
+	AudioRTPPacketsSent uint64          `json:"audio_rtp_packets_sent"`
+	AudioRTPPacketsRecv uint64          `json:"audio_rtp_packets_received"`
+	VideoRTPPacketsSent uint64          `json:"video_rtp_packets_sent"`
+	VideoRTPPacketsRecv uint64          `json:"video_rtp_packets_received"`
+	RTPBytesSent        uint64          `json:"rtp_bytes_sent"`
+	RTPBytesRecv        uint64          `json:"rtp_bytes_received"`
+	RTCPPacketsSent     uint64          `json:"rtcp_packets_sent"`
+	RTCPPacketsRecv     uint64          `json:"rtcp_packets_received"`
+	StartedAt           time.Time       `json:"started_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	LastMediaAt         time.Time       `json:"last_media_at,omitempty"`
+	StoppedAt           time.Time       `json:"stopped_at,omitempty"`
+}
+
+// LabManager owns local SIP lab session lifecycle state.
+type LabManager interface {
+	Start(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error)
+	List() []LabSessionSnapshot
+	Stop(id string) error
+}
+
+// NewLabManager returns a lifecycle manager for callers that need the
+// protocol-neutral contract without a running gateway. Gateway instances use
+// their transport-backed manager internally.
+func NewLabManager() LabManager { return newLabManager(nil) }
 
 // SIPGatewayProvider is the control-plane contract exposed by Module.
 type SIPGatewayProvider interface {
@@ -44,6 +129,9 @@ type SIPGatewayProvider interface {
 	Call(callID string) (CallSnapshot, bool)
 	Dial(ctx context.Context, targetURI, streamKey string) (string, error)
 	Hangup(callID string) error
+	StartLabSession(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error)
+	ListLabSessions() []LabSessionSnapshot
+	StopLabSession(id string) error
 	Metrics() MetricsSnapshot
 }
 
@@ -59,21 +147,25 @@ const (
 
 // CallSnapshot is an immutable point-in-time view of a SIP gateway call.
 type CallSnapshot struct {
-	CallID         string    `json:"call_id"`
-	Direction      string    `json:"direction"`
-	StreamKey      string    `json:"stream_key"`
-	Codec          string    `json:"codec"`
-	RTPPort        int       `json:"rtp_port"`
-	RTCPPort       int       `json:"rtcp_port"`
-	RemoteAddress  string    `json:"remote_address,omitempty"`
-	StartedAt      time.Time `json:"started_at"`
-	State          CallState `json:"state"`
-	LastError      string    `json:"last_error,omitempty"`
-	LastRTPAt      time.Time `json:"last_rtp_at,omitempty"`
-	RTPPacketsSent uint64    `json:"rtp_packets_sent"`
-	RTPPacketsRecv uint64    `json:"rtp_packets_received"`
-	RTPBytesSent   uint64    `json:"rtp_bytes_sent"`
-	RTPBytesRecv   uint64    `json:"rtp_bytes_received"`
+	CallID          string    `json:"call_id"`
+	Direction       string    `json:"direction"`
+	StreamKey       string    `json:"stream_key"`
+	Codec           string    `json:"codec"`
+	RTPPort         int       `json:"rtp_port"`
+	RTCPPort        int       `json:"rtcp_port"`
+	VideoCodec      string    `json:"video_codec,omitempty"`
+	VideoRTPPort    int       `json:"video_rtp_port,omitempty"`
+	VideoRTCPPort   int       `json:"video_rtcp_port,omitempty"`
+	RemoteAddress   string    `json:"remote_address,omitempty"`
+	StartedAt       time.Time `json:"started_at"`
+	State           CallState `json:"state"`
+	LastError       string    `json:"last_error,omitempty"`
+	LastRTPAt       time.Time `json:"last_rtp_at,omitempty"`
+	RTPPacketsSent  uint64    `json:"rtp_packets_sent"`
+	RTPPacketsRecv  uint64    `json:"rtp_packets_received"`
+	RTPBytesSent    uint64    `json:"rtp_bytes_sent"`
+	RTPBytesRecv    uint64    `json:"rtp_bytes_received"`
+	RTCPPacketsRecv uint64    `json:"rtcp_packets_received"`
 }
 
 // MetricsSnapshot contains bounded-cardinality gateway counters for metrics

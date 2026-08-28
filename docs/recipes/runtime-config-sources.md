@@ -2,7 +2,7 @@
 
 The checked-in sample configuration is for local development only: it disables TLS and authentication and uses the console credentials `admin/admin`. Never expose it publicly unchanged.
 
-LiveForge reads the bootstrap YAML at startup. A single background worker then loads the selected source immediately, polls it periodically, and publishes immutable snapshots. A runtime configuration read is an atomic in-memory load: it never performs file/network I/O, waits for refresh, or takes the manager status lock.
+LiveForge reads the bootstrap YAML at startup. A single background worker then loads the selected source immediately, polls it periodically, and publishes immutable snapshots. A runtime configuration read is an atomic in-memory load: it never performs file/network I/O, waits for refresh, or takes the manager status lock. Source loads, Config Apply writes, and source close are serialized; Apply waits for its source write to complete before returning 202, then schedules background parse, module application, and publication.
 
 ## Prerequisites
 
@@ -26,6 +26,19 @@ calls, 3 failures, or 1000 entries respectively. Explicit empty RTSP, WebRTC,
 and GB28181 port ranges select their documented module fallback behavior;
 non-empty ranges must contain two ordered positive ports. See the field
 descriptions in `docs/config/config.schema.json` for exact range behavior.
+
+## Stream Startup Cache Semantics
+
+The GOP cache is bounded by video keyframes and replays the interleaved video
+and audio frames retained between those boundaries. A late subscriber replays
+that GOP once, then continues from the atomically captured live cursor. A
+pure-audio stream has no GOP startup history: it starts at the live cursor and
+receives the next frame without a separate audio startup cache.
+
+The removed `stream.audio_cache_ms` setting is rejected before typed parsing,
+including when YAML mapping aliases or `<<` merge mappings and sequences
+introduce it. Validation follows repeated merge aliases with bounded work and
+terminates safely on recursive alias graphs.
 
 ## Local File
 
@@ -100,6 +113,46 @@ runtime:
 ```
 
 Redis fields use dotted or slash-separated paths such as `server.log_level` and `limits.max_connections`. Prefer hash mode when an atomic producer can update the hash and version key together.
+
+## Config Console And Apply
+
+The Config view reads the complete effective and desired configuration document from
+`GET /api/v1/server/config/document`, fetches the complete versioned JSON Schema from
+`GET /api/v1/server/config/schema`, and redacts values whose field names contain
+`token`, `password`, `secret`, `credential`, `passphrase`, or `private_key`. The
+desired document is retained from the selected source so comments and fields
+not represented by the typed runtime struct remain visible in the editable source
+pane. The effective applied document is shown in a separate read-only pane;
+pending restart paths identify desired values that have not yet changed the
+effective configuration. Source details show the selected kind plus redacted
+file, HTTP, Consul, and Redis settings. The page can edit the YAML, run a
+read-only Validate, and use Apply & Refresh. Viewer
+tokens have `config:read`; Apply and Refresh require `config:reload` (operator or
+admin).
+
+The editor starts fail-closed while source metadata is loading. Read-only sources
+and failed refreshes keep the editor read-only and Apply disabled; the page only
+enables writing after a successful response confirms that the selected source
+implements `ConfigWriter`.
+
+Apply writes the complete document through the selected source and then schedules
+the normal background refresh. The writer behavior is:
+
+| Source | Apply behavior | Failure/constraint |
+| --- | --- | --- |
+| `file` | Atomic temp-file write, fsync, rename; existing mode is preserved | The process must write the configured directory |
+| `http` / `https` | Authenticated `PUT` to the exact configured URL | URL scheme must match the source; redirects are disabled |
+| `consul` | Authenticated `PUT` to `<prefix>/config.yaml` | Consul token and KV write permission are required |
+| `redis` | Write `config.yaml` into the configured hash or prefix; increment `version_key` when set | Redis credentials and write permission are required |
+
+The request must contain a complete valid YAML/JSON document. YAML requests carry
+raw YAML text. JSON requests must use `{"document":"..."}`; a raw JSON object is
+not accepted as the request envelope. `[REDACTED]`
+placeholders are replaced with the currently effective sensitive values before a
+write, so the editor never needs to receive secrets. A source that only implements
+`ConfigSource` is read-only and Apply returns HTTP 409. The response is 202 only
+after the serialized source write succeeds; parsing, module application, and
+publication still run asynchronously and are visible in the status endpoint.
 
 ## Refresh And Observe
 

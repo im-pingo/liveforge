@@ -183,7 +183,7 @@ func (m *Module) updateRateLimiter(cfg config.RateLimitConfig) {
 }
 
 func (m *Module) onPublishStop(ctx *core.EventContext) error {
-	m.cleanupManagers(ctx.StreamKey)
+	m.cleanupManagers(ctx.StreamKey, ctx.PublisherID)
 	return nil
 }
 
@@ -193,25 +193,35 @@ func (m *Module) onStreamDestroy(ctx *core.EventContext) error {
 }
 
 // cleanupManagers stops and removes HLS/DASH/LL-HLS managers for a stream.
-func (m *Module) cleanupManagers(streamKey string) {
+func (m *Module) cleanupManagers(streamKey string, publisherIDs ...string) {
+	publisherID := ""
+	if len(publisherIDs) > 0 {
+		publisherID = publisherIDs[0]
+	}
 	m.hlsMu.Lock()
 	if mgr, ok := m.hlsManagers[streamKey]; ok {
-		mgr.Stop()
-		delete(m.hlsManagers, streamKey)
+		if publisherID == "" || mgr.publisherID == publisherID {
+			mgr.Stop()
+			delete(m.hlsManagers, streamKey)
+		}
 	}
 	m.hlsMu.Unlock()
 
 	m.dashMu.Lock()
 	if mgr, ok := m.dashManagers[streamKey]; ok {
-		mgr.Stop()
-		delete(m.dashManagers, streamKey)
+		if publisherID == "" || mgr.publisherID == publisherID {
+			mgr.Stop()
+			delete(m.dashManagers, streamKey)
+		}
 	}
 	m.dashMu.Unlock()
 
 	m.llhlsMu.Lock()
 	if mgr, ok := m.llhlsManagers[streamKey]; ok {
-		mgr.Stop()
-		delete(m.llhlsManagers, streamKey)
+		if publisherID == "" || mgr.publisherID == publisherID {
+			mgr.Stop()
+			delete(m.llhlsManagers, streamKey)
+		}
 	}
 	m.llhlsMu.Unlock()
 }
@@ -220,9 +230,18 @@ func (m *Module) cleanupManagers(streamKey string) {
 func (m *Module) getOrCreateHLS(streamKey string, stream *core.Stream) *HLSManager {
 	m.hlsMu.Lock()
 	defer m.hlsMu.Unlock()
+	publisherID := stream.StartupSnapshot().PublisherID
 
 	if mgr, ok := m.hlsManagers[streamKey]; ok {
-		return mgr
+		if mgr.publisherID == "" {
+			mgr.publisherID = publisherID
+			return mgr
+		}
+		if mgr.publisherID == publisherID {
+			return mgr
+		}
+		mgr.Stop()
+		delete(m.hlsManagers, streamKey)
 	}
 
 	cfg := m.server.Config().HTTP.HLS
@@ -230,8 +249,9 @@ func (m *Module) getOrCreateHLS(streamKey string, stream *core.Stream) *HLSManag
 	playlistSize := cfg.PlaylistSize
 
 	// basePath is the URL prefix for segment references in the m3u8
-	basePath := "/" + streamKey
+	basePath := "/" + escapeStreamKeyPath(streamKey)
 	mgr := NewHLSManager(streamKey, basePath, targetDur, playlistSize)
+	mgr.publisherID = publisherID
 	m.hlsManagers[streamKey] = mgr
 	go mgr.Run(stream)
 	return mgr
@@ -241,18 +261,27 @@ func (m *Module) getOrCreateHLS(streamKey string, stream *core.Stream) *HLSManag
 func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHManager {
 	m.dashMu.Lock()
 	defer m.dashMu.Unlock()
+	publisherID := stream.StartupSnapshot().PublisherID
 
 	if mgr, ok := m.dashManagers[streamKey]; ok {
-		return mgr
+		if mgr.publisherID == "" {
+			mgr.publisherID = publisherID
+			return mgr
+		}
+		if mgr.publisherID == publisherID {
+			return mgr
+		}
+		mgr.Stop()
+		delete(m.dashManagers, streamKey)
 	}
 
 	cfg := m.server.Config().HTTP.DASH
 	targetDur := cfg.SegmentDuration
 	playlistSize := cfg.PlaylistSize
 
-	basePath := "/" + streamKey
+	basePath := "/" + escapeStreamKeyPath(streamKey)
 	mgr := NewDASHManager(streamKey, basePath, targetDur, playlistSize)
-	mgr.InitFromStream(stream) // compute init segment synchronously
+	mgr.publisherID = publisherID
 	m.dashManagers[streamKey] = mgr
 	go mgr.Run(stream)
 	return mgr
@@ -262,14 +291,24 @@ func (m *Module) getOrCreateDASH(streamKey string, stream *core.Stream) *DASHMan
 func (m *Module) getOrCreateLLHLS(streamKey string, stream *core.Stream) *LLHLSManager {
 	m.llhlsMu.Lock()
 	defer m.llhlsMu.Unlock()
+	publisherID := stream.StartupSnapshot().PublisherID
 
 	if mgr, ok := m.llhlsManagers[streamKey]; ok {
-		return mgr
+		if mgr.publisherID == "" {
+			mgr.publisherID = publisherID
+			return mgr
+		}
+		if mgr.publisherID == publisherID {
+			return mgr
+		}
+		mgr.Stop()
+		delete(m.llhlsManagers, streamKey)
 	}
 
 	cfg := m.server.Config().HTTP.LLHLS
-	basePath := "/" + streamKey
-	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentCount, cfg.Container)
+	basePath := "/" + escapeStreamKeyPath(streamKey)
+	mgr := NewLLHLSManager(streamKey, basePath, cfg.PartDuration, cfg.SegmentDuration, cfg.SegmentCount, cfg.Container)
+	mgr.publisherID = publisherID
 	m.llhlsManagers[streamKey] = mgr
 	go mgr.Run(stream)
 	return mgr

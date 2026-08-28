@@ -9,7 +9,7 @@
 go build -o bin/lf-test ./tools/lf-test/
 
 # Push a test stream (uses embedded FLV source)
-./bin/lf-test push --protocol rtmp --target rtmp://127.0.0.1:1935/live/test --duration 5s
+./bin/lf-test push --protocol rtmp --target rtmp://127.0.0.1:1935/live/test --duration 5s --realtime
 
 # Play and assert video quality
 ./bin/lf-test play --protocol rtmp --url rtmp://127.0.0.1:1935/live/test \
@@ -38,6 +38,7 @@ lf-test push [flags]
 | `--target` | *(required)* | Target URL (e.g. `rtmp://host:1935/live/test`) |
 | `--duration` | `0` | Push duration (e.g. `5s`, `1m`); `0` = until source exhausted |
 | `--token` | | Auth token to include in the connection |
+| `--realtime` | `false` | Pace frames by their media timestamps; useful for lifecycle and recording tests |
 | `--assert` | | Assertion expression (repeatable) |
 | `--output` | auto | Output format: `human`, `json` (auto-detects from TTY) |
 | `--timeout` | `30s` | Overall timeout |

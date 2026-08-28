@@ -102,3 +102,23 @@ func (s *HTTPSource) Load(ctx context.Context, previous Version) (Snapshot, erro
 }
 
 func (s *HTTPSource) Close() error { return nil }
+
+func (s *HTTPSource) Write(ctx context.Context, data []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.url, strings.NewReader(string(data)))
+	if err != nil {
+		return fmt.Errorf("create config write request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/yaml")
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("write config endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("config endpoint returned HTTP %d for write", resp.StatusCode)
+	}
+	return nil
+}

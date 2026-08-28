@@ -27,6 +27,9 @@ func parseDocument(data []byte, expandEnvironment bool) (*config.Config, error) 
 	if expandEnvironment {
 		data = []byte(os.ExpandEnv(string(data)))
 	}
+	if err := config.ValidateRemovedSettings(data); err != nil {
+		return nil, err
+	}
 	cfg := config.Defaults()
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)

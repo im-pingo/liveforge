@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -247,6 +249,142 @@ func TestOriginPullFromMockServer(t *testing.T) {
 	// Check that frames were written to the stream
 	if stream.VideoSeqHeader() != nil {
 		t.Log("video sequence header received")
+	}
+}
+
+func TestClusterRTMPStalePublisherCallbackCannotWriteReplacementGeneration(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	playReady := make(chan struct{})
+	sendActive := make(chan struct{})
+	sendStale := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			serverErr <- acceptErr
+			return
+		}
+		serverErr <- serveControlledRTMPOrigin(conn, playReady, sendActive, sendStale)
+	}()
+
+	hub, _ := newTestHub()
+	stream, err := hub.GetOrCreate("live/stale-writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pullDone := make(chan error, 1)
+	go func() {
+		pullDone <- NewRTMPTransport().Pull(ctx, "rtmp://"+ln.Addr().String()+"/live/stale-writer", stream)
+	}()
+
+	select {
+	case <-playReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cluster RTMP pull did not reach play")
+	}
+	close(sendActive)
+	deadline := time.Now().Add(2 * time.Second)
+	for stream.RingBuffer().WriteCursor() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != 1 {
+		t.Fatalf("active cluster callback cursor = %d, want 1", got)
+	}
+	oldPublisher := stream.Publisher()
+	if oldPublisher == nil || !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("old cluster publisher was not removed")
+	}
+	replacement := &originPublisher{id: "cluster-replacement", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	startCursor := stream.StartupSnapshot().GenerationStartCursor
+	close(sendStale)
+
+	select {
+	case pullErr := <-pullDone:
+		if pullErr != nil {
+			t.Fatalf("cluster RTMP pull: %v", pullErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cluster RTMP pull did not stop after stale publisher write")
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != startCursor {
+		t.Fatalf("stale cluster callback advanced replacement cursor to %d, want %d", got, startCursor)
+	}
+}
+
+func serveControlledRTMPOrigin(conn net.Conn, playReady chan<- struct{}, sendActive, sendStale <-chan struct{}) error {
+	defer conn.Close()
+	c0c1 := make([]byte, 1+handshakeSize)
+	if _, err := io.ReadFull(conn, c0c1); err != nil {
+		return err
+	}
+	s0s1s2 := make([]byte, 1+2*handshakeSize)
+	s0s1s2[0] = 3
+	if _, err := conn.Write(s0s1s2); err != nil {
+		return err
+	}
+	c2 := make([]byte, handshakeSize)
+	if _, err := io.ReadFull(conn, c2); err != nil {
+		return err
+	}
+
+	cr := rtmp.NewChunkReader(conn, rtmp.DefaultChunkSize)
+	cw := rtmp.NewChunkWriter(conn, 4096)
+	for {
+		msg, err := cr.ReadMessage()
+		if err != nil {
+			return err
+		}
+		if msg.TypeID == rtmp.MsgSetChunkSize && len(msg.Payload) >= 4 {
+			cr.SetChunkSize(int(binary.BigEndian.Uint32(msg.Payload)))
+			continue
+		}
+		if msg.TypeID != rtmp.MsgAMF0Command {
+			continue
+		}
+		values, err := rtmp.AMF0Decode(msg.Payload)
+		if err != nil || len(values) < 2 {
+			continue
+		}
+		command, _ := values[0].(string)
+		transactionID, _ := values[1].(float64)
+		switch command {
+		case "connect", "createStream":
+			payload, _ := rtmp.AMF0Encode("_result", transactionID, nil, float64(1))
+			if err := cw.WriteMessage(3, &rtmp.Message{TypeID: rtmp.MsgAMF0Command, Length: uint32(len(payload)), Payload: payload}); err != nil {
+				return err
+			}
+		case "play":
+			close(playReady)
+			<-sendActive
+			active := []byte{0x17, 0x01, 0x00, 0x00, 0x00, 0x65, 0x01}
+			if err := cw.WriteMessage(6, &rtmp.Message{TypeID: rtmp.MsgVideo, Length: uint32(len(active)), StreamID: 1, Payload: active}); err != nil {
+				return err
+			}
+			<-sendStale
+			stale := []byte{0x17, 0x01, 0x00, 0x00, 0x00, 0x65, 0x02}
+			if err := cw.WriteMessage(6, &rtmp.Message{TypeID: rtmp.MsgVideo, Length: uint32(len(stale)), Timestamp: 33, StreamID: 1, Payload: stale}); err != nil {
+				return err
+			}
+			status, _ := rtmp.AMF0Encode("onStatus", float64(0), nil, map[string]any{"code": "NetStream.Play.Stop"})
+			if err := cw.WriteMessage(6, &rtmp.Message{TypeID: rtmp.MsgAMF0Command, Length: uint32(len(status)), StreamID: 1, Payload: status}); err != nil {
+				return err
+			}
+			return nil
+		default:
+			return fmt.Errorf("unexpected RTMP command %q", command)
+		}
 	}
 }
 

@@ -260,6 +260,54 @@ func TestForwardManagerDuplicatePublish(t *testing.T) {
 	}
 }
 
+func TestForwardManagerIgnoresStalePublisherStop(t *testing.T) {
+	hub, bus := newTestHub()
+	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), nil, nil, 1, time.Millisecond)
+	defer fm.Close()
+
+	stream, _ := hub.GetOrCreate("live/test")
+	pubA := &originPublisher{id: "publisher-a", info: &avframe.MediaInfo{}}
+	if err := stream.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+	if err := fm.onPublish(&core.EventContext{StreamKey: "live/test", PublisherID: pubA.ID()}); err != nil {
+		t.Fatal(err)
+	}
+	fm.mu.Lock()
+	targetsA := fm.active[stream.Key()]
+	fm.mu.Unlock()
+	if len(targetsA) != 1 {
+		t.Fatalf("publisher A targets = %d, want 1", len(targetsA))
+	}
+
+	if !stream.RemovePublisherIf(pubA) {
+		t.Fatal("publisher A was not removed")
+	}
+	pubB := &originPublisher{id: "publisher-b", info: &avframe.MediaInfo{}}
+	if err := stream.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	if err := fm.onPublish(&core.EventContext{StreamKey: stream.Key(), PublisherID: pubB.ID()}); err != nil {
+		t.Fatal(err)
+	}
+	fm.mu.Lock()
+	targetsB := fm.active[stream.Key()]
+	fm.mu.Unlock()
+	if len(targetsB) != 1 || targetsB[0] == targetsA[0] {
+		t.Fatal("publisher B did not replace publisher A forwarding targets")
+	}
+
+	if err := fm.onPublishStop(&core.EventContext{StreamKey: stream.Key(), PublisherID: pubA.ID()}); err != nil {
+		t.Fatal(err)
+	}
+	fm.mu.Lock()
+	current := fm.active[stream.Key()]
+	fm.mu.Unlock()
+	if len(current) != 1 || current[0] != targetsB[0] {
+		t.Fatal("stale publisher stop removed publisher B forwarding targets")
+	}
+}
+
 func TestForwardManagerClose(t *testing.T) {
 	hub, bus := newTestHub()
 	fm := NewForwardManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live/stream"}, "", 0), newTestRegistry(), nil, nil, 1, time.Millisecond)

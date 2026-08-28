@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -13,16 +14,19 @@ import (
 
 // TranscodedTrack holds a ring buffer for a specific target codec.
 type TranscodedTrack struct {
-	targetCodec avframe.CodecType
-	ringBuffer  *util.RingBuffer[*avframe.AVFrame]
-	sourceStart int64
-	subCount    int
-	cancel      context.CancelFunc
+	targetCodec   avframe.CodecType
+	ringBuffer    *util.RingBuffer[*avframe.AVFrame]
+	sourceStart   int64
+	sourceCursor  atomic.Int64
+	sourceMu      sync.Mutex
+	sourceAdvance chan struct{}
+	subCount      int
+	cancel        context.CancelFunc
 }
 
 // TranscodeManager creates and manages on-demand audio transcoding goroutines.
 // It is attached to a Stream and creates TranscodedTracks lazily when a subscriber
-// requests a codec different from the publisher's.
+// requests conversion or needs to follow same-generation source codec epochs.
 type TranscodeManager struct {
 	mu          sync.Mutex
 	tracks      map[avframe.CodecType]*TranscodedTrack // legacy audio + video tracks
@@ -48,7 +52,7 @@ func NewTranscodeManager(stream *Stream, registry *audiocodec.Registry, bufSize 
 // Otherwise it creates or reuses a shared TranscodedTrack.
 // The returned func must be called to release the subscription.
 func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, tm.stream.RingBuffer().WriteCursor(), false, false)
+	return tm.getOrCreateReaderAt(targetCodec, tm.stream.RingBuffer().WriteCursor(), 0, false, false, false, nil)
 }
 
 // GetOrCreateReaderAt returns a reader whose newly-created transcode track
@@ -56,37 +60,62 @@ func (tm *TranscodeManager) GetOrCreateReader(targetCodec avframe.CodecType) (*u
 // output cursor; use GetOrCreateReaderAtFromHistory when a snapshot subscriber
 // must consume already-produced output as well.
 func (tm *TranscodeManager) GetOrCreateReaderAt(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, sourceStart, false, false)
+	return tm.getOrCreateReaderAt(targetCodec, sourceStart, 0, false, false, false, nil)
 }
 
 // GetOrCreateReaderAtFromHistory returns a combined audio/video transcode
-// reader that includes the oldest output retained by the shared track. HTTP
-// muxers use this to replay converted audio from the cached GOP before they
-// continue with live frames; ordinary subscribers should use
-// GetOrCreateReaderAt and start at the current output cursor.
-func (tm *TranscodeManager) GetOrCreateReaderAtFromHistory(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, sourceStart, false, true)
+// reader that includes retained source video and target audio no older than
+// snapshot's audio codec epoch. HLS, LL-HLS, and DASH use this compatibility
+// path to transform the captured GOP without replaying stale audio epochs.
+func (tm *TranscodeManager) GetOrCreateReaderAtFromHistory(targetCodec avframe.CodecType, snapshot StreamStartupSnapshot) (*util.RingReader[*avframe.AVFrame], func(), error) {
+	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, false, true, false, &snapshot)
 }
 
-// GetOrCreateAudioReaderAt returns a target-codec audio-only reader starting
-// at sourceStart. WHEP uses it when source video is read from a separate ring
-// cursor and the negotiated audio track needs a different codec.
-func (tm *TranscodeManager) GetOrCreateAudioReaderAt(targetCodec avframe.CodecType, sourceStart int64) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	return tm.getOrCreateReaderAt(targetCodec, sourceStart, true, false)
+// GetOrCreateAudioReaderAt returns a target-codec audio-only reader sourced
+// from snapshot. RTMP and WHEP use it when direct video has a separate cursor.
+// The reader cannot emit audio older than snapshot's current codec epoch.
+func (tm *TranscodeManager) GetOrCreateAudioReaderAt(targetCodec avframe.CodecType, snapshot StreamStartupSnapshot) (*util.RingReader[*avframe.AVFrame], func(), error) {
+	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, true, false, true, &snapshot)
 }
 
-func (tm *TranscodeManager) getOrCreateReaderAt(targetCodec avframe.CodecType, sourceStart int64, audioOnly, fromHistory bool) (*util.RingReader[*avframe.AVFrame], func(), error) {
-	pub := tm.stream.Publisher()
-	if pub == nil {
+// GetOrCreateAudioReaderAtFromHistory returns an audio-only target-codec
+// reader at retained output from snapshot's current audio epoch. Snapshot
+// muxers use it to transform cached audio without pulling direct video behind
+// the snapshot's live cursor.
+func (tm *TranscodeManager) GetOrCreateAudioReaderAtFromHistory(targetCodec avframe.CodecType, snapshot StreamStartupSnapshot) (*util.RingReader[*avframe.AVFrame], func(), error) {
+	return tm.getOrCreateReaderAt(targetCodec, snapshot.SourceCursor, snapshot.audioCodecEpoch, true, true, true, &snapshot)
+}
+
+func (tm *TranscodeManager) getOrCreateReaderAt(
+	targetCodec avframe.CodecType,
+	sourceStart int64,
+	audioEpochFloor uint64,
+	audioOnly bool,
+	fromHistory bool,
+	forceTrack bool,
+	snapshot *StreamStartupSnapshot,
+) (*util.RingReader[*avframe.AVFrame], func(), error) {
+	// SetPublisher takes these locks in the same order while Reset removes old
+	// tracks. Holding the stream lock through track lookup/creation makes the
+	// snapshot generation check and map mutation one atomic acquisition.
+	tm.stream.mu.RLock()
+	defer tm.stream.mu.RUnlock()
+	if tm.stream.state != StreamStatePublishing || isNilPublisher(tm.stream.publisher) {
 		return nil, func() {}, fmt.Errorf("no publisher on stream")
 	}
+	if snapshot != nil && tm.stream.publisherGeneration != snapshot.Generation {
+		return nil, func() {}, fmt.Errorf(
+			"stale stream startup snapshot generation %d (active %d)",
+			snapshot.Generation,
+			tm.stream.publisherGeneration,
+		)
+	}
 
-	sourceCodec := pub.MediaInfo().AudioCodec
+	sourceCodec := tm.stream.mediaInfo.AudioCodec
 
 	// Zero-overhead path: target matches source, no transcoding needed.
-	if targetCodec == sourceCodec {
-		rb := tm.stream.RingBuffer()
-		reader := rb.NewReaderAt(sourceStart)
+	if targetCodec == sourceCodec && !forceTrack {
+		reader := tm.stream.ringBuffer.NewReaderAt(sourceStart)
 		return reader, func() {}, nil
 	}
 
@@ -100,42 +129,133 @@ func (tm *TranscodeManager) getOrCreateReaderAt(targetCodec avframe.CodecType, s
 
 	if track, ok := tracks[targetCodec]; ok {
 		track.subCount++
-		reader := track.ringBuffer.NewReaderAt(track.ringBuffer.WriteCursor())
-		if fromHistory {
-			reader = track.ringBuffer.NewReader()
-		}
+		reader, stopReader := tm.newTrackReader(track, fromHistory, audioEpochFloor)
 		var once sync.Once
-		release := func() { once.Do(func() { tm.releaseTrack(targetCodec, audioOnly) }) }
+		release := func() {
+			once.Do(func() {
+				stopReader()
+				tm.releaseTrack(targetCodec, audioOnly, track)
+			})
+		}
 		return reader, release, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	track := &TranscodedTrack{
-		targetCodec: targetCodec,
-		ringBuffer:  util.NewRingBuffer[*avframe.AVFrame](tm.bufSize),
-		sourceStart: sourceStart,
-		subCount:    1,
-		cancel:      cancel,
+		targetCodec:   targetCodec,
+		ringBuffer:    util.NewRingBuffer[*avframe.AVFrame](tm.bufSize),
+		sourceStart:   sourceStart,
+		subCount:      1,
+		cancel:        cancel,
+		sourceAdvance: make(chan struct{}),
 	}
+	track.sourceCursor.Store(sourceStart)
 	tracks[targetCodec] = track
 
-	go tm.transcodeLoop(ctx, track, sourceCodec, sourceStart, audioOnly)
-
-	reader := track.ringBuffer.NewReaderAt(track.ringBuffer.WriteCursor())
-	if fromHistory {
-		// A newly-created track may produce the sequence header and cached source
-		// frames before the caller starts consuming it. Start at the oldest output
-		// still retained by the track so snapshot subscribers do not lose the
-		// cached audio/video needed for their first segment.
-		reader = track.ringBuffer.NewReader()
-	}
+	// Attach the first reader before starting the producer so a non-history
+	// subscriber cannot race and miss the generated target sequence header.
+	reader, stopReader := tm.newTrackReader(track, fromHistory, audioEpochFloor)
+	go tm.transcodeLoop(ctx, track, sourceStart, audioEpochFloor, audioOnly)
 	var once sync.Once
-	release := func() { once.Do(func() { tm.releaseTrack(targetCodec, audioOnly) }) }
+	release := func() {
+		once.Do(func() {
+			stopReader()
+			tm.releaseTrack(targetCodec, audioOnly, track)
+		})
+	}
 	return reader, release, nil
 }
 
+// WaitForSourceCursor waits until a combined transcode track has consumed all
+// source frames before sourceCursor. It is used by finite consumers, such as
+// recording, when they need to drain generated output after stopping input.
+func (tm *TranscodeManager) WaitForSourceCursor(targetCodec avframe.CodecType, sourceCursor int64, ctx context.Context) bool {
+	if sourceCursor <= 0 {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		tm.mu.Lock()
+		track := tm.tracks[targetCodec]
+		tm.mu.Unlock()
+		if track == nil {
+			return false
+		}
+		track.sourceMu.Lock()
+		current := track.sourceCursor.Load()
+		advance := track.sourceAdvance
+		track.sourceMu.Unlock()
+		if current >= sourceCursor {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-advance:
+		}
+	}
+}
+
+func (track *TranscodedTrack) advanceSourceCursor(cursor int64) {
+	track.sourceMu.Lock()
+	defer track.sourceMu.Unlock()
+	if cursor <= track.sourceCursor.Load() {
+		return
+	}
+	track.sourceCursor.Store(cursor)
+	close(track.sourceAdvance)
+	track.sourceAdvance = make(chan struct{})
+}
+
+func (tm *TranscodeManager) newTrackReader(
+	track *TranscodedTrack,
+	fromHistory bool,
+	audioEpochFloor uint64,
+) (*util.RingReader[*avframe.AVFrame], func()) {
+	sharedReader := track.ringBuffer.NewReaderAt(track.ringBuffer.WriteCursor())
+	if fromHistory {
+		sharedReader = track.ringBuffer.NewReader()
+	}
+	if audioEpochFloor == 0 {
+		return sharedReader, func() { sharedReader.Close() }
+	}
+
+	// A reader-local ring preserves shared producer ownership while enforcing
+	// the snapshot's audio epoch floor. Source video remains unfiltered for the
+	// legacy combined-track consumers.
+	filtered := util.NewRingBuffer[*avframe.AVFrame](tm.bufSize)
+	reader := filtered.NewReader()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer filtered.Close()
+		defer sharedReader.Close()
+		for {
+			frame, ok := sharedReader.ReadContext(ctx)
+			if !ok {
+				return
+			}
+			if frame != nil && frame.MediaType.IsAudio() && frame.AudioCodecEpoch < audioEpochFloor {
+				continue
+			}
+			filtered.Write(frame)
+		}
+	}()
+	var once sync.Once
+	return reader, func() {
+		once.Do(func() {
+			cancel()
+			sharedReader.Close()
+			<-done
+		})
+	}
+}
+
 // releaseTrack decrements the subscriber count for a track and cleans it up when empty.
-func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnly bool) {
+func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnly bool, acquired *TranscodedTrack) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -144,7 +264,7 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnl
 		tracks = tm.audioTracks
 	}
 	track, ok := tracks[targetCodec]
-	if !ok {
+	if !ok || track != acquired {
 		return
 	}
 	track.subCount--
@@ -154,14 +274,148 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnl
 	}
 }
 
+type audioTranscodePipeline struct {
+	registry    *audiocodec.Registry
+	track       *TranscodedTrack
+	sourceCodec avframe.CodecType
+	sourceEpoch uint64
+	decoder     audiocodec.Decoder
+	encoder     audiocodec.Encoder
+	resampler   audiocodec.Resampler
+	resampled   bool
+	ts          audiocodec.TsTracker
+	tsInited    bool
+	pcmBuf      []int16
+}
+
+func (tm *TranscodeManager) newAudioTranscodePipeline(
+	track *TranscodedTrack,
+	sourceCodec avframe.CodecType,
+	sourceEpoch uint64,
+) (*audioTranscodePipeline, error) {
+	decoder, err := tm.registry.NewDecoder(sourceCodec)
+	if err != nil {
+		return nil, err
+	}
+	encoder, err := tm.registry.NewEncoder(track.targetCodec)
+	if err != nil {
+		decoder.Close()
+		return nil, err
+	}
+	pipeline := &audioTranscodePipeline{
+		registry:    tm.registry,
+		track:       track,
+		sourceCodec: sourceCodec,
+		sourceEpoch: sourceEpoch,
+		decoder:     decoder,
+		encoder:     encoder,
+	}
+	if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil &&
+		seqHeader.Codec == sourceCodec &&
+		(seqHeader.AudioCodecEpoch == 0 || seqHeader.AudioCodecEpoch == sourceEpoch) {
+		decoder.SetExtradata(seqHeader.Payload)
+	}
+	return pipeline, nil
+}
+
+func (p *audioTranscodePipeline) close() {
+	if p.resampler != nil {
+		p.resampler.Close()
+	}
+	p.decoder.Close()
+	p.encoder.Close()
+}
+
+func (p *audioTranscodePipeline) writeSequenceHeader(dts int64) {
+	writeTranscodeSequenceHeader(p.registry, p.track, p.sourceEpoch, dts)
+}
+
+func writeTranscodeSequenceHeader(registry *audiocodec.Registry, track *TranscodedTrack, epoch uint64, dts int64) {
+	seqHdr := registry.SequenceHeader(track.targetCodec)
+	if seqHdr == nil {
+		return
+	}
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, track.targetCodec,
+		avframe.FrameTypeSequenceHeader, dts, dts, seqHdr,
+	)
+	frame.AudioCodecEpoch = epoch
+	frame.AudioProvenance = avframe.FrameProvenanceTranscoded
+	track.ringBuffer.Write(frame)
+}
+
+func (p *audioTranscodePipeline) writeEncoded(dts int64, payload []byte) {
+	frame := avframe.NewAVFrame(
+		avframe.MediaTypeAudio, p.track.targetCodec,
+		avframe.FrameTypeInterframe, dts, dts, payload,
+	)
+	frame.AudioCodecEpoch = p.sourceEpoch
+	frame.AudioProvenance = avframe.FrameProvenanceTranscoded
+	p.track.ringBuffer.Write(frame)
+}
+
+func (p *audioTranscodePipeline) encode(frame *avframe.AVFrame) {
+	if !p.tsInited {
+		p.ts.Init(frame.DTS, p.encoder.SampleRate())
+		p.tsInited = true
+	}
+
+	pcm, err := p.decoder.Decode(frame.Payload)
+	if err != nil {
+		return
+	}
+	if !p.resampled {
+		if pcm.SampleRate != p.encoder.SampleRate() || pcm.Channels != p.encoder.Channels() {
+			p.resampler = p.registry.NewResampler(
+				pcm.SampleRate, pcm.Channels,
+				p.encoder.SampleRate(), p.encoder.Channels(),
+			)
+		}
+		p.resampled = true
+	}
+	if p.resampler != nil {
+		pcm = p.resampler.Resample(pcm)
+	}
+
+	frameSize := p.encoder.FrameSize() * p.encoder.Channels()
+	if frameSize == 0 {
+		encoded, encErr := p.encoder.Encode(&audiocodec.PCMFrame{
+			Samples: pcm.Samples, SampleRate: p.encoder.SampleRate(), Channels: p.encoder.Channels(),
+		})
+		if encErr != nil {
+			return
+		}
+		samplesPerChannel := len(pcm.Samples) / p.encoder.Channels()
+		p.writeEncoded(p.ts.Next(samplesPerChannel), encoded)
+		return
+	}
+
+	p.pcmBuf = append(p.pcmBuf, pcm.Samples...)
+	const maxPCMBufSamples = 48000 * 2
+	if len(p.pcmBuf) > maxPCMBufSamples {
+		p.pcmBuf = p.pcmBuf[len(p.pcmBuf)-maxPCMBufSamples:]
+	}
+	for len(p.pcmBuf) >= frameSize {
+		encoded, encErr := p.encoder.Encode(&audiocodec.PCMFrame{
+			Samples: p.pcmBuf[:frameSize], SampleRate: p.encoder.SampleRate(), Channels: p.encoder.Channels(),
+		})
+		p.pcmBuf = p.pcmBuf[frameSize:]
+		if encErr != nil {
+			continue
+		}
+		p.writeEncoded(p.ts.Next(p.encoder.FrameSize()), encoded)
+	}
+}
+
 // transcodeLoop is the core decode-resample-encode pipeline for a single target codec.
-// sourceCodec is passed in to avoid a TOCTOU race on Publisher().
+// Each source codec epoch owns fresh decoder, encoder, resampler, timestamp,
+// and PCM state while the shared track itself remains reference counted.
 //
 // Architecture: inline processing to minimize audio delivery jitter. Each
 // source audio frame is decoded/resampled/encoded inline. Combined tracks
-// retain source video passthrough for container muxers and RTMP subscribers;
-// audio-only tracks are reserved for WebRTC feeds whose video comes from a
-// separate source-ring reader.
+// retain source video passthrough for the segmenter compatibility paths;
+// audio-only tracks serve subscribers and shared muxers whose video comes from
+// a separate source-ring reader.
 //
 // This limits the maximum video delivery delay to one audio encode
 // operation (~0.5ms) rather than batching N encodes which blocks video
@@ -169,118 +423,23 @@ func (tm *TranscodeManager) releaseTrack(targetCodec avframe.CodecType, audioOnl
 // irregularities via EWMA, so even small periodic delays compound over
 // minutes into large jitter buffer growth. The ring buffer remains
 // single-producer (this goroutine only), avoiding data races.
-func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *TranscodedTrack, sourceCodec avframe.CodecType, sourceStart int64, audioOnly bool) {
-	decoder, err := tm.registry.NewDecoder(sourceCodec)
-	if err != nil {
-		slog.Error("transcode: decoder unavailable", "from", sourceCodec, "error", err)
-		track.ringBuffer.Close()
-		return
-	}
-	encoder, err := tm.registry.NewEncoder(track.targetCodec)
-	if err != nil {
-		slog.Error("transcode: encoder unavailable", "to", track.targetCodec, "error", err)
-		decoder.Close()
-		track.ringBuffer.Close()
-		return
-	}
-	defer decoder.Close()
-	defer encoder.Close()
-
-	// Set extradata for codecs that need it (e.g. AAC AudioSpecificConfig)
-	if seqHeader := tm.stream.AudioSeqHeader(); seqHeader != nil {
-		decoder.SetExtradata(seqHeader.Payload)
-	}
-
-	// Resampler is created lazily after the first successful decode
-	var resampler audiocodec.Resampler
-	resamplerInited := false
-
-	// Emit sequence header for target codec
-	if seqHdr := tm.registry.SequenceHeader(track.targetCodec); seqHdr != nil {
-		track.ringBuffer.Write(avframe.NewAVFrame(
-			avframe.MediaTypeAudio, track.targetCodec,
-			avframe.FrameTypeSequenceHeader, 0, 0, seqHdr,
-		))
-	}
-
-	var ts audiocodec.TsTracker
-	tsInited := false
-	var pcmBuf []int16
-	frameSize := encoder.FrameSize() * encoder.Channels()
-	const maxPCMBufSamples = 48000 * 2 // cap at ~1s of 48kHz stereo
-
-	// encodeAudio processes a single audio frame through the decode-resample-encode pipeline.
-	encodeAudio := func(frame *avframe.AVFrame) {
-		if !tsInited {
-			ts.Init(frame.DTS, encoder.SampleRate())
-			tsInited = true
+func (tm *TranscodeManager) transcodeLoop(
+	ctx context.Context,
+	track *TranscodedTrack,
+	sourceStart int64,
+	audioEpochFloor uint64,
+	audioOnly bool,
+) {
+	var pipeline *audioTranscodePipeline
+	var sourceCodec avframe.CodecType
+	var sourceEpoch uint64
+	writeTranscodeSequenceHeader(tm.registry, track, audioEpochFloor, 0)
+	defer func() {
+		if pipeline != nil {
+			pipeline.close()
 		}
-
-		pcm, decErr := decoder.Decode(frame.Payload)
-		if decErr != nil {
-			return
-		}
-
-		if !resamplerInited {
-			if pcm.SampleRate != encoder.SampleRate() ||
-				pcm.Channels != encoder.Channels() {
-				resampler = tm.registry.NewResampler(
-					pcm.SampleRate, pcm.Channels,
-					encoder.SampleRate(), encoder.Channels(),
-				)
-			}
-			resamplerInited = true
-		}
-
-		if resampler != nil {
-			pcm = resampler.Resample(pcm)
-		}
-
-		if frameSize == 0 {
-			chunk := &audiocodec.PCMFrame{
-				Samples:    pcm.Samples,
-				SampleRate: encoder.SampleRate(),
-				Channels:   encoder.Channels(),
-			}
-			encoded, encErr := encoder.Encode(chunk)
-			if encErr != nil {
-				return
-			}
-			samplesPerChannel := len(pcm.Samples) / encoder.Channels()
-			dts := ts.Next(samplesPerChannel)
-			track.ringBuffer.Write(avframe.NewAVFrame(
-				avframe.MediaTypeAudio, track.targetCodec,
-				avframe.FrameTypeInterframe,
-				dts, dts,
-				encoded,
-			))
-		} else {
-			pcmBuf = append(pcmBuf, pcm.Samples...)
-			if len(pcmBuf) > maxPCMBufSamples {
-				pcmBuf = pcmBuf[len(pcmBuf)-maxPCMBufSamples:]
-			}
-			for len(pcmBuf) >= frameSize {
-				chunk := &audiocodec.PCMFrame{
-					Samples:    pcmBuf[:frameSize],
-					SampleRate: encoder.SampleRate(),
-					Channels:   encoder.Channels(),
-				}
-				encoded, encErr := encoder.Encode(chunk)
-				if encErr != nil {
-					pcmBuf = pcmBuf[frameSize:]
-					continue
-				}
-				dts := ts.Next(encoder.FrameSize())
-				track.ringBuffer.Write(avframe.NewAVFrame(
-					avframe.MediaTypeAudio, track.targetCodec,
-					avframe.FrameTypeInterframe,
-					dts, dts,
-					encoded,
-				))
-				pcmBuf = pcmBuf[frameSize:]
-			}
-		}
-	}
+	}()
+	defer track.ringBuffer.Close()
 
 	reader := tm.stream.RingBuffer().NewReaderAt(sourceStart)
 	// RingBuffer.Signal is a single legacy notification channel shared by all
@@ -308,10 +467,6 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 		// encoding compound over minutes into large jitter buffer growth.
 		frame, ok := reader.Read()
 		if !ok {
-			if resampler != nil {
-				resampler.Close()
-			}
-			track.ringBuffer.Close()
 			return
 		}
 		for {
@@ -320,11 +475,47 @@ func (tm *TranscodeManager) transcodeLoop(ctx context.Context, track *Transcoded
 					// Legacy reader: pass video through without encoding.
 					track.ringBuffer.Write(frame)
 				}
-			} else if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				// Skip source audio sequence headers.
-			} else {
-				encodeAudio(frame)
+			} else if frame.MediaType.IsAudio() {
+				frameEpoch := frame.AudioCodecEpoch
+				if frameEpoch == 0 {
+					frameEpoch = sourceEpoch
+				}
+				if frameEpoch < audioEpochFloor {
+					track.advanceSourceCursor(reader.ReadCursor())
+					frame, ok = reader.TryRead()
+					if !ok {
+						break
+					}
+					continue
+				}
+				if frame.Codec != sourceCodec || frameEpoch != sourceEpoch {
+					firstAudioEpoch := sourceCodec == 0
+					if pipeline != nil {
+						pipeline.close()
+						pipeline = nil
+					}
+					sourceCodec = frame.Codec
+					sourceEpoch = frameEpoch
+					if sourceCodec != track.targetCodec {
+						var pipelineErr error
+						pipeline, pipelineErr = tm.newAudioTranscodePipeline(track, sourceCodec, sourceEpoch)
+						if pipelineErr != nil {
+							slog.Warn("transcode: codec epoch unavailable", "from", sourceCodec, "to", track.targetCodec, "epoch", sourceEpoch, "error", pipelineErr)
+						} else if !firstAudioEpoch || sourceEpoch != audioEpochFloor {
+							pipeline.writeSequenceHeader(frame.DTS)
+						}
+					}
+				}
+
+				if frame.Codec == track.targetCodec {
+					track.ringBuffer.Write(frame)
+				} else if pipeline != nil && frame.FrameType == avframe.FrameTypeSequenceHeader {
+					pipeline.decoder.SetExtradata(frame.Payload)
+				} else if pipeline != nil {
+					pipeline.encode(frame)
+				}
 			}
+			track.advanceSourceCursor(reader.ReadCursor())
 
 			frame, ok = reader.TryRead()
 			if !ok {

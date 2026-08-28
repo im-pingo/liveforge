@@ -151,12 +151,17 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 	if err != nil {
 		return fmt.Errorf("parse RTP URL: %w", err)
 	}
-
-	pub := stream.Publisher()
-	if pub == nil {
-		return fmt.Errorf("stream has no publisher")
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
 	}
-	mi := pub.MediaInfo()
+	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
+	defer cancelGeneration()
+
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
+	mi := &snapshot.MediaInfo
 
 	// Build SDP offer from stream media info.
 	sd := sdp.BuildFromMediaInfo(mi, targetURL, "0.0.0.0")
@@ -164,7 +169,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	// POST SDP offer to signaling endpoint.
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s", host, t.cfg.SignalingPath, url.QueryEscape(streamKey))
-	answerBody, err := t.postSDP(ctx, sigURL, offerSDP)
+	answerBody, err := t.postSDP(relayCtx, sigURL, offerSDP)
 	if err != nil {
 		return fmt.Errorf("signaling POST to %s: %w", sigURL, err)
 	}
@@ -198,7 +203,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 	defer close(done)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-relayCtx.Done():
 			udpConn.Close()
 		case <-done:
 			udpConn.Close()
@@ -207,7 +212,10 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	slog.Info("rtp relay push connected", "module", "cluster",
 		"target", targetURL, "remote", remoteAddr, "local_port", localPort)
-	markRelayConnected(ctx)
+	markRelayConnected(relayCtx)
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return nil
+	}
 
 	// Build packetizers and sessions per codec.
 	var videoSession, audioSession *pkgrtp.Session
@@ -249,18 +257,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 		}
 	}()
 
-	reader := stream.RingBuffer().NewReader()
-	for {
-		frame, ok := reader.ReadContext(ctx)
-		if !ok {
-			sendBYE(udpConn, videoSession, audioSession)
-			return nil
-		}
-
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			continue
-		}
-
+	sendFrame := func(frame *avframe.AVFrame) error {
 		var pkt pkgrtp.Packetizer
 		var session *pkgrtp.Session
 
@@ -271,15 +268,13 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 			pkt = audioPkt
 			session = audioSession
 		} else {
-			continue
+			return nil
 		}
-
 		rtpPackets, err := pkt.Packetize(frame, pkgrtp.DefaultMTU)
 		if err != nil {
-			continue
+			return nil
 		}
 		session.WrapPackets(rtpPackets, frame.DTS)
-
 		for _, p := range rtpPackets {
 			raw, err := p.Marshal()
 			if err != nil {
@@ -287,12 +282,44 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 			}
 			n, err := udpConn.Write(raw)
 			if err != nil {
-				if ctx.Err() != nil {
+				if relayCtx.Err() != nil {
 					return nil
 				}
 				return fmt.Errorf("udp write: %w", err)
 			}
-			recordRelayBytes(ctx, int64(n))
+			recordRelayBytes(relayCtx, int64(n))
+		}
+		return nil
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		if err := sendFrame(frame); err != nil {
+			return err
+		}
+	}
+
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+	for {
+		frame, ok := reader.ReadContext(relayCtx)
+		if !ok {
+			sendBYE(udpConn, videoSession, audioSession)
+			return nil
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return nil
+		}
+
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+
+		if err := sendFrame(frame); err != nil {
+			return err
 		}
 	}
 }
@@ -509,7 +536,9 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 			continue
 		}
 
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+			return nil
+		}
 	}
 }
 
@@ -591,7 +620,12 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 	}
 
 	stream, ok := t.hub.Find(streamKey)
-	if !ok || stream.Publisher() == nil {
+	if !ok {
+		http.Error(w, "stream not found or no publisher", http.StatusNotFound)
+		return
+	}
+	snapshot := stream.StartupSnapshot()
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		http.Error(w, "stream not found or no publisher", http.StatusNotFound)
 		return
 	}
@@ -621,7 +655,7 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	mi := stream.Publisher().MediaInfo()
+	mi := &snapshot.MediaInfo
 
 	// Build answer SDP from our stream info.
 	answerSD := sdp.BuildFromMediaInfo(mi, "", getLocalIP())
@@ -630,7 +664,7 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 		"stream", streamKey, "remote", remoteAddr)
 
 	// Start a goroutine to send RTP to the remote node.
-	go t.sendRTP(stream, remoteAddr)
+	go t.sendRTP(stream, snapshot, remoteAddr)
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.WriteHeader(http.StatusOK)
@@ -731,12 +765,16 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 			continue
 		}
 
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
+			return
+		}
 	}
 }
 
 // sendRTP reads from a stream and sends RTP to the remote address.
-func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
+func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupSnapshot, remoteAddr *net.UDPAddr) {
+	ctx, cancelGeneration := bindRelayGeneration(context.Background(), snapshot)
+	defer cancelGeneration()
 	localPort, err := t.ports.Allocate()
 	if err != nil {
 		slog.Warn("rtp send: allocate port failed", "module", "cluster", "error", err)
@@ -752,11 +790,10 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
 	}
 	defer udpConn.Close()
 
-	pub := stream.Publisher()
-	if pub == nil {
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return
 	}
-	mi := pub.MediaInfo()
+	mi := &snapshot.MediaInfo
 
 	var videoSession, audioSession *pkgrtp.Session
 	var videoPkt, audioPkt pkgrtp.Packetizer
@@ -782,7 +819,7 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-srDone:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				if videoSession != nil {
@@ -797,22 +834,10 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
 		}
 	}()
 
-	reader := stream.RingBuffer().NewReader()
-	for {
-		frame, ok := reader.TryRead()
-		if !ok {
-			waitCtx, cancel := context.WithTimeout(context.Background(), t.cfg.Timeout)
-			frame, ok = reader.ReadContext(waitCtx)
-			cancel()
-			if !ok {
-				sendBYE(udpConn, videoSession, audioSession)
-				return
-			}
-		}
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			continue
-		}
-
+	if !stream.IsPublisherGeneration(snapshot.Generation) {
+		return
+	}
+	sendFrame := func(frame *avframe.AVFrame) error {
 		var pkt pkgrtp.Packetizer
 		var session *pkgrtp.Session
 
@@ -823,23 +848,52 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, remoteAddr *net.UDPAddr) {
 			pkt = audioPkt
 			session = audioSession
 		} else {
-			continue
+			return nil
 		}
-
 		rtpPackets, err := pkt.Packetize(frame, pkgrtp.DefaultMTU)
 		if err != nil {
-			continue
+			return nil
 		}
 		session.WrapPackets(rtpPackets, frame.DTS)
-
 		for _, p := range rtpPackets {
 			raw, err := p.Marshal()
 			if err != nil {
 				continue
 			}
 			if _, err := udpConn.Write(raw); err != nil {
-				return
+				return err
 			}
+		}
+		return nil
+	}
+	for _, frame := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+		if err := sendFrame(frame); err != nil {
+			return
+		}
+	}
+
+	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
+	for {
+		frame, ok := reader.ReadContext(ctx)
+		if !ok {
+			sendBYE(udpConn, videoSession, audioSession)
+			return
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			continue
+		}
+
+		if err := sendFrame(frame); err != nil {
+			return
 		}
 	}
 }

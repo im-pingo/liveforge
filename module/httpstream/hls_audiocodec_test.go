@@ -79,3 +79,98 @@ func TestHLSManagerTranscodesCachedOpusIntoFirstSegment(t *testing.T) {
 		t.Fatal("first HLS segment has no transcoded AAC audio from cached Opus")
 	}
 }
+
+// Catches a codec-boundary return closing the combined transcode reader before
+// it can pass later direct video frames to a segmenter.
+func TestHLSManagerCodecSwitchKeepsCombinedVideoReaderPlaying(t *testing.T) {
+	stream := newMuxerWorkerStream(t, avframe.CodecG711U)
+	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 256))
+
+	mgr := NewHLSManager("live/hls-codec-switch", "/live/hls-codec-switch", 1, 5)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		100, 100, []byte{0x12, 0x10},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+		120, 120, []byte{0x21, 0x10},
+	))
+	for _, dts := range []int64{1000, 2000} {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			dts, dts, []byte{0, 0, 0, 2, 0x65, byte(dts / 1000)},
+		))
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 2 && time.Now().Before(deadline) {
+		select {
+		case <-done:
+			t.Fatalf("HLS combined transform reader stopped at the AAC codec boundary with %d segments", mgr.SegmentCount())
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if mgr.SegmentCount() < 2 {
+		t.Fatalf("HLS segment count = %d, want 2 after post-switch video keyframes", mgr.SegmentCount())
+	}
+	segment, ok := mgr.GetSegment(1)
+	if !ok {
+		t.Fatal("HLS did not retain the post-switch video segment")
+	}
+	videoFrames := 0
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.MediaType.IsVideo() {
+			videoFrames++
+		}
+	})
+	demuxer.Feed(segment)
+	demuxer.Flush()
+	if videoFrames == 0 {
+		t.Fatal("post-switch HLS segment contains no direct video")
+	}
+
+	// Catches tying the shared combined producer lifetime to a worker-local
+	// direct-audio handoff. Returning to G.711 must keep HLS/DASH-style readers
+	// alive and preserve their source-video passthrough.
+	for i := range 12 {
+		dts := int64(2100 + i*20)
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
+			dts, dts, make([]byte, 160),
+		))
+	}
+	for _, dts := range []int64{3000, 4000} {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			dts, dts, []byte{0, 0, 0, 2, 0x65, byte(dts / 1000)},
+		))
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for mgr.SegmentCount() < 4 && time.Now().Before(deadline) {
+		select {
+		case <-done:
+			t.Fatalf("HLS combined transform reader stopped after the source returned to G.711 with %d segments", mgr.SegmentCount())
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if mgr.SegmentCount() < 4 {
+		t.Fatalf("HLS segment count = %d, want 4 after the reverse codec switch", mgr.SegmentCount())
+	}
+}

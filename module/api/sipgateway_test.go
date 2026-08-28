@@ -42,6 +42,11 @@ func (m *sipGatewayStub) Dial(_ context.Context, target, stream string) (string,
 	return "outbound-1", nil
 }
 func (m *sipGatewayStub) Hangup(id string) error { m.hungup = id; delete(m.calls, id); return nil }
+func (m *sipGatewayStub) StartLabSession(context.Context, sipgateway.LabSessionRequest) (sipgateway.LabSessionSnapshot, error) {
+	return sipgateway.LabSessionSnapshot{}, nil
+}
+func (m *sipGatewayStub) ListLabSessions() []sipgateway.LabSessionSnapshot { return nil }
+func (m *sipGatewayStub) StopLabSession(string) error                      { return nil }
 func (m *sipGatewayStub) Metrics() sipgateway.MetricsSnapshot {
 	return sipgateway.MetricsSnapshot{ActiveCalls: len(m.calls)}
 }

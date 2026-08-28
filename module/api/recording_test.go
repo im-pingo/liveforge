@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -125,9 +126,44 @@ func TestRecordingManagementHandlers(t *testing.T) {
 	}
 }
 
+func TestRecordingManagementReportsDisabledWithoutModule(t *testing.T) {
+	server := core.NewServer(newTestConfig())
+	h := NewHandlers(server)
+
+	list := httptest.NewRecorder()
+	h.handleRecordings(list, httptest.NewRequest(http.MethodGet, "/api/v1/recordings", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("disabled list status=%d body=%s", list.Code, list.Body.String())
+	}
+	var listEnvelope struct {
+		Data []record.RecordingInfo `json:"data"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listEnvelope); err != nil {
+		t.Fatalf("decode disabled list: %v", err)
+	}
+	if len(listEnvelope.Data) != 0 {
+		t.Fatalf("disabled list = %#v, want empty", listEnvelope.Data)
+	}
+
+	status := httptest.NewRecorder()
+	h.handleRecordingStatus(status, httptest.NewRequest(http.MethodGet, "/api/v1/recordings/status", nil))
+	if status.Code != http.StatusOK {
+		t.Fatalf("disabled status=%d body=%s", status.Code, status.Body.String())
+	}
+	var statusEnvelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(status.Body.Bytes(), &statusEnvelope); err != nil {
+		t.Fatalf("decode disabled status: %v", err)
+	}
+	if statusEnvelope.Data["enabled"] != false || statusEnvelope.Data["available"] != true || statusEnvelope.Data["state"] != "disabled" || statusEnvelope.Data["reason"] != "recording disabled" {
+		t.Fatalf("disabled status = %#v", statusEnvelope.Data)
+	}
+}
+
 func TestRecordingPlayHandlerServesInlineRangeableMedia(t *testing.T) {
 	provider := &recordingProviderStub{
-		items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "mp4", State: record.RecordingCompleted}},
+		items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "fmp4", State: record.RecordingCompleted}},
 		content: []byte("0123456789"),
 	}
 	server := core.NewServer(newTestConfig())
@@ -154,6 +190,23 @@ func TestRecordingPlayHandlerServesInlineRangeableMedia(t *testing.T) {
 	}
 	if got := w.Body.String(); got != "2345" {
 		t.Fatalf("body=%q", got)
+	}
+}
+
+func TestRecordingPlayUsesFormatForMediaTypeBeforePathExtension(t *testing.T) {
+	provider := &recordingProviderStub{
+		items:   []record.RecordingInfo{{ID: "live/mismatch.flv", Format: "fmp4", State: record.RecordingCompleted}},
+		content: []byte("media"),
+	}
+	server := core.NewServer(newTestConfig())
+	server.RegisterModule(provider)
+	h := NewHandlers(server)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/recordings/live/mismatch.flv/play", nil)
+	req.SetPathValue("id", "live/mismatch.flv")
+	w := httptest.NewRecorder()
+	h.handleRecordingPlay(w, req)
+	if got := w.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("content type = %q, want video/mp4", got)
 	}
 }
 

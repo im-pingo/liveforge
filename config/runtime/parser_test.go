@@ -1,10 +1,53 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/im-pingo/liveforge/config"
 )
+
+func TestParseDocumentRejectsRemovedStreamSetting(t *testing.T) {
+	_, err := ParseDocument([]byte("stream:\n  audio_cache_ms: 1000\n"))
+	const want = "stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("removed setting error = %v, want %q", err, want)
+	}
+}
+
+func TestParseDocumentRejectsEnabledLLHLSZeroSegmentDuration(t *testing.T) {
+	_, err := ParseDocument([]byte("http_stream:\n  llhls:\n    enabled: true\n    segment_duration: 0\n"))
+	if err == nil || !strings.Contains(err.Error(), "http_stream.llhls.segment_duration must be greater than zero") {
+		t.Fatalf("zero LL-HLS segment duration error = %v", err)
+	}
+}
+
+func TestParseDocumentRejectsRemovedStreamSettingThroughYAMLIndirection(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "testdata", "removed-settings", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no removed-setting fixtures found")
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ParseDocument(data)
+			const want = "stream.audio_cache_ms has been removed; audio is interleaved in the GOP cache"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("removed setting error = %v, want %q", err, want)
+			}
+		})
+	}
+}
 
 func TestParseDocumentExpandsEnvironmentLikeBootstrapLoad(t *testing.T) {
 	t.Setenv("LIVEFORGE_TEST_API_TOKEN", "runtime-admin-secret")
@@ -149,6 +192,7 @@ func TestClassifyOnlyImplementedRuntimePoliciesAsHot(t *testing.T) {
 		"stream.gop_cache_num", "auth.subscribe.callback.url", "notify.http.endpoints",
 		"dvr.window", "api.auth.tokens", "api.console.role",
 		"http_stream.hls.segment_duration", "http_stream.dash.playlist_size", "http_stream.llhls.container",
+		"http_stream.llhls.segment_duration",
 		"webrtc.gcc.max_bitrate",
 	} {
 		if got := classifyPath(path); got != ChangeHot {

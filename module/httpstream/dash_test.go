@@ -2,7 +2,9 @@ package httpstream
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/xml"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +116,114 @@ func TestDASHManagerGetSegmentAndAudioSegment(t *testing.T) {
 	if !ok || string(data) != "ainit" {
 		t.Errorf("GetAudioInitSegment() = %q, %v", data, ok)
 	}
+}
+
+func TestDASHManagerAudioOnlyProducesLiveSegments(t *testing.T) {
+	for _, originDTS := range []int64{0, 5000} {
+		t.Run(fmt.Sprintf("origin_%d", originDTS), func(t *testing.T) {
+			streamKey := fmt.Sprintf("live/dash-audio-only-%d", originDTS)
+			stream := newAudioOnlyAACStream(t, streamKey)
+			mgr := NewDASHManager(stream.Key(), "/"+streamKey, 0.2, 5)
+			mgr.InitFromStream(stream)
+			done := make(chan struct{})
+			go func() {
+				mgr.Run(stream)
+				close(done)
+			}()
+			t.Cleanup(func() {
+				mgr.Stop()
+				stream.RingBuffer().Close()
+				<-done
+			})
+
+			time.Sleep(20 * time.Millisecond)
+			payloads := writeLiveAACFramesFromDTS(stream, 22, 20, originDTS)
+			waitForSegmentCount(t, mgr.SegmentCount, 2)
+			select {
+			case <-done:
+				t.Fatal("DASH manager stopped before the live source")
+			default:
+			}
+
+			initData, ok := mgr.GetAudioInitSegment()
+			if !ok {
+				t.Fatal("audio-only DASH init segment is unavailable while source is live")
+			}
+			demuxer, err := fmp4.NewDemuxer(initData)
+			if err != nil {
+				t.Fatalf("create audio-only DASH demuxer: %v", err)
+			}
+			firstData, ok := mgr.GetAudioSegment(0)
+			if !ok {
+				t.Fatal("first audio-only DASH segment is unavailable while source is live")
+			}
+			secondData, ok := mgr.GetAudioSegment(1)
+			if !ok {
+				t.Fatal("second audio-only DASH segment is unavailable while source is live")
+			}
+			firstFrames, err := demuxer.Parse(firstData)
+			if err != nil {
+				t.Fatalf("demux first audio-only DASH segment: %v", err)
+			}
+			secondFrames, err := demuxer.Parse(secondData)
+			if err != nil {
+				t.Fatalf("demux second audio-only DASH segment: %v", err)
+			}
+			if len(firstFrames) == 0 || len(secondFrames) == 0 {
+				t.Fatalf("audio-only DASH demuxed frames = %d/%d, want audio in both segments", len(firstFrames), len(secondFrames))
+			}
+			if firstFrames[0].DTS != 0 || secondFrames[0].DTS != 200 {
+				t.Fatalf("audio-only DASH demuxed segment starts = %d/%d ms, want 0/200 ms", firstFrames[0].DTS, secondFrames[0].DTS)
+			}
+			if firstBase, secondBase := dashTFDT(t, firstData), dashTFDT(t, secondData); firstBase != 0 || secondBase != 8820 {
+				t.Fatalf("audio-only DASH tfdt values = %d/%d, want 0/8820", firstBase, secondBase)
+			}
+			assertBoundaryPayloadStartsNextSegmentOnce(t, firstFrames, secondFrames, payloads[10])
+			mpd := mgr.GenerateMPD()
+			if !strings.Contains(mpd, `contentType="audio"`) || strings.Contains(mpd, `contentType="video"`) {
+				t.Fatalf("audio-only DASH MPD advertised the wrong adaptations:\n%s", mpd)
+			}
+		})
+	}
+}
+
+func dashTFDT(t *testing.T, segment []byte) uint64 {
+	t.Helper()
+	for offset := 0; offset+8 <= len(segment); {
+		size := int(binary.BigEndian.Uint32(segment[offset : offset+4]))
+		if size < 8 || offset+size > len(segment) {
+			t.Fatal("invalid top-level DASH fragment box")
+		}
+		if string(segment[offset+4:offset+8]) == "moof" {
+			return dashTFDTInBoxes(t, segment[offset+8:offset+size])
+		}
+		offset += size
+	}
+	t.Fatal("DASH fragment is missing moof")
+	return 0
+}
+
+func dashTFDTInBoxes(t *testing.T, boxes []byte) uint64 {
+	t.Helper()
+	for offset := 0; offset+8 <= len(boxes); {
+		size := int(binary.BigEndian.Uint32(boxes[offset : offset+4]))
+		if size < 8 || offset+size > len(boxes) {
+			t.Fatal("invalid nested DASH fragment box")
+		}
+		boxType := string(boxes[offset+4 : offset+8])
+		if boxType == "tfdt" {
+			if size < 20 || boxes[offset+8] != 1 {
+				t.Fatal("DASH tfdt is not a complete version 1 box")
+			}
+			return binary.BigEndian.Uint64(boxes[offset+12 : offset+20])
+		}
+		if boxType == "traf" {
+			return dashTFDTInBoxes(t, boxes[offset+8:offset+size])
+		}
+		offset += size
+	}
+	t.Fatal("DASH fragment is missing tfdt")
+	return 0
 }
 
 func TestDASHManagerGenerateMPD(t *testing.T) {
@@ -262,6 +372,7 @@ func TestDASHManagerVersionsInitSegmentURLs(t *testing.T) {
 	mgr.mu.Lock()
 	mgr.videoInitSeg = []byte("video configuration")
 	mgr.audioInitSeg = []byte("audio configuration")
+	mgr.hasVideo = true
 	mgr.videoCodecStr = "hvc1.1.6.L90.B0"
 	mgr.videoWidth = 640
 	mgr.videoHeight = 480

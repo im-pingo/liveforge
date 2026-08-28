@@ -290,7 +290,14 @@ func TestHandleMultiTrackPlaybackCompletesPlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mediaInfo := &avframe.MediaInfo{VideoCodec: avframe.CodecH264, AudioCodec: avframe.CodecAAC, SampleRate: 48000, Channels: 2}
+	mediaInfo := &avframe.MediaInfo{
+		VideoCodec:          avframe.CodecH264,
+		AudioCodec:          avframe.CodecAAC,
+		VideoSequenceHeader: []byte{0x01, 0x64},
+		AudioSequenceHeader: []byte{0x12, 0x10},
+		SampleRate:          48000,
+		Channels:            2,
+	}
 	publisher, err := NewRTSPPublisher("playback-source", mediaInfo, stream, nil)
 	if err != nil {
 		t.Fatal(err)

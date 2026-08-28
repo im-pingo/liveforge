@@ -19,9 +19,10 @@ type LLHLSSegmenterCallbacks struct {
 
 // LLHLSSegmenter reads AVFrames from a stream and produces LL-HLS segments.
 type LLHLSSegmenter struct {
-	partDuration float64
-	container    string
-	callbacks    LLHLSSegmenterCallbacks
+	partDuration    float64
+	segmentDuration float64
+	container       string
+	callbacks       LLHLSSegmenterCallbacks
 
 	fmp4Muxer  *fmp4.Muxer
 	tsMuxer    *ts.Muxer
@@ -47,38 +48,48 @@ type LLHLSSegmenter struct {
 }
 
 // NewLLHLSSegmenter creates a new segmenter.
-func NewLLHLSSegmenter(partDuration float64, container string, cb LLHLSSegmenterCallbacks) *LLHLSSegmenter {
+func NewLLHLSSegmenter(partDuration, segmentDuration float64, container string, cb LLHLSSegmenterCallbacks) *LLHLSSegmenter {
 	return &LLHLSSegmenter{
-		partDuration: partDuration,
-		container:    container,
-		callbacks:    cb,
-		done:         make(chan struct{}),
+		partDuration:    partDuration,
+		segmentDuration: segmentDuration,
+		container:       container,
+		callbacks:       cb,
+		done:            make(chan struct{}),
 	}
 }
 
 // Run starts the segmenter loop. Blocks until stream ends or Stop() is called.
-func (s *LLHLSSegmenter) Run(stream *core.Stream) {
+func (s *LLHLSSegmenter) Run(stream *core.Stream, publisherIDs ...string) {
 	slog.Info("segmenter started", "module", "llhls", "stream", stream.Key(), "container", s.container, "partDuration", s.partDuration)
 	defer slog.Info("segmenter stopped", "module", "llhls", "stream", stream.Key())
 
-	// Process GOP cache to pre-populate the first segment so the playlist
-	// has content immediately when the first client connects (avoids
-	// cold-start stutter). Snapshot cache and cursor atomically to avoid
-	// duplicating frames written in between.
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	s.audioPlan = s.selectAudioPlan(stream)
+	expectedPublisherID := ""
+	if len(publisherIDs) > 0 {
+		expectedPublisherID = publisherIDs[0]
+	}
+	snapshot, ok := waitStreamStartupForPublisher(s.done, stream, expectedPublisherID)
+	if !ok {
+		return
+	}
+
+	// Process the GOP cache from the same startup snapshot as the muxer tracks
+	// and live cursor. This prevents a sequence header arriving just after
+	// manager creation from being skipped by the live loop.
+	gopCache := snapshot.ReplayFrames
+	s.audioPlan = s.selectAudioPlanSnapshot(stream, snapshot)
 	s.audioPlanSet = true
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, s.audioPlan)
+	reader, release, audioPlan := muxerLiveReaderSnapshot(stream, snapshot, s.audioPlan)
 	s.audioPlan = audioPlan
 	defer release()
 	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
-	s.initMuxer(stream)
-	go func() {
-		<-s.done
-		reader.Close()
-	}()
+	s.initMuxerSnapshot(stream, snapshot)
+	stopReaderWatch := watchRingReader(reader, s.done, snapshot.GenerationDone)
+	defer stopReaderWatch()
 
 	for _, f := range gopCache {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -103,8 +114,13 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream) {
 
 		frame, ok := reader.Read()
 		if !ok || frame == nil {
-			s.flushCurrentPart(s.partStartDTS)
-			s.flushCurrentSegment()
+			if stream.IsPublisherGeneration(snapshot.Generation) {
+				s.flushCurrentPart(s.partStartDTS)
+				s.flushCurrentSegment()
+			}
+			return
+		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
@@ -127,14 +143,18 @@ func (s *LLHLSSegmenter) Stop() {
 }
 
 func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
+	s.initMuxerSnapshot(stream, stream.StartupSnapshot())
+}
+
+func (s *LLHLSSegmenter) initMuxerSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot) {
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
 	if !s.audioPlanSet {
-		s.audioPlan = s.selectAudioPlan(stream)
+		s.audioPlan = s.selectAudioPlanSnapshot(stream, snapshot)
 		s.audioPlanSet = true
 	}
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 		s.hasVideo = true
@@ -179,10 +199,14 @@ func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
 }
 
 func (s *LLHLSSegmenter) selectAudioPlan(stream *core.Stream) muxerAudioPlan {
+	return s.selectAudioPlanSnapshot(stream, stream.StartupSnapshot())
+}
+
+func (s *LLHLSSegmenter) selectAudioPlanSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot) muxerAudioPlan {
 	if s.container == "fmp4" {
-		return selectFMP4Audio(stream)
+		return selectFMP4AudioSnapshot(stream, snapshot)
 	}
-	return selectMuxerAudio(stream, isFlvCompatibleAudio)
+	return selectMuxerAudioSnapshot(stream, snapshot, isFlvCompatibleAudio)
 }
 
 func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
@@ -211,11 +235,11 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 		s.flushCurrentSegment()
 	}
 
-	// Audio-only streams: time-based full segment split (~6s). Audio frames in
+	// Audio-only streams: time-based full segment split. Audio frames in
 	// a video stream must never terminate a keyframe-bounded video segment.
 	if !s.hasVideo && s.segHasData && !frame.MediaType.IsVideo() {
 		segElapsed := float64(frame.DTS-s.segStartDTS) / 1000.0
-		if segElapsed >= 6.0 {
+		if segElapsed >= s.segmentDuration {
 			s.flushCurrentPart(frame.DTS)
 			s.flushCurrentSegment()
 		}

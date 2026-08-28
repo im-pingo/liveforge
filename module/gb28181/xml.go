@@ -29,11 +29,11 @@ type CatalogQuery struct {
 
 // CatalogResponse represents a catalog response from a device.
 type CatalogResponse struct {
-	XMLName  xml.Name      `xml:"Response"`
-	CmdType  string        `xml:"CmdType"`
-	SN       int           `xml:"SN"`
-	DeviceID string        `xml:"DeviceID"`
-	SumNum   int           `xml:"SumNum"`
+	XMLName    xml.Name          `xml:"Response"`
+	CmdType    string            `xml:"CmdType"`
+	SN         int               `xml:"SN"`
+	DeviceID   string            `xml:"DeviceID"`
+	SumNum     int               `xml:"SumNum"`
 	DeviceList CatalogDeviceList `xml:"DeviceList"`
 }
 

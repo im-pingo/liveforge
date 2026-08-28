@@ -1,263 +1,250 @@
 server:
-  name: "streamserver-01"
-  log_level: info
-  drain_timeout: 30s
-
+    name: "streamserver-01"
+    log_level: info
+    drain_timeout: 30s
 # Runtime refresh reads this file in the background. Remote sources can be
 # selected after bootstrap; credentials should come from environment variables.
 runtime:
-  source: file
-  poll_interval: 30s
-  load_timeout: 10s
-  file:
-    path: ""
-
+    source: file
+    poll_interval: 30s
+    load_timeout: 10s
+    file:
+        path: ""
 tls:
-  cert_file: ""
-  key_file: ""
-  auto: false  # auto-generate self-signed cert (enables HTTPS for console camera/mic access)
-
+    cert_file: ""
+    key_file: ""
+    auto: false # auto-generate self-signed cert (enables HTTPS for console camera/mic access)
 limits:
-  max_streams: 0
-  max_subscribers_per_stream: 0
-  max_connections: 0
-  max_bitrate_per_stream: 0
-  rate_limit:
-    enabled: false
-    rate: 50      # requests per second per IP
-    burst: 100    # max burst per IP
-
+    max_streams: 0
+    max_subscribers_per_stream: 0
+    max_connections: 0
+    max_bitrate_per_stream: 0
+    rate_limit:
+        enabled: false
+        rate: 50 # requests per second per IP
+        burst: 100 # max burst per IP
 rtmp:
-  enabled: true
-  listen: ":1935"
-  chunk_size: 4096
-  # skip_tracker:
-  #   max_count: 3
-  #   window: 60s
-
+    enabled: true
+    listen: ":1935"
+    chunk_size: 4096
+    # skip_tracker:
+    #   max_count: 3
+    #   window: 60s
 rtsp:
-  enabled: true
-  listen: ":8554"
-  rtp_port_range: [10000, 20000]
-  multicast:
-    enabled: false
-    address: "239.0.0.1"     # multicast group IP
-    base_port: 40000          # starting RTP port for multicast streams
-    ttl: 16                   # multicast TTL
-    interface: ""             # network interface (empty = default)
-  # skip_tracker:
-  #   max_count: 3
-  #   window: 60s
-
+    enabled: true
+    listen: ":8554"
+    rtp_port_range: [10000, 20000]
+    multicast:
+        enabled: false
+        address: "239.0.0.1" # multicast group IP
+        base_port: 40000 # starting RTP port for multicast streams
+        ttl: 16 # multicast TTL
+        interface: "" # network interface (empty = default)
+        # skip_tracker:
+        #   max_count: 3
+        #   window: 60s
 http_stream:
-  enabled: true
-  listen: ":8080"
-  cors: true
-  hls:
-    segment_duration: 6
-    playlist_size: 5
-  dash:
-    segment_duration: 6
-    playlist_size: 30
-  llhls:
     enabled: true
-    part_duration: 0.2
-    segment_count: 4
-    container: "fmp4"
-
+    listen: ":8080"
+    cors: true
+    hls:
+        segment_duration: 6
+        playlist_size: 5
+    dash:
+        segment_duration: 6
+        playlist_size: 30
+    llhls:
+        enabled: true
+        part_duration: 0.2
+        segment_duration: 1.0
+        segment_count: 4
+        container: "fmp4"
 websocket:
-  enabled: false
-  listen: ":8080"
-  path: "/ws/{stream}.{format}"
-
+    enabled: false
+    listen: ":8080"
+    path: "/ws/{stream}.{format}"
 webrtc:
-  enabled: true
-  listen: ":8443"
-  ice_lite: true
-  ice_servers:
-    - urls: ["stun:stun.l.google.com:19302"]
-    # TURN server example (uncomment for NAT traversal):
-    # - urls: ["turn:turn.example.com:3478"]
-    #   username: "user"
-    #   credential: "pass"
-    # - urls: ["turns:turn.example.com:5349"]
-    #   username: "user"
-    #   credential: "pass"
-  udp_port_range: [20000, 30000]
-  candidates: []
-  gcc:
     enabled: true
-    initial_bitrate: 100000000
-    min_bitrate: 100000
-    max_bitrate: 100000000
-
+    listen: ":8443"
+    ice_lite: true
+    ice_servers:
+        - urls: ["stun:stun.l.google.com:19302"]
+          # TURN server example (uncomment for NAT traversal):
+          # - urls: ["turn:turn.example.com:3478"]
+          #   username: "user"
+          #   credential: "pass"
+          # - urls: ["turns:turn.example.com:5349"]
+          #   username: "user"
+          #   credential: "pass"
+    udp_port_range: [20000, 30000]
+    candidates: []
+    gcc:
+        enabled: true
+        initial_bitrate: 100000000
+        min_bitrate: 100000
+        max_bitrate: 100000000
 srt:
-  enabled: true
-  listen: ":6000"
-  latency: 120
-  # passphrase: ""
-  # pbkeylen: 0
-  # skip_tracker:
-  #   max_count: 3
-  #   window: 60s
-
-sip:
-  enabled: true
-  listen: ":5060"
-  transport: ["udp", "tcp"]
-  server_id: "34020000002000000001"
-  domain: "3402000000"
-  auth:
-    enabled: false
-    password: ""
-
-gb28181:
-  enabled: true
-  stream_prefix: "gb28181"
-  rtp_port_range: [40000, 50000]
-  ssrc:
-    prefix: "34020"
-  keepalive:
-    interval: 60s
-    timeout: 180s
-  auto_invite: false
-  catalog_interval: 3600s
-  dump_file: ""
-
-audio_codec:
-  enabled: true
-
-stream:
-  gop_cache: true
-  gop_cache_num: 1
-  audio_cache_ms: 1000
-  ring_buffer_size: 1024
-  idle_timeout: 30s
-  no_publisher_timeout: 15s
-  slow_consumer:
     enabled: true
-    lag_warn_ratio: 0.5
-    lag_drop_ratio: 0.75
-    lag_critical_ratio: 0.9
-    lag_recover_ratio: 0.5
-    ewma_alpha: 0.3
-    send_time_ratio: 2.0
-  simulcast:
-    enabled: false
-    auto_pause_layer: true
-    layers:
-      - rid: h
-        max_bitrate: 2500000
-      - rid: l
-        max_bitrate: 500000
-  feedback:
-    default_mode: auto
-    auto_thresholds:
-      passthrough_max: 1
-      aggregate_max: 5
-
-auth:
-  enabled: false
-  publish:
-    mode: "none"
-    token:
-      secret: "${AUTH_JWT_SECRET}"
-      algorithm: HS256
-    callback:
-      url: ""
-      timeout: 3s
-  subscribe:
-    mode: "none"
-    token:
-      secret: "${AUTH_JWT_SECRET}"
-notify:
-  http:
-    enabled: false
-    endpoints: []
-  websocket:
-    enabled: false
-    path: /api/v1/ws/notify
-  alive_interval: 10s
-
-cluster:
-  forward:
-    enabled: false
-    # Targets support multiple protocols via URL scheme:
-    #   rtmp://host:1935/app/stream
-    #   srt://host:6000/app/stream
-    #   rtsp://host:554/app/stream
-    #   rtp://host:8090/app/stream  (SDP signaling via HTTP)
-    targets: []
-    schedule_url: ""
-    schedule_priority: schedule_first
-    schedule_timeout: 3s
-    retry_max: 5
-    retry_interval: 3s
-  origin:
-    enabled: false
-    # Origin servers support the same URL schemes as forward targets.
-    servers: []
-    schedule_url: ""
-    schedule_priority: schedule_first
-    schedule_timeout: 3s
-    idle_timeout: 30s
-    retry_max: 3
-    retry_delay: 2s
-  # SRT relay transport settings
-  srt:
-    latency: 120ms
+    listen: ":6000"
+    latency: 120
     # passphrase: ""
-    # pbkeylen: 16
-  # RTSP relay transport settings
-  rtsp:
-    transport: tcp  # tcp or udp
-  # RTP direct relay settings (SDP-over-HTTP signaling)
-  rtp:
-    port_range: "20000-20100"
-    signaling_path: "/api/relay"
-    rtcp_interval: 5s
-    timeout: 15s
-
+    # pbkeylen: 0
+    # skip_tracker:
+    #   max_count: 3
+    #   window: 60s
+sip:
+    enabled: true
+    listen: ":5060"
+    transport: ["udp", "tcp"]
+    server_id: "34020000002000000001"
+    domain: "3402000000"
+    auth:
+        enabled: false
+        password: ""
+    gateway:
+        enabled: true
+        stream_prefix: "sip"
+        rtp_port_range: [30000, 30100]
+        codecs: [opus, PCMA, PCMU]
+        max_calls: 100
+gb28181:
+    enabled: true
+    stream_prefix: "gb28181"
+    rtp_port_range: [40000, 50000]
+    ssrc:
+        prefix: "34020"
+    keepalive:
+        interval: 60s
+        timeout: 180s
+    auto_invite: false
+    catalog_interval: 3600s
+    dump_file: ""
+audio_codec:
+    enabled: true
+stream:
+    gop_cache: true
+    gop_cache_num: 1
+    ring_buffer_size: 1024
+    idle_timeout: 30s
+    no_publisher_timeout: 15s
+    slow_consumer:
+        enabled: true
+        lag_warn_ratio: 0.5
+        lag_drop_ratio: 0.75
+        lag_critical_ratio: 0.9
+        lag_recover_ratio: 0.5
+        ewma_alpha: 0.3
+        send_time_ratio: 2.0
+    simulcast:
+        enabled: false
+        auto_pause_layer: true
+        layers:
+            - rid: h
+              max_bitrate: 2500000
+            - rid: l
+              max_bitrate: 500000
+    feedback:
+        default_mode: auto
+        auto_thresholds:
+            passthrough_max: 1
+            aggregate_max: 5
+auth:
+    enabled: false
+    publish:
+        mode: "none"
+        token:
+            secret: ""
+            algorithm: HS256
+        callback:
+            url: ""
+            timeout: 3s
+    subscribe:
+        mode: "none"
+        token:
+            secret: ""
+notify:
+    http:
+        enabled: false
+        endpoints: []
+    websocket:
+        enabled: false
+        path: /api/v1/ws/notify
+    alive_interval: 10s
+cluster:
+    forward:
+        enabled: false
+        # Targets support multiple protocols via URL scheme:
+        #   rtmp://host:1935/app/stream
+        #   srt://host:6000/app/stream
+        #   rtsp://host:554/app/stream
+        #   rtp://host:8090/app/stream  (SDP signaling via HTTP)
+        targets: []
+        schedule_url: ""
+        schedule_priority: schedule_first
+        schedule_timeout: 3s
+        retry_max: 5
+        retry_interval: 3s
+    origin:
+        enabled: false
+        # Origin servers support the same URL schemes as forward targets.
+        servers: []
+        schedule_url: ""
+        schedule_priority: schedule_first
+        schedule_timeout: 3s
+        idle_timeout: 30s
+        retry_max: 3
+        retry_delay: 2s
+    # SRT relay transport settings
+    srt:
+        latency: 120ms
+        # passphrase: ""
+        # pbkeylen: 16
+    # RTSP relay transport settings
+    rtsp:
+        transport: tcp # tcp or udp
+    # RTP direct relay settings (SDP-over-HTTP signaling)
+    rtp:
+        port_range: "20000-20100"
+        signaling_path: "/api/relay"
+        rtcp_interval: 5s
+        timeout: 15s
 record:
-  enabled: false
-  stream_pattern: "live/*"
-  format: flv
-  path: "/data/record/{date}/{stream_key}_{time}.{ext}"
-  segment:
-    mode: duration
-    duration: 30m
-    max_size: 512MB
-  on_file_complete:
-    url: ""
-
+    enabled: false
+    stream_pattern: "live/*"
+    format: fmp4
+    path: "/data/record/{date}/{stream_key}_{time}.{ext}"
+    segment:
+        mode: duration
+        duration: 30m
+        max_size: 512MB
+    on_file_complete:
+        url: ""
 dvr:
-  enabled: false
-  listen: ":8070"
-  stream_pattern: "live/*"
-  path: "./dvr/{stream_key}"
-  window: 2h
-  segment_duration: 6s
-  cleanup_interval: 30s
-
+    enabled: false
+    listen: ":8070"
+    stream_pattern: "live/*"
+    path: "./dvr/{stream_key}"
+    window: 2h
+    segment_duration: 6s
+    cleanup_interval: 30s
 metrics:
-  enabled: false
-  listen: ":9090"
-  path: "/metrics"
-
+    enabled: false
+    listen: ":9090"
+    path: "/metrics"
 api:
-  enabled: true
-  listen: ":8090"
-  auth:
-    bearer_token: "${API_TOKEN}"
-    # Named tokens support viewer, operator, and admin roles. Keep tokens in
-    # environment-expanded private configuration, never in source control.
-    tokens: []
-    # - name: monitoring
-    #   token: "${MONITORING_API_TOKEN}"
-    #   role: viewer
-  console:
-    username: "admin"
-    password: "admin"
-    role: admin
-  audit:
-    max_entries: 1000
+    enabled: true
+    listen: ":8090"
+    auth:
+        bearer_token: ""
+        # Named tokens support viewer, operator, and admin roles. Keep tokens in
+        # environment-expanded private configuration, never in source control.
+        tokens: []
+        # - name: monitoring
+        #   token: "${MONITORING_API_TOKEN}"
+        #   role: viewer
+    console:
+        username: "admin"
+        password: admin
+        role: admin
+    audit:
+        max_entries: 1000

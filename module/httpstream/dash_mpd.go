@@ -2,6 +2,7 @@ package httpstream
 
 import (
 	"encoding/binary"
+	"encoding/xml"
 	"fmt"
 	"math"
 	"math/bits"
@@ -17,11 +18,15 @@ func (d *DASHManager) GenerateMPD() string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	segs := d.videoSegments
+	videoSegs := d.videoSegments
 	audioSegs := d.audioSegments
+	timelineSegs := videoSegs
+	if len(timelineSegs) == 0 {
+		timelineSegs = audioSegs
+	}
 
 	var totalDur float64
-	for _, seg := range segs {
+	for _, seg := range timelineSegs {
 		totalDur += seg.Duration
 	}
 
@@ -32,14 +37,14 @@ func (d *DASHManager) GenerateMPD() string {
 
 	// Compute average segment duration for minimumUpdatePeriod.
 	avgDurMs := int(d.targetDur * 1000)
-	if len(segs) > 2 {
+	if len(timelineSegs) > 2 {
 		var stableDur float64
-		for _, seg := range segs[2:] {
+		for _, seg := range timelineSegs[2:] {
 			stableDur += seg.Duration
 		}
-		avgDurMs = int(math.Round(stableDur / float64(len(segs)-2) * 1000))
-	} else if len(segs) > 0 {
-		avgDurMs = int(math.Round(segs[len(segs)-1].Duration * 1000))
+		avgDurMs = int(math.Round(stableDur / float64(len(timelineSegs)-2) * 1000))
+	} else if len(timelineSegs) > 0 {
+		avgDurMs = int(math.Round(timelineSegs[len(timelineSegs)-1].Duration * 1000))
 	}
 	if avgDurMs <= 0 {
 		avgDurMs = int(d.targetDur * 1000)
@@ -54,8 +59,8 @@ func (d *DASHManager) GenerateMPD() string {
 
 	// startNumber corresponds to the first segment in the current window.
 	startNumber := 1
-	if len(segs) > 0 {
-		startNumber = segs[0].SeqNum + 1 // SeqNum is 0-based; URL numbers are 1-based
+	if len(timelineSegs) > 0 {
+		startNumber = timelineSegs[0].SeqNum + 1 // SeqNum is 0-based; URL numbers are 1-based
 	}
 
 	ast := d.startTime
@@ -76,41 +81,43 @@ func (d *DASHManager) GenerateMPD() string {
 	sb.WriteString(`  <Period id="0" start="PT0S">` + "\n")
 
 	// Video AdaptationSet with SegmentTimeline.
-	sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
-	videoInitURL := d.basePath + "/vinit.mp4"
-	if version := initSegmentVersion(d.videoInitSeg); version != "" {
-		videoInitURL += "?v=" + version
-	}
-	fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/v$Number$.m4s">`,
-		startNumber, videoInitURL, d.basePath)
-	sb.WriteString("\n")
-	sb.WriteString("        <SegmentTimeline>\n")
-	timeMs := int64(math.Round(d.timeBase * 1000))
-	for i, seg := range segs {
-		durMs := int64(math.Round(seg.Duration * 1000))
-		if i == 0 {
-			fmt.Fprintf(&sb, "          <S t=\"%d\" d=\"%d\"/>\n", timeMs, durMs)
-		} else {
-			fmt.Fprintf(&sb, "          <S d=\"%d\"/>\n", durMs)
+	if d.hasVideo || len(videoSegs) > 0 {
+		sb.WriteString(`    <AdaptationSet id="0" contentType="video" mimeType="video/mp4" startWithSAP="1" segmentAlignment="true">` + "\n")
+		videoInitURL := d.basePath + "/vinit.mp4"
+		if version := initSegmentVersion(d.videoInitSeg); version != "" {
+			videoInitURL += "?v=" + version
 		}
-		timeMs += durMs
+		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/v$Number$.m4s">`,
+			startNumber, escapeXMLAttribute(videoInitURL), escapeXMLAttribute(d.basePath))
+		sb.WriteString("\n")
+		sb.WriteString("        <SegmentTimeline>\n")
+		timeMs := int64(math.Round(d.timeBase * 1000))
+		for i, seg := range videoSegs {
+			durMs := int64(math.Round(seg.Duration * 1000))
+			if i == 0 {
+				fmt.Fprintf(&sb, "          <S t=\"%d\" d=\"%d\"/>\n", timeMs, durMs)
+			} else {
+				fmt.Fprintf(&sb, "          <S d=\"%d\"/>\n", durMs)
+			}
+			timeMs += durMs
+		}
+		sb.WriteString("        </SegmentTimeline>\n")
+		sb.WriteString("      </SegmentTemplate>\n")
+		videoCodecStr := d.videoCodecStr
+		if videoCodecStr == "" {
+			videoCodecStr = "avc1.640028"
+		}
+		vw, vh := d.videoWidth, d.videoHeight
+		if vw <= 0 {
+			vw = 1920
+		}
+		if vh <= 0 {
+			vh = 1080
+		}
+		fmt.Fprintf(&sb, "      <Representation id=\"0\" bandwidth=\"2000000\" codecs=\"%s\" width=\"%d\" height=\"%d\"/>\n",
+			videoCodecStr, vw, vh)
+		sb.WriteString("    </AdaptationSet>\n")
 	}
-	sb.WriteString("        </SegmentTimeline>\n")
-	sb.WriteString("      </SegmentTemplate>\n")
-	videoCodecStr := d.videoCodecStr
-	if videoCodecStr == "" {
-		videoCodecStr = "avc1.640028"
-	}
-	vw, vh := d.videoWidth, d.videoHeight
-	if vw <= 0 {
-		vw = 1920
-	}
-	if vh <= 0 {
-		vh = 1080
-	}
-	fmt.Fprintf(&sb, "      <Representation id=\"0\" bandwidth=\"2000000\" codecs=\"%s\" width=\"%d\" height=\"%d\"/>\n",
-		videoCodecStr, vw, vh)
-	sb.WriteString("    </AdaptationSet>\n")
 
 	// Audio AdaptationSet with SegmentTimeline.
 	if d.hasAudio && len(audioSegs) > 0 {
@@ -128,7 +135,7 @@ func (d *DASHManager) GenerateMPD() string {
 			audioInitURL += "?v=" + version
 		}
 		fmt.Fprintf(&sb, `      <SegmentTemplate timescale="1000" startNumber="%d" initialization="%s" media="%s/a$Number$.m4s">`,
-			audioStartNumber, audioInitURL, d.basePath)
+			audioStartNumber, escapeXMLAttribute(audioInitURL), escapeXMLAttribute(d.basePath))
 		sb.WriteString("\n")
 		sb.WriteString("        <SegmentTimeline>\n")
 		audioTimeMs := int64(math.Round(d.timeBase * 1000))
@@ -158,21 +165,34 @@ func (d *DASHManager) GenerateMPD() string {
 	return sb.String()
 }
 
-// SegmentCount returns the number of video segments currently available.
+func escapeXMLAttribute(value string) string {
+	var escaped strings.Builder
+	_ = xml.EscapeText(&escaped, []byte(value))
+	return escaped.String()
+}
+
+// SegmentCount returns the number of timeline segments currently available.
 func (d *DASHManager) SegmentCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	if len(d.videoSegments) == 0 {
+		return len(d.audioSegments)
+	}
 	return len(d.videoSegments)
 }
 
-// SegmentRange returns the SeqNum range [lo, hi] of video segments in memory.
+// SegmentRange returns the SeqNum range [lo, hi] of timeline segments in memory.
 func (d *DASHManager) SegmentRange() (lo, hi int) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if len(d.videoSegments) == 0 {
+	segments := d.videoSegments
+	if len(segments) == 0 {
+		segments = d.audioSegments
+	}
+	if len(segments) == 0 {
 		return -1, -1
 	}
-	return d.videoSegments[0].SeqNum, d.videoSegments[len(d.videoSegments)-1].SeqNum
+	return segments[0].SeqNum, segments[len(segments)-1].SeqNum
 }
 
 // dashVideoCodecString returns the DASH codecs string (e.g., "avc1.640028")

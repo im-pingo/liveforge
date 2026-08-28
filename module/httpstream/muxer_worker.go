@@ -2,8 +2,10 @@ package httpstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"log/slog"
+	"sync"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/audiocodec"
@@ -56,24 +58,24 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	defer inst.Buffer.Close()
 	slog.Info("muxer started", "module", "httpstream", "format", "flv", "stream", stream.Key())
 
-	// Snapshot GOP cache and write cursor atomically so the reader starts
-	// right after the cached frames with no duplicates.
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
-	defer release()
-	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
+	snapshot, ok := waitMuxerStartup(inst, stream)
+	if !ok {
+		return
+	}
+	audioPlan := selectMuxerAudioSnapshot(stream, snapshot, isFlvCompatibleAudio)
+	reader, audioPlan := muxerWorkerLiveInputSnapshot(stream, snapshot, audioPlan)
+	defer reader.Close()
 
 	muxer := flv.NewMuxer()
 	var buf bytes.Buffer
 
 	// Write FLV header as init data
-	hasVideo := stream.VideoSeqHeader() != nil
+	hasVideo := snapshot.VideoSequenceHeader != nil
 	hasAudio := audioPlan.hasAudio()
 	muxer.WriteHeader(&buf, hasVideo, hasAudio)
 
 	// Write sequence headers into the FLV stream
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		muxer.WriteFrame(&buf, vsh)
 	}
 	if ash := audioPlan.sequenceHeader; ash != nil {
@@ -84,7 +86,10 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 
 	// Send the cached video GOP. Source audio is excluded when the live reader
 	// transcodes it, and unsupported audio is excluded entirely.
-	for _, f := range gopCache {
+	for _, f := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if !audioPlan.accepts(f) {
 			continue
 		}
@@ -94,10 +99,8 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	}
 
 	// Close reader when muxer is done so Read() unblocks promptly.
-	go func() {
-		<-inst.Done
-		reader.Close()
-	}()
+	stopReaderWatch := watchMuxerInput(reader, inst.Done, snapshot.GenerationDone)
+	defer stopReaderWatch()
 
 	for {
 		frame, ok := reader.Read()
@@ -105,16 +108,12 @@ func (m *Module) runFLVMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 			slog.Info("muxer stopped", "module", "httpstream", "format", "flv", "stream", stream.Key())
 			return
 		}
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			continue // Already sent in init data
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
 		}
 		if !audioPlan.accepts(frame) {
 			continue
 		}
-		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
-			continue
-		}
-
 		if err := muxer.WriteFrame(&buf, frame); err == nil && buf.Len() > 0 {
 			inst.Buffer.Write(bufCopyAndReset(&buf))
 		}
@@ -125,18 +124,19 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	defer inst.Buffer.Close()
 	slog.Info("muxer started", "module", "httpstream", "format", "ts", "stream", stream.Key())
 
-	// Snapshot GOP cache and write cursor atomically.
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	audioPlan := selectMuxerAudio(stream, isFlvCompatibleAudio)
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
-	defer release()
-	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
+	snapshot, ok := waitMuxerStartup(inst, stream)
+	if !ok {
+		return
+	}
+	audioPlan := selectMuxerAudioSnapshot(stream, snapshot, isFlvCompatibleAudio)
+	reader, audioPlan := muxerWorkerLiveInputSnapshot(stream, snapshot, audioPlan)
+	defer reader.Close()
 
 	// Determine codecs from sequence headers
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqData, audioSeqData []byte
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqData = vsh.Payload
 	}
@@ -152,7 +152,10 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	// No init data needed for TS (PAT/PMT sent inline)
 
 	// Send GOP cache using the same audio policy as the live reader.
-	for _, f := range gopCache {
+	for _, f := range snapshot.ReplayFrames {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if !audioPlan.accepts(f) {
 			continue
 		}
@@ -162,10 +165,8 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 	}
 
 	// Close reader when muxer is done so Read() unblocks promptly.
-	go func() {
-		<-inst.Done
-		reader.Close()
-	}()
+	stopReaderWatch := watchMuxerInput(reader, inst.Done, snapshot.GenerationDone)
+	defer stopReaderWatch()
 
 	for {
 		frame, ok := reader.Read()
@@ -173,13 +174,35 @@ func (m *Module) runTSMuxer(inst *core.MuxerInstance, stream *core.Stream) {
 			slog.Info("muxer stopped", "module", "httpstream", "format", "ts", "stream", stream.Key())
 			return
 		}
-		if frame.FrameType == avframe.FrameTypeSequenceHeader || !audioPlan.accepts(frame) {
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader {
+			if frame.MediaType.IsVideo() {
+				videoCodec = frame.Codec
+				videoSeqData = frame.Payload
+			} else if frame.MediaType.IsAudio() {
+				if audioPlan.mode == muxerAudioTranscode && frame.Codec == audioPlan.codec {
+					audioPlan.sequenceHeader = frame
+				} else if isFlvCompatibleAudio(frame.Codec) {
+					audioPlan = muxerAudioPlan{
+						mode:           muxerAudioPassthrough,
+						codec:          frame.Codec,
+						sequenceHeader: frame,
+					}
+				} else {
+					continue
+				}
+				audioCodec = audioPlan.codec
+				audioSeqData = audioPlan.sequenceHeader.Payload
+			}
+			muxer = ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
+			inst.Buffer.Write(muxer.WritePATAndPMT())
 			continue
 		}
-		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
+		if !audioPlan.accepts(frame) {
 			continue
 		}
-
 		if data := muxer.WriteFrame(frame); len(data) > 0 {
 			inst.Buffer.Write(data)
 		}
@@ -190,16 +213,18 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	defer inst.Buffer.Close()
 	slog.Info("muxer started", "module", "httpstream", "format", "fmp4", "stream", stream.Key())
 
-	gopCache, startPos := stream.GOPCacheSnapshot()
-	audioPlan := selectFMP4Audio(stream)
-	reader, release, audioPlan := muxerLiveReader(stream, startPos, audioPlan)
-	defer release()
-	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
+	snapshot, ok := waitMuxerStartup(inst, stream)
+	if !ok {
+		return
+	}
+	audioPlan := selectFMP4AudioSnapshot(stream, snapshot)
+	reader, audioPlan := muxerWorkerLiveInputSnapshot(stream, snapshot, audioPlan)
+	defer reader.Close()
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqHeader, audioSeqHeader *avframe.AVFrame
 
-	if vsh := stream.VideoSeqHeader(); vsh != nil {
+	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
 		videoCodec = vsh.Codec
 		videoSeqHeader = vsh
 	}
@@ -261,9 +286,12 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	}
 
 	// Send GOP cache as first segment using the selected audio policy.
-	if len(gopCache) > 0 {
+	if len(snapshot.ReplayFrames) > 0 {
 		var filtered []*avframe.AVFrame
-		for _, f := range gopCache {
+		for _, f := range snapshot.ReplayFrames {
+			if !stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
 			if audioPlan.accepts(f) {
 				filtered = append(filtered, f)
 			}
@@ -275,10 +303,8 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 	}
 
 	// Close reader when muxer is done so Read() unblocks promptly.
-	go func() {
-		<-inst.Done
-		reader.Close()
-	}()
+	stopReaderWatch := watchMuxerInput(reader, inst.Done, snapshot.GenerationDone)
+	defer stopReaderWatch()
 
 	const liveFragmentDurationMS = int64(200)
 	var liveFrames []*avframe.AVFrame
@@ -305,16 +331,15 @@ func (m *Module) runFMP4Muxer(inst *core.MuxerInstance, stream *core.Stream) {
 			slog.Info("muxer stopped", "module", "httpstream", "format", "fmp4", "stream", stream.Key())
 			return
 		}
+		if !stream.IsPublisherGeneration(snapshot.Generation) {
+			return
+		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
 		if !audioPlan.accepts(frame) {
 			continue
 		}
-		if isCachedTranscodeVideo(frame, audioPlan, cachedVideoEndDTS, hasCachedVideo) {
-			continue
-		}
-
 		if len(liveFrames) > 0 && frame.DTS-liveStartDTS >= liveFragmentDurationMS &&
 			(videoCodec == 0 || frame.MediaType.IsVideo()) {
 			flushLiveFrames(frame.DTS)
@@ -358,16 +383,16 @@ func isFMP4CompatibleAudio(codec avframe.CodecType) bool {
 	return codec == avframe.CodecAAC || codec == avframe.CodecMP3 || codec == avframe.CodecOpus
 }
 
-func selectFMP4Audio(stream *core.Stream) muxerAudioPlan {
-	plan := selectMuxerAudio(stream, isFMP4CompatibleAudio)
+func selectFMP4AudioSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot) muxerAudioPlan {
+	plan := selectMuxerAudioSnapshot(stream, snapshot, isFMP4CompatibleAudio)
 	if plan.mode == muxerAudioPassthrough && plan.codec == avframe.CodecOpus {
-		plan.sequenceHeader = opusDOpsSequenceHeader(stream)
+		plan.sequenceHeader = opusDOpsSequenceHeader(snapshot)
 	}
 	return plan
 }
 
-func opusDOpsSequenceHeader(stream *core.Stream) *avframe.AVFrame {
-	if source := stream.AudioSeqHeader(); source != nil && source.Codec == avframe.CodecOpus {
+func opusDOpsSequenceHeader(snapshot core.StreamStartupSnapshot) *avframe.AVFrame {
+	if source := snapshot.AudioSequenceHeader; source != nil && source.Codec == avframe.CodecOpus {
 		if len(source.Payload) == 11 {
 			return avframe.NewAVFrame(
 				avframe.MediaTypeAudio, avframe.CodecOpus,
@@ -386,13 +411,11 @@ func opusDOpsSequenceHeader(stream *core.Stream) *avframe.AVFrame {
 
 	sampleRate := 48000
 	channels := 2
-	if pub := stream.Publisher(); pub != nil && pub.MediaInfo() != nil {
-		if pub.MediaInfo().SampleRate > 0 {
-			sampleRate = pub.MediaInfo().SampleRate
-		}
-		if pub.MediaInfo().Channels > 0 {
-			channels = pub.MediaInfo().Channels
-		}
+	if snapshot.MediaInfo.SampleRate > 0 {
+		sampleRate = snapshot.MediaInfo.SampleRate
+	}
+	if snapshot.MediaInfo.Channels > 0 {
+		channels = snapshot.MediaInfo.Channels
 	}
 	return avframe.NewAVFrame(
 		avframe.MediaTypeAudio, avframe.CodecOpus,
@@ -431,12 +454,8 @@ func (p muxerAudioPlan) accepts(frame *avframe.AVFrame) bool {
 	return p.hasAudio() && frame.Codec == p.codec
 }
 
-func selectMuxerAudio(stream *core.Stream, compatible func(avframe.CodecType) bool) muxerAudioPlan {
-	pub := stream.Publisher()
-	if pub == nil || pub.MediaInfo() == nil {
-		return muxerAudioPlan{}
-	}
-	sourceCodec := pub.MediaInfo().AudioCodec
+func selectMuxerAudioSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot, compatible func(avframe.CodecType) bool) muxerAudioPlan {
+	sourceCodec := snapshot.MediaInfo.AudioCodec
 	if sourceCodec == 0 {
 		return muxerAudioPlan{}
 	}
@@ -444,7 +463,7 @@ func selectMuxerAudio(stream *core.Stream, compatible func(avframe.CodecType) bo
 		return muxerAudioPlan{
 			mode:           muxerAudioPassthrough,
 			codec:          sourceCodec,
-			sequenceHeader: stream.AudioSeqHeader(),
+			sequenceHeader: snapshot.AudioSequenceHeader,
 		}
 	}
 	if stream.TranscodeManager() != nil && audiocodec.Global().CanTranscode(sourceCodec, avframe.CodecAAC) {
@@ -460,17 +479,220 @@ func selectMuxerAudio(stream *core.Stream, compatible func(avframe.CodecType) bo
 	return muxerAudioPlan{}
 }
 
+type muxerWorkerLiveInput struct {
+	source               *util.RingReader[*avframe.AVFrame]
+	audio                *util.RingReader[*avframe.AVFrame]
+	release              func()
+	frames               chan muxerWorkerFrame
+	cancel               context.CancelFunc
+	allDone              chan struct{}
+	plan                 muxerAudioPlan
+	audioOwner           muxerWorkerAudioOwner
+	audioEpoch           uint64
+	directEpochSeen      bool
+	startupHeaderHandled bool
+	audioOnce            sync.Once
+	closeOnce            sync.Once
+}
+
+type muxerWorkerAudioOwner uint8
+
+const (
+	muxerWorkerAudioUnknown muxerWorkerAudioOwner = iota
+	muxerWorkerAudioTransformed
+	muxerWorkerAudioDirect
+)
+
+type muxerWorkerFrame struct {
+	frame       *avframe.AVFrame
+	transformed bool
+}
+
+func muxerWorkerLiveInputSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot, plan muxerAudioPlan) (*muxerWorkerLiveInput, muxerAudioPlan) {
+	input := &muxerWorkerLiveInput{
+		source:  stream.RingBuffer().NewReaderAt(snapshot.LiveCursor),
+		release: func() {},
+		frames:  make(chan muxerWorkerFrame),
+		allDone: make(chan struct{}),
+		plan:    plan,
+	}
+	followAudioEpochs := plan.mode == muxerAudioTranscode ||
+		(plan.mode == muxerAudioPassthrough && plan.codec == avframe.CodecAAC)
+	if followAudioEpochs {
+		if tm := stream.TranscodeManager(); tm != nil {
+			reader, release, err := tm.GetOrCreateAudioReaderAtFromHistory(avframe.CodecAAC, snapshot)
+			if err == nil {
+				input.audio = reader
+				input.release = release
+			} else {
+				slog.Warn("muxer: audio transcode unavailable", "stream", stream.Key(), "error", err)
+				if plan.mode == muxerAudioTranscode {
+					plan = muxerAudioPlan{}
+				}
+			}
+		} else if plan.mode == muxerAudioTranscode {
+			plan = muxerAudioPlan{}
+		}
+	}
+	input.plan = plan
+	if input.audio != nil {
+		input.plan.mode = muxerAudioTranscode
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	input.cancel = cancel
+	var pumps sync.WaitGroup
+	pump := func(reader *util.RingReader[*avframe.AVFrame], transformed bool, accept func(*avframe.AVFrame) bool) {
+		defer pumps.Done()
+		for {
+			frame, ok := reader.ReadContext(ctx)
+			if !ok {
+				return
+			}
+			if !accept(frame) {
+				continue
+			}
+			select {
+			case input.frames <- muxerWorkerFrame{frame: frame, transformed: transformed}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	pumps.Add(1)
+	go pump(input.source, false, func(frame *avframe.AVFrame) bool { return frame != nil })
+	if input.audio != nil {
+		pumps.Add(1)
+		go pump(input.audio, true, func(frame *avframe.AVFrame) bool {
+			return frame != nil && frame.MediaType.IsAudio() && frame.Codec == plan.codec
+		})
+	}
+	go func() {
+		pumps.Wait()
+		close(input.frames)
+		close(input.allDone)
+	}()
+	return input, plan
+}
+
+func (r *muxerWorkerLiveInput) Read() (*avframe.AVFrame, bool) {
+	for {
+		delivery, ok := <-r.frames
+		if !ok {
+			return nil, false
+		}
+		frame := delivery.frame
+		if r.plan.mode != muxerAudioTranscode || frame == nil || !frame.MediaType.IsAudio() {
+			return frame, true
+		}
+		if !r.acceptAudioDelivery(delivery) {
+			continue
+		}
+		return frame, true
+	}
+}
+
+func (r *muxerWorkerLiveInput) acceptAudioDelivery(delivery muxerWorkerFrame) bool {
+	frame := delivery.frame
+	epoch := frame.AudioCodecEpoch
+	if epoch == 0 {
+		epoch = r.audioEpoch
+		if epoch == 0 {
+			epoch = 1
+		}
+	}
+	if epoch < r.audioEpoch {
+		return false
+	}
+
+	if delivery.transformed {
+		if frame.AudioProvenance == avframe.FrameProvenanceSource {
+			r.setAudioOwner(epoch, muxerWorkerAudioDirect)
+			r.directEpochSeen = true
+			return false
+		}
+		r.setAudioOwner(epoch, muxerWorkerAudioTransformed)
+		if r.audioEpoch != epoch || r.audioOwner != muxerWorkerAudioTransformed {
+			return false
+		}
+		if frame.FrameType == avframe.FrameTypeSequenceHeader &&
+			!r.startupHeaderHandled && !r.directEpochSeen {
+			r.startupHeaderHandled = true
+			return false
+		}
+		return true
+	}
+
+	if frame.Codec == r.plan.codec {
+		r.setAudioOwner(epoch, muxerWorkerAudioDirect)
+		r.directEpochSeen = true
+		return r.audioEpoch == epoch && r.audioOwner == muxerWorkerAudioDirect
+	}
+	r.setAudioOwner(epoch, muxerWorkerAudioTransformed)
+	return false
+}
+
+func (r *muxerWorkerLiveInput) setAudioOwner(epoch uint64, owner muxerWorkerAudioOwner) {
+	if epoch > r.audioEpoch {
+		r.audioEpoch = epoch
+		r.audioOwner = owner
+		return
+	}
+	if epoch == r.audioEpoch &&
+		(r.audioOwner == muxerWorkerAudioUnknown || owner == muxerWorkerAudioDirect) {
+		r.audioOwner = owner
+	}
+}
+
+func (r *muxerWorkerLiveInput) closeAudio() {
+	r.audioOnce.Do(func() {
+		if r.audio != nil {
+			r.audio.Close()
+		}
+		r.release()
+	})
+}
+
+func (r *muxerWorkerLiveInput) Close() {
+	r.closeOnce.Do(func() {
+		r.cancel()
+		r.source.Close()
+		r.closeAudio()
+		<-r.allDone
+	})
+}
+
+func watchMuxerInput(input *muxerWorkerLiveInput, done, generationDone <-chan struct{}) func() {
+	stop := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-done:
+			input.Close()
+		case <-generationDone:
+			input.Close()
+		case <-stop:
+		}
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-watcherDone
+	}
+}
+
 // muxerLiveReader opens the live source selected by the audio plan. A failed
 // transcode setup degrades to a filtered source reader so incompatible audio
 // can never leak into a container whose init data declares another codec.
-func muxerLiveReader(stream *core.Stream, startPos int64, plan muxerAudioPlan) (*util.RingReader[*avframe.AVFrame], func(), muxerAudioPlan) {
+func muxerLiveReaderSnapshot(stream *core.Stream, snapshot core.StreamStartupSnapshot, plan muxerAudioPlan) (*util.RingReader[*avframe.AVFrame], func(), muxerAudioPlan) {
 	if plan.mode == muxerAudioTranscode {
 		if tm := stream.TranscodeManager(); tm != nil {
 			// The HTTP muxers already replay cached video separately. The legacy
 			// transcode track is intentionally started at the cached GOP source
 			// cursor so it contributes both target audio history and live video;
 			// callers filter the cached video portion by its video DTS watermark.
-			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, stream.GOPCacheSourceStart())
+			reader, release, err := tm.GetOrCreateReaderAtFromHistory(avframe.CodecAAC, snapshot)
 			if err == nil {
 				return reader, release, plan
 			}
@@ -478,7 +700,115 @@ func muxerLiveReader(stream *core.Stream, startPos int64, plan muxerAudioPlan) (
 		}
 		plan = muxerAudioPlan{}
 	}
-	return stream.RingBuffer().NewReaderAt(startPos), func() {}, plan
+	return stream.RingBuffer().NewReaderAt(snapshot.LiveCursor), func() {}, plan
+}
+
+func selectFMP4Audio(stream *core.Stream) muxerAudioPlan {
+	return selectFMP4AudioSnapshot(stream, stream.StartupSnapshot())
+}
+
+func selectMuxerAudio(stream *core.Stream, compatible func(avframe.CodecType) bool) muxerAudioPlan {
+	return selectMuxerAudioSnapshot(stream, stream.StartupSnapshot(), compatible)
+}
+
+func muxerLiveReader(stream *core.Stream, startPos int64, plan muxerAudioPlan) (*util.RingReader[*avframe.AVFrame], func(), muxerAudioPlan) {
+	snapshot := stream.StartupSnapshot()
+	snapshot.LiveCursor = startPos
+	return muxerLiveReaderSnapshot(stream, snapshot, plan)
+}
+
+func waitMuxerStartup(inst *core.MuxerInstance, stream *core.Stream) (core.StreamStartupSnapshot, bool) {
+	pending := stream.StartupSnapshot()
+	if pending.Generation != inst.Generation || pending.GenerationDone == nil {
+		return core.StreamStartupSnapshot{}, false
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-inst.Done:
+			cancel()
+		case <-pending.GenerationDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(ctx)
+	cancel()
+	<-watcherDone
+	return snapshot, ok && snapshot.Generation == pending.Generation &&
+		stream.IsPublisherGeneration(snapshot.Generation)
+}
+
+// waitStreamStartup waits for a stream generation to expose all of the
+// sequence headers required by its declared tracks. The manager's done signal
+// and the captured generation signal both cancel the wait, so a stopped or
+// replaced publisher cannot leave a segmenter blocked indefinitely.
+func waitStreamStartup(done <-chan struct{}, stream *core.Stream) (core.StreamStartupSnapshot, bool) {
+	return waitStreamStartupForPublisher(done, stream, "")
+}
+
+func waitStreamStartupForPublisher(done <-chan struct{}, stream *core.Stream, expectedPublisherID string) (core.StreamStartupSnapshot, bool) {
+	pending := stream.StartupSnapshot()
+	if pending.Generation == 0 || pending.GenerationDone == nil {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if expectedPublisherID != "" && pending.PublisherID != expectedPublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		select {
+		case <-done:
+			return core.StreamStartupSnapshot{}, false
+		default:
+		}
+		return pending, stream.IsPublisherGeneration(pending.Generation) &&
+			(expectedPublisherID == "" || pending.PublisherID == expectedPublisherID)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-done:
+			cancel()
+		case <-pending.GenerationDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(ctx)
+	cancel()
+	<-watcherDone
+	return snapshot, ok && snapshot.Generation == pending.Generation &&
+		stream.IsPublisherGeneration(snapshot.Generation) &&
+		(expectedPublisherID == "" || snapshot.PublisherID == expectedPublisherID)
+}
+
+// watchRingReader closes a ring reader when its manager or publisher
+// generation ends. The returned function synchronizes watcher shutdown so no
+// goroutine is left behind after a segmenter exits normally.
+func watchRingReader[T any](reader *util.RingReader[T], done, generationDone <-chan struct{}) func() {
+	stop := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-done:
+			reader.Close()
+		case <-generationDone:
+			reader.Close()
+		case <-stop:
+		}
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-watcherDone
+	}
 }
 
 func cachedVideoEndDTS(frames []*avframe.AVFrame) (int64, bool) {

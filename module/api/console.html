@@ -124,28 +124,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
 .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 
-/* GOP cache bar */
-.gop-cell { min-width: 100px; }
-.gop-bar-wrap {
-  width: 100%;
-  height: 6px;
-  background: var(--surface2);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 4px;
-}
-.gop-bar {
-  height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--blue));
-  transition: width 0.4s ease;
-}
+/* GOP cache */
+.gop-cell { min-width: 170px; }
 .gop-label {
   font-size: 11px;
   font-family: "SF Mono", "Fira Code", monospace;
   color: var(--text2);
   font-variant-numeric: tabular-nums;
 }
+.gop-label + .gop-label { margin-top: 2px; }
 .gop-label b { color: var(--text); font-weight: 600; }
 
 /* State badge */
@@ -331,10 +318,21 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   aspect-ratio: 16/9;
   margin-bottom: 12px;
 }
+.player-video-wrap.audio-only {
+  aspect-ratio: auto;
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  padding: 16px;
+}
 .player-video-wrap video {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+.player-video-wrap audio {
+  display: none;
+  width: 100%;
 }
 .player-status {
   font-size: 12px;
@@ -548,10 +546,21 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 /* Nav tabs */
 .nav-tabs {
   display: flex;
-  gap: 0;
+  align-items: flex-end;
+  gap: 22px;
   margin-bottom: 24px;
   border-bottom: 1px solid var(--border);
 }
+.nav-group { display: flex; flex-direction: column; gap: 4px; }
+.nav-group-label {
+  padding: 0 4px;
+  color: var(--text2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.nav-group-tabs { display: flex; align-items: flex-end; }
 .nav-tab {
   flex: 0 0 auto;
   background: none;
@@ -630,6 +639,7 @@ select:focus-visible {
 
 /* Management views */
 .nav-tabs { overflow-x: auto; scrollbar-width: thin; }
+.nav-group { flex: 0 0 auto; }
 .nav-tab[hidden] { display: none; }
 .ops-view[hidden] { display: none; }
 .ops-toolbar {
@@ -687,6 +697,21 @@ select:focus-visible {
   font-size: 13px;
 }
 .ops-error.show { display: flex; }
+.ops-capability {
+  display: none;
+  min-height: 38px;
+  align-items: center;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-left: 3px solid var(--text2);
+  background: rgba(136,136,136,0.08);
+  color: var(--text2);
+  font-size: 13px;
+}
+.ops-capability.show { display: flex; }
+.ops-capability.good { border-left-color: var(--green); color: var(--green); background: rgba(74,222,128,0.08); }
+.ops-capability.warn { border-left-color: var(--yellow); color: var(--yellow); background: rgba(250,204,21,0.08); }
+.ops-capability.bad { border-left-color: var(--red); color: var(--red); background: rgba(248,113,113,0.08); }
 .ops-form {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
@@ -704,6 +729,18 @@ select:focus-visible {
   font: 13px "SF Mono", "Fira Code", monospace;
   outline: none;
 }
+.config-editor {
+  width: 100%;
+  min-height: 360px;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+}
+.config-editor:focus { border-color: var(--accent); }
 .ops-input:focus { border-color: var(--accent); }
 .ops-detail {
   min-height: 72px;
@@ -735,6 +772,12 @@ select:focus-visible {
 .health-good { color: var(--green); }
 .health-warn { color: var(--yellow); }
 .health-bad { color: var(--red); }
+.lab-error {
+  max-width: 280px;
+  color: var(--red);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .ops-view .stat-card { min-height: 92px; }
 .ops-view .table-wrap { min-height: 96px; }
 #view-cluster table,
@@ -788,13 +831,28 @@ select:focus-visible {
   </div>
 
   <div class="nav-tabs" id="nav-tabs" role="tablist" aria-label="Management views">
-    <button class="nav-tab active" id="tab-streams" data-view="streams" role="tab" aria-selected="true" aria-controls="view-streams" tabindex="0">Streams</button>
-    <button class="nav-tab" id="tab-gb28181" data-view="gb28181" role="tab" aria-selected="false" aria-controls="view-gb28181" tabindex="-1" hidden>GB28181</button>
-    <button class="nav-tab" id="tab-config" data-view="config" role="tab" aria-selected="false" aria-controls="view-config" tabindex="-1">Config</button>
-    <button class="nav-tab" id="tab-cluster" data-view="cluster" role="tab" aria-selected="false" aria-controls="view-cluster" tabindex="-1">Cluster</button>
-    <button class="nav-tab" id="tab-sip" data-view="sip" role="tab" aria-selected="false" aria-controls="view-sip" tabindex="-1">SIP Calls</button>
-    <button class="nav-tab" id="tab-storage" data-view="storage" role="tab" aria-selected="false" aria-controls="view-storage" tabindex="-1">Storage</button>
-    <button class="nav-tab" id="tab-security" data-view="security" role="tab" aria-selected="false" aria-controls="view-security" tabindex="-1">Security</button>
+    <div class="nav-group" id="nav-workspace">
+      <div class="nav-group-label">Workspace</div>
+      <div class="nav-group-tabs">
+        <button class="nav-tab active" id="tab-streams" data-view="streams" role="tab" aria-selected="true" aria-controls="view-streams" tabindex="0">Streams</button>
+        <button class="nav-tab" id="tab-gb28181" data-view="gb28181" role="tab" aria-selected="false" aria-controls="view-gb28181" tabindex="-1" hidden>GB28181</button>
+        <button class="nav-tab" id="tab-sip" data-view="sip" role="tab" aria-selected="false" aria-controls="view-sip" tabindex="-1">SIP Calls</button>
+        <button class="nav-tab" id="tab-storage" data-view="storage" role="tab" aria-selected="false" aria-controls="view-storage" tabindex="-1">Storage</button>
+      </div>
+    </div>
+    <div class="nav-group" id="nav-operations">
+      <div class="nav-group-label">Operations</div>
+      <div class="nav-group-tabs">
+        <button class="nav-tab" id="tab-cluster" data-view="cluster" role="tab" aria-selected="false" aria-controls="view-cluster" tabindex="-1">Cluster</button>
+      </div>
+    </div>
+    <div class="nav-group" id="nav-system">
+      <div class="nav-group-label">System</div>
+      <div class="nav-group-tabs">
+        <button class="nav-tab" id="tab-config" data-view="config" role="tab" aria-selected="false" aria-controls="view-config" tabindex="-1">Configuration</button>
+        <button class="nav-tab" id="tab-security" data-view="security" role="tab" aria-selected="false" aria-controls="view-security" tabindex="-1">Security &amp; Audit</button>
+      </div>
+    </div>
   </div>
 
   <div id="view-streams" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
@@ -876,6 +934,23 @@ select:focus-visible {
       </div>
     </div>
 
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Local Protocol Lab</span><button class="btn" id="gb-self-test" type="button">Run GB28181 Self-Test</button></div>
+      <pre class="ops-detail" id="gb-self-test-result">No test run</pre>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">H.264 + G.711A / PS / RTP loopback</span></div>
+      <form class="ops-form" id="gb-lab-form" onsubmit="startGBLab(event)">
+        <select class="ops-input" id="gb-lab-mode" aria-label="GB28181 lab mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select>
+        <input class="ops-input" id="gb-lab-device" aria-label="GB28181 lab device ID" placeholder="34020000001320000011" required>
+        <input class="ops-input" id="gb-lab-channel" aria-label="GB28181 lab channel ID" placeholder="34020000001320000012" required>
+        <input class="ops-input" id="gb-lab-stream" aria-label="GB28181 lab stream key" placeholder="gb28181/channel" required>
+        <button class="btn btn-play" id="gb-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
+      </form>
+      <div class="ops-error" id="gb-lab-error"></div>
+      <div class="table-wrap"><table><thead><tr><th>Device / Channel</th><th>Mode</th><th>Stream</th><th>State</th><th>Error</th><th>RTP</th><th>RTCP</th><th>PS Frames</th><th>Actions</th></tr></thead><tbody id="gb-lab-sessions-tbody"></tbody></table><div id="gb-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent GB28181 lab sessions</div></div></div>
+    </div>
+
     <div class="gb-section-title">Devices</div>
     <div class="table-wrap">
       <table>
@@ -947,6 +1022,24 @@ select:focus-visible {
       <div class="ops-section-title"><span>Pending Restart</span><span id="config-pending-count">0</span></div>
       <div class="ops-list" id="config-pending"></div>
     </div>
+    <div class="ops-section" id="config-documents">
+      <div class="ops-section-title"><span>Desired Source Document</span><span id="config-source-writable">Read-only</span></div>
+      <div class="ops-toolbar-actions" style="margin-bottom:10px">
+        <button class="btn" id="config-validate" data-permission="viewer" type="button">Validate</button>
+        <button class="btn btn-play" id="config-apply" data-permission="operator" type="button" disabled>Apply &amp; Refresh</button>
+      </div>
+      <textarea class="config-editor" id="config-editor" spellcheck="false" readonly aria-label="Desired source configuration document"></textarea>
+      <div class="ops-section-title" style="margin-top:12px"><span>Effective Applied Document</span><span id="config-effective-state">Applied</span></div>
+      <pre class="ops-detail" id="config-effective-document">Effective document unavailable</pre>
+    </div>
+    <div class="ops-section" id="config-source-details-section">
+      <div class="ops-section-title"><span>Selected Source Details</span><span id="config-source-kind">-</span></div>
+      <pre class="ops-detail" id="config-source-details">Source details unavailable</pre>
+    </div>
+    <div class="ops-section" id="config-schema-section">
+      <div class="ops-section-title" style="margin-top:12px"><span>Configuration Schema</span><span id="config-schema-version">-</span></div>
+      <pre class="ops-detail" id="config-schema">Schema unavailable</pre>
+    </div>
   </div>
 
   <div id="view-cluster" class="ops-view" role="tabpanel" aria-labelledby="tab-cluster" tabindex="0" hidden>
@@ -982,6 +1075,22 @@ select:focus-visible {
       <div class="stat-card"><div class="stat-label">Outbound</div><div class="stat-value" id="sip-outbound">0</div></div>
       <div class="stat-card"><div class="stat-label">Network Failures</div><div class="stat-value" id="sip-network-failures">0</div></div>
     </div>
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Local Protocol Lab</span><button class="btn" id="sip-self-test" type="button">Run SIP Self-Test</button></div>
+      <pre class="ops-detail" id="sip-self-test-result">No test run</pre>
+    </div>
+    <div class="ops-section">
+      <div class="ops-section-title"><span>Persistent Fake Device</span><span class="ops-field-label">H.264 + PCMA / PCMU RTP loopback</span></div>
+      <form class="ops-form" id="sip-lab-form" onsubmit="startSIPLab(event)">
+        <select class="ops-input" id="sip-lab-mode" aria-label="SIP lab mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select>
+        <input class="ops-input" id="sip-lab-device" aria-label="SIP lab device ID" placeholder="lab-device" required>
+        <input class="ops-input" id="sip-lab-stream" aria-label="SIP lab stream key" placeholder="sip/lab" required>
+        <select class="ops-input" id="sip-lab-codec" aria-label="SIP lab codec"><option value="PCMA">PCMA</option><option value="PCMU">PCMU</option></select>
+        <button class="btn btn-play" id="sip-lab-start" data-permission="operator" type="submit">Start Lab Device</button>
+      </form>
+      <div class="ops-error" id="sip-lab-error"></div>
+      <div class="table-wrap"><table><thead><tr><th>Device</th><th>Mode</th><th>Stream</th><th>State</th><th>Error</th><th>Audio RTP</th><th>Video RTP</th><th>RTCP</th><th>Last Media</th><th>Actions</th></tr></thead><tbody id="sip-lab-sessions-tbody"></tbody></table><div id="sip-lab-sessions-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No persistent SIP lab sessions</div></div></div>
+    </div>
     <div class="table-wrap"><table><thead><tr><th>Call ID</th><th>Direction</th><th>Stream</th><th>Codec</th><th>State</th><th>RTP</th><th>Actions</th></tr></thead><tbody id="sip-calls-tbody"></tbody></table><div id="sip-calls-empty" class="empty-state" style="display:none;padding:20px"><div class="empty-sub">No SIP calls</div></div></div>
     <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
   </div>
@@ -989,6 +1098,7 @@ select:focus-visible {
   <div id="view-storage" class="ops-view" role="tabpanel" aria-labelledby="tab-storage" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Recordings &amp; DVR</h2></div>
     <div class="ops-error" id="storage-error"></div>
+    <div class="ops-capability" id="recording-capability" role="status"></div>
     <div class="stats">
       <div class="stat-card"><div class="stat-label">Recordings</div><div class="stat-value accent" id="recording-count">0</div></div>
       <div class="stat-card"><div class="stat-label">Files Completed</div><div class="stat-value" id="recording-completed">0</div></div>
@@ -1051,6 +1161,7 @@ select:focus-visible {
     <div class="player-header">
       <div><h3 style="display:inline">Preview</h3><span class="stream-label" id="player-stream-key"></span></div>
       <div style="display:flex;align-items:center">
+        <button class="btn-stats" id="btn-player-audio" onclick="togglePlayerAudio()" aria-pressed="false" style="display:none">Unmute</button>
         <button class="btn-stats" id="btn-stats" onclick="toggleStatsOverlay()">Stats</button>
         <button class="player-close" onclick="closePlayer()">&times;</button>
       </div>
@@ -1059,6 +1170,7 @@ select:focus-visible {
     <div class="player-body">
       <div class="player-video-wrap">
         <video id="player-video" autoplay playsinline></video>
+        <audio id="player-audio" controls autoplay></audio>
       </div>
       <div class="player-status" id="player-status">Select a protocol to start playback</div>
       <div class="player-url" id="player-url" style="display:none"></div>
@@ -1179,10 +1291,12 @@ var currentDash = null;
 var currentVideoEventCleanup = null;
 var playerGeneration = 0;
 var streamMedia = Object.create(null);
+var recordingFormats = Object.create(null);
 var statsInterval = null;
 var statsPrev = null;
 var statsVisible = false;
 var managementRole = "viewer";
+var sourceWritable = false;
 var activeTab = "streams";
 var activeViewController = null;
 var activeViewInterval = null;
@@ -1247,6 +1361,7 @@ function clearManagementError(view) {
 
 function canManage(requiredRole) {
   if (managementRole === "admin") return true;
+  if (requiredRole === "viewer") return managementRole === "viewer" || managementRole === "operator";
   return requiredRole === "operator" && managementRole === "operator";
 }
 
@@ -1257,6 +1372,14 @@ function applyManagementPermissions() {
     controls[i].disabled = !allowed;
     controls[i].title = allowed ? "" : "Insufficient console role";
   }
+  updateConfigEditorControls();
+}
+
+function updateConfigEditorControls() {
+  var canOperate = sourceWritable && canManage("operator");
+  document.getElementById("config-editor").readOnly = !canOperate;
+  document.getElementById("config-apply").disabled = !canOperate;
+  document.getElementById("config-validate").disabled = !canManage("viewer");
 }
 
 function abortActiveViewRequest() {
@@ -1531,7 +1654,18 @@ function renderStatsOverlay(v, a) {
   if (!overlay) return;
 
   if (!v) {
-    overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">No video stats yet</span></span></div>';
+    if (a) {
+      var audioPackets = a.packetsReceived || 0;
+      var audioLost = a.packetsLost || 0;
+      var audioJitter = a.jitter ? (a.jitter * 1000).toFixed(0) + 'ms' : '-';
+      overlay.innerHTML = '<div class="stat-row">' +
+        '<span class="stat-item"><span class="stat-label-s">A.Pkts</span>' + val(audioPackets) + '</span>' +
+        '<span class="stat-item"><span class="stat-label-s">A.Lost</span>' + val(audioLost, audioLost > 0 ? 'bad' : 'good') + '</span>' +
+        '<span class="stat-item"><span class="stat-label-s">A.Jit</span>' + val(audioJitter) + '</span>' +
+        '</div>';
+    } else {
+      overlay.innerHTML = '<div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for media stats...</span></span></div>';
+    }
     statsPrev = { v: v, a: a };
     return;
   }
@@ -1647,9 +1781,17 @@ function destroyCurrentPlayer() {
   }
   var video = document.getElementById("player-video");
   video.pause();
+  video.muted = false;
   video.srcObject = null;
   video.src = "";
   video.load();
+  var audio = document.getElementById("player-audio");
+  audio.pause();
+  audio.muted = false;
+  audio.srcObject = null;
+  audio.src = "";
+  audio.load();
+  setPlayerAudioControl(null, false);
 }
 
 function isCurrentPlayer(generation) {
@@ -1676,7 +1818,68 @@ function setPlayerURL(url) {
   el.style.display = url ? "block" : "none";
 }
 
+function setPlayerAudioControl(mediaElement, visible) {
+  var button = document.getElementById("btn-player-audio");
+  if (!button) return;
+  if (!visible || !mediaElement) {
+    button.style.display = "none";
+    button.setAttribute("aria-pressed", "false");
+    button.textContent = "Unmute";
+    return;
+  }
+  button.style.display = "inline-block";
+  button.setAttribute("aria-pressed", mediaElement.muted ? "false" : "true");
+  button.textContent = mediaElement.muted ? "Unmute" : "Mute";
+}
+
+function togglePlayerAudio() {
+  var video = document.getElementById("player-video");
+  var audio = document.getElementById("player-audio");
+  var mediaElement = video && video.style.display !== "none" ? video : audio;
+  if (!mediaElement || !mediaElement.srcObject) return;
+  mediaElement.muted = !mediaElement.muted;
+  setPlayerAudioControl(mediaElement, true);
+  var playPromise = mediaElement.play();
+  if (playPromise && playPromise.catch) {
+    playPromise.catch(function(e) {
+      if (isCurrentPlayer(playerGeneration)) setPlayerStatus("Audio play error: " + formatErr(e), "error");
+    });
+  }
+}
+
+function streamHasVideo(streamKey) {
+  var codec = normalizePlayerCodec((streamMedia[streamKey] || {}).video_codec);
+  return ["h264", "avc", "avc1", "h265", "hevc", "hev1", "hvc1", "av1", "av01", "vp8", "vp08", "vp9", "vp09"].indexOf(codec) >= 0;
+}
+
+function selectStreamMediaElement(streamKey) {
+  var hasVideo = streamHasVideo(streamKey);
+  var wrap = document.querySelector('.player-video-wrap');
+  var video = document.getElementById("player-video");
+  var audio = document.getElementById("player-audio");
+  if (wrap) wrap.classList.toggle("audio-only", !hasVideo);
+  video.style.display = hasVideo ? "block" : "none";
+  audio.style.display = hasVideo ? "none" : "block";
+  return hasVideo ? video : audio;
+}
+
 function monitorPlayableVideo(video, generation, label, streamKey) {
+  monitorPlayableMedia(video, generation, label, streamKey, true);
+}
+
+function monitorPlayableAudio(audio, generation, label, streamKey) {
+  monitorPlayableMedia(audio, generation, label, streamKey, false);
+}
+
+function monitorStreamMedia(mediaElement, generation, label, streamKey) {
+  if (streamHasVideo(streamKey)) {
+    monitorPlayableVideo(mediaElement, generation, label, streamKey);
+  } else {
+    monitorPlayableAudio(mediaElement, generation, label, streamKey);
+  }
+}
+
+function monitorPlayableMedia(mediaElement, generation, label, streamKey, expectsVideo) {
   if (currentVideoEventCleanup) {
     try { currentVideoEventCleanup(); } catch(e) {}
     currentVideoEventCleanup = null;
@@ -1684,9 +1887,7 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
 
   var finished = false;
   var frameCallbackID = null;
-  var media = streamMedia[streamKey] || {};
-  var expectsVideo = normalizePlayerCodec(media.video_codec) !== "";
-  var lastMediaTime = Number(video.currentTime) || 0;
+  var lastMediaTime = Number(mediaElement.currentTime) || 0;
   var lastProgressAt = Date.now();
   var playbackConfirmed = false;
   var playbackStalled = false;
@@ -1696,11 +1897,11 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
     finished = true;
     clearTimeout(startupTimeoutID);
     clearInterval(stallIntervalID);
-    video.removeEventListener("loadeddata", checkReady);
-    video.removeEventListener("playing", checkReady);
-    video.removeEventListener("timeupdate", checkReady);
-    if (frameCallbackID !== null && video.cancelVideoFrameCallback) {
-      try { video.cancelVideoFrameCallback(frameCallbackID); } catch(e) {}
+    mediaElement.removeEventListener("loadeddata", checkReady);
+    mediaElement.removeEventListener("playing", checkReady);
+    mediaElement.removeEventListener("timeupdate", checkReady);
+    if (frameCallbackID !== null && mediaElement.cancelVideoFrameCallback) {
+      try { mediaElement.cancelVideoFrameCallback(frameCallbackID); } catch(e) {}
     }
     if (currentVideoEventCleanup === cleanup) currentVideoEventCleanup = null;
   }
@@ -1717,10 +1918,14 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
       cleanup();
       return;
     }
-    if (video.readyState < 2 || video.paused) return;
-    if (expectsVideo && (video.videoWidth <= 0 || video.videoHeight <= 0)) return;
+    if (mediaElement.readyState < 2 || mediaElement.paused) return;
+    if (expectsVideo && (mediaElement.videoWidth <= 0 || mediaElement.videoHeight <= 0)) return;
 
-    var mediaTime = Number(video.currentTime) || 0;
+    var mediaTime = Number(mediaElement.currentTime) || 0;
+    if (!expectsVideo && mediaElement.readyState >= 2 && mediaTime > 0) {
+      markPlaying();
+      return;
+    }
     if (mediaTime > lastMediaTime + 0.05) {
       lastMediaTime = mediaTime;
       lastProgressAt = Date.now();
@@ -1744,29 +1949,49 @@ function monitorPlayableVideo(video, generation, label, streamKey) {
       return;
     }
     checkReady();
-    if (playbackConfirmed && !playbackStalled && !video.paused && Date.now() - lastProgressAt >= 3000) {
+    if (playbackConfirmed && !playbackStalled && !mediaElement.paused && Date.now() - lastProgressAt >= 3000) {
       playbackStalled = true;
       setPlayerStatus("Playback stalled (" + label + ")", "error");
     }
   }, 500);
 
   currentVideoEventCleanup = cleanup;
-  video.addEventListener("loadeddata", checkReady);
-  video.addEventListener("playing", checkReady);
-  video.addEventListener("timeupdate", checkReady);
+  mediaElement.addEventListener("loadeddata", checkReady);
+  mediaElement.addEventListener("playing", checkReady);
+  mediaElement.addEventListener("timeupdate", checkReady);
 
-  if (expectsVideo && video.requestVideoFrameCallback) {
-    frameCallbackID = video.requestVideoFrameCallback(function() {
+  if (expectsVideo && mediaElement.requestVideoFrameCallback) {
+    frameCallbackID = mediaElement.requestVideoFrameCallback(function() {
       checkReady();
     });
   }
   checkReady();
 }
 
-function playHTTPFLV(streamKey) {
+function encodedStreamPath(streamKey) {
+  return String(streamKey || "").split("/").map(function(segment) {
+    return encodeURIComponent(segment);
+  }).join("/");
+}
+
+function validProtocolLabStreamKey(streamKey) {
+  var value = String(streamKey || "");
+  if (!value || value.length > 256 || !/^[\x21-\x7e]+$/.test(value)) return false;
+  return value.split("/").every(function(segment) {
+    return segment && segment !== "." && segment !== "..";
+  });
+}
+
+function playerPlaybackPath(playback, field, fallback) {
+  var value = playback && playback[field];
+  return typeof value === "string" && value ? value : fallback;
+}
+
+function playHTTPFLV(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".flv");
+  var mediaElement = selectStreamMediaElement(streamKey);
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1779,12 +2004,12 @@ function playHTTPFLV(streamKey) {
     url: url,
     isLive: true
   });
-  player.attachMediaElement(document.getElementById("player-video"));
+  player.attachMediaElement(mediaElement);
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-FLV", streamKey);
+    monitorStreamMedia(mediaElement, generation, "HTTP-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1800,10 +2025,11 @@ function playHTTPFLV(streamKey) {
   currentPlayer = player;
 }
 
-function playWSFLV(streamKey) {
+function playWSFLV(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = websocketMediaURL("/ws/" + streamKey + ".flv");
+  var mediaElement = selectStreamMediaElement(streamKey);
+  var url = websocketMediaURL(playbackPath || "/ws/" + encodedStreamPath(streamKey) + ".flv");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1816,12 +2042,12 @@ function playWSFLV(streamKey) {
     url: url,
     isLive: true
   });
-  player.attachMediaElement(document.getElementById("player-video"));
+  player.attachMediaElement(mediaElement);
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(document.getElementById("player-video"), generation, "WS-FLV", streamKey);
+    monitorStreamMedia(mediaElement, generation, "WS-FLV", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1837,10 +2063,11 @@ function playWSFLV(streamKey) {
   currentPlayer = player;
 }
 
-function playHTTPTS(streamKey) {
+function playHTTPTS(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".ts");
+  var mediaElement = selectStreamMediaElement(streamKey);
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".ts");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1853,12 +2080,12 @@ function playHTTPTS(streamKey) {
     url: url,
     isLive: true
   });
-  player.attachMediaElement(document.getElementById("player-video"));
+  player.attachMediaElement(mediaElement);
   player.load();
   player.play().then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(document.getElementById("player-video"), generation, "HTTP-TS", streamKey);
+    monitorStreamMedia(mediaElement, generation, "HTTP-TS", streamKey);
   }).catch(function(e) {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus("Play error: " + e.message, "error");
@@ -1900,10 +2127,10 @@ function fmp4MimeCandidates(streamKey) {
   return ["video/mp4"];
 }
 
-function playFMP4(streamKey) {
+function playFMP4(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".mp4");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".mp4");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
@@ -1912,7 +2139,7 @@ function playFMP4(streamKey) {
     return;
   }
 
-  var video = document.getElementById("player-video");
+  var video = selectStreamMediaElement(streamKey);
   var ms = new MediaSource();
   var abortCtrl = new AbortController();
   currentMSEAbort = abortCtrl;
@@ -2011,7 +2238,7 @@ function playFMP4(streamKey) {
         video.play().then(function() {
           if (!isCurrentPlayer(generation)) return;
           setPlayerStatus("Connected, waiting for first decoded frame...");
-          monitorPlayableVideo(video, generation, "FMP4", streamKey);
+          monitorStreamMedia(video, generation, "FMP4", streamKey);
         }).catch(function(e) {
           if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
         });
@@ -2059,14 +2286,14 @@ function playFMP4(streamKey) {
   });
 }
 
-function playHLS(streamKey) {
+function playHLS(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".m3u8");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".m3u8");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
-  var video = document.getElementById("player-video");
+  var video = selectStreamMediaElement(streamKey);
 
   if (typeof Hls === "undefined") {
     setPlayerStatus("hls.js not loaded", "error");
@@ -2089,7 +2316,7 @@ function playHLS(streamKey) {
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Connected, waiting for first decoded frame...");
-        monitorPlayableVideo(video, generation, "HLS", streamKey);
+        monitorStreamMedia(video, generation, "HLS", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -2111,7 +2338,7 @@ function playHLS(streamKey) {
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
         setPlayerStatus("Connected, waiting for first decoded frame...");
-        monitorPlayableVideo(video, generation, "HLS native", streamKey);
+        monitorStreamMedia(video, generation, "HLS native", streamKey);
       }).catch(function(e) {
         if (!isCurrentPlayer(generation) || video.src !== url) return;
         setPlayerStatus("Play error: " + e.message, "error");
@@ -2127,14 +2354,14 @@ function playHLS(streamKey) {
   }
 }
 
-function playDASH(streamKey) {
+function playDASH(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
-  var url = mediaURL("/" + streamKey + ".mpd");
+  var url = mediaURL(playbackPath || "/" + encodedStreamPath(streamKey) + ".mpd");
   setPlayerURL(url);
   setPlayerStatus("Connecting...");
 
-  var video = document.getElementById("player-video");
+  var video = selectStreamMediaElement(streamKey);
 
   if (typeof dashjs === "undefined") {
     setPlayerStatus("dash.js not loaded", "error");
@@ -2162,7 +2389,7 @@ function playDASH(streamKey) {
     if (!isCurrentPlayer(generation) || playbackMonitorStarted) return;
     playbackMonitorStarted = true;
     setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorPlayableVideo(video, generation, "DASH", streamKey);
+    monitorStreamMedia(video, generation, "DASH", streamKey);
   });
 
   player.on(dashjs.MediaPlayer.events.ERROR, function(e) {
@@ -2171,11 +2398,12 @@ function playDASH(streamKey) {
   });
 }
 
-function playWHEP(streamKey, mode) {
+function playWHEP(streamKey, mode, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
   var proto = location.protocol === "https:" ? "https://" : "http://";
-  var url = endpointURL(proto.slice(0, -2), endpoints.webrtc, "/webrtc/whep/" + streamKey + "?mode=" + (mode || "realtime"));
+  var fallbackPath = "/webrtc/whep/" + encodedStreamPath(streamKey) + "?mode=" + (mode || "realtime");
+  var url = endpointURL(proto.slice(0, -2), endpoints.webrtc, playbackPath || fallbackPath);
   setPlayerURL(url);
   setPlayerStatus("Negotiating WebRTC...");
 
@@ -2192,20 +2420,27 @@ function playWHEP(streamKey, mode) {
   var remoteStream = new MediaStream();
   var receivedTrack = false;
   var playbackMonitorStarted = false;
-  var video = document.getElementById("player-video");
-  video.srcObject = remoteStream;
+  var mediaElement = selectStreamMediaElement(streamKey);
+  var hasVideo = streamHasVideo(streamKey);
+  mediaElement.srcObject = remoteStream;
+  // ontrack runs asynchronously, outside the click gesture that opened the
+  // player. Start muted so browser autoplay policy cannot hide the media;
+  // the user can restore audio with the explicit player control.
+  mediaElement.muted = true;
 
   pc.ontrack = function(event) {
     if (!isCurrentPlayer(generation)) return;
     receivedTrack = true;
     remoteStream.addTrack(event.track);
-    if (!playbackMonitorStarted && (event.track.kind === "video" || !normalizePlayerCodec((streamMedia[streamKey] || {}).video_codec))) {
+    // Rebind after the first track arrives so browsers refresh an element
+    // that was initially attached to an empty MediaStream.
+    mediaElement.srcObject = remoteStream;
+    if (event.track.kind === "audio") setPlayerAudioControl(mediaElement, true);
+    if (!playbackMonitorStarted && (event.track.kind === "video" || !hasVideo)) {
       playbackMonitorStarted = true;
-      video.play().then(function() {
-        if (!isCurrentPlayer(generation)) return;
-        setPlayerStatus("WebRTC connected, waiting for first decoded frame...");
-        monitorPlayableVideo(video, generation, "WebRTC/WHEP", streamKey);
-      }).catch(function(e) {
+      var playPromise = mediaElement.play();
+      monitorStreamMedia(mediaElement, generation, "WebRTC/WHEP", streamKey);
+      playPromise.catch(function(e) {
         if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + e.message, "error");
       });
     }
@@ -2279,23 +2514,23 @@ function prefersWHEP(videoCodec) {
   return codec === "vp8" || codec === "vp08" || codec === "vp9" || codec === "vp09" || codec === "av1" || codec === "av01";
 }
 
-function addWHEPProtocols(protocols) {
+function addWHEPProtocols(protocols, playback) {
   if (!endpoints.webrtc) return;
-  protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime"); } });
-  protocols.push({ id: "whep-live", label: "WebRTC-Live", fn: function(k) { playWHEP(k, "live"); } });
+  protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime", playerPlaybackPath(playback, "whep", "")); } });
+  protocols.push({ id: "whep-live", label: "WebRTC-Live", fn: function(k) { playWHEP(k, "live", playerPlaybackPath(playback, "whep_live", "")); } });
 }
 
-function addHTTPProtocols(protocols) {
+function addHTTPProtocols(protocols, playback) {
   if (!endpoints.http) return;
-  protocols.push({ id: "http-flv", label: "HTTP-FLV", fn: playHTTPFLV });
-  protocols.push({ id: "ws-flv", label: "WS-FLV", fn: playWSFLV });
-  protocols.push({ id: "http-ts", label: "HTTP-TS", fn: playHTTPTS });
-  protocols.push({ id: "fmp4", label: "FMP4", fn: playFMP4 });
-  protocols.push({ id: "hls", label: "HLS", fn: playHLS });
-  protocols.push({ id: "dash", label: "DASH", fn: playDASH });
+  protocols.push({ id: "http-flv", label: "HTTP-FLV", fn: function(k) { playHTTPFLV(k, playerPlaybackPath(playback, "http_flv", "")); } });
+  protocols.push({ id: "ws-flv", label: "WS-FLV", fn: function(k) { playWSFLV(k, playerPlaybackPath(playback, "ws_flv", "")); } });
+  protocols.push({ id: "http-ts", label: "HTTP-TS", fn: function(k) { playHTTPTS(k, playerPlaybackPath(playback, "http_ts", "")); } });
+  protocols.push({ id: "fmp4", label: "FMP4", fn: function(k) { playFMP4(k, playerPlaybackPath(playback, "fmp4", "")); } });
+  protocols.push({ id: "hls", label: "HLS", fn: function(k) { playHLS(k, playerPlaybackPath(playback, "hls", "")); } });
+  protocols.push({ id: "dash", label: "DASH", fn: function(k) { playDASH(k, playerPlaybackPath(playback, "dash", "")); } });
 }
 
-function openPlayer(streamKey) {
+function openPlayer(streamKey, mediaHint) {
   destroyCurrentPlayer();
   statsVisible = false;
   var btnStats = document.getElementById('btn-stats');
@@ -2309,19 +2544,29 @@ function openPlayer(streamKey) {
   var tabs = document.getElementById("proto-tabs");
   tabs.innerHTML = "";
   var protocols = [];
-  var media = streamMedia[streamKey] || {};
+  var playback = arguments.length > 2 ? arguments[2] : null;
+  var media = Object.assign({}, streamMedia[streamKey] || {}, mediaHint || {});
+  if (mediaHint) streamMedia[streamKey] = media;
   var videoCodec = media.video_codec || "";
+  var audioCodec = normalizePlayerCodec(media.audio_codec);
+  var hasVideo = streamHasVideo(streamKey);
+  var audioOnlyG711 = !hasVideo && ["g711a", "g711u", "pcma", "pcmu"].indexOf(audioCodec) >= 0;
   var whepPreferred = prefersWHEP(videoCodec);
 
-  if (whepPreferred) {
-    addWHEPProtocols(protocols);
+  selectStreamMediaElement(streamKey);
+  if (audioOnlyG711) {
+    if (endpoints.webrtc) addWHEPProtocols(protocols, playback);
+  } else if (whepPreferred) {
+    addWHEPProtocols(protocols, playback);
   } else {
-    addHTTPProtocols(protocols);
-    addWHEPProtocols(protocols);
+    addHTTPProtocols(protocols, playback);
+    addWHEPProtocols(protocols, playback);
   }
 
   if (protocols.length === 0) {
-    if (whepPreferred && !endpoints.webrtc) {
+    if (audioOnlyG711 && !endpoints.webrtc) {
+      setPlayerStatus("G.711 audio requires WebRTC/WHEP playback", "error");
+    } else if (whepPreferred && !endpoints.webrtc) {
       setPlayerStatus((videoCodec || "This video codec") + " requires WebRTC/WHEP playback", "error");
     } else {
       setPlayerStatus("No streaming endpoints available", "error");
@@ -2465,17 +2710,14 @@ function renderStreams(streams) {
     var gopCell = row.insertCell();
     var gop = document.createElement("div");
     gop.className = "gop-cell";
-    var barWrap = document.createElement("div");
-    barWrap.className = "gop-bar-wrap";
-    var bar = document.createElement("div");
-    bar.className = "gop-bar";
-    bar.style.width = Math.min((s.gop_cache_len || 0) / 120 * 100, 100).toFixed(0) + "%";
-    barWrap.appendChild(bar);
-    var gopLabel = document.createElement("div");
-    gopLabel.className = "gop-label";
-    gopLabel.textContent = (s.gop_cache_len || 0) + " frames · " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
-    gop.appendChild(barWrap);
-    gop.appendChild(gopLabel);
+    if (!s.video_codec && s.audio_codec) {
+      gop.textContent = "Not applicable (audio-only)";
+    } else {
+      var gopLabel = document.createElement("div");
+      gopLabel.className = "gop-label";
+      gopLabel.textContent = "GOP #" + (s.gop_generation || 0) + " " + (s.gop_cache_len || 0) + " frames / " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+      gop.appendChild(gopLabel);
+    }
     gopCell.appendChild(gop);
 
     var subscriberCell = row.insertCell();
@@ -2947,8 +3189,10 @@ function createDynamicActionHandlers() {
     "stream-delete": function(value) { deleteStream(value); },
     "sip-detail": function(value) { loadSIPCall(value); },
     "sip-hangup": function(value) { hangupSIPCall(value); },
+    "sip-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "" }, button.playbackMetadata); },
+    "sip-lab-stop": function(value) { stopSIPLab(value); },
     "recording-detail": function(value) { loadRecording(value); },
-    "recording-play": function(value) { playRecording(value); },
+    "recording-play": function(value) { playRecording(value, recordingFormats[value]); },
     "recording-download": function(value) { downloadRecording(value); },
     "recording-delete": function(value) { deleteRecording(value); },
     "dvr-detail": function(value) { loadDVRSession(value); },
@@ -2961,7 +3205,9 @@ function createDynamicActionHandlers() {
     "gb-ptz": function(value) { openPTZ(value); },
     "gb-playback": function(value) { openPlayback(value); },
     "gb-preview": function(value) { openPlayer(value); },
-    "gb-close-session": function(value) { gbCloseSession(value); }
+    "gb-close-session": function(value) { gbCloseSession(value); },
+    "gb-lab-preview": function(value, button) { openPlayer(value, { video_codec: button.dataset.videoCodec || "H264", audio_codec: button.dataset.audioCodec || "G711A" }, button.playbackMetadata); },
+    "gb-lab-stop": function(value) { stopGBLab(value); }
   };
 }
 
@@ -2970,7 +3216,7 @@ document.addEventListener("click", function(event) {
   var button = event.target.closest("[data-action]");
   if (!button) return;
   var handler = dynamicActionHandlers[button.dataset.action];
-  if (handler) handler(button.dataset.actionId);
+  if (handler) handler(button.dataset.actionId, button);
 });
 
 function renderEmptyTable(tbodyID, emptyID, rows) {
@@ -2980,7 +3226,14 @@ function renderEmptyTable(tbodyID, emptyID, rows) {
 
 function refreshRuntimeConfig(signal) {
   clearManagementError("config");
-  return apiFetch("/api/v1/server/config", { signal: signal }).then(function(data) {
+  return Promise.all([
+    apiFetch("/api/v1/server/config", { signal: signal }),
+    apiFetch("/api/v1/server/config/document", { signal: signal }),
+    apiFetch("/api/v1/server/config/schema", { signal: signal })
+  ]).then(function(results) {
+    var data = results[0] || {};
+    var documentData = results[1] || {};
+    var schemaData = results[2] || {};
     data = data || {};
     document.getElementById("config-enabled").textContent = data.enabled ? "Active" : "Disabled";
     document.getElementById("config-enabled").className = "stat-value " + (data.enabled ? "health-good" : "");
@@ -2998,10 +3251,53 @@ function refreshRuntimeConfig(signal) {
     document.getElementById("config-pending").innerHTML = pending.length
       ? pending.map(function(path) { return '<span class="ops-chip">' + esc(path) + "</span>"; }).join("")
       : '<span class="ops-field-label">None</span>';
+    var editor = document.getElementById("config-editor");
+    if (document.activeElement !== editor) {
+      editor.value = documentData.desired_document || documentData.effective_document || JSON.stringify(documentData.desired || documentData.effective || {}, null, 2);
+    }
+    sourceWritable = !!documentData.writable;
+    document.getElementById("config-source-writable").textContent = documentData.writable ? "Writable source" : "Read-only source";
+    document.getElementById("config-effective-state").textContent = pending.length ? "Applied; restart pending" : "Applied";
+    document.getElementById("config-effective-document").textContent = documentData.effective_document || JSON.stringify(documentData.effective || {}, null, 2);
+    document.getElementById("config-source-kind").textContent = documentData.source_details && documentData.source_details.kind ? documentData.source_details.kind : (data.source || "-");
+    document.getElementById("config-source-details").textContent = JSON.stringify(documentData.source_details || {}, null, 2);
+    document.getElementById("config-schema-version").textContent = schemaData.$id || "JSON Schema";
+    document.getElementById("config-schema").textContent = JSON.stringify(schemaData, null, 2);
     if (data.last_error) showManagementError("config", new Error(data.last_error));
     var button = document.getElementById("config-refresh");
     button.disabled = !data.enabled || !canManage("operator");
+    updateConfigEditorControls();
+  }).catch(function(err) {
+    sourceWritable = false;
+    updateConfigEditorControls();
+    showManagementError("config", err);
+  });
+}
+
+function validateConfigEditor() {
+  clearManagementError("config");
+  return apiFetch("/api/v1/server/config/validate", {
+    method: "POST",
+    headers: {"Content-Type": "application/yaml"},
+    body: document.getElementById("config-editor").value
+  }).then(function() {
+    showToast("Configuration is valid");
   }).catch(function(err) { showManagementError("config", err); });
+}
+
+function applyConfigEditor() {
+  if (!sourceWritable || !canManage("operator")) return Promise.resolve();
+  showModal("Apply configuration", "Write the complete configuration document and schedule a refresh?", function() {
+    if (!sourceWritable || !canManage("operator")) return Promise.resolve();
+    return apiFetch("/api/v1/server/config/apply", {
+      method: "POST",
+      headers: {"Content-Type": "application/yaml"},
+      body: document.getElementById("config-editor").value
+    }).then(function() {
+      showToast("Configuration written; refresh scheduled");
+      return refreshRuntimeConfig();
+    }).catch(function(err) { showManagementError("config", err); });
+  });
 }
 
 function refreshRuntimeConfigNow() {
@@ -3042,7 +3338,8 @@ function refreshCluster(signal) {
 
 function refreshSIPCalls(signal) {
   clearManagementError("sip");
-  return apiFetch("/api/v1/sipgateway/calls", { signal: signal }).then(function(data) {
+  return Promise.all([apiFetch("/api/v1/sipgateway/calls", { signal: signal }), refreshSIPLab(signal)]).then(function(results) {
+    var data = results[0] || {};
     data = data || {};
     var metrics = data.metrics || {};
     var calls = data.calls || [];
@@ -3052,6 +3349,20 @@ function refreshSIPCalls(signal) {
     document.getElementById("sip-network-failures").textContent = metrics.network_failures_total || 0;
     renderSIPCalls(calls);
   }).catch(function(err) { showManagementError("sip", err); });
+}
+
+function runSIPSelfTest() {
+  var result = document.getElementById("sip-self-test-result");
+  result.textContent = "Running local SIP checks...";
+  return apiFetch("/api/v1/sipgateway/test")
+    .then(function(report) {
+      result.textContent = JSON.stringify(report, null, 2);
+      result.className = "ops-detail " + (report && report.passed ? "health-good" : "health-bad");
+    })
+    .catch(function(err) {
+      result.textContent = managementErrorMessage(err);
+      result.className = "ops-detail health-bad";
+    });
 }
 
 function renderSIPCalls(calls) {
@@ -3073,6 +3384,78 @@ function renderSIPCalls(calls) {
     appendActionButton(actions, "Details", "", "sip-detail", call.call_id);
     if (canManage("operator")) appendActionButton(actions, "Hang up", "btn-danger", "sip-hangup", call.call_id);
     actionCell.appendChild(actions);
+  });
+}
+
+function renderSIPLabSessions(views) {
+  views = views || [];
+  var tbody = document.getElementById("sip-lab-sessions-tbody");
+  var empty = document.getElementById("sip-lab-sessions-empty");
+  tbody.replaceChildren();
+  empty.style.display = views.length ? "none" : "block";
+  views.forEach(function(view) {
+    var s = view.session || {};
+    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: s.codec || "" };
+    var row = tbody.insertRow();
+    appendTextCell(row, s.device_id || s.identity || "-", "mono");
+    appendTextCell(row, s.mode || "-");
+    appendTextCell(row, s.stream_key || "-", "stream-key");
+    appendTextCell(row, s.state || "-");
+    appendTextCell(row, s.last_error || "-", "lab-error");
+    appendTextCell(row, (s.audio_rtp_packets_sent || 0) + " tx / " + (s.audio_rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.video_rtp_packets_sent || 0) + " tx / " + (s.video_rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, formatDate(s.last_media_at));
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (s.stream_key && view.playback && view.playback.available) {
+      var preview = appendActionButton(actions, "Preview", "btn-play", "sip-lab-preview", s.stream_key);
+      preview.dataset.videoCodec = "H264";
+      preview.dataset.audioCodec = s.codec || "";
+      preview.playbackMetadata = view.playback;
+    }
+    if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "sip-lab-stop", s.id);
+    actionCell.appendChild(actions);
+  });
+}
+
+function refreshSIPLab(signal) {
+  return apiFetch("/api/v1/sipgateway/lab/sessions", { signal: signal }).then(function(data) {
+    renderSIPLabSessions((data && data.sessions) || []);
+  }).catch(function(err) {
+    document.getElementById("sip-lab-error").textContent = managementErrorMessage(err);
+  });
+}
+
+function startSIPLab(event) {
+  event.preventDefault();
+  if (!canManage("operator")) return;
+  var button = document.getElementById("sip-lab-start");
+  button.disabled = true;
+  document.getElementById("sip-lab-error").textContent = "";
+  var request = {
+    mode: document.getElementById("sip-lab-mode").value,
+    device_id: document.getElementById("sip-lab-device").value.trim(),
+    stream_key: document.getElementById("sip-lab-stream").value.trim(),
+    codec: document.getElementById("sip-lab-codec").value
+  };
+  if (!validProtocolLabStreamKey(request.stream_key)) {
+    document.getElementById("sip-lab-error").textContent = "Stream key segments must be non-empty and cannot be . or ..";
+    button.disabled = !canManage("operator");
+    return;
+  }
+  apiFetch("/api/v1/sipgateway/lab/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })
+    .then(function(data) { showToast("SIP lab started"); renderSIPLabSessions(data ? [data] : []); return refreshSIPLab(); })
+    .catch(function(err) { document.getElementById("sip-lab-error").textContent = managementErrorMessage(err); })
+    .finally(function() { button.disabled = !canManage("operator"); });
+}
+
+function stopSIPLab(id) {
+  showModal("Stop SIP lab", "Stop this local fake SIP device?", function() {
+    return apiFetch("/api/v1/sipgateway/lab/sessions/" + encodeURIComponent(id), { method: "DELETE" })
+      .then(function() { showToast("SIP lab stopped"); return refreshSIPLab(); })
+      .catch(function(err) { document.getElementById("sip-lab-error").textContent = managementErrorMessage(err); });
   });
 }
 
@@ -3117,13 +3500,15 @@ function recordingPlayURL(recordingID) {
   return recordingURL(recordingID) + "/play";
 }
 
-function renderRecordings(items) {
+function renderRecordings(items, allowPlayback) {
   items = items || [];
+  recordingFormats = Object.create(null);
   document.getElementById("recording-count").textContent = items.length;
   var tbody = document.getElementById("recordings-tbody");
   tbody.replaceChildren();
   document.getElementById("recordings-empty").style.display = items.length ? "none" : "block";
   items.forEach(function(item) {
+    recordingFormats[item.id] = item.format || "";
     var row = tbody.insertRow();
     appendTextCell(row, item.id, "mono");
     appendTextCell(row, item.stream_key || "-", "stream-key");
@@ -3135,7 +3520,7 @@ function renderRecordings(items) {
     var actions = document.createElement("div");
     actions.className = "actions";
     appendActionButton(actions, "Details", "", "recording-detail", item.id);
-    if (item.state === "completed") {
+    if (item.state === "completed" && allowPlayback !== false) {
       appendActionButton(actions, "Play", "btn-play", "recording-play", item.id);
       appendActionButton(actions, "Download", "", "recording-download", item.id);
     }
@@ -3173,18 +3558,42 @@ function refreshStorage(signal) {
     settledRequest(apiFetch("/api/v1/recordings/status", { signal: signal })),
     settledRequest(apiFetch("/api/v1/dvr/status", { signal: signal }))
   ]).then(function(results) {
-    if (results[0].value) renderRecordings(results[0].value);
     var recordingStatus = results[1].value || {};
     var recordingMetrics = recordingStatus.metrics || {};
     document.getElementById("recording-completed").textContent = recordingMetrics.files_completed || 0;
+    var capability = document.getElementById("recording-capability");
+    var state = recordingStatus.state || (recordingStatus.enabled ? "ready" : "disabled");
+    if (results[0].value) renderRecordings(results[0].value, state !== "disabled");
+    var capabilityText = "";
+    var capabilityClass = "";
+    if (state === "disabled") {
+      capabilityText = "Recording is disabled. Enable record.enabled to create playback files.";
+    } else if (state === "ready") {
+      capabilityText = "Recording is ready for playback.";
+      capabilityClass = "good";
+    } else if (state === "degraded") {
+      capabilityText = "Recording is degraded: " + (recordingStatus.reason || "storage needs attention");
+      capabilityClass = "warn";
+    } else {
+      capabilityText = "Recording is unavailable: " + (recordingStatus.reason || "storage cannot be used");
+      capabilityClass = "bad";
+    }
+    capability.textContent = capabilityText;
+    capability.className = "ops-capability show " + capabilityClass;
     var recordHealth = recordingStatus.storage || {};
     var dvrData = results[2].value || {};
     var dvrHealth = dvrData.storage || {};
     var healthy = (recordHealth.healthy || !recordHealth.root) && (dvrHealth.healthy || !dvrHealth.root);
     var lowSpace = recordHealth.low_space || dvrHealth.low_space;
     var health = document.getElementById("storage-health");
-    health.textContent = lowSpace ? "Low space" : healthy ? "Healthy" : "Unavailable";
-    health.className = "stat-value " + (lowSpace ? "health-warn" : healthy ? "health-good" : "health-bad");
+    var dvrEnabled = dvrData.enabled === true;
+    if (state === "disabled" && !dvrEnabled) {
+      health.textContent = "Disabled";
+      health.className = "stat-value";
+    } else {
+      health.textContent = lowSpace ? "Low space" : healthy ? "Healthy" : "Unavailable";
+      health.className = "stat-value " + (lowSpace ? "health-warn" : healthy ? "health-good" : "health-bad");
+    }
     renderDVR(dvrData);
     var failed = results.filter(function(result) { return result.error && result.error.name !== "AbortError"; });
     if (failed.length) showManagementError("storage", failed[0].error);
@@ -3198,7 +3607,7 @@ function loadRecording(recordingID) {
     .catch(function(err) { showManagementError("storage", err); });
 }
 
-function playRecording(recordingID) {
+function playRecording(recordingID, recordingFormat) {
   destroyCurrentPlayer();
   statsVisible = false;
   var btnStats = document.getElementById("btn-stats");
@@ -3209,14 +3618,16 @@ function playRecording(recordingID) {
   setPlayerURL(recordingPlayURL(recordingID));
   setPlayerStatus("Loading recording...");
   var video = document.getElementById("player-video");
+  var format = String(recordingFormat || "").toLowerCase();
   var ext = String(recordingID).split(".").pop().toLowerCase();
-  if (ext === "mp4" || ext === "m4v") {
+  var playbackType = format || ext;
+  if (playbackType === "mp4" || playbackType === "fmp4" || playbackType === "m4v") {
     video.src = recordingPlayURL(recordingID);
     video.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
     return;
   }
-  if ((ext === "flv" || ext === "ts") && typeof mpegts !== "undefined" && mpegts.isSupported()) {
-    var player = mpegts.createPlayer({ type: ext === "flv" ? "flv" : "mpegts", url: recordingPlayURL(recordingID), isLive: false });
+  if ((playbackType === "flv" || playbackType === "ts" || playbackType === "hls") && typeof mpegts !== "undefined" && mpegts.isSupported()) {
+    var player = mpegts.createPlayer({ type: playbackType === "flv" ? "flv" : "mpegts", url: recordingPlayURL(recordingID), isLive: false });
     player.attachMediaElement(video);
     player.load();
     player.play().then(function() { setPlayerStatus("Playing recording", "ok"); }).catch(function(err) { setPlayerStatus("Play error: " + formatErr(err), "error"); });
@@ -3451,7 +3862,8 @@ document.getElementById("nav-tabs").addEventListener("keydown", function(event) 
 function refreshGB28181(signal) {
   return Promise.all([
     apiFetch("/api/v1/gb28181/devices", { signal: signal }),
-    apiFetch("/api/v1/gb28181/sessions", { signal: signal })
+    apiFetch("/api/v1/gb28181/sessions", { signal: signal }),
+    refreshGBLab(signal)
   ]).then(function(results) {
     var devices = results[0] || [];
     var sessions = results[1] || [];
@@ -3469,6 +3881,20 @@ function refreshGB28181(signal) {
     document.getElementById("gb-stat-channels").textContent = totalCh;
     document.getElementById("gb-stat-sessions").textContent = sessions.length;
   }).catch(function(err) { showManagementError("gb28181", err); });
+}
+
+function runGB28181SelfTest() {
+  var result = document.getElementById("gb-self-test-result");
+  result.textContent = "Running local GB28181 checks...";
+  return apiFetch("/api/v1/gb28181/test")
+    .then(function(report) {
+      result.textContent = JSON.stringify(report, null, 2);
+      result.className = "ops-detail " + (report && report.passed ? "health-good" : "health-bad");
+    })
+    .catch(function(err) {
+      result.textContent = managementErrorMessage(err);
+      result.className = "ops-detail health-bad";
+    });
 }
 
 function renderDevicesTable(devices) {
@@ -3572,6 +3998,77 @@ function renderSessionsTable(sessions) {
     appendActionButton(actions, "Preview", "btn-play", "gb-preview", s.stream_key);
     if (canManage("admin")) appendActionButton(actions, "Close", "btn-danger", "gb-close-session", s.id);
     actionCell.appendChild(actions);
+  });
+}
+
+function renderGBLabSessions(views) {
+  views = views || [];
+  var tbody = document.getElementById("gb-lab-sessions-tbody");
+  var empty = document.getElementById("gb-lab-sessions-empty");
+  tbody.replaceChildren();
+  empty.style.display = views.length ? "none" : "block";
+  views.forEach(function(view) {
+    var s = view.session || {};
+    if (s.stream_key) streamMedia[s.stream_key] = { video_codec: "H264", audio_codec: "G711A" };
+    var row = tbody.insertRow();
+    appendTextCell(row, (s.device_id || "-") + " / " + (s.channel_id || "-"), "mono");
+    appendTextCell(row, s.mode || "-");
+    appendTextCell(row, s.stream_key || "-", "stream-key");
+    appendTextCell(row, s.state || "-");
+    appendTextCell(row, s.last_error || "-", "lab-error");
+    appendTextCell(row, (s.rtp_packets_sent || 0) + " tx / " + (s.rtp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.rtcp_packets_sent || 0) + " tx / " + (s.rtcp_packets_received || 0) + " rx", "mono");
+    appendTextCell(row, (s.ps_frames_sent || 0) + " tx / " + (s.ps_frames_received || 0) + " rx", "mono");
+    var actionCell = row.insertCell();
+    var actions = document.createElement("div");
+    actions.className = "actions";
+    if (s.stream_key && view.playback && view.playback.available) {
+      var preview = appendActionButton(actions, "Preview", "btn-play", "gb-lab-preview", s.stream_key);
+      preview.dataset.videoCodec = "H264";
+      preview.dataset.audioCodec = "G711A";
+      preview.playbackMetadata = view.playback;
+    }
+    if (canManage("operator") && s.state !== "stopped") appendActionButton(actions, "Stop", "btn-danger", "gb-lab-stop", s.id);
+    actionCell.appendChild(actions);
+  });
+}
+
+function refreshGBLab(signal) {
+  return apiFetch("/api/v1/gb28181/lab/sessions", { signal: signal }).then(function(data) {
+    renderGBLabSessions((data && data.sessions) || []);
+  }).catch(function(err) {
+    document.getElementById("gb-lab-error").textContent = managementErrorMessage(err);
+  });
+}
+
+function startGBLab(event) {
+  event.preventDefault();
+  if (!canManage("operator")) return;
+  var button = document.getElementById("gb-lab-start");
+  button.disabled = true;
+  document.getElementById("gb-lab-error").textContent = "";
+  var request = {
+    mode: document.getElementById("gb-lab-mode").value,
+    device_id: document.getElementById("gb-lab-device").value.trim(),
+    channel_id: document.getElementById("gb-lab-channel").value.trim(),
+    stream_key: document.getElementById("gb-lab-stream").value.trim()
+  };
+  if (!validProtocolLabStreamKey(request.stream_key)) {
+    document.getElementById("gb-lab-error").textContent = "Stream key segments must be non-empty and cannot be . or ..";
+    button.disabled = !canManage("operator");
+    return;
+  }
+  apiFetch("/api/v1/gb28181/lab/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })
+    .then(function(data) { showToast("GB28181 lab started"); renderGBLabSessions(data ? [data] : []); return refreshGBLab(); })
+    .catch(function(err) { document.getElementById("gb-lab-error").textContent = managementErrorMessage(err); })
+    .finally(function() { button.disabled = !canManage("operator"); });
+}
+
+function stopGBLab(id) {
+  showModal("Stop GB28181 lab", "Stop this local fake GB28181 device?", function() {
+    return apiFetch("/api/v1/gb28181/lab/sessions/" + encodeURIComponent(id), { method: "DELETE" })
+      .then(function() { showToast("GB28181 lab stopped"); return refreshGBLab(); })
+      .catch(function(err) { document.getElementById("gb-lab-error").textContent = managementErrorMessage(err); });
   });
 }
 
@@ -3717,6 +4214,10 @@ function showToast(msg) {
 }
 
 /* === Init === */
+document.getElementById("config-validate").addEventListener("click", validateConfigEditor);
+document.getElementById("config-apply").addEventListener("click", applyConfigEditor);
+document.getElementById("sip-self-test").addEventListener("click", runSIPSelfTest);
+document.getElementById("gb-self-test").addEventListener("click", runGB28181SelfTest);
 applyManagementPermissions();
 bootstrapManagementRole();
 switchTab("streams");

@@ -45,6 +45,17 @@ func newMuxerWorkerStream(t *testing.T, audioCodec avframe.CodecType) *core.Stre
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
 		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
 	))
+	if audioCodec == avframe.CodecOpus {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeSequenceHeader,
+			0, 0, []byte("OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00"),
+		))
+	} else if audioCodec == avframe.CodecAAC {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+			0, 0, []byte{0x12, 0x10},
+		))
+	}
 	stream.WriteFrame(avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
 		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
@@ -52,12 +63,31 @@ func newMuxerWorkerStream(t *testing.T, audioCodec avframe.CodecType) *core.Stre
 	return stream
 }
 
-func newMuxerWorkerInstance() (*core.MuxerInstance, *core.SharedBufferReader) {
+func newMuxerWorkerInstance(stream *core.Stream) (*core.MuxerInstance, *core.SharedBufferReader) {
 	inst := &core.MuxerInstance{
-		Buffer: core.NewSharedBuffer(256),
-		Done:   make(chan struct{}),
+		Buffer:     core.NewSharedBuffer(256),
+		Generation: stream.StartupSnapshot().Generation,
+		Done:       make(chan struct{}),
 	}
 	return inst, inst.Buffer.NewReader()
+}
+
+func newPreReadyMuxerWorkerStream(t *testing.T) *core.Stream {
+	t.Helper()
+	stream := core.NewStream("live/pre-ready-muxer-worker", config.StreamConfig{
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 256,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&muxerWorkerPublisher{info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if stream.StartupSnapshot().Ready {
+		t.Fatal("test publisher unexpectedly started ready")
+	}
+	return stream
 }
 
 func waitForMuxerInit(t *testing.T, inst *core.MuxerInstance) []byte {
@@ -86,7 +116,7 @@ func collectMuxerOutput(reader *core.SharedBufferReader) []byte {
 
 func TestFLVMuxerDropsOpusWhenAudioTranscodingIsUnavailable(t *testing.T) {
 	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
-	inst, reader := newMuxerWorkerInstance()
+	inst, reader := newMuxerWorkerInstance(stream)
 	workerDone := make(chan struct{})
 	go func() {
 		new(Module).runFLVMuxer(inst, stream)
@@ -129,9 +159,79 @@ func TestFLVMuxerDropsOpusWhenAudioTranscodingIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestFLVMuxerStopsOnPublisherGenerationEnd(t *testing.T) {
+	stream := newMuxerWorkerStream(t, 0)
+	inst, _ := newMuxerWorkerInstance(stream)
+	workerDone := make(chan struct{})
+	go func() {
+		new(Module).runFLVMuxer(inst, stream)
+		close(workerDone)
+	}()
+	waitForMuxerInit(t, inst)
+
+	stream.RemovePublisher()
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("FLV muxer did not stop when its publisher generation ended")
+	}
+}
+
+func TestFLVMuxerStopsWhenPreReadyGenerationIsRemoved(t *testing.T) {
+	stream := newPreReadyMuxerWorkerStream(t)
+	inst, _ := newMuxerWorkerInstance(stream)
+	workerDone := make(chan struct{})
+	go func() {
+		new(Module).runFLVMuxer(inst, stream)
+		close(workerDone)
+	}()
+
+	stream.RemovePublisher()
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("FLV muxer remained blocked after its pre-ready publisher generation ended")
+	}
+}
+
+func TestFLVMuxerDoesNotAttachToReplacementAfterPreReadyGenerationEnds(t *testing.T) {
+	stream := newPreReadyMuxerWorkerStream(t)
+	inst, reader := newMuxerWorkerInstance(stream)
+	workerDone := make(chan struct{})
+	go func() {
+		new(Module).runFLVMuxer(inst, stream)
+		close(workerDone)
+	}()
+
+	stream.RemovePublisher()
+	replacement := &muxerWorkerPublisher{info: &avframe.MediaInfo{
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	}}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 2, 0x65, 0x02},
+	))
+
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("old FLV muxer did not terminate after publisher replacement")
+	}
+	if initData := inst.InitData(); initData != nil {
+		t.Fatalf("old FLV muxer published %d bytes of replacement init data", len(initData))
+	}
+	if data, ok := reader.TryRead(); ok {
+		t.Fatalf("old FLV muxer published %d bytes from replacement generation", len(data))
+	}
+}
+
 func TestTSMuxerDropsOpusWhenAudioTranscodingIsUnavailable(t *testing.T) {
 	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
-	inst, reader := newMuxerWorkerInstance()
+	inst, reader := newMuxerWorkerInstance(stream)
 	workerDone := make(chan struct{})
 	go func() {
 		new(Module).runTSMuxer(inst, stream)
@@ -182,9 +282,49 @@ func TestTSMuxerDropsOpusWhenAudioTranscodingIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestTSMuxerAnnouncesLateAACBeforeFirstAudioFrame(t *testing.T) {
+	stream := newMuxerWorkerStream(t, 0)
+	inst, reader := newMuxerWorkerInstance(stream)
+	workerDone := make(chan struct{})
+	go func() {
+		new(Module).runTSMuxer(inst, stream)
+		close(workerDone)
+	}()
+	readMuxerPacket(t, reader) // Cached video GOP.
+
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
+		20, 20, []byte{0x12, 0x10},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+		40, 40, []byte{1, 2},
+	))
+	announcement := readMuxerPacket(t, reader)
+	if !tsOutputDeclaresStreamType(announcement, 0x0f) {
+		t.Fatal("HTTP TS output did not announce the late AAC track before its first media frame")
+	}
+	media := readMuxerPacket(t, reader)
+	if !tsOutputContainsPID(media, ts.PIDAudio) {
+		t.Fatal("HTTP TS output dropped the first late-track audio frame")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if data, ok := reader.TryRead(); ok {
+		t.Fatalf("HTTP TS output duplicated the first late-track audio frame in %d extra bytes", len(data))
+	}
+
+	stream.RingBuffer().Close()
+	select {
+	case <-workerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TS muxer did not stop after source closed")
+	}
+	close(inst.Done)
+}
+
 func TestFMP4MuxerSynthesizesWHIPOpusTrackConfiguration(t *testing.T) {
 	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
-	inst, _ := newMuxerWorkerInstance()
+	inst, _ := newMuxerWorkerInstance(stream)
 	workerDone := make(chan struct{})
 	go func() {
 		new(Module).runFMP4Muxer(inst, stream)
@@ -227,7 +367,7 @@ func TestFMP4MuxerSynthesizesWHIPOpusTrackConfiguration(t *testing.T) {
 
 func TestFMP4MuxerDerivesH265TrackDimensions(t *testing.T) {
 	stream := newH265MuxerWorkerStream(t)
-	inst, _ := newMuxerWorkerInstance()
+	inst, _ := newMuxerWorkerInstance(stream)
 	workerDone := make(chan struct{})
 	go func() {
 		new(Module).runFMP4Muxer(inst, stream)
@@ -248,7 +388,7 @@ func TestFMP4MuxerDerivesH265TrackDimensions(t *testing.T) {
 
 func TestFMP4MuxerBatchesLiveAudioAndVideoIntoSameFragment(t *testing.T) {
 	stream := newH265MuxerWorkerStream(t)
-	inst, reader := newMuxerWorkerInstance()
+	inst, reader := newMuxerWorkerInstance(stream)
 	workerDone := make(chan struct{})
 	go func() {
 		new(Module).runFMP4Muxer(inst, stream)
@@ -325,7 +465,7 @@ func TestFMP4MuxerRebasesH265AACBFramesOntoSubscriberTimeline(t *testing.T) {
 		}
 	}
 
-	inst, reader := newMuxerWorkerInstance()
+	inst, reader := newMuxerWorkerInstance(stream)
 	workerDone := make(chan struct{})
 	go func() {
 		new(Module).runFMP4Muxer(inst, stream)
@@ -417,6 +557,48 @@ func readMuxerPacket(t *testing.T, reader *core.SharedBufferReader) []byte {
 	}
 }
 
+func tsOutputDeclaresStreamType(data []byte, streamType byte) bool {
+	for offset := 0; offset+ts.PacketSize <= len(data); offset += ts.PacketSize {
+		pkt := data[offset : offset+ts.PacketSize]
+		pid := uint16(pkt[1]&0x1f)<<8 | uint16(pkt[2])
+		if pid != ts.PIDPmt || pkt[1]&0x40 == 0 {
+			continue
+		}
+		pos := 4
+		if pkt[3]&0x20 != 0 {
+			pos += 1 + int(pkt[4])
+		}
+		if pos >= len(pkt) {
+			continue
+		}
+		pos += 1 + int(pkt[pos])
+		if pos+12 > len(pkt) {
+			continue
+		}
+		sectionLen := int(pkt[pos+1]&0x0f)<<8 | int(pkt[pos+2])
+		end := pos + 3 + sectionLen - 4
+		programInfoLen := int(pkt[pos+10]&0x0f)<<8 | int(pkt[pos+11])
+		for i := pos + 12 + programInfoLen; i+4 < end && i+4 < len(pkt); {
+			if pkt[i] == streamType {
+				return true
+			}
+			i += 5 + int(pkt[i+3]&0x0f)<<8 + int(pkt[i+4])
+		}
+	}
+	return false
+}
+
+func tsOutputContainsPID(data []byte, wantPID uint16) bool {
+	for offset := 0; offset+ts.PacketSize <= len(data); offset += ts.PacketSize {
+		pkt := data[offset : offset+ts.PacketSize]
+		pid := uint16(pkt[1]&0x1f)<<8 | uint16(pkt[2])
+		if pid == wantPID {
+			return true
+		}
+	}
+	return false
+}
+
 func newH265MuxerWorkerStream(t *testing.T) *core.Stream {
 	return newH265MuxerWorkerStreamAt(t, avframe.CodecOpus, 0)
 }
@@ -462,6 +644,12 @@ func newH265MuxerWorkerStreamAt(t *testing.T, audioCodec avframe.CodecType, base
 		stream.WriteFrame(avframe.NewAVFrame(
 			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader,
 			0, 0, []byte{0x11, 0x90},
+		))
+	}
+	if audioCodec == avframe.CodecOpus {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeSequenceHeader,
+			0, 0, []byte("OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00"),
 		))
 	}
 	stream.WriteFrame(avframe.NewAVFrame(

@@ -52,6 +52,10 @@ func (p *Publisher) MediaInfo() *avframe.MediaInfo {
 	}
 	if ac := p.demuxer.AudioCodec(); ac != 0 {
 		p.info.AudioCodec = ac
+		if ac == avframe.CodecG711A || ac == avframe.CodecG711U {
+			p.info.SampleRate = 8000
+			p.info.Channels = 1
+		}
 	}
 	return p.info
 }

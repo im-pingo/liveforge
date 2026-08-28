@@ -10,6 +10,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 func newTestHub() (*core.StreamHub, *core.EventBus) {
@@ -22,6 +23,65 @@ func newTestHub() (*core.StreamHub, *core.EventBus) {
 	}
 	hub := core.NewStreamHub(cfg, config.LimitsConfig{}, bus)
 	return hub, bus
+}
+
+func TestRTMPStalePublisherCallbackCannotWriteReplacementGeneration(t *testing.T) {
+	hub, _ := newTestHub()
+	stream, err := hub.GetOrCreate("live/stale-writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldClient, oldServer := net.Pipe()
+	newClient, newServer := net.Pipe()
+	t.Cleanup(func() {
+		_ = oldClient.Close()
+		_ = oldServer.Close()
+		_ = newClient.Close()
+		_ = newServer.Close()
+	})
+
+	oldPublisher := NewPublisher("live/stale-writer", oldServer)
+	if err := stream.SetPublisher(oldPublisher); err != nil {
+		t.Fatal(err)
+	}
+	oldHandler := &Handler{hub: hub, streamKey: "live/stale-writer", publisher: oldPublisher}
+	activePayload := []byte{0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64, 0x00, 0x28}
+	if err := oldHandler.handleMediaMessage(&Message{TypeID: MsgVideo, Payload: activePayload}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != 1 {
+		t.Fatalf("active publisher cursor = %d, want 1", got)
+	}
+	if oldPublisher.MediaInfo().VideoCodec != avframe.CodecH264 {
+		t.Fatal("active RTMP callback did not update its publisher media info")
+	}
+
+	if !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("old publisher was not removed")
+	}
+	newPublisher := NewPublisher("live/stale-writer", newServer)
+	if err := stream.SetPublisher(newPublisher); err != nil {
+		t.Fatal(err)
+	}
+	replacement := stream.StartupSnapshot()
+	stalePayload := []byte{0x17, 0x00, 0x00, 0x00, 0x00, 0x01, 0x42, 0x00, 0x1f}
+	if err := oldHandler.handleMediaMessage(&Message{TypeID: MsgVideo, Payload: stalePayload}); err == nil {
+		t.Fatal("stale RTMP callback did not terminate its connection")
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != replacement.GenerationStartCursor {
+		t.Fatalf("stale RTMP callback advanced replacement cursor to %d, want %d", got, replacement.GenerationStartCursor)
+	}
+	if got := newPublisher.MediaInfo().VideoCodec; got != 0 {
+		t.Fatalf("stale RTMP callback changed replacement video codec to %v", got)
+	}
+
+	newHandler := &Handler{hub: hub, streamKey: "live/stale-writer", publisher: newPublisher}
+	if err := newHandler.handleMediaMessage(&Message{TypeID: MsgVideo, Payload: activePayload}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stream.RingBuffer().WriteCursor(); got != replacement.GenerationStartCursor+1 {
+		t.Fatalf("replacement publisher cursor = %d, want %d", got, replacement.GenerationStartCursor+1)
+	}
 }
 
 func TestHandlerConnect(t *testing.T) {

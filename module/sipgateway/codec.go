@@ -20,6 +20,13 @@ var encodingToCodec = map[string]codecInfo{
 	"OPUS": {avframe.CodecOpus, 48000, 111},
 }
 
+var sipH264Codec = negotiatedCodec{
+	Codec:        avframe.CodecH264,
+	PT:           96,
+	ClockRate:    90000,
+	EncodingName: "H264",
+}
+
 func codecForEncoding(name string) (codecInfo, bool) {
 	info, ok := encodingToCodec[strings.ToUpper(name)]
 	return info, ok
@@ -100,6 +107,21 @@ func negotiateCodec(offer *sdp.MediaDescription, preferred []string) (negotiated
 	return best, bestPriority >= 0
 }
 
+func negotiateH264(offer *sdp.MediaDescription) (negotiatedCodec, bool) {
+	if offer == nil || offer.Type != "video" {
+		return negotiatedCodec{}, false
+	}
+	for _, pt := range offer.Formats {
+		rm := offer.RTPMap(pt)
+		if rm != nil && strings.EqualFold(rm.EncodingName, "H264") && rm.ClockRate == sipH264Codec.ClockRate {
+			codec := sipH264Codec
+			codec.PT = pt
+			return codec, true
+		}
+	}
+	return negotiatedCodec{}, false
+}
+
 func staticPT(pt int) (struct {
 	EncodingName string
 	ClockRate    int
@@ -119,6 +141,10 @@ func staticPT(pt int) (struct {
 }
 
 func buildAnswerSDP(serverAddr string, rtpPort int, nc negotiatedCodec) []byte {
+	return buildAnswerSDPWithVideo(serverAddr, rtpPort, nc, 0, negotiatedCodec{})
+}
+
+func buildAnswerSDPWithVideo(serverAddr string, audioPort int, audioCodec negotiatedCodec, videoPort int, videoCodec negotiatedCodec) []byte {
 	sd := &sdp.SessionDescription{
 		Version: 0,
 		Origin: sdp.Origin{
@@ -140,21 +166,26 @@ func buildAnswerSDP(serverAddr string, rtpPort int, nc negotiatedCodec) []byte {
 
 	md := &sdp.MediaDescription{
 		Type:    "audio",
-		Port:    rtpPort,
+		Port:    audioPort,
 		Proto:   "RTP/AVP",
-		Formats: []int{nc.PT},
+		Formats: []int{audioCodec.PT},
 		Attributes: []sdp.Attribute{
-			{Key: "rtpmap", Value: rtpmapValue(nc)},
+			{Key: "rtpmap", Value: rtpmapValue(audioCodec)},
 			{Key: "sendrecv"},
 			{Key: "ptime", Value: "20"},
 		},
 	}
 
 	sd.Media = append(sd.Media, md)
+	appendH264Media(sd, videoPort, videoCodec)
 	return sd.Marshal()
 }
 
 func buildOfferSDP(serverAddr string, rtpPort int, codecs []negotiatedCodec) []byte {
+	return buildOfferSDPWithVideo(serverAddr, rtpPort, codecs, 0, negotiatedCodec{})
+}
+
+func buildOfferSDPWithVideo(serverAddr string, audioPort int, codecs []negotiatedCodec, videoPort int, videoCodec negotiatedCodec) []byte {
 	sd := &sdp.SessionDescription{
 		Version: 0,
 		Origin: sdp.Origin{
@@ -185,13 +216,31 @@ func buildOfferSDP(serverAddr string, rtpPort int, codecs []negotiatedCodec) []b
 
 	md := &sdp.MediaDescription{
 		Type:       "audio",
-		Port:       rtpPort,
+		Port:       audioPort,
 		Proto:      "RTP/AVP",
 		Formats:    formats,
 		Attributes: attrs,
 	}
 	sd.Media = append(sd.Media, md)
+	appendH264Media(sd, videoPort, videoCodec)
 	return sd.Marshal()
+}
+
+func appendH264Media(sd *sdp.SessionDescription, port int, codec negotiatedCodec) {
+	if sd == nil || port <= 0 || codec.Codec != avframe.CodecH264 {
+		return
+	}
+	sd.Media = append(sd.Media, &sdp.MediaDescription{
+		Type:    "video",
+		Port:    port,
+		Proto:   "RTP/AVP",
+		Formats: []int{codec.PT},
+		Attributes: []sdp.Attribute{
+			{Key: "rtpmap", Value: rtpmapValue(codec)},
+			{Key: "fmtp", Value: itoa(codec.PT) + " packetization-mode=1;profile-level-id=42c00b"},
+			{Key: "sendrecv"},
+		},
+	})
 }
 
 func rtpmapValue(nc negotiatedCodec) string {

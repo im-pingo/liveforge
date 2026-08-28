@@ -32,8 +32,8 @@ const (
 type PTZZoom uint8
 
 const (
-	PTZZoomIn  PTZZoom = 0x10
-	PTZZoomOut PTZZoom = 0x20
+	PTZZoomIn   PTZZoom = 0x10
+	PTZZoomOut  PTZZoom = 0x20
 	PTZZoomStop PTZZoom = 0x00
 )
 

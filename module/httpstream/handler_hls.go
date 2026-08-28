@@ -65,7 +65,11 @@ func (m *Module) serveLLHLSPlaylist(w http.ResponseWriter, r *http.Request, stre
 	// The bundled Hls.js rejects a part-only initial manifest as levelEmptyError,
 	// but waiting for one segment still avoids the old three-GOP startup delay.
 	if targetMSN < 0 {
-		if !mgr.WaitForCompletedSegment(r.Context(), 10*time.Second) && r.Context().Err() != nil {
+		if !mgr.WaitForCompletedSegment(r.Context(), mgr.initialPlaylistWait) {
+			if r.Context().Err() != nil {
+				return
+			}
+			http.Error(w, "initial LL-HLS segment not ready", http.StatusServiceUnavailable)
 			return
 		}
 	}

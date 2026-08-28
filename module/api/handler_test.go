@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +40,6 @@ func newTestConfig() *config.Config {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     256,
 			IdleTimeout:        5 * time.Second,
 			NoPublisherTimeout: 3 * time.Second,
@@ -122,6 +122,12 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	}
 
 	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 0, 0, []byte{0x02},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 20, 20, []byte{0x03},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x00},
 	))
 	stream.WriteFrame(avframe.NewAVFrame(
@@ -133,9 +139,14 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	h.handleStreams(w, req)
 
 	data := decodeAPIData(t, w.Body.Bytes())
-	var resp StreamsResponse
+	var resp struct {
+		Streams []StreamInfo `json:"streams"`
+	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"audio_cache_frames"`) || strings.Contains(string(data), `"audio_cache_duration_ms"`) {
+		t.Fatalf("stream response retained removed audio-cache fields: %s", data)
 	}
 	if len(resp.Streams) != 1 {
 		t.Fatalf("expected 1 stream, got %d", len(resp.Streams))
@@ -159,6 +170,9 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	}
 	if si.GOPCacheLen != 2 {
 		t.Errorf("expected gop_cache_len 2, got %d", si.GOPCacheLen)
+	}
+	if si.GOPGeneration != 1 {
+		t.Errorf("expected gop_generation 1, got %d", si.GOPGeneration)
 	}
 	if si.Stats == nil {
 		t.Error("expected stats in stream list response")
@@ -414,6 +428,63 @@ func TestHandleConfigStatus(t *testing.T) {
 		if _, ok := status[field]; !ok {
 			t.Fatalf("config status omitted %q: %v", field, status)
 		}
+	}
+}
+
+func TestHandleConfigDocumentReturnsRedactedEffectiveConfigAndSchema(t *testing.T) {
+	h, server := newTestHandlers(t)
+	cfg := config.Defaults()
+	cfg.API.Auth.BearerToken = "api-secret"
+	cfg.API.Console.Username = "admin"
+	cfg.API.Console.Password = "console-secret"
+	server.UpdateConfig(cfg)
+	manager, err := configruntime.NewManager(configruntime.Options{Source: &testConfigSource{}, Initial: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	server.SetConfigManager(manager)
+
+	w := httptest.NewRecorder()
+	h.handleConfigDocument(w, httptest.NewRequest(http.MethodGet, "/api/v1/server/config/document", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var response struct {
+		Effective map[string]any `json:"effective"`
+		Schema    map[string]any `json:"schema"`
+		Writable  bool           `json:"writable"`
+		Source    map[string]any `json:"source_details"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Writable || response.Schema["$schema"] == nil || response.Schema["$defs"] == nil || response.Source["kind"] == nil {
+		t.Fatalf("document response missing metadata: %+v", response)
+	}
+	apiConfig, ok := response.Effective["api"].(map[string]any)
+	if !ok {
+		t.Fatalf("effective config missing api section: %+v", response.Effective)
+	}
+	auth, _ := apiConfig["auth"].(map[string]any)
+	if auth["bearer_token"] != "[REDACTED]" {
+		t.Fatalf("bearer token was not redacted: %+v", auth)
+	}
+	console, _ := apiConfig["console"].(map[string]any)
+	if console["password"] != "[REDACTED]" {
+		t.Fatalf("console password was not redacted: %+v", console)
+	}
+}
+
+func TestHandleConfigValidateRejectsInvalidDocument(t *testing.T) {
+	h, _ := newTestHandlers(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/server/config/validate", strings.NewReader(`{"document":"server:\n  name: ["}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.handleConfigValidate(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

@@ -4,10 +4,13 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	configruntime "github.com/im-pingo/liveforge/config/runtime"
+	"github.com/im-pingo/liveforge/core"
 )
 
 func TestLLHLSPlaylistGenerate_BasicTags(t *testing.T) {
-	p := NewLLHLSPlaylist(0.2, "/live/test", "fmp4")
+	p := NewLLHLSPlaylist(0.2, 6.0, "/live/test", "fmp4")
 
 	segments := []*LLHLSSegment{
 		{
@@ -51,7 +54,7 @@ func TestLLHLSPlaylistGenerate_BasicTags(t *testing.T) {
 }
 
 func TestLLHLSPlaylistGenerate_TSContainer(t *testing.T) {
-	p := NewLLHLSPlaylist(0.2, "/live/test", "ts")
+	p := NewLLHLSPlaylist(0.2, 6.0, "/live/test", "ts")
 
 	segments := []*LLHLSSegment{
 		{MSN: 0, Duration: 6.0, Parts: []*LLHLSPart{
@@ -73,7 +76,7 @@ func TestLLHLSPlaylistGenerate_TSContainer(t *testing.T) {
 }
 
 func TestLLHLSPlaylistGenerate_DeltaUpdate(t *testing.T) {
-	p := NewLLHLSPlaylist(0.2, "/live/test", "fmp4")
+	p := NewLLHLSPlaylist(0.2, 6.0, "/live/test", "fmp4")
 
 	segments := make([]*LLHLSSegment, 4)
 	for i := range segments {
@@ -95,7 +98,7 @@ func TestLLHLSPlaylistGenerate_DeltaUpdate(t *testing.T) {
 }
 
 func TestLLHLSPlaylistGenerate_EmptySegments(t *testing.T) {
-	p := NewLLHLSPlaylist(0.2, "/live/test", "fmp4")
+	p := NewLLHLSPlaylist(0.2, 6.0, "/live/test", "fmp4")
 
 	m3u8 := p.Generate(nil, nil, 0, false, false)
 
@@ -107,8 +110,32 @@ func TestLLHLSPlaylistGenerate_EmptySegments(t *testing.T) {
 	}
 }
 
+func TestLLHLSConfiguredSegmentDurationSetsEmptyPlaylistTarget(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/llhls-playlist-target")
+	cfg, err := configruntime.ParseDocument([]byte("http_stream:\n  llhls:\n    enabled: true\n    segment_duration: 1.2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := core.NewServer(cfg)
+	module := NewModule()
+	module.server = server
+	mgr := module.getOrCreateLLHLS(stream.Key(), stream)
+	t.Cleanup(func() {
+		mgr.Stop()
+		stream.RingBuffer().Close()
+	})
+
+	playlist, err := mgr.GeneratePlaylist(context.Background(), -1, -1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(playlist, "#EXT-X-TARGETDURATION:2") {
+		t.Fatalf("empty LL-HLS playlist ignored configured segment duration:\n%s", playlist)
+	}
+}
+
 func TestLLHLSManagerVersionsInitSegmentURL(t *testing.T) {
-	mgr := NewLLHLSManager("live/versioned", "/live/versioned", 0.2, 5, "fmp4")
+	mgr := NewLLHLSManager("live/versioned", "/live/versioned", 0.2, 1.0, 5, "fmp4")
 	mgr.segmenter.callbacks.OnInit([]byte("video and audio configuration"))
 
 	playlist, err := mgr.GeneratePlaylist(context.Background(), -1, -1, false)
@@ -121,7 +148,7 @@ func TestLLHLSManagerVersionsInitSegmentURL(t *testing.T) {
 }
 
 func TestLLHLSManagerRetainsLatestCompletedPartIdentityOnBlockingReload(t *testing.T) {
-	mgr := NewLLHLSManager("live/reload", "/live/reload", 0.2, 5, "fmp4")
+	mgr := NewLLHLSManager("live/reload", "/live/reload", 0.2, 1.0, 5, "fmp4")
 	part := &LLHLSPart{Index: 0, Duration: 0.2, Independent: true, Data: []byte("part")}
 	mgr.mu.Lock()
 	mgr.segments = []*LLHLSSegment{{MSN: 0, Duration: 0.2, Parts: []*LLHLSPart{part}}}

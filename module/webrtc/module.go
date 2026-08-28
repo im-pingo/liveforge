@@ -381,17 +381,38 @@ func (m *Module) handleOptions(w http.ResponseWriter, r *http.Request) {
 // registerCodecs registers the codecs we support. Each codec gets exactly one
 // entry (plus RTX) so the SDP answer stays compact and unambiguous.
 func registerCodecs(me *webrtc.MediaEngine) error {
-	// Audio: Opus.
-	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypeOpus,
-			ClockRate:   48000,
-			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+	// Audio: Opus and the G.711 codecs used by SIP/GB28181 gateways.
+	audioCodecs := []webrtc.RTPCodecParameters{
+		{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:    webrtc.MimeTypeOpus,
+				ClockRate:   48000,
+				Channels:    2,
+				SDPFmtpLine: "minptime=10;useinbandfec=1",
+			},
+			PayloadType: 111,
 		},
-		PayloadType: 111,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		return err
+		{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypePCMU,
+				ClockRate: 8000,
+				Channels:  1,
+			},
+			PayloadType: 0,
+		},
+		{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypePCMA,
+				ClockRate: 8000,
+				Channels:  1,
+			},
+			PayloadType: 8,
+		},
+	}
+	for _, codec := range audioCodecs {
+		if err := me.RegisterCodec(codec, webrtc.RTPCodecTypeAudio); err != nil {
+			return err
+		}
 	}
 
 	videoFeedback := []webrtc.RTCPFeedback{

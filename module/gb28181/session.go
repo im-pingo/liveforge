@@ -1,11 +1,139 @@
 package gb28181
 
 import (
+	"context"
+	"errors"
 	"net"
+	"regexp"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/im-pingo/liveforge/core"
 )
+
+const gbLabTerminalErrorLimit = 256
+
+var (
+	gbSIPCredentialPattern = regexp.MustCompile(`(?i)(sips?:[^\s:@]+):[^\s@]+@`)
+	gbBearerTokenPattern   = regexp.MustCompile(`(?i)(bearer\s+)[^\s]+`)
+)
+
+var (
+	// ErrLabInvalidRequest indicates that a protocol lab start request is invalid.
+	ErrLabInvalidRequest = errors.New("GB28181 lab request is invalid")
+	// ErrLabDuplicateIdentity indicates that a lab identity is already active.
+	ErrLabDuplicateIdentity = errors.New("GB28181 lab identity is already active")
+	// ErrLabSessionNotFound indicates that a lab session does not exist.
+	ErrLabSessionNotFound = errors.New("GB28181 lab session not found")
+	// ErrLabManagerUnimplemented indicates that a standalone manager has no transport to attach to.
+	ErrLabManagerUnimplemented = errors.New("GB28181 lab manager is not implemented")
+)
+
+// LabMode selects the direction of a local protocol lab.
+type LabMode string
+
+const (
+	LabModePublish LabMode = "publish"
+	LabModeReceive LabMode = "receive"
+)
+
+// LabDirection describes the media direction relative to LiveForge.
+type LabDirection string
+
+const (
+	LabDirectionInbound  LabDirection = "inbound"
+	LabDirectionOutbound LabDirection = "outbound"
+)
+
+// LabSessionState describes the lifecycle state of a local protocol lab.
+type LabSessionState string
+
+const (
+	LabSessionStateStarting LabSessionState = "starting"
+	LabSessionStateActive   LabSessionState = "active"
+	LabSessionStateStopped  LabSessionState = "stopped"
+	LabSessionStateFailed   LabSessionState = "failed"
+)
+
+// LabSessionRequest contains the protocol-neutral portion of a GB28181 lab start.
+type LabSessionRequest struct {
+	Mode      LabMode `json:"mode"`
+	DeviceID  string  `json:"device_id"`
+	ChannelID string  `json:"channel_id"`
+	StreamKey string  `json:"stream_key"`
+}
+
+// LabSessionSnapshot is an immutable point-in-time view of a GB28181 lab session.
+type LabSessionSnapshot struct {
+	ID              string          `json:"id"`
+	Identity        string          `json:"identity"`
+	DeviceID        string          `json:"device_id"`
+	ChannelID       string          `json:"channel_id"`
+	StreamKey       string          `json:"stream_key"`
+	Mode            LabMode         `json:"mode"`
+	State           LabSessionState `json:"state"`
+	Direction       LabDirection    `json:"direction"`
+	LastError       string          `json:"last_error,omitempty"`
+	RTPPacketsSent  uint64          `json:"rtp_packets_sent"`
+	RTPPacketsRecv  uint64          `json:"rtp_packets_received"`
+	RTPBytesSent    uint64          `json:"rtp_bytes_sent"`
+	RTPBytesRecv    uint64          `json:"rtp_bytes_received"`
+	RTCPPacketsSent uint64          `json:"rtcp_packets_sent"`
+	RTCPPacketsRecv uint64          `json:"rtcp_packets_received"`
+	PSFramesSent    uint64          `json:"ps_frames_sent"`
+	PSFramesRecv    uint64          `json:"ps_frames_received"`
+	AudioFramesSent uint64          `json:"audio_frames_sent"`
+	AudioFramesRecv uint64          `json:"audio_frames_received"`
+	VideoFramesSent uint64          `json:"video_frames_sent"`
+	VideoFramesRecv uint64          `json:"video_frames_received"`
+	StartedAt       time.Time       `json:"started_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	LastMediaAt     time.Time       `json:"last_media_at,omitempty"`
+	StoppedAt       time.Time       `json:"stopped_at,omitempty"`
+}
+
+func redactedLabError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.Join(strings.Fields(err.Error()), " ")
+	message = gbSIPCredentialPattern.ReplaceAllString(message, `${1}:[redacted]@`)
+	message = gbBearerTokenPattern.ReplaceAllString(message, `${1}[redacted]`)
+	runes := []rune(message)
+	if len(runes) > gbLabTerminalErrorLimit {
+		return string(runes[:gbLabTerminalErrorLimit])
+	}
+	return message
+}
+
+// LabManager owns local GB28181 lab session lifecycle state.
+type LabManager interface {
+	Start(ctx context.Context, request LabSessionRequest) (LabSessionSnapshot, error)
+	List() []LabSessionSnapshot
+	Stop(id string) error
+}
+
+type contractLabManager struct{}
+
+// NewLabManager returns the contract-only manager; an initialized Module owns the transport-backed manager.
+func NewLabManager() LabManager { return contractLabManager{} }
+
+func (contractLabManager) Start(_ context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
+	if request.Mode != LabModePublish && request.Mode != LabModeReceive {
+		return LabSessionSnapshot{}, ErrLabInvalidRequest
+	}
+	if strings.TrimSpace(request.DeviceID) == "" ||
+		strings.TrimSpace(request.ChannelID) == "" ||
+		!validGBLabStreamKey(request.StreamKey) {
+		return LabSessionSnapshot{}, ErrLabInvalidRequest
+	}
+	return LabSessionSnapshot{}, ErrLabManagerUnimplemented
+}
+
+func (contractLabManager) List() []LabSessionSnapshot { return []LabSessionSnapshot{} }
+
+func (contractLabManager) Stop(string) error { return ErrLabManagerUnimplemented }
 
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
@@ -21,9 +149,11 @@ type MediaSession struct {
 	State      SessionState
 	Publisher  *Publisher
 	Receiver   *RTPReceiver
+	Sender     *outboundMediaSession
 	Stream     *core.Stream
 	SSRC       uint32
 	Playback   bool
+	InviteTx   inviteDialog
 	closed     bool
 	published  bool
 }
@@ -43,9 +173,11 @@ type MediaSessionSnapshot struct {
 	Publisher   *Publisher
 	PublisherID string
 	Receiver    *RTPReceiver
+	Sender      *outboundMediaSession
 	Stream      *core.Stream
 	SSRC        uint32
 	Playback    bool
+	InviteTx    inviteDialog
 	Closed      bool
 	Published   bool
 }
@@ -113,6 +245,9 @@ func (s *MediaSession) closeSnapshot() (MediaSessionSnapshot, bool) {
 	if snapshot.Receiver != nil {
 		snapshot.Receiver.Close()
 	}
+	if snapshot.Sender != nil {
+		snapshot.Sender.close()
+	}
 	if snapshot.Publisher != nil {
 		_ = snapshot.Publisher.Close()
 	}
@@ -149,9 +284,11 @@ func (s *MediaSession) snapshotLocked() MediaSessionSnapshot {
 		Publisher:   s.Publisher,
 		PublisherID: publisherID,
 		Receiver:    s.Receiver,
+		Sender:      s.Sender,
 		Stream:      s.Stream,
 		SSRC:        s.SSRC,
 		Playback:    s.Playback,
+		InviteTx:    s.InviteTx,
 		Closed:      s.closed,
 		Published:   s.published,
 	}

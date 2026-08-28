@@ -105,7 +105,9 @@ func (p *Publisher) Run() {
 			}
 			p.info.Store(&mi)
 		}
-		stream.WriteFrame(frame)
+		if !stream.WriteFrameForPublisher(p, frame) && stream.Publisher() != p {
+			_ = p.Close()
+		}
 	})
 
 	// SRT delivers data in message-mode chunks (typically 1316 bytes = 7 TS packets).

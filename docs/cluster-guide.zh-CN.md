@@ -7,6 +7,8 @@ LiveForge 支持多节点集群转发，提供两种模式：
 
 两种模式均支持多种传输协议：**RTMP**、**SRT**、**RTSP**、**RTP**。协议由配置中的 URL scheme 决定（`rtmp://`、`srt://`、`rtsp://`、`rtp://`）。
 
+每条转推都绑定一个 publisher generation。传输层只捕获一次原子启动快照：协议或容器需要时只发送该快照的 sequence header 和缓存 GOP 一次，然后从 `LiveCursor` 创建 AVFrame reader。reader 监听 generation 结束，并在每次阻塞读取后再次校验 generation，因此 publisher 替换后的第一帧不会泄漏到旧转推，也不会从 ring 当前保留的最老位置启动。GB28181 PS 转发如果视频 sequence header 发送失败，会传播带阶段信息的错误，并在 replay/live 媒体之前停止。SIP/GB28181 出站启动在 2xx 对话已接受后遇到 generation 终止会发送一次 BYE；接受前取消只关闭未建立的事务。纯音频没有 replay 历史，直接从 live cursor 开始。
+
 ## 协议选择
 
 | 协议 | 适用场景 | 延迟 | 说明 |
@@ -73,7 +75,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -134,7 +135,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -189,7 +189,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -287,7 +286,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -341,7 +339,6 @@ webrtc:
 stream:
   gop_cache: true
   gop_cache_num: 1
-  audio_cache_ms: 1000
   ring_buffer_size: 1024
   idle_timeout: 30s
   no_publisher_timeout: 15s
@@ -458,7 +455,7 @@ cluster:
     retry_interval: 3s
 ```
 
-**工作原理**：当流在本节点发布时，自动转推到所有配置的 `targets`。发布 URL 中的流名称会自动附加到每个目标 URL 后。
+**工作原理**：当流在本节点发布时，自动转推到所有配置的 `targets`。发布 URL 中的流名称会自动附加到每个目标 URL 后。每个目标都从当前 publisher generation 的快照开始；RTMP 和 PS 传输保留 header/container 顺序，RTP/RTSP 则因 SDP 已携带参数而不发送 sequence-header 媒体。publisher 停止或替换会结束当前转推，后续重试重新捕获新快照。GB28181 PS header 发送失败会带阶段信息返回，并阻止后续 replay/live 媒体。
 
 **多目标**：可以列出多个不同协议的目标，所有目标同时接收流。
 
@@ -481,7 +478,7 @@ cluster:
     retry_delay: 2s
 ```
 
-**工作原理**：当订阅者请求本地不存在的流时，节点按顺序尝试每个源站直到成功。流被转发到本地供所有订阅者使用。最后一个订阅者离开后，经过 `idle_timeout` 后拆除回源连接。
+**工作原理**：当订阅者请求本地不存在的流时，节点按顺序尝试每个源站直到成功。流被转发到本地供所有订阅者使用。最后一个订阅者离开后，经过 `idle_timeout` 后拆除回源连接。下游 relay 使用源 publisher generation 的快照和 live cursor 作为唯一 replay/live 边界，不会把上一个 origin publisher 的保留帧继续转发。
 
 ### 协议专属设置
 

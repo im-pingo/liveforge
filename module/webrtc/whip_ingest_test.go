@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
@@ -97,6 +99,113 @@ func TestWHIPOpusIngestWritesEveryPacketWithoutMarker(t *testing.T) {
 	}
 	if got := stream.Stats().AudioFrames; got != 3 {
 		t.Fatalf("audio frames = %d, want 3; Opus packets must not depend on RTP Marker", got)
+	}
+}
+
+func TestWHIPStalePublisherCallbackCannotWriteReplacementGeneration(t *testing.T) {
+	m, server := newTestModule(t)
+	clientPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = clientPC.Close() })
+
+	track, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		"audio",
+		"whip-stale-writer",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clientPC.AddTrack(track); err != nil {
+		t.Fatal(err)
+	}
+
+	offer, err := clientPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatherDone := webrtc.GatheringCompletePromise(clientPC)
+	if err := clientPC.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-gatherDone
+
+	const streamKey = "live/whip-stale-writer"
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whip/"+streamKey, bytes.NewBufferString(clientPC.LocalDescription().SDP))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("WHIP status = %d, want 201: %s", rr.Code, rr.Body.String())
+	}
+
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	clientPC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			connectedOnce.Do(func() { close(connected) })
+		}
+	})
+	if err := clientPC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: rr.Body.String()}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("WHIP client state = %s, want connected", clientPC.ConnectionState())
+	}
+
+	writePacket := func(sequence uint16) {
+		t.Helper()
+		if err := track.WriteRTP(&pionrtp.Packet{
+			Header:  pionrtp.Header{Version: 2, SequenceNumber: sequence, Timestamp: uint32(sequence) * 960},
+			Payload: []byte{0xF8, 0xFF, 0xFE},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePacket(1)
+
+	var stream *core.Stream
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		candidate, ok := server.StreamHub().Find(streamKey)
+		if ok && candidate.RingBuffer().WriteCursor() == 1 {
+			stream = candidate
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if stream == nil {
+		t.Fatal("active WHIP callback did not write its first packet")
+	}
+	oldPublisher := stream.Publisher()
+	if oldPublisher == nil {
+		t.Fatal("active WHIP publisher was not attached")
+	}
+	if !stream.RemovePublisherIf(oldPublisher) {
+		t.Fatal("old WHIP publisher was not removed")
+	}
+	replacement := &authorizationTestPublisher{id: "whip-replacement", info: &avframe.MediaInfo{AudioCodec: avframe.CodecOpus}}
+	if err := stream.SetPublisher(replacement); err != nil {
+		t.Fatal(err)
+	}
+	startCursor := stream.StartupSnapshot().GenerationStartCursor
+	for sequence := uint16(2); sequence <= 9; sequence++ {
+		writePacket(sequence)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := stream.RingBuffer().WriteCursor(); got != startCursor {
+		t.Fatalf("stale WHIP callback advanced replacement cursor to %d, want %d", got, startCursor)
+	}
+	deadline = time.Now().Add(time.Second)
+	for sessionCount(m) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := sessionCount(m); got != 0 {
+		t.Fatalf("stale WHIP publisher left %d active sessions", got)
 	}
 }
 

@@ -63,6 +63,7 @@ type RTSPSession struct {
 	Publisher  *RTSPPublisher
 	Subscriber *RTSPSubscriber
 	MediaInfo  *avframe.MediaInfo
+	Startup    core.StreamStartupSnapshot
 	Tracks     []TrackSetup
 	Stream     *core.Stream
 
@@ -82,6 +83,7 @@ type RTSPSessionSnapshot struct {
 	Publisher  *RTSPPublisher
 	Subscriber *RTSPSubscriber
 	MediaInfo  *avframe.MediaInfo
+	Startup    core.StreamStartupSnapshot
 	Tracks     []TrackSetup
 	Stream     *core.Stream
 	Closed     bool
@@ -154,13 +156,14 @@ func (s *RTSPSession) SetRemoteAddr(remoteAddr string) bool {
 	return true
 }
 
-func (s *RTSPSession) SetDescription(mediaInfo *avframe.MediaInfo, stream *core.Stream) bool {
+func (s *RTSPSession) SetDescription(startup core.StreamStartupSnapshot, stream *core.Stream) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.State == StateClosed {
 		return false
 	}
-	s.MediaInfo = mediaInfo
+	s.Startup = startup
+	s.MediaInfo = &s.Startup.MediaInfo
 	s.Stream = stream
 	return true
 }
@@ -303,6 +306,16 @@ func (s *RTSPSession) Touch() {
 	s.mu.Unlock()
 }
 
+func (s *RTSPSession) touchPublisherIfCurrent(stream *core.Stream, publisher *RTSPPublisher) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.State == StateClosed || s.Stream != stream || s.Publisher != publisher {
+		return false
+	}
+	s.lastTouch = time.Now()
+	return true
+}
+
 func (s *RTSPSession) GetState() SessionState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -325,6 +338,7 @@ func (s *RTSPSession) snapshotLocked() RTSPSessionSnapshot {
 		Publisher:  s.Publisher,
 		Subscriber: s.Subscriber,
 		MediaInfo:  s.MediaInfo,
+		Startup:    s.Startup,
 		Tracks:     append([]TrackSetup(nil), s.Tracks...),
 		Stream:     s.Stream,
 		Closed:     s.closed,

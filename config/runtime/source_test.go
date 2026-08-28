@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,6 +36,28 @@ func TestFileSourceReturnsDocumentAndModificationMetadata(t *testing.T) {
 	}
 	if snapshot.LastModified.IsZero() || snapshot.Version == "" {
 		t.Fatalf("missing file metadata: %+v", snapshot)
+	}
+}
+
+func TestFileSourceWriteReplacesDocumentAtomically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "liveforge.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  name: old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := NewFileSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Write(context.Background(), []byte("server:\n  name: new\n")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "server:\n  name: new\n" {
+		t.Fatalf("written config=%q err=%v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("file mode=%v err=%v", info.Mode().Perm(), err)
 	}
 }
 
@@ -72,6 +95,27 @@ func TestHTTPSourceUsesETagAndAcceptsNotModified(t *testing.T) {
 	}
 	if len(second.Data) != 0 || second.Version != first.Version {
 		t.Fatalf("304 snapshot = %+v", second)
+	}
+}
+
+func TestHTTPSourceWriteUsesAuthenticatedPut(t *testing.T) {
+	var method, auth, body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, auth = r.Method, r.Header.Get("Authorization")
+		data, _ := io.ReadAll(r.Body)
+		body = string(data)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	source, err := NewHTTPSource(HTTPSourceOptions{URL: server.URL, Token: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Write(context.Background(), []byte("server:\n  name: http\n")); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPut || auth != "Bearer secret" || body == "" {
+		t.Fatalf("write request method=%q auth=%q body=%q", method, auth, body)
 	}
 }
 
@@ -337,6 +381,27 @@ func TestConsulSourceDecodesKVPrefix(t *testing.T) {
 	}
 	if cfg.Server.Name != "consul" || snapshot.Version != "17" {
 		t.Fatalf("consul snapshot = %+v cfg=%+v", snapshot, cfg.Server)
+	}
+}
+
+func TestConsulSourceWriteUsesCompleteConfigKey(t *testing.T) {
+	var path, token, body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, token = r.URL.Path, r.Header.Get("X-Consul-Token")
+		data, _ := io.ReadAll(r.Body)
+		body = string(data)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	source, err := NewConsulSource(ConsulSourceOptions{Address: server.URL, Prefix: "liveforge", Token: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Write(context.Background(), []byte("server:\n  name: consul\n")); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v1/kv/liveforge/config.yaml" || token != "secret" || body == "" {
+		t.Fatalf("consul write path=%q token=%q body=%q", path, token, body)
 	}
 }
 

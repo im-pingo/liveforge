@@ -42,7 +42,6 @@ func TestConsolePublishFlow(t *testing.T) {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     256,
 			IdleTimeout:        30 * time.Second,
 			NoPublisherTimeout: 30 * time.Second,
@@ -254,7 +253,6 @@ func TestConsoleWHEPWaitsForDecodedFrameBeforeReportingPlaying(t *testing.T) {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
-			AudioCacheMs:       1000,
 			RingBufferSize:     256,
 			IdleTimeout:        30 * time.Second,
 			NoPublisherTimeout: 30 * time.Second,

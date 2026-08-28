@@ -29,3 +29,5 @@ curl -sv --noproxy '*' http://127.0.0.1:8080/live/demo.m3u8
 ```
 
 The response should be from LiveForge with an HLS content type. A `404` from `nginx` or another server means the loopback media port is occupied by a different process; `ffplay` on RTMP and WHEP on their separate ports can still succeed. Release the conflicting port or change `http_stream.listen`, then reload the Console.
+
+HLS, LL-HLS, and DASH wait for the active publisher's required codec sequence headers before creating a playable segmenter. If a publisher is connected but has not sent its video or AAC configuration header yet, the playlist can remain empty until that header arrives; this avoids advertising a segment initialized with the wrong codec metadata.

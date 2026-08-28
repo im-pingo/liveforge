@@ -11,7 +11,7 @@ import (
 	"github.com/im-pingo/liveforge/pkg/util"
 )
 
-func TestWHEPLiveSnapshotKeepsFramesWrittenWhileCacheIsSent(t *testing.T) {
+func TestWHEPStartupSnapshotKeepsFramesWrittenWhileCacheIsSent(t *testing.T) {
 	stream := core.NewStream("live/whep-snapshot", config.StreamConfig{
 		GOPCache:       true,
 		GOPCacheNum:    1,
@@ -20,20 +20,21 @@ func TestWHEPLiveSnapshotKeepsFramesWrittenWhileCacheIsSent(t *testing.T) {
 	cached := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeKeyframe, 1000, 1000, []byte{1})
 	stream.WriteFrame(cached)
 
-	gopCache, startPos := whepLiveSnapshot(stream, false)
+	snapshot := stream.StartupSnapshot()
+	gopCache := whepLiveSnapshot(snapshot, false)
 	if len(gopCache) != 1 || gopCache[0] != cached {
 		t.Fatalf("GOP snapshot = %v, want cached keyframe", gopCache)
 	}
 
 	live := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeInterframe, 1033, 1033, []byte{2})
 	stream.WriteFrame(live) // Simulates a publisher write while the cached GOP is sent.
-	got, ok := stream.RingBuffer().NewReaderAt(startPos).TryRead()
+	got, ok := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor).TryRead()
 	if !ok || got != live {
 		t.Fatalf("first live frame after GOP snapshot = (%v, %v), want newly written frame", got, ok)
 	}
 }
 
-func TestWHEPLiveSnapshotDropsSourceAudioWhenTranscoding(t *testing.T) {
+func TestWHEPStartupSnapshotDropsSourceAudioWhenTranscoding(t *testing.T) {
 	stream := core.NewStream("live/whep-transcode-cache", config.StreamConfig{
 		GOPCache:       true,
 		GOPCacheNum:    1,
@@ -44,13 +45,13 @@ func TestWHEPLiveSnapshotDropsSourceAudioWhenTranscoding(t *testing.T) {
 	stream.WriteFrame(video)
 	stream.WriteFrame(aac)
 
-	gopCache, _ := whepLiveSnapshot(stream, true)
+	gopCache := whepLiveSnapshot(stream.StartupSnapshot(), true)
 	if len(gopCache) != 1 || gopCache[0] != video {
 		t.Fatalf("transcoded live GOP snapshot = %v, want cached video only", gopCache)
 	}
 }
 
-func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T) {
+func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderUnavailable(t *testing.T) {
 	stream := core.NewStream("live/whep-reader-transition", config.StreamConfig{
 		RingBufferSize: 16,
 	}, config.LimitsConfig{}, core.NewEventBus())
@@ -62,14 +63,14 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 	}
 	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, &audiocodec.Registry{}, 16))
 
-	_, startPos := whepLiveSnapshot(stream, true)
+	snapshot := stream.StartupSnapshot()
 	betweenSnapshotAndReader := avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeInterframe,
 		1033, 1033, []byte{1},
 	)
 	stream.WriteFrame(betweenSnapshotAndReader)
 
-	readers := newWHEPFeedReaders(stream, startPos, startPos, true, avframe.CodecOpus)
+	readers := newWHEPFeedReaders(stream, snapshot, true, avframe.CodecOpus)
 	defer readers.Close()
 	if got, ok := readers.source.TryRead(); !ok || got != betweenSnapshotAndReader {
 		t.Fatalf("source reader first frame = (%v, %v), want frame written after snapshot", got, ok)
@@ -82,19 +83,14 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 		t.Fatal("transcode reader missing")
 	}
 
-	select {
-	case <-readers.targetAudio.Signal(): // Empty registry makes transcoder close asynchronously.
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for failed transcoder to close")
-	}
 	if _, ok := readers.targetAudio.TryRead(); ok {
-		t.Fatal("failed transcoder unexpectedly produced a frame")
+		t.Fatal("unavailable transcoder unexpectedly produced a frame")
 	}
 
 	woke := make(chan bool, 1)
 	waitDone := make(chan struct{})
 	go func() {
-		woke <- readers.wait(waitDone)
+		woke <- readers.wait(waitDone, snapshot.GenerationDone)
 	}()
 	select {
 	case <-woke:
@@ -102,22 +98,22 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderCloses(t *testing.T)
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	afterTranscoderClose := avframe.NewAVFrame(
+	afterUnavailableEpoch := avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeInterframe,
 		1066, 1066, []byte{2},
 	)
-	stream.WriteFrame(afterTranscoderClose)
+	stream.WriteFrame(afterUnavailableEpoch)
 	select {
 	case ok := <-woke:
 		if !ok {
-			t.Fatal("reader wait stopped after transcode failure")
+			t.Fatal("reader wait stopped while the transcode epoch was unavailable")
 		}
 	case <-time.After(time.Second):
 		close(waitDone)
-		t.Fatal("source video did not wake reader after transcode failure")
+		t.Fatal("source video did not wake reader while the transcode epoch was unavailable")
 	}
-	if got, ok := readers.source.TryRead(); !ok || got != afterTranscoderClose {
-		t.Fatalf("source reader after transcode failure = (%v, %v), want uninterrupted video", got, ok)
+	if got, ok := readers.source.TryRead(); !ok || got != afterUnavailableEpoch {
+		t.Fatalf("source reader during unavailable transcode epoch = (%v, %v), want uninterrupted video", got, ok)
 	}
 }
 
@@ -125,16 +121,17 @@ func TestWHEPFeedReadersWakeIndependently(t *testing.T) {
 	stream := core.NewStream("live/whep-independent-wake", config.StreamConfig{
 		RingBufferSize: 16,
 	}, config.LimitsConfig{}, core.NewEventBus())
-	r1 := newWHEPFeedReaders(stream, 0, 0, false, 0)
-	r2 := newWHEPFeedReaders(stream, 0, 0, false, 0)
+	snapshot := stream.StartupSnapshot()
+	r1 := newWHEPFeedReaders(stream, snapshot, false, 0)
+	r2 := newWHEPFeedReaders(stream, snapshot, false, 0)
 	defer r1.Close()
 	defer r2.Close()
 
 	done := make(chan struct{})
 	woke1 := make(chan bool, 1)
 	woke2 := make(chan bool, 1)
-	go func() { woke1 <- r1.wait(done) }()
-	go func() { woke2 <- r2.wait(done) }()
+	go func() { woke1 <- r1.wait(done, snapshot.GenerationDone) }()
+	go func() { woke2 <- r2.wait(done, snapshot.GenerationDone) }()
 	time.Sleep(20 * time.Millisecond)
 	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 1, 1, []byte{1}))
 
@@ -151,6 +148,24 @@ func TestWHEPFeedReadersWakeIndependently(t *testing.T) {
 	close(done)
 }
 
+func TestWHEPFeedReadersStopOnGenerationEnd(t *testing.T) {
+	stream := core.NewStream("live/whep-generation", config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id: "source", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{1}))
+	snapshot := stream.StartupSnapshot()
+	readers := newWHEPFeedReaders(stream, snapshot, false, 0)
+	defer readers.Close()
+	done := make(chan struct{})
+	stream.RemovePublisher()
+	if readers.wait(done, snapshot.GenerationDone) {
+		t.Fatal("WHEP reader remained active after publisher generation ended")
+	}
+}
+
 func TestWHEPInitialKeyframeGateRequiresSentCachedKeyframe(t *testing.T) {
 	if whepInitialKeyframeReady("live", false) {
 		t.Fatal("live mode bypassed keyframe gate without sending a cached keyframe")
@@ -163,7 +178,26 @@ func TestWHEPInitialKeyframeGateRequiresSentCachedKeyframe(t *testing.T) {
 	}
 }
 
+func TestWHEPInitialMediaGateAllowsAudioOnlyStreams(t *testing.T) {
+	if !whepInitialMediaReady("realtime", false, false) {
+		t.Fatal("audio-only realtime playback waited for a video keyframe")
+	}
+	if !whepInitialMediaReady("live", false, false) {
+		t.Fatal("audio-only live playback waited for a video keyframe")
+	}
+	if whepInitialMediaReady("realtime", false, true) {
+		t.Fatal("video realtime playback bypassed the keyframe gate")
+	}
+}
+
 func TestWHEPFeedReadersDrainOnlyTargetAudioAfterKeyframe(t *testing.T) {
+	stream := core.NewStream("live/whep-target-audio", config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id: "source", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := stream.StartupSnapshot()
 	targetRing := util.NewRingBuffer[*avframe.AVFrame](16)
 	readers := &whepFeedReaders{targetAudio: targetRing.NewReaderAt(0)}
 	video := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH265, avframe.FrameTypeInterframe, 0, 0, []byte{1})
@@ -174,7 +208,7 @@ func TestWHEPFeedReadersDrainOnlyTargetAudioAfterKeyframe(t *testing.T) {
 	targetRing.Write(earlyOpus)
 
 	var delivered []*avframe.AVFrame
-	readers.drainTargetAudio(false, avframe.CodecOpus, func(frame *avframe.AVFrame) {
+	readers.drainTargetAudio(stream, snapshot.Generation, false, avframe.CodecOpus, func(frame *avframe.AVFrame) {
 		delivered = append(delivered, frame)
 	})
 	if len(delivered) != 0 {
@@ -185,11 +219,41 @@ func TestWHEPFeedReadersDrainOnlyTargetAudioAfterKeyframe(t *testing.T) {
 	targetRing.Write(video)
 	targetRing.Write(aac)
 	targetRing.Write(lateOpus)
-	readers.drainTargetAudio(true, avframe.CodecOpus, func(frame *avframe.AVFrame) {
+	readers.drainTargetAudio(stream, snapshot.Generation, true, avframe.CodecOpus, func(frame *avframe.AVFrame) {
 		delivered = append(delivered, frame)
 	})
 	if len(delivered) != 1 || delivered[0] != lateOpus {
 		t.Fatalf("delivered target frames = %v, want late Opus only", delivered)
+	}
+}
+
+func TestWHEPTranscodeReaderStopsBeforeReplacementGenerationFrame(t *testing.T) {
+	stream := core.NewStream("live/whep-transcode-generation", config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id: "old", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := stream.StartupSnapshot()
+	targetRing := util.NewRingBuffer[*avframe.AVFrame](16)
+	readers := &whepFeedReaders{targetAudio: targetRing.NewReaderAt(0)}
+	oldFrame := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe, 0, 0, []byte{1})
+	replacementFrame := avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecOpus, avframe.FrameTypeInterframe, 20, 20, []byte{2})
+	targetRing.Write(oldFrame)
+
+	var delivered []*avframe.AVFrame
+	readers.drainTargetAudio(stream, snapshot.Generation, true, avframe.CodecOpus, func(frame *avframe.AVFrame) {
+		delivered = append(delivered, frame)
+		stream.RemovePublisher()
+		if err := stream.SetPublisher(&authorizationTestPublisher{
+			id: "replacement", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		targetRing.Write(replacementFrame)
+	})
+	if len(delivered) != 1 || delivered[0] != oldFrame {
+		t.Fatalf("delivered target frames = %v, want old-generation frame only", delivered)
 	}
 }
 

@@ -12,11 +12,19 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 type sequencedStorage struct {
 	Storage
 	next int
+}
+
+func writeLifecycleFrame(stream *core.Stream) {
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x01},
+	))
 }
 
 func (s *sequencedStorage) Create(ctx context.Context, id string, info RecordingInfo) (WriteObject, error) {
@@ -29,13 +37,14 @@ func newLifecycleTestModule(t *testing.T, key string) (*Module, *core.Stream, *s
 	cfg := &config.Config{
 		Server: config.ServerConfig{DrainTimeout: time.Second},
 		Record: config.RecordConfig{StreamPattern: "*", Format: "flv"},
-		Stream: config.StreamConfig{RingBufferSize: 16},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 16},
 	}
 	server := core.NewServer(cfg)
 	stream, err := server.StreamHub().GetOrCreate(key)
 	if err != nil {
 		t.Fatal(err)
 	}
+	writeLifecycleFrame(stream)
 	local, err := NewLocalStorage(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +147,7 @@ func TestModuleCloseSignalsEverySessionBeforeWaiting(t *testing.T) {
 			Path:           filepath.Join(t.TempDir(), "{stream_key}.flv"),
 			OnFileComplete: config.FileCompleteConfig{URL: callback.URL},
 		},
-		Stream: config.StreamConfig{RingBufferSize: 16},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 16},
 	}
 	server := core.NewServer(cfg)
 	m := NewModule()
@@ -148,6 +157,7 @@ func TestModuleCloseSignalsEverySessionBeforeWaiting(t *testing.T) {
 	sessions := make([]*RecordSession, 0, 2)
 	for _, key := range []string{"live/one", "live/two"} {
 		stream, _ := server.StreamHub().GetOrCreate(key)
+		writeLifecycleFrame(stream)
 		session, err := NewRecordSession(key, stream, cfg.Record)
 		if err != nil {
 			t.Fatal(err)
@@ -285,7 +295,7 @@ func TestModuleRepublishSurvivesFinalizerLongerThanDrainTimeout(t *testing.T) {
 				URL: callback.URL,
 			},
 		},
-		Stream: config.StreamConfig{RingBufferSize: 16},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 16},
 	}
 	server := core.NewServer(cfg)
 	stream, _ := server.StreamHub().GetOrCreate("live/slow-republish")
@@ -302,10 +312,18 @@ func TestModuleRepublishSurvivesFinalizerLongerThanDrainTimeout(t *testing.T) {
 	if err := stream.SetPublisher(oldPublisher); err != nil {
 		t.Fatal(err)
 	}
+	writeLifecycleFrame(stream)
 	if err := m.onPublish(&core.EventContext{StreamKey: "live/slow-republish", PublisherID: oldPublisher.ID()}); err != nil {
 		t.Fatal(err)
 	}
 	oldSession := m.sessions["live/slow-republish"]
+	startupDeadline := time.Now().Add(time.Second)
+	for oldSession.Status().Bytes == 0 && time.Now().Before(startupDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if oldSession.Status().Bytes == 0 {
+		t.Fatal("old record session did not consume its startup snapshot")
+	}
 
 	stream.RemovePublisher()
 	newPublisher := &testPublisher{id: "new"}
@@ -377,7 +395,7 @@ func TestModuleCloseAccountsForStopHookBlockedFinalizer(t *testing.T) {
 				URL: callback.URL,
 			},
 		},
-		Stream: config.StreamConfig{RingBufferSize: 16},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 16},
 	}
 	server := core.NewServer(cfg)
 	stream, _ := server.StreamHub().GetOrCreate("live/blocked-finalizer")
@@ -385,6 +403,7 @@ func TestModuleCloseAccountsForStopHookBlockedFinalizer(t *testing.T) {
 	if err := stream.SetPublisher(publisher); err != nil {
 		t.Fatal(err)
 	}
+	writeLifecycleFrame(stream)
 	m := NewModule()
 	if err := m.Init(server); err != nil {
 		t.Fatal(err)

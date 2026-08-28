@@ -146,6 +146,18 @@ func TestStorageTemplateUsesConfiguredFormat(t *testing.T) {
 	}
 }
 
+func TestStorageTemplateDefaultsToMP4WhenFormatIsUnset(t *testing.T) {
+	t.Chdir(t.TempDir())
+	storage, template, err := newStorageForConfig(config.RecordConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if filepath.Ext(template) != ".mp4" {
+		t.Fatalf("default recording template = %q, want .mp4", template)
+	}
+}
+
 func TestLocalStorageRecoversCrashPartialWithoutOverwritingFailure(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "live/cam")

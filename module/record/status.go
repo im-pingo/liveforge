@@ -27,10 +27,23 @@ type RecordingMetricsSnapshot struct {
 	StorageErrors  uint64 `json:"storage_errors"`
 }
 
+type RecordingAvailabilityState string
+
+const (
+	RecordingDisabled    RecordingAvailabilityState = "disabled"
+	RecordingReady       RecordingAvailabilityState = "ready"
+	RecordingDegraded    RecordingAvailabilityState = "degraded"
+	RecordingUnavailable RecordingAvailabilityState = "unavailable"
+)
+
 type RecordingStatusSnapshot struct {
-	Sessions []RecordingSessionStatus `json:"sessions"`
-	Storage  StorageHealth            `json:"storage"`
-	Metrics  RecordingMetricsSnapshot `json:"metrics"`
+	Enabled   bool                       `json:"enabled"`
+	Available bool                       `json:"available"`
+	State     RecordingAvailabilityState `json:"state"`
+	Reason    string                     `json:"reason,omitempty"`
+	Sessions  []RecordingSessionStatus   `json:"sessions"`
+	Storage   StorageHealth              `json:"storage"`
+	Metrics   RecordingMetricsSnapshot   `json:"metrics"`
 }
 
 type RecordingMetrics struct {
