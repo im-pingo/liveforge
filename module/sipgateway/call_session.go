@@ -55,6 +55,7 @@ type CallSession struct {
 	established     atomic.Bool
 	terminateOnce   sync.Once
 	stopOnce        sync.Once
+	generationOnce  sync.Once
 	rtcpSender      rtcpSenderState
 	rtpBuffer       []byte
 	transcodedAudio *util.RingReader[*avframe.AVFrame]
@@ -616,6 +617,7 @@ func (cs *CallSession) receiveVideoRTCPLoop(track *sipVideoTrack) {
 
 func (cs *CallSession) sendLoop() {
 	defer slog.Info("rtp send loop stopped", "module", "sipgateway", "call", cs.callID)
+	defer cs.releaseGenerationResources()
 
 	audioSession := rtp.NewSession(uint8(cs.codec.PT), uint32(cs.codec.ClockRate))
 	audioPacketizer, err := rtp.NewPacketizer(cs.codec.Codec)
@@ -625,17 +627,12 @@ func (cs *CallSession) sendLoop() {
 	}
 	cs.mu.RLock()
 	stream := cs.stream
-	releaseSubscriber := cs.releaseSubscriber
 	conn := cs.conn
 	rtcpConn := cs.rtcpConn
 	remoteAddr := cs.remoteAddr
 	video := cs.video
 	transcodedAudio := cs.transcodedAudio
-	releaseAudio := cs.releaseAudio
 	cs.mu.RUnlock()
-	if transcodedAudio != nil || releaseAudio != nil {
-		defer cs.releaseTranscodedAudio(transcodedAudio, releaseAudio)
-	}
 	var videoSession *rtp.Session
 	var videoPacketizer rtp.Packetizer
 	if video != nil {
@@ -646,12 +643,6 @@ func (cs *CallSession) sendLoop() {
 			return
 		}
 	}
-
-	defer func() {
-		if releaseSubscriber != nil {
-			releaseSubscriber()
-		}
-	}()
 
 	readCtx, cancelRead := context.WithCancel(context.Background())
 	defer cancelRead()
@@ -858,6 +849,29 @@ func (cs *CallSession) releaseTranscodedAudio(reader *util.RingReader[*avframe.A
 	cs.mu.Unlock()
 }
 
+func (cs *CallSession) releaseGenerationResources() {
+	cs.generationOnce.Do(func() {
+		cs.mu.Lock()
+		reader := cs.transcodedAudio
+		releaseAudio := cs.releaseAudio
+		releaseSubscriber := cs.releaseSubscriber
+		cs.transcodedAudio = nil
+		cs.releaseAudio = nil
+		cs.releaseSubscriber = nil
+		cs.mu.Unlock()
+
+		if reader != nil {
+			reader.Close()
+		}
+		if releaseAudio != nil {
+			releaseAudio()
+		}
+		if releaseSubscriber != nil {
+			releaseSubscriber()
+		}
+	})
+}
+
 func (cs *CallSession) sendFrame(frame *avframe.AVFrame, packetizer rtp.Packetizer, session *rtp.Session, conn, rtcpConn *net.UDPConn, remoteAddr *net.UDPAddr, reportState *rtcpSenderState) bool {
 	packets, err := packetizer.Packetize(frame, 1400)
 	if err != nil || len(packets) == 0 {
@@ -940,6 +954,7 @@ func (cs *CallSession) terminate(state CallState, err error, notify bool) bool {
 		callback = cs.onTerminate
 		cs.mu.Unlock()
 		cs.stop()
+		cs.releaseGenerationResources()
 		if state == CallStateNetworkLost && cs.metrics != nil {
 			cs.metrics.networkFailures.Add(1)
 		}

@@ -36,6 +36,12 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 		byeStarted: make(chan struct{}, 2),
 		byeRelease: make(chan struct{}),
 	}
+	byeReleased := false
+	defer func() {
+		if !byeReleased {
+			close(dialog.byeRelease)
+		}
+	}()
 	close(dialog.done)
 	gw.sendInvite = func(_ context.Context, req *sip.Request) (inviteDialog, error) {
 		dialog.response = sip.NewResponseFromRequest(req, 200, "OK", []byte(testPCMUAnswer))
@@ -89,7 +95,6 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 		t.Fatal("late session close started a second SIP BYE")
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(dialog.byeRelease)
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		session.mu.RLock()
@@ -119,10 +124,11 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 		t.Fatal("released target-audio reader still returned media")
 	}
 	dialog.mu.Lock()
-	byes := dialog.byes
+	byesBeforeRelease := dialog.byes
+	closesBeforeRelease := dialog.closes
 	dialog.mu.Unlock()
-	if byes != 1 {
-		t.Fatalf("BYE calls after publisher retirement = %d, want 1", byes)
+	if byesBeforeRelease != 1 || closesBeforeRelease != 0 {
+		t.Fatalf("dialog while BYE blocked = %d BYE/%d close, want 1/0", byesBeforeRelease, closesBeforeRelease)
 	}
 
 	if err := stream.SetPublisher(&gatewayTestPublisher{
@@ -155,6 +161,25 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 	if err := gw.Hangup(replacementCallID); err != nil {
 		t.Fatalf("Hangup replacement call: %v", err)
 	}
+
+	close(dialog.byeRelease)
+	byeReleased = true
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		dialog.mu.Lock()
+		byes := dialog.byes
+		closes := dialog.closes
+		dialog.mu.Unlock()
+		if byes == 1 && closes == 1 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	dialog.mu.Lock()
+	byes := dialog.byes
+	closes := dialog.closes
+	dialog.mu.Unlock()
+	t.Fatalf("dialog after BYE release = %d BYE/%d close, want 1/1", byes, closes)
 }
 
 func TestTranscodedAudioReadyAfterPublisherRetirementDoesNotSendRTP(t *testing.T) {
