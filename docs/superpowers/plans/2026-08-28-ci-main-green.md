@@ -4,7 +4,7 @@
 
 **Goal:** Make post-merge `main` CI reliable by fixing GB28181 ephemeral-port allocation, making lint deterministic, and removing only confirmed-unused branches.
 
-**Architecture:** When `NewRTPReceiver` receives port zero, it will derive the RTCP port from the RTP socket's assigned port. CI will pin golangci-lint and compare changes against the appropriate revision on both PR and main push events, so an historical lint backlog cannot make main red while new issues remain gated.
+**Architecture:** When `NewRTPReceiver` receives port zero, it will derive the RTCP port from the RTP socket's assigned port. CI will pin golangci-lint; the action's `only-new-issues` mode already compares a pull request with its patch and a main push with that push's commit diff, so an historical lint backlog will not block later incremental changes while new issues remain gated.
 
 **Tech Stack:** Go 1.26, FFmpeg-tagged Go tests, GitHub Actions, golangci-lint.
 
@@ -39,9 +39,9 @@
 **Files:**
 - Modify: `.github/workflows/ci.yml:34-39`
 
-**Interfaces:** The `Lint` job must remain a required quality gate for pull requests and must check only the new merge revision on `main` pushes.
+**Interfaces:** The `Lint` job must remain a required quality gate for pull requests and must check only the new diff on `main` pushes.
 
-- [ ] **Step 1: Pin `golangci-lint-action` to the repository's Node 24-compatible action major and replace `version: latest` with a verified v2 release; configure the action's revision arguments conditionally for pull requests versus `HEAD^` on main pushes.
+- [ ] **Step 1: Pin `golangci-lint-action` to the repository's Node 24-compatible action major and replace `version: latest` with the verified `v2.13.2` release; retain `only-new-issues: true`, which the action maps to the PR patch or push commit diff automatically.
 - [ ] **Step 2: Validate the workflow diff with `git diff --check` and inspect `.github/workflows/ci.yml` for valid YAML and no unrelated changes.
 - [ ] **Step 3: Commit with `git add .github/workflows/ci.yml && git commit -m "ci: lint only changes on main pushes"`.
 
