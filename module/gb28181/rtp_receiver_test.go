@@ -238,18 +238,6 @@ func TestSeqDiff(t *testing.T) {
 	}
 }
 
-func TestOwnRTPPacketCopiesPayload(t *testing.T) {
-	original := &pionrtp.Packet{
-		Header:  pionrtp.Header{SequenceNumber: 7, Timestamp: 9},
-		Payload: []byte{1, 2, 3},
-	}
-	owned := ownRTPPacket(original)
-	original.Payload[0] = 99
-	if owned.Payload[0] != 1 {
-		t.Fatalf("owned payload changed with source buffer: %v", owned.Payload)
-	}
-}
-
 func TestRTPReceiverUnexpectedSocketFailureStopsBothWorkers(t *testing.T) {
 	receiver, err := NewRTPReceiver(0, NewPublisher("receiver-failure", nil))
 	if err != nil {

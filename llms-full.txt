@@ -33,6 +33,8 @@ SIP, GB28181, Record, DVR, and cluster push egress all bind startup to one atomi
 
 SIP Gateway reserves and binds each RTP/RTCP pair before SDP and transfers socket ownership to the admitted call. A requested PCMA/PCMU target may use an independent generation-bound transcode reader; every ready transformed frame rechecks cancellation and publisher generation immediately before RTP send. Publisher retirement closes and releases that reader, the generation subscriber, and the sockets, frees the pair for exact reuse, and converges with late teardown triggers on one BYE.
 
+GB28181 inbound device INVITEs complete asynchronous publish-start admission before sending a final 2xx response. Backpressure returns non-2xx and rolls back the publisher, session, newly created stream, bound sockets, and allocator reservation without an unmatched publish-stop. Server-initiated live and playback calls transfer accepted dialogs to one managed ACK/BYE/close owner. Receive Lab and SIP/GB28181 self-test port checks reserve and bind both RTP/RTCP sockets atomically, skip externally occupied pairs when another configured pair is available, and release the pair exactly once.
+
 Protocol Lab receive workflows use the same readiness rule: a known unsupported SIP audio codec is rejected before waiting, while SIP and GB28181 wait for the captured publisher generation's required sequence headers before sending outbound signaling. A late header can therefore be canceled by the caller instead of creating a partially negotiated call; receive-mode test fixtures must provide the source header when they expect synchronous activation.
 
 ## Capability matrix

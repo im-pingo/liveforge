@@ -50,7 +50,6 @@ type outboundMediaSession struct {
 	ssrc       uint32
 	sequence   uint16
 	snapshot   core.StreamStartupSnapshot
-	rtpBuffer  []byte
 
 	closeOnce sync.Once
 	subOnce   sync.Once
@@ -223,7 +222,7 @@ func (s *outboundMediaSession) sendFrame(muxer *ps.Muxer, frame *avframe.AVFrame
 		if end > len(data) {
 			end = len(data)
 		}
-		packet := pionrtp.Packet{Header: pionrtp.Header{
+		packet := &pionrtp.Packet{Header: pionrtp.Header{
 			Version:        2,
 			PayloadType:    labRTPPayloadType,
 			SequenceNumber: s.sequence,
@@ -231,16 +230,11 @@ func (s *outboundMediaSession) sendFrame(muxer *ps.Muxer, frame *avframe.AVFrame
 			SSRC:           s.ssrc,
 			Marker:         end == len(data),
 		}, Payload: data[offset:end]}
-		packetSize := packet.MarshalSize()
-		if cap(s.rtpBuffer) < packetSize {
-			s.rtpBuffer = make([]byte, packetSize)
-		}
-		encoded := s.rtpBuffer[:packetSize]
-		encodedSize, err := packet.MarshalTo(encoded)
+		encoded, err := packet.Marshal()
 		if err != nil {
 			return err
 		}
-		n, err := s.rtpConn.WriteToUDP(encoded[:encodedSize], s.remoteRTP)
+		n, err := s.rtpConn.WriteToUDP(encoded, s.remoteRTP)
 		if err != nil {
 			return err
 		}
