@@ -176,6 +176,23 @@ func TestReadTCPRTPPacketInvalidLength(t *testing.T) {
 	}
 }
 
+func TestNewRTPReceiverUsesAssignedPortForRTCP(t *testing.T) {
+	receiver, err := NewRTPReceiver(0, NewPublisher("ephemeral-port", nil))
+	if err != nil {
+		t.Fatalf("NewRTPReceiver: %v", err)
+	}
+	t.Cleanup(receiver.Close)
+
+	rtpPort := receiver.LocalPort()
+	rtcpPort := receiver.rtcpConn.LocalAddr().(*net.UDPAddr).Port
+	if rtpPort <= 0 {
+		t.Fatalf("RTP port = %d, want assigned ephemeral port", rtpPort)
+	}
+	if rtcpPort != rtpPort+1 {
+		t.Fatalf("RTCP port = %d, want RTP port + 1 = %d", rtcpPort, rtpPort+1)
+	}
+}
+
 func TestSeqDiff(t *testing.T) {
 	tests := []struct {
 		a, b uint16

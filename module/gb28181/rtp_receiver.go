@@ -41,10 +41,14 @@ func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen UDP :%d: %w", port, err)
 	}
-	rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port + 1})
+	rtcpPort := port + 1
+	if port == 0 {
+		rtcpPort = conn.LocalAddr().(*net.UDPAddr).Port + 1
+	}
+	rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: rtcpPort})
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("listen RTCP UDP :%d: %w", port+1, err)
+		return nil, fmt.Errorf("listen RTCP UDP :%d: %w", rtcpPort, err)
 	}
 
 	return &RTPReceiver{
