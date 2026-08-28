@@ -62,11 +62,22 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 		t.Fatal("transcoded outbound session was not retained")
 	}
 	firstPorts := session.snapshot()
-	session.mu.RLock()
+	releaseAudioReturned := make(chan struct{})
+	session.mu.Lock()
 	transcodedReader := session.transcodedAudio
-	session.mu.RUnlock()
+	originalReleaseAudio := session.releaseAudio
+	if originalReleaseAudio != nil {
+		session.releaseAudio = func() {
+			originalReleaseAudio()
+			close(releaseAudioReturned)
+		}
+	}
+	session.mu.Unlock()
 	if transcodedReader == nil {
 		t.Fatal("transcoded outbound session has no target-audio reader")
+	}
+	if originalReleaseAudio == nil {
+		t.Fatal("transcoded outbound session has no target-audio release callback")
 	}
 	if got := stream.Subscribers()["sipgateway"]; got != 1 {
 		t.Fatalf("SIP subscribers = %d, want 1 while call is active", got)
@@ -94,6 +105,11 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 	case <-dialog.byeStarted:
 		t.Fatal("late session close started a second SIP BYE")
 	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case <-releaseAudioReturned:
+	case <-time.After(time.Second):
+		t.Fatal("target-audio release callback did not return while BYE was blocked")
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
