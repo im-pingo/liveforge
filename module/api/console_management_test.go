@@ -57,6 +57,26 @@ func consoleElementsByID(doc *html.Node) map[string]*html.Node {
 	return elements
 }
 
+func consoleIDCounts(doc *html.Node) map[string]int {
+	counts := make(map[string]int)
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode {
+			for _, attr := range node.Attr {
+				if attr.Key == "id" {
+					counts[attr.Val]++
+					break
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+	return counts
+}
+
 func consoleAttribute(node *html.Node, name string) string {
 	for _, attr := range node.Attr {
 		if attr.Key == name {
@@ -64,6 +84,15 @@ func consoleAttribute(node *html.Node, name string) string {
 		}
 	}
 	return ""
+}
+
+func consoleHasAttribute(node *html.Node, name string) bool {
+	for _, attr := range node.Attr {
+		if attr.Key == name {
+			return true
+		}
+	}
+	return false
 }
 
 func consoleFunctionSource(t *testing.T, script, name string) string {
@@ -231,6 +260,15 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 	}
 }
 
+func TestConsoleManagementDOMIDsAreUnique(t *testing.T) {
+	doc, _ := consoleDocument(t)
+	for id, count := range consoleIDCounts(doc) {
+		if count != 1 {
+			t.Errorf("console id %q appears %d times, want exactly once", id, count)
+		}
+	}
+}
+
 func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 	doc, script := consoleDocument(t)
 	elements := consoleElementsByID(doc)
@@ -270,6 +308,12 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 	if consoleAttribute(elements["config-validate"], "data-permission") != "viewer" {
 		t.Error("config Validate must remain available to read-only viewer roles")
 	}
+	if !consoleHasAttribute(elements["config-editor"], "readonly") {
+		t.Error("config editor must start read-only until a writable source is loaded")
+	}
+	if !consoleHasAttribute(elements["config-apply"], "disabled") {
+		t.Error("config Apply must start disabled until a writable source is loaded")
+	}
 	if !strings.Contains(script, "documentData.desired_document || documentData.effective_document") {
 		t.Error("config editor must prefer desired values so restart-required settings are not overwritten")
 	}
@@ -280,7 +324,9 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 		"config-schema",
 		"documentData.effective_document",
 		"documentData.writable",
-		"document.getElementById(\"config-apply\").disabled = !documentData.writable",
+		"var sourceWritable = false",
+		"sourceWritable = !!documentData.writable",
+		"updateConfigEditorControls",
 	} {
 		if !strings.Contains(script, required) && elements[required] == nil {
 			t.Errorf("config console is missing complete-document contract %q", required)
@@ -345,9 +391,9 @@ func TestConsoleConfigBrowserRendersDesiredEffectiveSchemaAndSourceDetails(t *te
 					desired: document.getElementById("config-editor").value,
 					effective: document.getElementById("config-effective-document").textContent,
 					pending: document.getElementById("config-pending").textContent,
-					pendingCount: document.getElementById("config-pending-count").textContent,
+					pendingCount:  document.getElementById("config-pending-count").textContent,
 					sourceDetails: document.getElementById("config-source-details").textContent,
-					schema: document.getElementById("config-schema").textContent,
+					schema:        document.getElementById("config-schema").textContent,
 					applyDisabled: document.getElementById("config-apply").disabled,
 					editorReadOnly: document.getElementById("config-editor").readOnly
 				};
@@ -376,6 +422,102 @@ func TestConsoleConfigBrowserRendersDesiredEffectiveSchemaAndSourceDetails(t *te
 		}
 		if probe.ApplyDisabled || probe.EditorReadOnly {
 			t.Errorf("writable config controls disabled: apply=%v readonly=%v", probe.ApplyDisabled, probe.EditorReadOnly)
+		}
+	})
+}
+
+func TestConsoleConfigBrowserKeepsReadOnlySourceSafeAndValidateAvailable(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			ApplyCalls     int  `json:"applyCalls"`
+			ModalOpened    bool `json:"modalOpened"`
+			ApplyDisabled  bool `json:"applyDisabled"`
+			EditorReadOnly bool `json:"editorReadOnly"`
+			Validate       bool `json:"validate"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			var applyCalls = 0;
+			apiFetch = function(url) {
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"http"});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:"server:\n  name: read-only\n", effective_document:"server:\n  name: active\n", writable:false, source_details:{kind:"http"}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1"});
+				if (url === "/api/v1/server/config/apply") { applyCalls++; return Promise.resolve({}); }
+				return Promise.resolve({});
+			};
+			var modalOpened = false;
+			showModal = function() { modalOpened = true; };
+			window.__configProbe = null;
+			refreshRuntimeConfig().then(function() {
+				applyConfigEditor();
+				window.__configProbe = {
+					applyCalls: applyCalls,
+					modalOpened: modalOpened,
+					applyDisabled: document.getElementById("config-apply").disabled,
+					editorReadOnly: document.getElementById("config-editor").readOnly,
+					validate: !document.getElementById("config-validate").disabled
+				};
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(20*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("probe read-only config controls: %v", err)
+		}
+		if probe.ApplyCalls != 0 || probe.ModalOpened || !probe.ApplyDisabled || !probe.EditorReadOnly || !probe.Validate {
+			t.Fatalf("read-only config controls = %#v", probe)
+		}
+	})
+}
+
+func TestConsoleConfigBrowserRevokesWriteStateAfterRefreshFailure(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			ApplyCalls          int  `json:"applyCalls"`
+			OpenedBeforeFailure bool `json:"openedBeforeFailure"`
+			ModalOpened         bool `json:"modalOpened"`
+			ApplyDisabled       bool `json:"applyDisabled"`
+			EditorReadOnly      bool `json:"editorReadOnly"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			var phase = "writable";
+			var applyCalls = 0;
+			apiFetch = function(url) {
+				if (phase === "failed") return Promise.reject(new Error("refresh failed"));
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"file"});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:"server:\n  name: writable\n", effective_document:"server:\n  name: active\n", writable:true, source_details:{kind:"file"}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1"});
+				if (url === "/api/v1/server/config/apply") { applyCalls++; return Promise.resolve({}); }
+				return Promise.resolve({});
+			};
+			window.__configProbe = null;
+			refreshRuntimeConfig().then(function() {
+				applyConfigEditor();
+				var openedBeforeFailure = document.getElementById("modal").classList.contains("active");
+				var staleConfirmation = pendingAction;
+				sourceWritable = false;
+				return Promise.resolve(staleConfirmation()).then(function() {
+					closeModal();
+					phase = "failed";
+					return refreshRuntimeConfig().then(function() {
+						applyConfigEditor();
+						window.__configProbe = {
+							applyCalls: applyCalls,
+							openedBeforeFailure: openedBeforeFailure,
+							modalOpened: document.getElementById("modal").classList.contains("active"),
+							applyDisabled: document.getElementById("config-apply").disabled,
+							editorReadOnly: document.getElementById("config-editor").readOnly
+						};
+					});
+				});
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(20*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("probe failed config refresh controls: %v", err)
+		}
+		if probe.ApplyCalls != 0 || !probe.OpenedBeforeFailure || probe.ModalOpened || !probe.ApplyDisabled || !probe.EditorReadOnly {
+			t.Fatalf("failed refresh config controls = %#v", probe)
 		}
 	})
 }

@@ -1026,13 +1026,13 @@ select:focus-visible {
       <div class="ops-section-title"><span>Desired Source Document</span><span id="config-source-writable">Read-only</span></div>
       <div class="ops-toolbar-actions" style="margin-bottom:10px">
         <button class="btn" id="config-validate" data-permission="viewer" type="button">Validate</button>
-        <button class="btn btn-play" id="config-apply" data-permission="operator" type="button">Apply &amp; Refresh</button>
+        <button class="btn btn-play" id="config-apply" data-permission="operator" type="button" disabled>Apply &amp; Refresh</button>
       </div>
-      <textarea class="config-editor" id="config-editor" spellcheck="false" aria-label="Desired source configuration document"></textarea>
+      <textarea class="config-editor" id="config-editor" spellcheck="false" readonly aria-label="Desired source configuration document"></textarea>
       <div class="ops-section-title" style="margin-top:12px"><span>Effective Applied Document</span><span id="config-effective-state">Applied</span></div>
       <pre class="ops-detail" id="config-effective-document">Effective document unavailable</pre>
     </div>
-    <div class="ops-section" id="config-source">
+    <div class="ops-section" id="config-source-details-section">
       <div class="ops-section-title"><span>Selected Source Details</span><span id="config-source-kind">-</span></div>
       <pre class="ops-detail" id="config-source-details">Source details unavailable</pre>
     </div>
@@ -1295,6 +1295,7 @@ var statsInterval = null;
 var statsPrev = null;
 var statsVisible = false;
 var managementRole = "viewer";
+var sourceWritable = false;
 var activeTab = "streams";
 var activeViewController = null;
 var activeViewInterval = null;
@@ -1370,6 +1371,14 @@ function applyManagementPermissions() {
     controls[i].disabled = !allowed;
     controls[i].title = allowed ? "" : "Insufficient console role";
   }
+  updateConfigEditorControls();
+}
+
+function updateConfigEditorControls() {
+  var canOperate = sourceWritable && canManage("operator");
+  document.getElementById("config-editor").readOnly = !canOperate;
+  document.getElementById("config-apply").disabled = !canOperate;
+  document.getElementById("config-validate").disabled = !canManage("viewer");
 }
 
 function abortActiveViewRequest() {
@@ -3208,6 +3217,7 @@ function refreshRuntimeConfig(signal) {
     if (document.activeElement !== editor) {
       editor.value = documentData.desired_document || documentData.effective_document || JSON.stringify(documentData.desired || documentData.effective || {}, null, 2);
     }
+    sourceWritable = !!documentData.writable;
     document.getElementById("config-source-writable").textContent = documentData.writable ? "Writable source" : "Read-only source";
     document.getElementById("config-effective-state").textContent = pending.length ? "Applied; restart pending" : "Applied";
     document.getElementById("config-effective-document").textContent = documentData.effective_document || JSON.stringify(documentData.effective || {}, null, 2);
@@ -3218,10 +3228,12 @@ function refreshRuntimeConfig(signal) {
     if (data.last_error) showManagementError("config", new Error(data.last_error));
     var button = document.getElementById("config-refresh");
     button.disabled = !data.enabled || !canManage("operator");
-    document.getElementById("config-validate").disabled = !canManage("viewer");
-    editor.readOnly = !documentData.writable || !canManage("operator");
-    document.getElementById("config-apply").disabled = !documentData.writable || !canManage("operator");
-  }).catch(function(err) { showManagementError("config", err); });
+    updateConfigEditorControls();
+  }).catch(function(err) {
+    sourceWritable = false;
+    updateConfigEditorControls();
+    showManagementError("config", err);
+  });
 }
 
 function validateConfigEditor() {
@@ -3236,8 +3248,9 @@ function validateConfigEditor() {
 }
 
 function applyConfigEditor() {
-  if (!canManage("operator")) return Promise.resolve();
+  if (!sourceWritable || !canManage("operator")) return Promise.resolve();
   showModal("Apply configuration", "Write the complete configuration document and schedule a refresh?", function() {
+    if (!sourceWritable || !canManage("operator")) return Promise.resolve();
     return apiFetch("/api/v1/server/config/apply", {
       method: "POST",
       headers: {"Content-Type": "application/yaml"},
