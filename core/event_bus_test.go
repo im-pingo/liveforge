@@ -1,12 +1,176 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestEventBusReservesTerminalOnlyConsumerLaneOnStart(t *testing.T) {
+	bus := NewEventBus()
+	started := make(chan struct{}, 1)
+	recordStopped := make(chan struct{}, 1)
+	httpStopped := make(chan struct{}, 1)
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+		started <- struct{}{}
+		return nil
+	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+		recordStopped <- struct{}{}
+		return nil
+	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "httpstream", Handler: func(*EventContext) error {
+		httpStopped <- struct{}{}
+		return nil
+	}})
+	ctx := &EventContext{StreamKey: "live/terminal-reservation", PublisherID: "publisher-1"}
+
+	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("publish start hook did not run")
+	}
+
+	bus.asyncMu.Lock()
+	reserved := len(bus.lifecycleLanes)
+	bus.asyncMu.Unlock()
+	if reserved != 2 {
+		t.Fatalf("reserved lifecycle lanes = %d, want start and terminal-only consumers", reserved)
+	}
+
+	if err := bus.EmitAsync(EventPublishStop, ctx); err != nil {
+		t.Fatal(err)
+	}
+	for name, done := range map[string]<-chan struct{}{"record": recordStopped, "httpstream": httpStopped} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s terminal hook did not run", name)
+		}
+	}
+	waitEventBusLanesReleased(t, bus)
+}
+
+func TestEventBusReservesTerminalOnlyLaneWithoutStartHooks(t *testing.T) {
+	bus := NewEventBus()
+	stopped := make(chan struct{}, 1)
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+		stopped <- struct{}{}
+		return nil
+	}})
+	ctx := &EventContext{StreamKey: "live/terminal-only", PublisherID: "publisher-1"}
+
+	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	bus.asyncMu.Lock()
+	reserved := len(bus.lifecycleLanes)
+	bus.asyncMu.Unlock()
+	if reserved != 1 {
+		t.Fatalf("reserved lifecycle lanes = %d, want terminal-only consumer", reserved)
+	}
+
+	if err := bus.EmitAsync(EventPublishStop, ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("terminal-only hook did not run")
+	}
+	waitEventBusLanesReleased(t, bus)
+}
+
+func TestEventBusReservesEveryTerminalHookSlotForConsumer(t *testing.T) {
+	bus := NewEventBus()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var starts atomic.Int32
+	var stops atomic.Int32
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+		if starts.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return nil
+	}})
+	for range 2 {
+		bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+			stops.Add(1)
+			return nil
+		}})
+	}
+	ctx := &EventContext{StreamKey: "live/terminal-slots", PublisherID: "publisher-1"}
+	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	for i := 0; i < maxLifecycleQueueDepth-2; i++ {
+		if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+			t.Fatalf("start queue admission %d: %v", i, err)
+		}
+	}
+	if err := bus.EmitAsync(EventPublish, ctx); !errors.Is(err, ErrAsyncBackpressure) {
+		t.Fatalf("start consumed terminal reservation: %v", err)
+	}
+	if err := bus.EmitAsync(EventPublishStop, ctx); err != nil {
+		t.Fatalf("terminal hooks did not fit reserved slots: %v", err)
+	}
+	close(release)
+	waitEventBusLanesReleased(t, bus)
+	if got := stops.Load(); got != 2 {
+		t.Fatalf("terminal hook calls = %d, want 2", got)
+	}
+}
+
+func TestEventBusDrainWaitsForAsyncHooksAndHonorsContext(t *testing.T) {
+	bus := NewEventBus()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	bus.Register(HookRegistration{Event: EventStreamAlive, Mode: HookAsync, Handler: func(*EventContext) error {
+		close(entered)
+		<-release
+		return nil
+	}})
+	if err := bus.EmitAsync(EventStreamAlive, &EventContext{StreamKey: "live/drain"}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := bus.Drain(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Drain() error = %v, want context deadline", err)
+	}
+
+	close(release)
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Drain(ctx); err != nil {
+		t.Fatalf("Drain() after release: %v", err)
+	}
+}
+
+func TestEventBusDrainCompletesAfterPanickingHook(t *testing.T) {
+	bus := NewEventBus()
+	bus.Register(HookRegistration{Event: EventStreamAlive, Mode: HookAsync, Handler: func(*EventContext) error {
+		panic("expected test panic")
+	}})
+	if err := bus.EmitAsync(EventStreamAlive, &EventContext{StreamKey: "live/panic-drain"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Drain(ctx); err != nil {
+		t.Fatalf("Drain() after panic: %v", err)
+	}
+}
 
 func TestEventBusSyncHook(t *testing.T) {
 	bus := NewEventBus()
@@ -161,12 +325,15 @@ func TestEventBusLifecycleQueueBackpressureIsBoundedAndObservable(t *testing.T) 
 		}
 		return nil
 	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "blocked", Handler: func(*EventContext) error {
+		return nil
+	}})
 	ctx := &EventContext{StreamKey: "live/saturated", PublisherID: "publisher-1"}
 	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
 		t.Fatalf("initial lifecycle admission: %v", err)
 	}
 	<-entered
-	for i := 0; i < maxLifecycleQueueDepth; i++ {
+	for i := 0; i < maxLifecycleQueueDepth-1; i++ {
 		if err := bus.EmitAsync(EventPublish, ctx); err != nil {
 			t.Fatalf("queue admission %d: %v", i, err)
 		}
@@ -174,15 +341,82 @@ func TestEventBusLifecycleQueueBackpressureIsBoundedAndObservable(t *testing.T) 
 	if err := bus.EmitAsync(EventPublish, ctx); !errors.Is(err, ErrAsyncBackpressure) {
 		t.Fatalf("saturated admission error = %v, want %v", err, ErrAsyncBackpressure)
 	}
+	if err := bus.EmitAsync(EventPublishStop, ctx); err != nil {
+		t.Fatalf("terminal lifecycle event did not use its reserved queue slot: %v", err)
+	}
 	if got := bus.AsyncStats().Rejected; got != 1 {
 		t.Fatalf("rejected dispatches = %d, want 1", got)
 	}
 
 	close(release)
 	waitEventBusLanesReleased(t, bus)
-	if got := calls.Load(); got != int32(maxLifecycleQueueDepth+1) {
-		t.Fatalf("accepted lifecycle calls = %d, want %d", got, maxLifecycleQueueDepth+1)
+	if got := calls.Load(); got != int32(maxLifecycleQueueDepth) {
+		t.Fatalf("accepted publish calls = %d, want %d", got, maxLifecycleQueueDepth)
 	}
+}
+
+func TestEventBusRetainsIdleLifecycleLaneUntilTerminalEvent(t *testing.T) {
+	bus := NewEventBus()
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	bus.Register(HookRegistration{Event: EventPublish, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+		close(started)
+		return nil
+	}})
+	bus.Register(HookRegistration{Event: EventPublishStop, Mode: HookAsync, Consumer: "record", Handler: func(*EventContext) error {
+		close(stopped)
+		return nil
+	}})
+	ctx := &EventContext{StreamKey: "live/idle-lane", PublisherID: "publisher-1"}
+	if err := bus.EmitAsync(EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		bus.asyncMu.Lock()
+		laneCount := len(bus.lifecycleLanes)
+		var running bool
+		for _, lane := range bus.lifecycleLanes {
+			running = lane.running
+		}
+		bus.asyncMu.Unlock()
+		if laneCount == 1 && !running {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	bus.asyncMu.Lock()
+	retained := len(bus.lifecycleLanes) == 1
+	bus.asyncMu.Unlock()
+	if !retained {
+		t.Fatal("lifecycle lane was released before its terminal event")
+	}
+
+	if err := bus.EmitAsync(EventPublishStop, ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("terminal lifecycle event did not run")
+	}
+	waitEventBusLanesReleased(t, bus)
+}
+
+func TestEventBusReleasesStartOnlyConsumerLane(t *testing.T) {
+	bus := NewEventBus()
+	done := make(chan struct{})
+	bus.Register(HookRegistration{Event: EventSubscribe, Mode: HookAsync, Consumer: "origin-pull", Handler: func(*EventContext) error {
+		close(done)
+		return nil
+	}})
+	if err := bus.EmitAsync(EventSubscribe, &EventContext{StreamKey: "live/pull", SubscriberID: "subscriber-1"}); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	waitEventBusLanesReleased(t, bus)
 }
 
 func TestEventBusLifecycleWorkerRecoversPanicAndReleasesLane(t *testing.T) {
@@ -256,14 +490,23 @@ func TestEventBusLifecycleGenerationsRunIndependentlyAndReleaseState(t *testing.
 		},
 	})
 
-	bus.EmitAsync(EventPublish, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-1"})
+	if err := bus.EmitAsync(EventPublish, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-1"}); err != nil {
+		t.Fatal(err)
+	}
 	<-blocked
-	bus.EmitAsync(EventPublishStop, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-1"})
-	bus.EmitAsync(EventPublish, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-2"})
+	if err := bus.EmitAsync(EventPublishStop, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.EmitAsync(EventPublish, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-2"}); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-secondRan:
 	case <-time.After(time.Second):
 		t.Fatal("independent publisher generation was blocked")
+	}
+	if err := bus.EmitAsync(EventPublishStop, &EventContext{StreamKey: "live/generations", PublisherID: "publisher-2"}); err != nil {
+		t.Fatal(err)
 	}
 	close(release)
 	select {

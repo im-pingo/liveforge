@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -29,6 +30,9 @@ type EventBus struct {
 	lifecycleLanes map[lifecycleLaneKey]*lifecycleLane
 	autoConsumers  map[autoConsumerKey]uint64
 	asyncRejected  atomic.Uint64
+	dispatchMu     sync.Mutex
+	pendingAsync   int
+	asyncIdle      chan struct{}
 }
 
 type lifecycleLaneKey struct {
@@ -39,13 +43,15 @@ type lifecycleLaneKey struct {
 }
 
 type lifecycleDispatch struct {
-	ctx  *EventContext
-	hook HookRegistration
+	ctx      *EventContext
+	hook     HookRegistration
+	terminal bool
 }
 
 type lifecycleLane struct {
-	queue   []lifecycleDispatch
-	running bool
+	queue          []lifecycleDispatch
+	running        bool
+	closeWhenEmpty bool
 }
 
 type autoConsumerKey struct {
@@ -55,10 +61,13 @@ type autoConsumerKey struct {
 
 // NewEventBus creates a new EventBus.
 func NewEventBus() *EventBus {
+	idle := make(chan struct{})
+	close(idle)
 	return &EventBus{
 		hooks:          make(map[EventType][]HookRegistration),
 		lifecycleLanes: make(map[lifecycleLaneKey]*lifecycleLane),
 		autoConsumers:  make(map[autoConsumerKey]uint64),
+		asyncIdle:      idle,
 	}
 }
 
@@ -111,16 +120,65 @@ func (b *EventBus) EmitSync(event EventType, ctx *EventContext) error {
 // than a partial start/stop delivery when capacity is exhausted.
 func (b *EventBus) EmitAsync(event EventType, ctx *EventContext) error {
 	hooks := asyncHooks(b.snapshot(event))
+	if key, ok := eventLifecycleKey(event, ctx); ok {
+		terminalCounts := b.terminalConsumerCounts(event)
+		if len(hooks) > 0 || len(terminalCounts) > 0 {
+			return b.enqueueLifecycle(event, key, hooks, ctx, terminalCounts)
+		}
+		return nil
+	}
 	if len(hooks) == 0 {
 		return nil
 	}
-	if key, ok := eventLifecycleKey(event, ctx); ok {
-		return b.enqueueLifecycle(key, hooks, ctx)
-	}
+	b.beginAsync(len(hooks))
 	for _, hook := range hooks {
-		go runAsyncHook(hook, cloneEventContext(ctx))
+		go b.runTrackedAsyncHook(hook, cloneEventContext(ctx))
 	}
 	return nil
+}
+
+// Drain waits for all asynchronous hook dispatches accepted before the bus
+// becomes idle. Callers must stop event producers before relying on an idle
+// result as a shutdown barrier.
+func (b *EventBus) Drain(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b.dispatchMu.Lock()
+	idle := b.asyncIdle
+	b.dispatchMu.Unlock()
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *EventBus) beginAsync(count int) {
+	if count <= 0 {
+		return
+	}
+	b.dispatchMu.Lock()
+	if b.pendingAsync == 0 {
+		b.asyncIdle = make(chan struct{})
+	}
+	b.pendingAsync += count
+	b.dispatchMu.Unlock()
+}
+
+func (b *EventBus) completeAsync() {
+	b.dispatchMu.Lock()
+	b.pendingAsync--
+	if b.pendingAsync == 0 {
+		close(b.asyncIdle)
+	}
+	b.dispatchMu.Unlock()
+}
+
+func (b *EventBus) runTrackedAsyncHook(hook HookRegistration, ctx *EventContext) {
+	defer b.completeAsync()
+	runAsyncHook(hook, ctx)
 }
 
 func (b *EventBus) AsyncStats() AsyncDispatchStats {
@@ -168,24 +226,58 @@ func lifecycleFamily(event EventType) (uint8, bool) {
 	}
 }
 
-func (b *EventBus) enqueueLifecycle(base lifecycleLaneKey, hooks []HookRegistration, ctx *EventContext) error {
+func (b *EventBus) terminalConsumerCounts(event EventType) map[string]int {
+	var terminal EventType
+	switch event {
+	case EventPublish:
+		terminal = EventPublishStop
+	case EventSubscribe:
+		terminal = EventSubscribeStop
+	default:
+		return nil
+	}
+	consumers := make(map[string]int)
+	for _, hook := range asyncHooks(b.snapshot(terminal)) {
+		consumers[hook.Consumer]++
+	}
+	return consumers
+}
+
+func (b *EventBus) enqueueLifecycle(event EventType, base lifecycleLaneKey, hooks []HookRegistration, ctx *EventContext, terminalCounts map[string]int) error {
 	type laneStart struct {
 		key  lifecycleLaneKey
 		lane *lifecycleLane
 	}
 	counts := make(map[lifecycleLaneKey]int, len(hooks))
+	holdOpen := make(map[lifecycleLaneKey]bool, len(hooks))
+	terminal := event == EventPublishStop || event == EventSubscribeStop
 	for _, hook := range hooks {
 		key := base
 		key.consumer = hook.Consumer
 		counts[key]++
+		holdOpen[key] = terminalCounts[hook.Consumer] > 0
+	}
+	if !terminal {
+		for consumer := range terminalCounts {
+			key := base
+			key.consumer = consumer
+			if _, exists := counts[key]; !exists {
+				counts[key] = 0
+			}
+			holdOpen[key] = true
+		}
 	}
 
 	b.asyncMu.Lock()
 	newLanes := 0
 	for key, count := range counts {
 		lane := b.lifecycleLanes[key]
+		limit := maxLifecycleQueueDepth
+		if !terminal {
+			limit -= terminalCounts[key.consumer]
+		}
 		if lane == nil {
-			if count > maxLifecycleQueueDepth {
+			if count > limit {
 				b.asyncMu.Unlock()
 				b.asyncRejected.Add(1)
 				return ErrAsyncBackpressure
@@ -193,7 +285,7 @@ func (b *EventBus) enqueueLifecycle(base lifecycleLaneKey, hooks []HookRegistrat
 			newLanes++
 			continue
 		}
-		if len(lane.queue)+count > maxLifecycleQueueDepth {
+		if len(lane.queue)+count > limit {
 			b.asyncMu.Unlock()
 			b.asyncRejected.Add(1)
 			return ErrAsyncBackpressure
@@ -205,17 +297,29 @@ func (b *EventBus) enqueueLifecycle(base lifecycleLaneKey, hooks []HookRegistrat
 		return ErrAsyncBackpressure
 	}
 	starts := make([]laneStart, 0, newLanes)
+	for key, count := range counts {
+		lane := b.lifecycleLanes[key]
+		if lane == nil {
+			lane = &lifecycleLane{running: count > 0, closeWhenEmpty: terminal || !holdOpen[key]}
+			b.lifecycleLanes[key] = lane
+			if lane.running {
+				starts = append(starts, laneStart{key: key, lane: lane})
+			}
+		} else if count > 0 && !lane.running {
+			lane.running = true
+			starts = append(starts, laneStart{key: key, lane: lane})
+		}
+		if !terminal && holdOpen[key] {
+			lane.closeWhenEmpty = false
+		}
+	}
 	for _, hook := range hooks {
 		key := base
 		key.consumer = hook.Consumer
 		lane := b.lifecycleLanes[key]
-		if lane == nil {
-			lane = &lifecycleLane{running: true}
-			b.lifecycleLanes[key] = lane
-			starts = append(starts, laneStart{key: key, lane: lane})
-		}
-		lane.queue = append(lane.queue, lifecycleDispatch{ctx: cloneEventContext(ctx), hook: hook})
+		lane.queue = append(lane.queue, lifecycleDispatch{ctx: cloneEventContext(ctx), hook: hook, terminal: terminal})
 	}
+	b.beginAsync(len(hooks))
 	b.asyncMu.Unlock()
 	for _, start := range starts {
 		go b.runLifecycleLane(start.key, start.lane)
@@ -228,7 +332,7 @@ func (b *EventBus) runLifecycleLane(key lifecycleLaneKey, lane *lifecycleLane) {
 		b.asyncMu.Lock()
 		if len(lane.queue) == 0 {
 			lane.running = false
-			if b.lifecycleLanes[key] == lane {
+			if lane.closeWhenEmpty && b.lifecycleLanes[key] == lane {
 				delete(b.lifecycleLanes, key)
 			}
 			b.asyncMu.Unlock()
@@ -239,7 +343,12 @@ func (b *EventBus) runLifecycleLane(key lifecycleLaneKey, lane *lifecycleLane) {
 		lane.queue = lane.queue[1:]
 		b.asyncMu.Unlock()
 
-		runAsyncHook(dispatch.hook, dispatch.ctx)
+		b.runTrackedAsyncHook(dispatch.hook, dispatch.ctx)
+		if dispatch.terminal {
+			b.asyncMu.Lock()
+			lane.closeWhenEmpty = true
+			b.asyncMu.Unlock()
+		}
 	}
 }
 

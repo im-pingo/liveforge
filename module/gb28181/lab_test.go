@@ -1260,8 +1260,8 @@ func freeGBLabRTPPortRange(t *testing.T, pairCount int, excludedRanges ...[]int)
 	}
 
 	const (
-		minPort = 20000
-		maxPort = 29999
+		minPort = 35000
+		maxPort = 39999
 	)
 	portCount := pairCount * 2
 	loopback := net.ParseIP("127.0.0.1")

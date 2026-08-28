@@ -31,11 +31,12 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 		return nil, err
 	}
 
-	// Allocate local RTP port pair
-	rtpPort, _, err := ic.handler.ports.AllocatePair()
+	// Reserve and bind both media sockets before exposing the RTP port in SDP.
+	pair, err := ic.handler.ports.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		return nil, fmt.Errorf("allocate port pair: %w", err)
 	}
+	rtpPort := pair.RTPPort
 
 	localIP := getLocalIP()
 	// Build SDP offer
@@ -70,6 +71,7 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 	_, streamExisted := ic.handler.hub.Find(streamKey)
 	stream, err := ic.handler.hub.GetOrCreate(streamKey)
 	if err != nil {
+		closeBoundUDPPair(pair)
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
@@ -80,9 +82,10 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 			stream.WriteFrameForPublisher(pub, frame)
 		},
 	)
-	receiver, err := newRTPReceiver(rtpPort, pub)
+	receiver, err := newBoundRTPReceiver(pair, pub)
 	if err != nil {
 		_ = pub.Close()
+		closeBoundUDPPair(pair)
 		ic.handler.ports.Free(rtpPort, rtpPort+1)
 		if !streamExisted {
 			ic.handler.hub.Remove(streamKey)
@@ -111,6 +114,7 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send INVITE: %w", err)
 	}
+	invTx = newManagedInviteDialog(invTx)
 	keepTransaction := false
 	defer func() {
 		if !keepTransaction {
@@ -160,19 +164,30 @@ func (ic *inviteClient) inviteStream(ctx context.Context, device *Device, channe
 		ic.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("set publisher: %w", err)
 	}
+	startup := stream.StartupSnapshot()
+	session.StreamInstanceID = startup.StreamInstanceID
+	session.PublisherGeneration = startup.Generation
 	session.InviteTx = invTx
 	session.SetState(SessionStateStreaming)
 	ic.handler.sessions.Add(session)
 	ic.handler.runReceiver(session, receiver)
 
 	publishCtx.PublisherID = pub.ID()
+	publishCtx.StreamInstanceID = startup.StreamInstanceID
+	publishCtx.PublisherGeneration = startup.Generation
 	publishCtx.Extra = map[string]any{
 		"gb28181_device_id":  device.DeviceID,
 		"gb28181_channel_id": channelID,
 	}
-	session.startPublishLifecycle(func() {
-		ic.handler.bus.EmitAsync(core.EventPublish, publishCtx)
-	})
+	var lifecycleErr error
+	if !session.startPublishLifecycle(func() error {
+		lifecycleErr = ic.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+		return lifecycleErr
+	}) {
+		terminateAcceptedDialog(invTx)
+		ic.handler.rollbackSession(session, !streamExisted)
+		return nil, fmt.Errorf("publish lifecycle admission: %w", lifecycleErr)
+	}
 	keepTransaction = true
 
 	slog.Info("outbound invite accepted", "module", "gb28181",

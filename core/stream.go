@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -82,9 +83,10 @@ func (st *SkipTracker) RecordSkip() bool {
 
 // Stream manages the lifecycle, publisher, subscribers, and frame distribution for a stream key.
 type Stream struct {
-	key    string
-	config config.StreamConfig
-	limits config.LimitsConfig
+	key        string
+	instanceID uint64
+	config     config.StreamConfig
+	limits     config.LimitsConfig
 
 	mu        sync.RWMutex
 	state     StreamState
@@ -118,10 +120,13 @@ type Stream struct {
 	transcodeManager *TranscodeManager
 }
 
+var streamInstanceSequence atomic.Uint64
+
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *Stream {
 	s := &Stream{
 		key:                   key,
+		instanceID:            streamInstanceSequence.Add(1),
 		config:                cfg,
 		limits:                limits,
 		state:                 StreamStateIdle,
@@ -136,6 +141,9 @@ func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, 
 	s.feedbackRouter = NewFeedbackRouter(cfg.Feedback)
 	return s
 }
+
+// InstanceID identifies this concrete stream object without retaining it.
+func (s *Stream) InstanceID() uint64 { return s.instanceID }
 
 // Key returns the stream key.
 func (s *Stream) Key() string {
@@ -566,6 +574,7 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 
 // StreamStartupSnapshot is an atomic view of the current publisher generation's startup state.
 type StreamStartupSnapshot struct {
+	StreamInstanceID      uint64
 	Generation            uint64
 	PublisherID           string
 	GenerationStartCursor int64
@@ -602,6 +611,7 @@ func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
 		publisherID = s.publisher.ID()
 	}
 	return StreamStartupSnapshot{
+		StreamInstanceID:      s.instanceID,
 		Generation:            s.publisherGeneration,
 		PublisherID:           publisherID,
 		GenerationStartCursor: s.generationStartCursor,

@@ -137,49 +137,53 @@ func (contractLabManager) Stop(string) error { return ErrLabManagerUnimplemented
 
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
-	mu         sync.Mutex
-	ID         string // SIP Call-ID
-	DeviceID   string
-	ChannelID  string
-	StreamKey  string
-	Direction  SessionDirection
-	LocalPort  int
-	RemoteAddr *net.UDPAddr
-	Transport  string // "udp" or "tcp"
-	State      SessionState
-	Publisher  *Publisher
-	Receiver   *RTPReceiver
-	Sender     *outboundMediaSession
-	Stream     *core.Stream
-	SSRC       uint32
-	Playback   bool
-	InviteTx   inviteDialog
-	closed     bool
-	published  bool
+	mu                  sync.Mutex
+	ID                  string // SIP Call-ID
+	DeviceID            string
+	ChannelID           string
+	StreamKey           string
+	Direction           SessionDirection
+	LocalPort           int
+	RemoteAddr          *net.UDPAddr
+	Transport           string // "udp" or "tcp"
+	State               SessionState
+	Publisher           *Publisher
+	Receiver            *RTPReceiver
+	Sender              *outboundMediaSession
+	Stream              *core.Stream
+	StreamInstanceID    uint64
+	PublisherGeneration uint64
+	SSRC                uint32
+	Playback            bool
+	InviteTx            inviteDialog
+	closed              bool
+	published           bool
 }
 
 // MediaSessionSnapshot is an immutable view of session state used by cleanup
 // and management readers.
 type MediaSessionSnapshot struct {
-	ID          string
-	DeviceID    string
-	ChannelID   string
-	StreamKey   string
-	Direction   SessionDirection
-	LocalPort   int
-	RemoteAddr  *net.UDPAddr
-	Transport   string
-	State       SessionState
-	Publisher   *Publisher
-	PublisherID string
-	Receiver    *RTPReceiver
-	Sender      *outboundMediaSession
-	Stream      *core.Stream
-	SSRC        uint32
-	Playback    bool
-	InviteTx    inviteDialog
-	Closed      bool
-	Published   bool
+	ID                  string
+	DeviceID            string
+	ChannelID           string
+	StreamKey           string
+	Direction           SessionDirection
+	LocalPort           int
+	RemoteAddr          *net.UDPAddr
+	Transport           string
+	State               SessionState
+	Publisher           *Publisher
+	PublisherID         string
+	Receiver            *RTPReceiver
+	Sender              *outboundMediaSession
+	Stream              *core.Stream
+	StreamInstanceID    uint64
+	PublisherGeneration uint64
+	SSRC                uint32
+	Playback            bool
+	InviteTx            inviteDialog
+	Closed              bool
+	Published           bool
 }
 
 // SetState transitions the session to a new state.
@@ -205,16 +209,18 @@ func (s *MediaSession) MarkPublished() bool {
 	return s.startPublishLifecycle(nil)
 }
 
-func (s *MediaSession) startPublishLifecycle(emit func()) bool {
+func (s *MediaSession) startPublishLifecycle(emit func() error) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.published {
 		return false
 	}
-	s.published = true
 	if emit != nil {
-		emit()
+		if err := emit(); err != nil {
+			return false
+		}
 	}
+	s.published = true
 	return true
 }
 
@@ -272,25 +278,27 @@ func (s *MediaSession) snapshotLocked() MediaSessionSnapshot {
 		publisherID = s.Publisher.ID()
 	}
 	return MediaSessionSnapshot{
-		ID:          s.ID,
-		DeviceID:    s.DeviceID,
-		ChannelID:   s.ChannelID,
-		StreamKey:   s.StreamKey,
-		Direction:   s.Direction,
-		LocalPort:   s.LocalPort,
-		RemoteAddr:  remoteAddr,
-		Transport:   s.Transport,
-		State:       s.State,
-		Publisher:   s.Publisher,
-		PublisherID: publisherID,
-		Receiver:    s.Receiver,
-		Sender:      s.Sender,
-		Stream:      s.Stream,
-		SSRC:        s.SSRC,
-		Playback:    s.Playback,
-		InviteTx:    s.InviteTx,
-		Closed:      s.closed,
-		Published:   s.published,
+		ID:                  s.ID,
+		DeviceID:            s.DeviceID,
+		ChannelID:           s.ChannelID,
+		StreamKey:           s.StreamKey,
+		Direction:           s.Direction,
+		LocalPort:           s.LocalPort,
+		RemoteAddr:          remoteAddr,
+		Transport:           s.Transport,
+		State:               s.State,
+		Publisher:           s.Publisher,
+		PublisherID:         publisherID,
+		Receiver:            s.Receiver,
+		Sender:              s.Sender,
+		Stream:              s.Stream,
+		StreamInstanceID:    s.StreamInstanceID,
+		PublisherGeneration: s.PublisherGeneration,
+		SSRC:                s.SSRC,
+		Playback:            s.Playback,
+		InviteTx:            s.InviteTx,
+		Closed:              s.closed,
+		Published:           s.published,
 	}
 }
 

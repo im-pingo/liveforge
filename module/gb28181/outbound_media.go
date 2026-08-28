@@ -16,6 +16,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
@@ -49,6 +50,7 @@ type outboundMediaSession struct {
 	ssrc       uint32
 	sequence   uint16
 	snapshot   core.StreamStartupSnapshot
+	rtpBuffer  []byte
 
 	closeOnce sync.Once
 	subOnce   sync.Once
@@ -78,10 +80,30 @@ func newOutboundMediaSession(stream *core.Stream, rtpPort, rtcpPort int) (*outbo
 		_ = rtpConn.Close()
 		return nil, err
 	}
-	var random [4]byte
-	if _, err := rand.Read(random[:]); err != nil {
+	session, err := newOutboundMediaSessionWithSockets(stream, rtpConn, rtcpConn)
+	if err != nil {
 		_ = rtpConn.Close()
 		_ = rtcpConn.Close()
+		return nil, err
+	}
+	return session, nil
+}
+
+func newOutboundMediaSessionFromBoundPair(stream *core.Stream, pair *portalloc.BoundUDPPair) (*outboundMediaSession, error) {
+	if pair == nil || pair.RTPConn == nil || pair.RTCPConn == nil {
+		return nil, errors.New("bound outbound RTP/RTCP pair is incomplete")
+	}
+	rtpAddr, rtpOK := pair.RTPConn.LocalAddr().(*net.UDPAddr)
+	rtcpAddr, rtcpOK := pair.RTCPConn.LocalAddr().(*net.UDPAddr)
+	if !rtpOK || !rtcpOK || rtpAddr.Port != pair.RTPPort || rtcpAddr.Port != pair.RTCPPort || pair.RTCPPort != pair.RTPPort+1 {
+		return nil, errors.New("bound outbound RTP/RTCP pair ports are inconsistent")
+	}
+	return newOutboundMediaSessionWithSockets(stream, pair.RTPConn, pair.RTCPConn)
+}
+
+func newOutboundMediaSessionWithSockets(stream *core.Stream, rtpConn, rtcpConn *net.UDPConn) (*outboundMediaSession, error) {
+	var random [4]byte
+	if _, err := rand.Read(random[:]); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -201,7 +223,7 @@ func (s *outboundMediaSession) sendFrame(muxer *ps.Muxer, frame *avframe.AVFrame
 		if end > len(data) {
 			end = len(data)
 		}
-		packet := &pionrtp.Packet{Header: pionrtp.Header{
+		packet := pionrtp.Packet{Header: pionrtp.Header{
 			Version:        2,
 			PayloadType:    labRTPPayloadType,
 			SequenceNumber: s.sequence,
@@ -209,11 +231,16 @@ func (s *outboundMediaSession) sendFrame(muxer *ps.Muxer, frame *avframe.AVFrame
 			SSRC:           s.ssrc,
 			Marker:         end == len(data),
 		}, Payload: data[offset:end]}
-		encoded, err := packet.Marshal()
+		packetSize := packet.MarshalSize()
+		if cap(s.rtpBuffer) < packetSize {
+			s.rtpBuffer = make([]byte, packetSize)
+		}
+		encoded := s.rtpBuffer[:packetSize]
+		encodedSize, err := packet.MarshalTo(encoded)
 		if err != nil {
 			return err
 		}
-		n, err := s.rtpConn.WriteToUDP(encoded, s.remoteRTP)
+		n, err := s.rtpConn.WriteToUDP(encoded[:encodedSize], s.remoteRTP)
 		if err != nil {
 			return err
 		}
@@ -306,20 +333,28 @@ func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channel
 		return nil, fmt.Errorf("%w: receive stream requires H.264 and G.711A", ErrLabInvalidRequest)
 	}
 
-	rtpPort, rtcpPort, err := m.handler.ports.AllocatePair()
+	pair, err := m.handler.ports.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		return nil, err
 	}
+	rtpPort, rtcpPort := pair.RTPPort, pair.RTCPPort
 	portsOwned := true
 	defer func() {
 		if portsOwned {
 			m.handler.ports.Free(rtpPort, rtcpPort)
 		}
 	}()
-	sender, err := newOutboundMediaSession(stream, rtpPort, rtcpPort)
+	pairOwned := true
+	defer func() {
+		if pairOwned {
+			closeBoundUDPPair(pair)
+		}
+	}()
+	sender, err := newOutboundMediaSessionFromBoundPair(stream, pair)
 	if err != nil {
 		return nil, err
 	}
+	pairOwned = false
 	sender.snapshot = snapshot
 	senderOwned := true
 	defer func() {

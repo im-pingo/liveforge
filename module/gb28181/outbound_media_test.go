@@ -230,6 +230,97 @@ func TestGBOutboundGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
 	}
 }
 
+func TestGBOutboundSkipsExternallyOccupiedFirstPortPair(t *testing.T) {
+	portRange := freeGBLabRTPPortRange(t, 2)
+	loopback := net.ParseIP("127.0.0.1")
+	occupiedRTP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: portRange[0]})
+	if err != nil {
+		t.Fatalf("occupy first RTP port: %v", err)
+	}
+	defer occupiedRTP.Close()
+	occupiedRTCP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: portRange[0] + 1})
+	if err != nil {
+		t.Fatalf("occupy first RTCP port: %v", err)
+	}
+	defer occupiedRTCP.Close()
+
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/occupied-first-pair")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+	ports, err := portalloc.New(portRange[0], portRange[1])
+	if err != nil {
+		t.Fatalf("New port allocator: %v", err)
+	}
+	sessions := NewSessionManager()
+	h := &handler{sessions: sessions, hub: hub, bus: core.NewEventBus(), ports: ports}
+	remoteRTP, remoteRTCP, err := listenGBLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen remote media pair: %v", err)
+	}
+	defer remoteRTP.Close()
+	defer remoteRTCP.Close()
+	m := &Module{
+		sipService: failingInviteService{},
+		handler:    h,
+		sessions:   sessions,
+		sendInvite: func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+			dialog := newSuccessfulInviteDialog(req)
+			dialog.response.SetBody(buildGBLabSDP(remoteRTP.LocalAddr().(*net.UDPAddr).Port, "recvonly"))
+			return dialog, nil
+		},
+	}
+
+	session, err := m.startOutboundMedia(context.Background(), &Device{
+		DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
+	}, "channel", stream.Key())
+	if err != nil {
+		t.Fatalf("startOutboundMedia with occupied first pair: %v", err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			h.closeSession(session, "")
+		}
+	})
+	if session.LocalPort != portRange[0]+2 {
+		t.Fatalf("outbound local RTP port = %d, want second pair %d", session.LocalPort, portRange[0]+2)
+	}
+	sender := session.Snapshot().Sender
+	if sender == nil {
+		t.Fatal("outbound session has no media sender")
+	}
+	if got := sender.rtpConn.LocalAddr().(*net.UDPAddr).Port; got != portRange[0]+2 {
+		t.Fatalf("sender RTP socket = %d, want %d", got, portRange[0]+2)
+	}
+	if got := sender.rtcpConn.LocalAddr().(*net.UDPAddr).Port; got != portRange[0]+3 {
+		t.Fatalf("sender RTCP socket = %d, want %d", got, portRange[0]+3)
+	}
+	if !h.closeSession(session, "") {
+		t.Fatal("outbound session did not own cleanup")
+	}
+	closed = true
+	reused, err := ports.AllocateBoundUDPPair("udp4", loopback)
+	if err != nil {
+		t.Fatalf("outbound cleanup did not release second pair: %v", err)
+	}
+	if reused.RTPPort != portRange[0]+2 || reused.RTCPPort != portRange[0]+3 {
+		t.Fatalf("reused pair = %d/%d, want %d/%d", reused.RTPPort, reused.RTCPPort, portRange[0]+2, portRange[0]+3)
+	}
+	closeBoundUDPPair(reused)
+	ports.Free(reused.RTPPort, reused.RTCPPort)
+}
+
 func TestGBOutboundSenderReportsArePeriodicAndCountPayloadOctets(t *testing.T) {
 	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
 	stream, err := hub.GetOrCreate("gb28181/rtcp-sender")

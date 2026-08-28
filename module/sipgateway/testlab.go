@@ -38,12 +38,14 @@ func (gw *Gateway) RunSelfTest(ctx context.Context) protocoltest.Report {
 		checks = append(checks, protocoltest.Check{Name: "sdp_codec_negotiation", Passed: ok, Detail: codec.EncodingName})
 	}
 
-	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
+	pair, err := gw.portAlloc.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		checks = append(checks, protocoltest.Check{Name: "rtp_port_allocation", Detail: err.Error()})
 	} else {
-		gw.portAlloc.Free(rtpPort, rtcpPort)
-		checks = append(checks, protocoltest.Check{Name: "rtp_port_allocation", Passed: true, Detail: fmt.Sprintf("%d/%d", rtpPort, rtcpPort)})
+		_ = pair.RTPConn.Close()
+		_ = pair.RTCPConn.Close()
+		gw.portAlloc.Free(pair.RTPPort, pair.RTCPPort)
+		checks = append(checks, protocoltest.Check{Name: "rtp_port_allocation", Passed: true, Detail: fmt.Sprintf("%d/%d", pair.RTPPort, pair.RTCPPort)})
 	}
 
 	checks = append(checks, runSIPSignalingLoop(ctx, gw.codecs)...)
