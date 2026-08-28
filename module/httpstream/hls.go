@@ -122,8 +122,9 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		buf.Reset()
 	}
 
-	// Process GOP cache into first segment. GOPCacheSnapshot captured the ring
-	// cursor atomically, so the live reader starts after every cached frame.
+	// Process the startup snapshot's GOP into the first segment. The snapshot
+	// captured the ring cursor atomically, so the live reader starts after every
+	// cached frame.
 	// Do not use a cross-track DTS watermark here: audio and video can have
 	// different timestamp domains and a late audio frame must not hide a live
 	// video frame.
