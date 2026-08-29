@@ -114,6 +114,14 @@ runtime:
 
 Redis fields use dotted or slash-separated paths such as `server.log_level` and `limits.max_connections`. Prefer hash mode when an atomic producer can update the hash and version key together.
 
+For flattened Consul and Redis snapshots, leaf values are interpreted
+conservatively. Case-insensitive booleans and `null`, canonical base-10
+integers without leading zeroes, and finite decimal or exponent floats become
+typed YAML scalars. Leading-zero identifiers, durations, non-finite or
+out-of-range numbers, and YAML-looking collection text remain strings. Supply
+maps and sequences through a complete `config.yaml`/`config.json` value rather
+than encoding YAML syntax in a flattened leaf.
+
 ## Config Console And Apply
 
 The Config view reads the complete effective and desired configuration document from
@@ -129,6 +137,18 @@ file, HTTP, Consul, and Redis settings. The page can edit the YAML, run a
 read-only Validate, and use Apply & Refresh. Viewer
 tokens have `config:read`; Apply and Refresh require `config:reload` (operator or
 admin).
+
+Sensitive containers are redacted recursively: collection shape and stable
+identity fields (`id`, `name`, `username`, `channel_id`, and `device_id`) remain
+visible, while every other scalar descendant is replaced. Scalar URL/address
+fields and scalar URL sequences retain their public scheme, host, port, and path
+while user information, query values, and fragments are removed; structured
+URL/address values remain under opaque traversal. Malformed or hostless values
+become opaque. Address keys also retain bare IPv4/IPv6 values accepted by
+`net.ParseIP` and validated plain `host:port` values. Apply restores placeholders
+from the current desired source document; reordered structured collections are matched by stable
+public identity, and missing, ambiguous, or marked shape-mismatched originals
+are rejected instead of guessing.
 
 The editor starts fail-closed while source metadata is loading. Read-only sources
 and failed refreshes keep the editor read-only and Apply disabled; the page only

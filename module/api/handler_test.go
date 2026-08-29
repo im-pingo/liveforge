@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -428,6 +429,51 @@ func TestHandleConfigStatus(t *testing.T) {
 		if _, ok := status[field]; !ok {
 			t.Fatalf("config status omitted %q: %v", field, status)
 		}
+	}
+}
+
+func TestHandleConfigStatusRedactsBackgroundSourceError(t *testing.T) {
+	h, server := newTestHandlers(t)
+	const sourceURL = "https://status-user:status-password@config.example.test/live.yaml?token=query-secret" //nolint:gosec // Synthetic value verifies redaction.
+	manager, err := configruntime.NewManager(configruntime.Options{
+		Source:       errorConfigWriterSource{err: errors.New("refresh " + sourceURL + "\nretry denied")},
+		Initial:      config.Defaults(),
+		PollInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for manager.Status().ConsecutiveFailures == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for background source failure")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	server.SetConfigManager(manager)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/server/config", nil)
+	w := httptest.NewRecorder()
+	h.handleConfigStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var status ConfigRuntimeStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"status-user", "status-password", "query-secret", "token="} {
+		if strings.Contains(status.LastError, secret) {
+			t.Fatalf("config status leaked %q: %q", secret, status.LastError)
+		}
+	}
+	if !strings.Contains(status.LastError, "config.example.test") || strings.ContainsAny(status.LastError, "\r\n") {
+		t.Fatalf("config status lost context or retained line breaks: %q", status.LastError)
 	}
 }
 

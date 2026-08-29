@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -206,6 +207,48 @@ func TestPreserveRedactedSecretsKeepsSourceCommentsAndUnknownFields(t *testing.T
 	}
 }
 
+func TestPreserveRedactedSecretsRestoresUnknownOneElementSensitiveSequence(t *testing.T) {
+	const sourceDocument = "custom_private_keys: [secret-value]\n"
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(redacted), "secret-value") {
+		t.Fatalf("redacted document leaked the source secret: %s", redacted)
+	}
+
+	restored, err := preserveRedactedSecretsWithDocument(redacted, config.Defaults(), []byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(restored, &document); err != nil {
+		t.Fatal(err)
+	}
+	values, ok := document["custom_private_keys"].([]any)
+	if !ok || len(values) != 1 || values[0] != "secret-value" {
+		t.Fatalf("restored custom_private_keys = %#v, want original one-element sequence", document["custom_private_keys"])
+	}
+}
+
+func TestPreserveRedactedSecretsRejectsUnknownSensitiveSequenceWithoutUniqueOriginal(t *testing.T) {
+	tests := []struct {
+		name            string
+		currentDocument string
+	}{
+		{name: "missing original"},
+		{name: "ambiguous original", currentDocument: "custom_private_keys: [first-secret, second-secret]\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := []byte("custom_private_keys: [\"[REDACTED]\"]\n")
+			if _, err := preserveRedactedSecretsWithDocument(candidate, config.Defaults(), []byte(test.currentDocument)); err == nil {
+				t.Fatal("redacted sensitive sequence was accepted without a unique original")
+			}
+		})
+	}
+}
+
 func TestHandleConfigApplyRejectsInvalidDocument(t *testing.T) {
 	h, server := newTestHandlers(t)
 	manager, err := configruntime.NewManager(configruntime.Options{Source: testConfigSource{}, Initial: server.Config()})
@@ -244,6 +287,36 @@ func TestHandleConfigApplyRejectsReadOnlySource(t *testing.T) {
 	}
 	if response.Message == "" {
 		t.Fatal("read-only error did not include a message")
+	}
+}
+
+func TestHandleConfigApplyRedactsSourceURLFromWriteError(t *testing.T) {
+	h, server := newTestHandlers(t)
+	const sourceURL = "https://config-user:config-password@config.example.test/live.yaml?token=query-secret" //nolint:gosec // Synthetic value verifies redaction.
+	manager, err := configruntime.NewManager(configruntime.Options{
+		Source:  errorConfigWriterSource{err: errors.New("write " + sourceURL + ": connection refused")},
+		Initial: server.Config(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	server.SetConfigManager(manager)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/server/config/apply", strings.NewReader("server:\n  name: edited\n"))
+	request.Header.Set("Content-Type", "application/yaml")
+	w := httptest.NewRecorder()
+	h.handleConfigApply(w, request)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, secret := range []string{"config-user", "config-password", "query-secret", "token="} {
+		if strings.Contains(w.Body.String(), secret) {
+			t.Fatalf("config apply error leaked %q: %s", secret, w.Body.String())
+		}
+	}
+	if !strings.Contains(w.Body.String(), "config.example.test") {
+		t.Fatalf("redacted error lost useful endpoint identity: %s", w.Body.String())
 	}
 }
 
@@ -355,6 +428,748 @@ func TestRedactedSourceDetailsRemoveURLCredentials(t *testing.T) {
 	}
 }
 
+func TestRedactedSourceDetailsFailClosedForMalformedAddressAndPreserveHostPort(t *testing.T) {
+	malformed := redactedSourceDetails(config.RuntimeConfig{
+		HTTP:  config.RuntimeHTTPSourceConfig{URL: "http-user:http-password@config.example.test/live?token=query-secret"},
+		Redis: config.RuntimeRedisSourceConfig{Addr: "redis-user:redis-password@redis.example.test:6379?token=query-secret"},
+	})
+	if got := malformed["http"].(map[string]any)["url"]; got != "" {
+		t.Fatalf("malformed HTTP URL was returned as %q", got)
+	}
+	if got := malformed["redis"].(map[string]any)["addr"]; got != "" {
+		t.Fatalf("malformed Redis address was returned as %q", got)
+	}
+	userinfo := redactedSourceDetails(config.RuntimeConfig{
+		Redis: config.RuntimeRedisSourceConfig{Addr: "redis-user@redis.example.test:6379"},
+	})
+	if got := userinfo["redis"].(map[string]any)["addr"]; got != "" {
+		t.Fatalf("credential-like Redis address was returned as %q", got)
+	}
+
+	plain := redactedSourceDetails(config.RuntimeConfig{Redis: config.RuntimeRedisSourceConfig{Addr: "127.0.0.1:6379"}})
+	if got := plain["redis"].(map[string]any)["addr"]; got != "127.0.0.1:6379" {
+		t.Fatalf("plain Redis host:port = %q, want preserved address", got)
+	}
+}
+
+func TestHandleConfigDocumentRedactsRedisAddressCredentials(t *testing.T) {
+	h, server := newTestHandlers(t)
+	cfg := config.Defaults()
+	cfg.Runtime.Source = "redis"
+	//nolint:gosec // Synthetic URL credentials verify the management response boundary.
+	cfg.Runtime.Redis.Addr = "redis://redis-user:redis-password@redis.example.test:6379?token=redis-secret#fragment"
+	cfg.Runtime.Redis.Username = "liveforge"
+	server.UpdateConfig(cfg)
+	manager, err := configruntime.NewManager(configruntime.Options{Source: testConfigSource{}, Initial: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	server.SetConfigManager(manager)
+
+	w := httptest.NewRecorder()
+	h.handleConfigDocument(w, httptest.NewRequest(http.MethodGet, "/api/v1/server/config/document", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var response struct {
+		SourceDetails map[string]any `json:"source_details"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	redisDetails := response.SourceDetails["redis"].(map[string]any)
+	if got := redisDetails["addr"]; got != "redis://redis.example.test:6379" {
+		t.Fatalf("redacted Redis address = %q", got)
+	}
+	if got := redisDetails["username"]; got != "liveforge" {
+		t.Fatalf("Redis ACL identity = %q", got)
+	}
+	for _, secret := range []string{"redis-user", "redis-password", "redis-secret", "token=", "fragment"} {
+		if strings.Contains(w.Body.String(), secret) {
+			t.Fatalf("config document response leaked %q: %s", secret, w.Body.String())
+		}
+	}
+}
+
+func TestRedactedConfigDocumentRemovesURLCredentialsAndRestoresOnApply(t *testing.T) {
+	//nolint:gosec // Intentional fake URL credentials verify redaction.
+	const sourceDocument = `runtime:
+  source: https
+  http:
+    url: https://user:password@config.example.test/live.yaml?token=source-secret
+`
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactedText := string(redacted)
+	for _, secret := range []string{"user", "password", "source-secret", "token="} {
+		if strings.Contains(redactedText, secret) {
+			t.Fatalf("redacted document leaked %q: %s", secret, redactedText)
+		}
+	}
+	if !strings.Contains(redactedText, "REDACTED") {
+		t.Fatalf("redacted URL did not contain an explicit marker: %s", redactedText)
+	}
+
+	current := config.Defaults()
+	current.Runtime.Source = "https"
+	current.Runtime.HTTP.URL = "https://user:password@config.example.test/live.yaml?token=source-secret"
+	restored, err := preserveRedactedSecrets(redacted, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restored), "https://user:password@config.example.test/live.yaml?token=source-secret") {
+		t.Fatalf("restored document lost the original URL credentials: %q", restored)
+	}
+}
+
+func TestRedactedConfigDocumentFailsClosedForHostlessURLAndPreservesPlainAddress(t *testing.T) {
+	const sourceDocument = `custom_callback_url: callback-user:callback-password@callback.example.test/hook?token=query-secret
+runtime:
+  redis:
+    addr: 127.0.0.1:6379
+`
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"callback-user", "callback-password", "query-secret", "token="} {
+		if strings.Contains(string(redacted), secret) {
+			t.Fatalf("redacted document leaked %q: %s", secret, redacted)
+		}
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(redacted, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document["custom_callback_url"] != "[REDACTED]" {
+		t.Fatalf("hostless callback URL = %#v, want opaque marker", document["custom_callback_url"])
+	}
+	if got := document["runtime"].(map[string]any)["redis"].(map[string]any)["addr"]; got != "127.0.0.1:6379" {
+		t.Fatalf("plain Redis host:port = %q, want preserved address", got)
+	}
+}
+
+func TestConfigMapRedactionFailsClosedForHostlessURLAndPreservesPlainAddress(t *testing.T) {
+	document := map[string]any{
+		"custom_callback_url": "callback-user:callback-password@callback.example.test/hook?token=query-secret",
+		"runtime": map[string]any{
+			"redis": map[string]any{"addr": "127.0.0.1:6379"},
+		},
+	}
+	redactConfigValue(document)
+	if document["custom_callback_url"] != "[REDACTED]" {
+		t.Fatalf("hostless callback URL = %#v, want opaque marker", document["custom_callback_url"])
+	}
+	if got := document["runtime"].(map[string]any)["redis"].(map[string]any)["addr"]; got != "127.0.0.1:6379" {
+		t.Fatalf("plain Redis host:port = %q, want preserved address", got)
+	}
+}
+
+func TestConfigRedactionPreservesOnlyBareIPOrValidatedHostPortAddresses(t *testing.T) {
+	const sourceDocument = `ipv4_address: 239.0.0.1
+ipv6_address: "ff15::1"
+hostname_address: relay.example.test
+credential_address: relay-user@relay.example.test
+path_address: /var/run/relay.sock
+query_address: 239.0.0.1?token=query-secret
+fragment_address: 239.0.0.1#fragment-secret
+malformed_address: "[invalid"
+redis_address: 127.0.0.1:6379
+rtsp:
+  multicast:
+    address: 239.0.0.1
+`
+
+	assertAddresses := func(t *testing.T, document map[string]any) {
+		t.Helper()
+		if document["ipv4_address"] != "239.0.0.1" {
+			t.Fatalf("bare IPv4 address = %#v, want preserved", document["ipv4_address"])
+		}
+		if document["ipv6_address"] != "ff15::1" {
+			t.Fatalf("bare IPv6 address = %#v, want preserved", document["ipv6_address"])
+		}
+		if document["redis_address"] != "127.0.0.1:6379" {
+			t.Fatalf("validated host:port = %#v, want preserved", document["redis_address"])
+		}
+		multicast := document["rtsp"].(map[string]any)["multicast"].(map[string]any)
+		if multicast["address"] != "239.0.0.1" {
+			t.Fatalf("RTSP multicast address = %#v, want preserved", multicast["address"])
+		}
+		for _, key := range []string{
+			"hostname_address", "credential_address", "path_address", "query_address",
+			"fragment_address", "malformed_address",
+		} {
+			if document[key] != "[REDACTED]" {
+				t.Fatalf("unsafe %s = %#v, want opaque marker", key, document[key])
+			}
+		}
+	}
+
+	t.Run("YAML document", func(t *testing.T) {
+		redacted, err := redactedConfigDocument([]byte(sourceDocument))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := yaml.Unmarshal(redacted, &document); err != nil {
+			t.Fatal(err)
+		}
+		assertAddresses(t, document)
+	})
+
+	t.Run("decoded map", func(t *testing.T) {
+		var document map[string]any
+		if err := yaml.Unmarshal([]byte(sourceDocument), &document); err != nil {
+			t.Fatal(err)
+		}
+		redactConfigValue(document)
+		assertAddresses(t, document)
+	})
+}
+
+func TestConfigRedactionPreservesSecretContainerShapeAndRedactsNestedValues(t *testing.T) {
+	//nolint:gosec // Intentional fake credentials verify the management redaction boundary.
+	const sourceDocument = `api:
+  auth:
+    tokens:
+      - name: viewer
+        token: viewer-secret
+        role: viewer
+notify:
+  http:
+    endpoints:
+      - url: https://hook-user:hook-password@notify.example.test/live?token=query-secret#fragment-secret
+        events: [publish]
+        secret: webhook-secret
+        retry: 2
+        timeout: 3s
+`
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(redacted, &document); err != nil {
+		t.Fatal(err)
+	}
+	tokens, ok := document["api"].(map[string]any)["auth"].(map[string]any)["tokens"].([]any)
+	if !ok || len(tokens) != 1 {
+		t.Fatalf("tokens structure = %#v, want one-item sequence", document["api"])
+	}
+	token := tokens[0].(map[string]any)
+	if token["name"] != "viewer" || token["role"] != "[REDACTED]" || token["token"] != "[REDACTED]" {
+		t.Fatalf("redacted token = %#v", token)
+	}
+	endpoints, ok := document["notify"].(map[string]any)["http"].(map[string]any)["endpoints"].([]any)
+	if !ok || len(endpoints) != 1 {
+		t.Fatalf("endpoints structure = %#v, want one-item sequence", document["notify"])
+	}
+	endpoint := endpoints[0].(map[string]any)
+	if endpoint["secret"] != "[REDACTED]" || endpoint["events"].([]any)[0] != "publish" {
+		t.Fatalf("redacted endpoint = %#v", endpoint)
+	}
+	for _, leaked := range []string{"hook-user", "hook-password", "query-secret", "fragment-secret", "webhook-secret", "viewer-secret"} {
+		if strings.Contains(string(redacted), leaked) {
+			t.Fatalf("redacted document leaked %q: %s", leaked, redacted)
+		}
+	}
+}
+
+func TestRedactedConfigDocumentRedactsOpaqueSensitiveContainers(t *testing.T) {
+	const sourceDocument = `custom_credentials:
+  name: primary
+  value: mapping-secret
+  nested:
+    id: nested
+    material: nested-secret
+custom_private_keys:
+  - name: first
+    material: item-secret
+  - raw-sequence-secret
+  - [nested-sequence-secret]
+`
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"mapping-secret", "nested-secret", "item-secret", "raw-sequence-secret", "nested-sequence-secret"} {
+		if strings.Contains(string(redacted), secret) {
+			t.Fatalf("redacted YAML leaked %q: %s", secret, redacted)
+		}
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(redacted, &document); err != nil {
+		t.Fatal(err)
+	}
+	assertOpaqueSensitiveContainersRedacted(t, document)
+}
+
+func TestConfigMapRedactionRedactsOpaqueSensitiveContainers(t *testing.T) {
+	const sourceDocument = `custom_credentials:
+  name: primary
+  value: mapping-secret
+  nested:
+    id: nested
+    material: nested-secret
+custom_private_keys:
+  - name: first
+    material: item-secret
+  - raw-sequence-secret
+  - [nested-sequence-secret]
+`
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(sourceDocument), &document); err != nil {
+		t.Fatal(err)
+	}
+	redactConfigValue(document)
+	assertOpaqueSensitiveContainersRedacted(t, document)
+}
+
+func TestOpaqueSensitiveContainerRedactionKeepsStructuredURLValuesOpaque(t *testing.T) {
+	const sourceDocument = `custom_credentials:
+  name: primary
+  callback_url:
+    name: mapping
+    neutral: mapping-secret
+    address:
+      id: nested-address
+      host: address-secret
+  callback_urls:
+    - name: sequence-entry
+      neutral: sequence-secret
+      endpoint:
+        channel_id: nested-endpoint
+        payload: endpoint-secret
+    - scalar-sequence-secret
+  public_url: https://url-user:url-password@public.example.test/hook?token=url-secret
+  public_urls:
+    - https://list-user:list-password@list.example.test/hook?token=list-secret
+`
+
+	t.Run("YAML document", func(t *testing.T) {
+		redacted, err := redactedConfigDocument([]byte(sourceDocument))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNoStructuredURLSecretLeak(t, string(redacted))
+		var document map[string]any
+		if err := yaml.Unmarshal(redacted, &document); err != nil {
+			t.Fatal(err)
+		}
+		assertStructuredURLValuesOpaque(t, document)
+	})
+
+	t.Run("decoded map", func(t *testing.T) {
+		var document map[string]any
+		if err := yaml.Unmarshal([]byte(sourceDocument), &document); err != nil {
+			t.Fatal(err)
+		}
+		redactConfigValue(document)
+		encoded, err := yaml.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNoStructuredURLSecretLeak(t, string(encoded))
+		assertStructuredURLValuesOpaque(t, document)
+	})
+}
+
+func TestPreserveRedactedSecretsRestoresOpaqueSensitiveItemsByIdentity(t *testing.T) {
+	const currentDocument = `custom_private_keys:
+  - {name: first, material: first-secret}
+  - {name: second, material: second-secret}
+`
+	const candidateDocument = `custom_private_keys:
+  - {name: second, material: "[REDACTED]"}
+  - {name: first, material: "[REDACTED]"}
+`
+	restored, err := preserveRedactedSecretsWithDocument([]byte(candidateDocument), config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(restored)
+	if !strings.Contains(text, "first-secret") || !strings.Contains(text, "second-secret") || strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("opaque structured secrets were not restored by identity: %s", restored)
+	}
+}
+
+func TestConfigMapRedactionPreservesNamedTokenAndEndpointCollections(t *testing.T) {
+	current := config.Defaults()
+	current.API.Auth.Tokens = []config.APIAuthToken{{Name: "viewer", Token: "viewer-secret", Role: "viewer"}}
+	current.Notify.HTTP.Endpoints = []config.NotifyEndpointConfig{{
+		URL: "https://notify.example.test/live?token=query-secret", Events: []string{"publish"}, Secret: "webhook-secret",
+	}}
+
+	redacted := configMapFromConfig(current)
+	tokens, ok := redacted["api"].(map[string]any)["auth"].(map[string]any)["tokens"].([]any)
+	if !ok || len(tokens) != 1 {
+		t.Fatalf("tokens structure = %#v", redacted["api"])
+	}
+	if token := tokens[0].(map[string]any); token["name"] != "viewer" || token["token"] != "[REDACTED]" {
+		t.Fatalf("redacted token = %#v", token)
+	}
+	endpoints, ok := redacted["notify"].(map[string]any)["http"].(map[string]any)["endpoints"].([]any)
+	if !ok || len(endpoints) != 1 {
+		t.Fatalf("endpoints structure = %#v", redacted["notify"])
+	}
+	if endpoint := endpoints[0].(map[string]any); endpoint["secret"] != "[REDACTED]" || strings.Contains(endpoint["url"].(string), "query-secret") {
+		t.Fatalf("redacted endpoint = %#v", endpoint)
+	}
+}
+
+func TestPreserveRedactedSecretsMatchesReorderedCollectionsByStableIdentity(t *testing.T) {
+	//nolint:gosec // Intentional fake credentials verify identity-based restoration.
+	const currentDocument = `api:
+  auth:
+    tokens:
+      - {name: alpha, token: alpha-secret, role: viewer}
+      - {name: beta, token: beta-secret, role: operator}
+webrtc:
+  ice_servers:
+    - {urls: ["turn:one.example.test"], username: one, credential: ice-one}
+    - {urls: ["turn:two.example.test"], username: two, credential: ice-two}
+notify:
+  http:
+    endpoints:
+      - {url: "https://one.example.test/hook?token=one-query", events: [publish], secret: hook-one, retry: 1, timeout: 1s}
+      - {url: "https://two.example.test/hook?token=two-query", events: [unpublish], secret: hook-two, retry: 2, timeout: 2s}
+`
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate map[string]any
+	if unmarshalErr := yaml.Unmarshal(redacted, &candidate); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	reverseConfigSequence(t, candidate, "api", "auth", "tokens")
+	reverseConfigSequence(t, candidate, "webrtc", "ice_servers")
+	reverseConfigSequence(t, candidate, "notify", "http", "endpoints")
+	candidateDocument, err := yaml.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := preserveRedactedSecretsWithDocument(candidateDocument, config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(restored, &got); err != nil {
+		t.Fatal(err)
+	}
+	assertConfigSecretByIdentity(t, got, []string{"api", "auth", "tokens"}, "name", "beta", "token", "beta-secret")
+	assertConfigSecretByIdentity(t, got, []string{"webrtc", "ice_servers"}, "username", "two", "credential", "ice-two")
+	assertConfigSecretByIdentity(t, got, []string{"notify", "http", "endpoints"}, "events", "unpublish", "secret", "hook-two")
+}
+
+func TestPreserveRedactedSecretsDoesNotTransplantDeletedSecretIntoInsertedItem(t *testing.T) {
+	const currentDocument = `api:
+  auth:
+    tokens:
+      - {name: keep, token: keep-secret, role: viewer}
+      - {name: delete, token: delete-secret, role: viewer}
+`
+	const candidateDocument = `api:
+  auth:
+    tokens:
+      - {name: inserted, token: inserted-secret, role: operator}
+      - {name: keep, token: "[REDACTED]", role: viewer}
+`
+	restored, err := preserveRedactedSecretsWithDocument([]byte(candidateDocument), config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(restored)
+	if !strings.Contains(text, "inserted-secret") || !strings.Contains(text, "keep-secret") || strings.Contains(text, "delete-secret") {
+		t.Fatalf("insert/delete restoration crossed identities: %s", text)
+	}
+}
+
+func TestPreserveRedactedSecretsRejectsRenamedSingletonStructuredItem(t *testing.T) {
+	const currentDocument = `api:
+  auth:
+    tokens:
+      - {name: original, token: original-secret, role: viewer}
+`
+	const candidateDocument = `api:
+  auth:
+    tokens:
+      - {name: renamed, token: "[REDACTED]", role: viewer}
+`
+	if _, err := preserveRedactedSecretsWithDocument([]byte(candidateDocument), config.Defaults(), []byte(currentDocument)); err == nil {
+		t.Fatal("renamed singleton token received the original item's secret")
+	}
+}
+
+func TestPreserveRedactedURLKeepsEditedLocationAndRestoresOnlySecretComponents(t *testing.T) {
+	//nolint:gosec // Intentional fake URL credentials verify component restoration.
+	const currentDocument = `runtime:
+  source: https
+  http:
+    url: https://source-user:source-password@old.example.test/old.yaml?token=source-secret#source-fragment
+`
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.ReplaceAll(string(redacted), "old.example.test/old.yaml", "new.example.test/new.yaml")
+	restored, err := preserveRedactedSecretsWithDocument([]byte(edited), config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"https://", "source-user", ":", "source-password", "@new.example.test/new.yaml",
+		"?token=", "source-secret", "#", "source-fragment",
+	}, "")
+	if !strings.Contains(string(restored), want) {
+		t.Fatalf("restored URL = %s, want edited location with original secret components %q", restored, want)
+	}
+}
+
+func TestPreserveRedactedURLRestoresOpaqueScalarMarker(t *testing.T) {
+	const currentDocument = `custom_callback_url: callback-user:callback-password@callback.example.test/hook?token=query-secret
+`
+	const candidateDocument = `custom_callback_url: "[REDACTED]"
+`
+	restored, err := preserveRedactedSecretsWithDocument([]byte(candidateDocument), config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restored), "callback-user:callback-password@callback.example.test/hook?token=query-secret") {
+		t.Fatalf("opaque URL marker was persisted instead of restored: %s", restored)
+	}
+}
+
+func TestPreserveRedactedURLRestoresOpaqueTURNURIQuery(t *testing.T) {
+	const currentDocument = `webrtc:
+  ice_servers:
+    - urls: ["turn:relay.example.test:3478?transport=udp&token=turn-secret"]
+      username: relay
+      credential: relay-secret
+`
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(redacted), "turn-secret") {
+		t.Fatalf("redacted TURN URI leaked its query: %s", redacted)
+	}
+	restored, err := preserveRedactedSecretsWithDocument(redacted, config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restored), "turn:relay.example.test:3478?transport=udp&token=turn-secret") {
+		t.Fatalf("TURN URI query was not restored: %s", restored)
+	}
+}
+
+func TestPreserveRedactedURLRejectsMarkedShapeMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   string
+		candidate string
+	}{
+		{
+			name:      "scalar original and sequence candidate",
+			current:   "custom_callback_url: https://user:password@scalar.example.test/hook?token=secret\n",
+			candidate: "custom_callback_url:\n  - https://REDACTED@scalar.example.test/hook?__liveforge_redacted__=1\n",
+		},
+		{
+			name:      "scalar original and mapping candidate",
+			current:   "custom_callback_url: https://user:password@scalar.example.test/hook?token=secret\n",
+			candidate: "custom_callback_url:\n  primary_url: https://REDACTED@scalar.example.test/hook?__liveforge_redacted__=1\n",
+		},
+		{
+			name:      "sequence original and scalar candidate",
+			current:   "custom_callback_url:\n  - https://user:password@sequence.example.test/hook?token=secret\n",
+			candidate: "custom_callback_url: \"[REDACTED]\"\n",
+		},
+		{
+			name:      "sequence original and mapping candidate",
+			current:   "custom_callback_url:\n  - https://user:password@sequence.example.test/hook?token=secret\n",
+			candidate: "custom_callback_url:\n  primary_url: https://REDACTED@sequence.example.test/hook?__liveforge_redacted__=1\n",
+		},
+		{
+			name:      "mapping original and scalar candidate",
+			current:   "custom_callback_url:\n  primary_url: https://user:password@mapping.example.test/hook?token=secret\n",
+			candidate: "custom_callback_url: \"[REDACTED]\"\n",
+		},
+		{
+			name:      "mapping original and sequence candidate",
+			current:   "custom_callback_url:\n  primary_url: https://user:password@mapping.example.test/hook?token=secret\n",
+			candidate: "custom_callback_url:\n  - https://REDACTED@mapping.example.test/hook?__liveforge_redacted__=1\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			restored, err := preserveRedactedSecretsWithDocument([]byte(test.candidate), config.Defaults(), []byte(test.current))
+			if err == nil {
+				t.Fatalf("marked URL shape mismatch was accepted and produced: %s", restored)
+			}
+			if restored != nil {
+				t.Fatalf("failed restoration returned a document containing placeholders: %s", restored)
+			}
+		})
+	}
+}
+
+func TestPreserveRedactedURLSequenceMatchesReorderedPublicIdentity(t *testing.T) {
+	const currentDocument = `custom_callback_urls:
+  - https://first-user:first-password@first.example.test/hook?token=first-secret
+  - https://second-user:second-password@second.example.test/hook?token=second-secret
+`
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate map[string]any
+	if err := yaml.Unmarshal(redacted, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	reverseConfigSequence(t, candidate, "custom_callback_urls")
+	candidateDocument, err := yaml.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := preserveRedactedSecretsWithDocument(candidateDocument, config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(restored, &document); err != nil {
+		t.Fatal(err)
+	}
+	urls := document["custom_callback_urls"].([]any)
+	wantFirst := "https://second-user:second-password@second.example.test/hook?token=second-secret"
+	wantSecond := "https://first-user:first-password@first.example.test/hook?token=first-secret"
+	if len(urls) != 2 || urls[0] != wantFirst || urls[1] != wantSecond {
+		t.Fatalf("restored reordered URLs = %#v, want [%q %q]", urls, wantFirst, wantSecond)
+	}
+}
+
+func TestPreserveRedactedSecretsRejectsAmbiguousCollectionIdentity(t *testing.T) {
+	const currentDocument = `notify:
+  http:
+    endpoints:
+      - {url: "https://one.example.test/hook?token=one", events: [publish], secret: one, retry: 1, timeout: 1s}
+      - {url: "https://two.example.test/hook?token=two", events: [publish], secret: two, retry: 1, timeout: 1s}
+`
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.ReplaceAll(string(redacted), "one.example.test", "edited-one.example.test")
+	edited = strings.ReplaceAll(edited, "two.example.test", "edited-two.example.test")
+	if _, err := preserveRedactedSecretsWithDocument([]byte(edited), config.Defaults(), []byte(currentDocument)); err == nil {
+		t.Fatal("ambiguous endpoint identity was accepted")
+	}
+}
+
+func reverseConfigSequence(t *testing.T, document map[string]any, path ...string) {
+	t.Helper()
+	var current any = document
+	for _, key := range path {
+		current = current.(map[string]any)[key]
+	}
+	items := current.([]any)
+	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+		items[left], items[right] = items[right], items[left]
+	}
+}
+
+func assertConfigSecretByIdentity(t *testing.T, document map[string]any, path []string, identityKey, identityValue, secretKey, secretValue string) {
+	t.Helper()
+	var current any = document
+	for _, key := range path {
+		current = current.(map[string]any)[key]
+	}
+	for _, item := range current.([]any) {
+		entry := item.(map[string]any)
+		matches := entry[identityKey] == identityValue
+		if values, ok := entry[identityKey].([]any); ok {
+			matches = len(values) == 1 && values[0] == identityValue
+		}
+		if matches {
+			if entry[secretKey] != secretValue {
+				t.Fatalf("%s=%v for %s=%v, want %q", secretKey, entry[secretKey], identityKey, entry[identityKey], secretValue)
+			}
+			return
+		}
+	}
+	t.Fatalf("identity %s=%q not found at %v", identityKey, identityValue, path)
+}
+
+func assertOpaqueSensitiveContainersRedacted(t *testing.T, document map[string]any) {
+	t.Helper()
+	credentials := document["custom_credentials"].(map[string]any)
+	if credentials["name"] != "primary" || credentials["value"] != "[REDACTED]" {
+		t.Fatalf("redacted custom_credentials = %#v", credentials)
+	}
+	nested := credentials["nested"].(map[string]any)
+	if nested["id"] != "nested" || nested["material"] != "[REDACTED]" {
+		t.Fatalf("redacted nested credentials = %#v", nested)
+	}
+	keys := document["custom_private_keys"].([]any)
+	first := keys[0].(map[string]any)
+	if first["name"] != "first" || first["material"] != "[REDACTED]" {
+		t.Fatalf("redacted structured private key = %#v", first)
+	}
+	if keys[1] != "[REDACTED]" || keys[2].([]any)[0] != "[REDACTED]" {
+		t.Fatalf("redacted heterogeneous private keys = %#v", keys)
+	}
+}
+
+func assertNoStructuredURLSecretLeak(t *testing.T, encoded string) {
+	t.Helper()
+	for _, secret := range []string{
+		"mapping-secret", "address-secret", "sequence-secret", "endpoint-secret",
+		"scalar-sequence-secret", "url-user", "url-password", "url-secret",
+		"list-user", "list-password", "list-secret",
+	} {
+		if strings.Contains(encoded, secret) {
+			t.Fatalf("structured URL redaction leaked %q: %s", secret, encoded)
+		}
+	}
+}
+
+func assertStructuredURLValuesOpaque(t *testing.T, document map[string]any) {
+	t.Helper()
+	credentials := document["custom_credentials"].(map[string]any)
+	callback := credentials["callback_url"].(map[string]any)
+	if callback["name"] != "mapping" || callback["neutral"] != "[REDACTED]" {
+		t.Fatalf("structured callback_url = %#v", callback)
+	}
+	address := callback["address"].(map[string]any)
+	if address["id"] != "nested-address" || address["host"] != "[REDACTED]" {
+		t.Fatalf("structured address = %#v", address)
+	}
+	callbacks := credentials["callback_urls"].([]any)
+	entry := callbacks[0].(map[string]any)
+	if entry["name"] != "sequence-entry" || entry["neutral"] != "[REDACTED]" {
+		t.Fatalf("structured callback_urls entry = %#v", entry)
+	}
+	endpoint := entry["endpoint"].(map[string]any)
+	if endpoint["channel_id"] != "nested-endpoint" || endpoint["payload"] != "[REDACTED]" {
+		t.Fatalf("structured endpoint = %#v", endpoint)
+	}
+	if callbacks[1] != "[REDACTED]" {
+		t.Fatalf("heterogeneous scalar URL value = %#v", callbacks[1])
+	}
+	publicURL := credentials["public_url"].(string)
+	if !strings.Contains(publicURL, "public.example.test/hook") || !isRedactedConfigURL(publicURL) {
+		t.Fatalf("scalar public_url lost safe identity: %q", publicURL)
+	}
+	publicURLs := credentials["public_urls"].([]any)
+	if len(publicURLs) != 1 || !strings.Contains(publicURLs[0].(string), "list.example.test/hook") || !isRedactedConfigURL(publicURLs[0].(string)) {
+		t.Fatalf("scalar public_urls lost safe identity: %#v", publicURLs)
+	}
+}
+
 type rawDocumentSource struct {
 	document []byte
 }
@@ -364,3 +1179,12 @@ func (s *rawDocumentSource) Load(context.Context, configruntime.Version) (config
 }
 
 func (s *rawDocumentSource) Close() error { return nil }
+
+type errorConfigWriterSource struct{ err error }
+
+func (s errorConfigWriterSource) Load(context.Context, configruntime.Version) (configruntime.Snapshot, error) {
+	return configruntime.Snapshot{}, s.err
+}
+
+func (s errorConfigWriterSource) Write(context.Context, []byte) error { return s.err }
+func (s errorConfigWriterSource) Close() error                        { return nil }

@@ -2,8 +2,16 @@ package runtime
 
 import (
 	"fmt"
+	"math"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
+)
+
+var (
+	canonicalDecimalInteger = regexp.MustCompile(`^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$`)
+	canonicalDecimalFloat   = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)$`)
 )
 
 func requireURL(raw, field string) (*url.URL, error) {
@@ -47,13 +55,24 @@ func documentFromKeyValues(values map[string]string) ([]byte, error) {
 }
 
 func parseScalar(value string) any {
-	switch strings.ToLower(strings.TrimSpace(value)) {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(trimmed) {
 	case "true":
 		return true
 	case "false":
 		return false
 	case "null":
 		return nil
+	}
+	if canonicalDecimalInteger.MatchString(trimmed) {
+		if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	if canonicalDecimalFloat.MatchString(trimmed) {
+		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil && !math.IsInf(parsed, 0) && !math.IsNaN(parsed) {
+			return parsed
+		}
 	}
 	return value
 }

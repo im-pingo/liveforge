@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -427,5 +428,112 @@ func TestRedisSourceBuildsNestedDocumentFromKeys(t *testing.T) {
 	}
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseFlattenedScalar(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  any
+	}{
+		{name: "positive integer", value: "100", want: int64(100)},
+		{name: "negative integer", value: "-42", want: int64(-42)},
+		{name: "decimal float", value: "1.25", want: 1.25},
+		{name: "exponent float", value: "6.25e-2", want: 0.0625},
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "FALSE", want: false},
+		{name: "null", value: "null", want: nil},
+		{name: "ordinary string", value: "liveforge", want: "liveforge"},
+		{name: "duration", value: "15s", want: "15s"},
+		{name: "leading zero identifier", value: "00123", want: "00123"},
+		{name: "negative leading zero identifier", value: "-01", want: "-01"},
+		{name: "leading zero float identifier", value: "01.5", want: "01.5"},
+		{name: "plus-prefixed integer", value: "+12", want: "+12"},
+		{name: "underscored integer", value: "1_000", want: "1_000"},
+		{name: "hexadecimal integer", value: "0x10", want: "0x10"},
+		{name: "integer overflow", value: "9223372036854775808", want: "9223372036854775808"},
+		{name: "float overflow", value: "1e309", want: "1e309"},
+		{name: "not a number", value: "NaN", want: "NaN"},
+		{name: "infinity", value: ".inf", want: ".inf"},
+		{name: "YAML sequence", value: "[one, two]", want: "[one, two]"},
+		{name: "YAML mapping", value: "{key: value}", want: "{key: value}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseScalar(test.value); got != test.want {
+				t.Fatalf("parseScalar(%q) = %#v (%T), want %#v (%T)", test.value, got, got, test.want, test.want)
+			}
+		})
+	}
+}
+
+func TestFlattenedKeyValueDocumentsDecodeTypedNumericConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		values map[string]string
+	}{
+		{
+			name: "consul slash paths",
+			values: map[string]string{
+				"limits/max_connections":             "100",
+				"limits/max_streams":                 "25",
+				"http_stream/llhls/segment_duration": "1.25",
+				"http_stream/llhls/part_duration":    "0.2",
+				"http_stream/llhls/segment_count":    "6",
+				"http_stream/llhls/enabled":          "true",
+			},
+		},
+		{
+			name: "redis dotted paths",
+			values: map[string]string{
+				"limits.max_connections":             "100",
+				"limits.max_streams":                 "25",
+				"http_stream.llhls.segment_duration": "1.25",
+				"http_stream.llhls.part_duration":    "0.2",
+				"http_stream.llhls.segment_count":    "6",
+				"http_stream.llhls.enabled":          "true",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			document, err := documentFromKeyValues(test.values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := ParseDocument(document)
+			if err != nil {
+				t.Fatalf("parse generated document: %v\n%s", err, document)
+			}
+			if cfg.Limits.MaxConnections != 100 || cfg.Limits.MaxStreams != 25 {
+				t.Fatalf("typed limits = %+v, want max_connections=100 max_streams=25", cfg.Limits)
+			}
+			if cfg.HTTP.LLHLS.SegmentDuration != 1.25 || cfg.HTTP.LLHLS.PartDuration != 0.2 || cfg.HTTP.LLHLS.SegmentCount != 6 {
+				t.Fatalf("typed LL-HLS config = %+v", cfg.HTTP.LLHLS)
+			}
+		})
+	}
+}
+
+func TestFlattenedKeyValueDocumentSerializationIsDeterministic(t *testing.T) {
+	first, err := documentFromKeyValues(map[string]string{
+		"limits.max_connections":             "100",
+		"http_stream.llhls.segment_duration": "1.25",
+		"server.name":                        "liveforge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := documentFromKeyValues(map[string]string{
+		"server.name":                        "liveforge",
+		"http_stream.llhls.segment_duration": "1.25",
+		"limits.max_connections":             "100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("flattened documents differ:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
