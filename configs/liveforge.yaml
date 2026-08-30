@@ -8,8 +8,10 @@ runtime:
     source: file
     poll_interval: 30s
     load_timeout: 10s
+    # Each source defaults to a 4 MiB complete-document/materialization limit.
     file:
         path: ""
+        max_bytes: 4194304
 tls:
     cert_file: ""
     key_file: ""
@@ -23,6 +25,8 @@ limits:
         enabled: false
         rate: 50 # requests per second per IP
         burst: 100 # max burst per IP
+        # Forwarded client-IP headers are ignored unless the direct peer is listed.
+        trusted_proxies: []
 rtmp:
     enabled: true
     listen: ":1935"
@@ -107,10 +111,12 @@ sip:
         rtp_port_range: [30000, 30100]
         codecs: [opus, PCMA, PCMU]
         max_calls: 100
+        max_lab_sessions: 16
 gb28181:
     enabled: true
     stream_prefix: "gb28181"
     rtp_port_range: [40000, 50000]
+    max_lab_sessions: 16
     ssrc:
         prefix: "34020"
     keepalive:
@@ -124,6 +130,9 @@ audio_codec:
 stream:
     gop_cache: true
     gop_cache_num: 1
+    gop_cache_max_frames: 300
+    gop_cache_max_duration: 10s
+    gop_cache_max_bytes: 33554432
     ring_buffer_size: 1024
     idle_timeout: 30s
     no_publisher_timeout: 15s
@@ -231,6 +240,12 @@ metrics:
     enabled: false
     listen: ":9090"
     path: "/metrics"
+    # Per-stream labels are opt-in. Without an allowlist, the limit is a
+    # Collector-lifetime budget whose admitted stream keys are never replaced.
+    # Set the limit to 0 to disable details; negative values are rejected.
+    stream_detail: false
+    stream_detail_limit: 100
+    stream_detail_allowlist: []
 api:
     enabled: true
     listen: ":8090"

@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,6 +51,35 @@ func (s *blockingSource) Load(ctx context.Context, previous Version) (Snapshot, 
 }
 
 func (s *blockingSource) Close() error { return nil }
+
+type countingErrorSource struct {
+	err   error
+	loads atomic.Int32
+}
+
+func (s *countingErrorSource) Load(context.Context, Version) (Snapshot, error) {
+	s.loads.Add(1)
+	return Snapshot{}, s.err
+}
+
+func (s *countingErrorSource) Close() error { return nil }
+
+type synchronizedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
 
 type serializedWriterSource struct {
 	active  atomic.Int32
@@ -154,9 +186,11 @@ func TestManagerWriteHonorsContextWhileWaitingForSourceIO(t *testing.T) {
 
 func TestSnapshotReadDoesNotWaitForRefresh(t *testing.T) {
 	source := &blockingSource{release: make(chan struct{})}
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
 	m, err := NewManager(Options{
 		Source:  source,
-		Initial: &config.Config{Server: config.ServerConfig{Name: "initial"}},
+		Initial: initial,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -186,9 +220,11 @@ func TestSnapshotReadDoesNotWaitForRefresh(t *testing.T) {
 
 func TestFailedRefreshRetainsLastValidSnapshot(t *testing.T) {
 	source := &blockingSource{release: make(chan struct{}), err: errors.New("source unavailable")}
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
 	m, err := NewManager(Options{
 		Source:  source,
-		Initial: &config.Config{Server: config.ServerConfig{Name: "initial"}},
+		Initial: initial,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -208,6 +244,67 @@ func TestFailedRefreshRetainsLastValidSnapshot(t *testing.T) {
 	if m.Status().ConsecutiveFailures == 0 {
 		t.Fatal("expected source failure status")
 	}
+}
+
+func TestManagerRedactsURLCredentialsFromFailureStatus(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	source := &blockingSource{
+		release: release,
+		err:     errors.New(`Get "https://user:password@example.test/config.yaml?token=source-secret": connection refused`),
+	}
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
+	m, err := NewManager(Options{Source: source, Initial: initial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.load(context.Background()); err == nil {
+		t.Fatal("expected source failure")
+	}
+	lastError := m.Status().LastError
+	for _, secret := range []string{"user", "password", "source-secret", "token="} {
+		if strings.Contains(lastError, secret) {
+			t.Fatalf("status error leaked %q: %s", secret, lastError)
+		}
+	}
+	if !strings.Contains(lastError, "__liveforge_redacted__") {
+		t.Fatalf("status error did not retain an explicit redaction marker: %s", lastError)
+	}
+}
+
+func TestManagerRedactsBackgroundSourceErrorsInStatusAndLogs(t *testing.T) {
+	var logs synchronizedBuffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	source := &countingErrorSource{err: errors.New("source load failed for https://source-user:source-password@config.example.test/live.yaml?token=query-secret\nretry denied")}
+	m, err := NewManager(Options{Source: source, Initial: config.Defaults(), PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForManagerTest(t, func() bool {
+		return m.Status().ConsecutiveFailures >= 1 && strings.Contains(logs.String(), "config.example.test")
+	})
+	assertRuntimeDiagnosticRedacted(t, m.Status().LastError)
+	if strings.ContainsAny(m.Status().LastError, "\r\n") {
+		t.Fatalf("runtime status retained line breaks: %q", m.Status().LastError)
+	}
+	assertRuntimeDiagnosticRedacted(t, logs.String())
+
+	if err := m.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForManagerTest(t, func() bool {
+		return source.loads.Load() >= 2 && m.Status().ConsecutiveFailures >= 2
+	})
+	assertRuntimeDiagnosticRedacted(t, m.Status().LastError)
 }
 
 func TestManagerPublishesEffectiveConfigAndKeepsDesiredRestartValuesPending(t *testing.T) {
@@ -353,6 +450,71 @@ func TestManagerApplicationFailureDoesNotPublishCandidateOrTypedKeys(t *testing.
 	}
 }
 
+func TestManagerRedactsApplicationFailureInStatus(t *testing.T) {
+	initial := config.Defaults()
+	desired := config.Defaults()
+	desired.Limits.MaxStreams = 42
+	data, err := normalizedBytes(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyErr := errors.New("application failed at https://apply-user:apply-password@config.example.test/apply?token=query-secret\nrollback required")
+	m, err := NewManager(Options{
+		Source:  &mutableSource{snapshot: Snapshot{Data: data, Version: "application-error"}},
+		Initial: initial,
+		Apply: func(*ConfigSnapshot, ChangeSet) error {
+			return applyErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.load(context.Background()); !errors.Is(err, applyErr) {
+		t.Fatalf("load error=%v want=%v", err, applyErr)
+	}
+	assertRuntimeDiagnosticRedacted(t, m.Status().LastError)
+	if strings.ContainsAny(m.Status().LastError, "\r\n") {
+		t.Fatalf("application status retained line breaks: %q", m.Status().LastError)
+	}
+}
+
+func TestManagerRedactsCallbackFailureInLogs(t *testing.T) {
+	var logs synchronizedBuffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	desired := config.Defaults()
+	desired.Limits.MaxStreams++
+	data, err := normalizedBytes(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackErr := errors.New("callback failed at https://callback-user:callback-password@config.example.test/callback?token=query-secret\nretry queued")
+	m, err := NewManager(Options{
+		Source:  &mutableSource{snapshot: Snapshot{Data: data, Version: "callback-error"}},
+		Initial: config.Defaults(),
+		OnChange: func(ChangeSet) error {
+			return callbackErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForManagerTest(t, func() bool {
+		return m.Status().CallbackFailures == 1 && strings.Contains(logs.String(), "config.example.test")
+	})
+	assertRuntimeDiagnosticRedacted(t, logs.String())
+	if strings.Contains(logs.String(), `\nretry queued`) {
+		t.Fatalf("callback log retained an injected line break: %q", logs.String())
+	}
+}
+
 func TestManagerCoalescesNotificationsWithoutLosingLatestSnapshot(t *testing.T) {
 	initial := config.Defaults()
 	source := &mutableSource{}
@@ -462,7 +624,7 @@ func TestManagerCountsAcceptedRejectedAndApplicationFailedChanges(t *testing.T) 
 }
 
 func BenchmarkSnapshotRead(b *testing.B) {
-	m, err := NewManager(Options{Source: &blockingSource{release: make(chan struct{})}, Initial: &config.Config{}})
+	m, err := NewManager(Options{Source: &blockingSource{release: make(chan struct{})}, Initial: config.Defaults()})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -471,5 +633,28 @@ func BenchmarkSnapshotRead(b *testing.B) {
 		if m.Snapshot() == nil {
 			b.Fatal("missing snapshot")
 		}
+	}
+}
+
+func waitForManagerTest(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for manager condition")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func assertRuntimeDiagnosticRedacted(t *testing.T, diagnostic string) {
+	t.Helper()
+	for _, secret := range []string{"source-user", "source-password", "apply-user", "apply-password", "callback-user", "callback-password", "query-secret", "token="} {
+		if strings.Contains(diagnostic, secret) {
+			t.Fatalf("runtime diagnostic leaked %q: %q", secret, diagnostic)
+		}
+	}
+	if !strings.Contains(diagnostic, "config.example.test") {
+		t.Fatalf("runtime diagnostic lost useful host identity: %q", diagnostic)
 	}
 }

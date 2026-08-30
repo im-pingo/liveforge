@@ -33,7 +33,6 @@ type Session struct {
 	segDir      string
 	storage     *dvrStorage
 	dir         *localfs.Dir
-	ownsStore   bool
 
 	muxer       *ts.Muxer
 	segFile     segmentFile
@@ -48,6 +47,7 @@ type Session struct {
 	audioSeq   []byte
 	videoCodec avframe.CodecType
 	audioCodec avframe.CodecType
+	audioOnly  bool
 
 	reader      *util.RingReader[*avframe.AVFrame]
 	done        chan struct{}
@@ -88,15 +88,17 @@ func newSession(streamKey string, stream *core.Stream, cfg config.DVRConfig, exi
 	if err != nil {
 		return nil, err
 	}
-	session, err := newSessionWithStorage(streamKey, stream, cfg, existingIndex, startSeq, metrics, storage, nil, true)
+	snapshot := stream.StartupSnapshot()
+	session, err := newSessionWithStorage(streamKey, stream, snapshot, cfg, existingIndex, startSeq, metrics, storage, nil)
 	if err != nil {
 		_ = storage.Close()
 		return nil, err
 	}
+	session.storage = storage
 	return session, nil
 }
 
-func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVRConfig, existingIndex *SegmentIndex, startSeq int, metrics *DVRMetrics, storage *dvrStorage, existingDir *localfs.Dir, ownsStore bool) (*Session, error) {
+func newSessionWithStorage(streamKey string, stream *core.Stream, snapshot core.StreamStartupSnapshot, cfg config.DVRConfig, existingIndex *SegmentIndex, startSeq int, metrics *DVRMetrics, storage dvrDirectoryStore, existingDir *localfs.Dir) (*Session, error) {
 	if !validStreamKey(streamKey) {
 		return nil, fmt.Errorf("dvr: invalid stream key")
 	}
@@ -129,13 +131,11 @@ func newSessionWithStorage(streamKey string, stream *core.Stream, cfg config.DVR
 	session := &Session{
 		streamKey:   streamKey,
 		stream:      stream,
-		snapshot:    stream.StartupSnapshot(),
+		snapshot:    snapshot,
 		cfg:         cfg,
 		index:       idx,
 		segDir:      segDir,
-		storage:     storage,
 		dir:         dir,
-		ownsStore:   ownsStore,
 		segStartDTS: -1,
 		lastDTS:     -1,
 		segSeqNum:   startSeq,
@@ -177,7 +177,9 @@ func (s *Session) Run() {
 	}()
 	snapshot := s.snapshot
 	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-		return
+		if _, ended := snapshot.GenerationEndCursor(); !ended {
+			return
+		}
 	}
 	if snapshot.Generation != 0 && !snapshot.Ready {
 		readySnapshot, ok := waitDVRStartup(readCtx, s.stream, snapshot)
@@ -189,6 +191,7 @@ func (s *Session) Run() {
 	}
 	s.videoCodec = snapshot.MediaInfo.VideoCodec
 	s.audioCodec = snapshot.MediaInfo.AudioCodec
+	s.audioOnly = snapshot.MediaInfo.VideoCodec == 0
 	allowUndeclaredTracks := snapshot.Generation == 0 &&
 		snapshot.MediaInfo.VideoCodec == 0 && snapshot.MediaInfo.AudioCodec == 0
 	transcodedAudio := false
@@ -236,7 +239,9 @@ func (s *Session) Run() {
 	if !transcodedAudio {
 		for _, frame := range snapshot.ReplayFrames {
 			if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-				return
+				if _, ended := snapshot.GenerationEndCursor(); !ended {
+					return
+				}
 			}
 			if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
 				continue
@@ -249,11 +254,76 @@ func (s *Session) Run() {
 	}
 
 	for {
-		frame, ok := s.reader.ReadContext(generationCtx)
+		frame, ok, readErr := core.ReadFrameContext(generationCtx, s.reader)
+		if readErr != nil {
+			s.setLastError(readErr)
+			s.closeSegment(true)
+			return
+		}
 		if !ok {
+			if transcodedAudio {
+				s.drainTranscodedGenerationTail(snapshot, allowUndeclaredTracks)
+			} else {
+				s.drainSourceGenerationTail(snapshot, allowUndeclaredTracks)
+			}
 			return
 		}
 		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
+			endCursor, ended := snapshot.GenerationEndCursor()
+			if !ended || (!transcodedAudio && s.reader.ReadCursor() > endCursor) {
+				return
+			}
+		}
+		if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
+			continue
+		}
+		s.processFrame(frame)
+	}
+}
+
+func (s *Session) drainTranscodedGenerationTail(snapshot core.StreamStartupSnapshot, allowUndeclaredTracks bool) {
+	if s.reader == nil {
+		return
+	}
+	_, ended := snapshot.GenerationEndCursor()
+	if !ended {
+		return
+	}
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelWait()
+	for {
+		frame, ok, readErr := core.ReadFrameContext(waitCtx, s.reader)
+		if readErr != nil {
+			s.setLastError(readErr)
+			s.closeSegment(true)
+			return
+		}
+		if !ok {
+			return
+		}
+		if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
+			continue
+		}
+		s.processFrame(frame)
+	}
+}
+
+func (s *Session) drainSourceGenerationTail(snapshot core.StreamStartupSnapshot, allowUndeclaredTracks bool) {
+	if s.reader == nil {
+		return
+	}
+	endCursor, ended := snapshot.GenerationEndCursor()
+	if !ended {
+		return
+	}
+	for s.reader.ReadCursor() < endCursor {
+		frame, ok, readErr := core.TryReadFrame(s.reader)
+		if readErr != nil {
+			s.setLastError(readErr)
+			s.closeSegment(true)
+			return
+		}
+		if !ok || s.reader.ReadCursor() > endCursor {
 			return
 		}
 		if !dvrFrameAccepted(frame, s.videoCodec, s.audioCodec, allowUndeclaredTracks) {
@@ -317,7 +387,7 @@ func (s *Session) finish() {
 	s.finishOnce.Do(func() {
 		s.closeSegment(false)
 		s.lifecycle.Store(sessionStopped)
-		if s.ownsStore {
+		if s.storage != nil {
 			_ = s.closeStorage()
 		}
 		close(s.finished)
@@ -363,7 +433,11 @@ func (s *Session) processFrame(frame *avframe.AVFrame) {
 		s.muxer = ts.NewMuxer(s.videoCodec, s.audioCodec, s.videoSeq, s.audioSeq)
 	}
 
-	if s.segFile == nil || (frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && s.shouldSplit()) {
+	shouldRotate := frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && s.shouldSplit()
+	if s.audioOnly && frame.MediaType.IsAudio() {
+		shouldRotate = s.shouldSplit()
+	}
+	if s.segFile == nil || shouldRotate {
 		s.closeSegment(false)
 		s.openSegment()
 	}
@@ -620,7 +694,7 @@ func (s *Session) closeStorage() error {
 		if s.dir != nil {
 			s.storageErr = errors.Join(s.storageErr, s.dir.Close())
 		}
-		if s.ownsStore && s.storage != nil {
+		if s.storage != nil {
 			s.storageErr = errors.Join(s.storageErr, s.storage.Close())
 		}
 	})

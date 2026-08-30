@@ -6,6 +6,13 @@ The Console includes local one-shot protocol self-tests and persistent fake-devi
 sessions so SIP and GB28181 workflows can be validated without a PBX, cloud
 platform, or camera. Enable SIP, its `gateway` block, and GB28181, keep the API
 listener on loopback, and use a viewer or operator token.
+Each provider admits at most `max_lab_sessions` active `starting`, `active`, or
+SIP `contract` sessions at once. The default is 16; terminal history is retained
+for diagnosis but does not consume the ceiling. Set a positive value in
+`sip.gateway.max_lab_sessions` or `gb28181.max_lab_sessions`; non-positive values
+are normalized to the default. When the ceiling is full, the start API returns
+HTTP 429 with the `ProtocolLabCapacity` error instead of allocating sockets or
+publishing a partially active session.
 The checked-in sample includes a loopback-safe gateway port range so this page is
 usable immediately in local development:
 
@@ -27,7 +34,9 @@ fake SIP peer through REGISTER and 401 digest challenge, authenticated
 registration, INVITE/200/ACK/BYE, incompatible-codec rejection, timeout
 handling, RTP media, and RTCP control. It also checks SDP parsing and codec
 negotiation against the configured gateway codecs and an RTP/RTCP port pair.
-The Console SIP page renders every phase and its failure detail.
+The port check binds both configured UDP sockets, fails when every pair is
+occupied by another process, and closes/frees a successful reservation before
+returning. The Console SIP page renders every phase and its failure detail.
 
 For a persistent provider session, call the `SIPGatewayProvider` methods
 `StartLabSession(ctx, LabSessionRequest)`, `ListLabSessions()`, and
@@ -35,7 +44,11 @@ For a persistent provider session, call the `SIPGatewayProvider` methods
 SIP call and sends deterministic H.264 video plus PCMA/PCMU audio on separate
 RTP tracks, with RTCP, into the gateway-created stream. The gateway binds and
 parses both real RTCP receiver sockets, and the Lab counter reflects packets
-accepted there rather than successful UDP writes. In `receive` mode, the fake
+accepted there rather than successful UDP writes. Gateway RTP/RTCP allocation
+skips pairs already occupied by another local process and keeps both sockets
+bound before SDP is accepted or offered, closing the allocation only during
+setup rollback or session cleanup. Fake Lab endpoint pairs avoid the configured
+gateway RTP range. In `receive` mode, the fake
 SIP endpoint accepts the gateway outbound INVITE, receives the existing source
 without writing generated frames into that stream, counts audio/video RTP and
 RTCP, and sends periodic receiver reports for each track. Gateway sender reports
@@ -47,9 +60,23 @@ transport reader before closing its fake SIP UA, so normal cleanup does not
 underflow sipgo UDP references or report an already-closed socket. This provider
 workflow requires an initialized SIP transport and enabled gateway. Receive mode
 waits for the selected publisher generation to become startup-ready before
-sending its INVITE; a source with a known unsupported audio codec is rejected
-before signaling, while a source with late sequence headers is waited on or
-canceled with the request context.
+sending its INVITE. The requested PCMA or PCMU value is the actual outbound
+target codec, not just a display hint. A matching source is passed through;
+when the source differs, the generation-bound shared audio transcoder supplies
+an independent target-codec reader while H.264 continues from the original
+live cursor. That conversion requires `audio_codec.enabled=true`, the
+`audiocodec` build tag, and FFmpeg development libraries. A source without a
+direct or available transformed path is rejected before signaling, while a
+source with late sequence headers is waited on or canceled with the request
+context.
+
+Gateway RTP/RTCP pairs are socket-bound before SDP and remain owned by the call
+until teardown. For a transcoded outbound call, every ready target-audio frame
+rechecks its captured publisher generation immediately before RTP send. Source
+retirement closes and releases the target reader, generation subscriber, and
+media sockets, returns the exact port pair to the allocator, and sends one BYE
+even if another local teardown races with retirement.
+
 The publish stream contains a dependency-free moving 160x90 constrained-baseline
 H.264 pattern at 25 fps, with one IDR per 25-frame loop, plus audible 20 ms
 PCMA/PCMU frames. The Console uses the video player and prefers WebRTC/WHEP for
@@ -97,8 +124,10 @@ The report is returned by `GET /api/v1/gb28181/test` and runs an in-process fake
 device through SIP registration, Keepalive, Catalog query/response, playback
 INVITE/200 SDP/ACK/BYE, missing-SDP rejection, timeout handling, PS/90000 media
 over localhost UDP, and RTCP control. It also checks an RTP/RTCP port pair and
-local PS mux/demux of an H.264 keyframe. It does not contact a platform or
-camera. The Console GB28181 page renders every phase and its detail.
+local PS mux/demux of an H.264 keyframe. The configured pair is accepted only
+after both UDP sockets bind; external exhaustion fails this check, while a
+successful check closes both sockets and frees the pair. It does not contact a
+platform or camera. The Console GB28181 page renders every phase and its detail.
 
 Persistent GB28181 sessions use the same control shape and perform real
 REGISTER, Keepalive, Catalog, INVITE, ACK, BYE, and unregister signaling. In
@@ -107,18 +136,35 @@ that Contact during registration. LiveForge then uses its normal invite client
 to initiate live play; the fake device accepts INVITE, consumes ACK without a
 response, handles BYE, and sends deterministic H.264 plus G.711A in PS/RTP
 payload type 96 with RTCP into LiveForge's real RTP/RTCP receiver. In `receive`
-mode LiveForge validates an existing H.264/G.711A source before activation and
-a module-owned outbound media session admits a source subscriber before it
-sends that source as PS/RTP/RTCP. Subscriber-limit rejection is returned
+mode LiveForge requires H.264 plus direct G.711A or source audio that the
+tagged runtime can convert to G.711A. A module-owned outbound media session
+admits a source subscriber before activation, keeps H.264 on the source live
+cursor, and uses an independent generation-bound target-audio reader when
+conversion is needed. Unsupported conversion fails before signaling, while a
+supported source is sent as PS/RTP/RTCP. Subscriber-limit rejection is returned
 synchronously and the Lab is never published as active. If the sender later
 fails, the Lab transitions to `failed`, records a bounded redacted diagnostic,
 and releases its dialog, module session, subscriber, sockets, and ports. The
 fake device only receives and counts RTP, RTCP, PS, audio, and video frames. The
-simulator binds only loopback sockets, requires no FFmpeg or external platform,
-and releases both SIP UAs, dialogs, RTP/RTCP ports, and session resources on
-stop or module close. The fake-client transport reader exits before its UA and
+simulator binds only loopback sockets and requires no external platform. Direct
+G.711A requires no FFmpeg; converting Opus, AAC, or another supported source
+codec requires the `audiocodec` build. The Lab releases both SIP UAs, dialogs,
+RTP/RTCP ports, target-audio readers, and session resources on stop or module
+close. The fake-client transport reader exits before its UA and
 the fake-peer listener exits before its peer UA, avoiding sipgo UDP reference
 underflow and closed-socket cleanup warnings.
+
+Inbound device INVITEs complete asynchronous publish-start admission before
+LiveForge exposes `200 OK`. Backpressure returns a non-2xx response and removes
+the publisher, session, receiver sockets, newly created stream, and allocated
+pair without emitting an unmatched publish-stop. GB28181 receive-mode outbound
+media also allocates and binds its RTP/RTCP pair atomically, so an externally
+occupied first pair is skipped in favor of a later configured pair.
+
+Successful server-initiated live and playback INVITEs transfer dialog ownership
+to the media session. Local stop, receiver failure, rollback after an accepted
+2xx response, and repeated cleanup converge on one managed dialog, so at most
+one BYE is sent and the transaction is closed once.
 
 After the initial registration, each persistent fake device continues sending
 Keepalive messages at roughly one-third of the configured
@@ -136,8 +182,9 @@ curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
 
 `GET` requires `gb28181:read`; `POST` and `DELETE` require
 `gb28181:control`. Receive mode requires the requested stream to already have
-an H.264 video and G.711A audio publisher with the required startup sequence
-headers. The receive path waits for that publisher generation to become ready
+H.264 video and either direct G.711A audio or an audio codec the running tagged
+build can transform to G.711A, with the required startup sequence headers. The
+receive path waits for that publisher generation to become ready
 before sending its INVITE; a late header is not treated as a playable source
 until it arrives. The publish sample includes a moving constrained-baseline
 SPS/PPS/IDR/interframe pattern at 25 fps and audible 8 kHz mono G.711A audio, so the
@@ -251,7 +298,21 @@ go test ./module/api ./module/sipgateway ./module/gb28181
 go test ./pkg/rtp -run TestH264DepacketizerEmitsSequenceHeaderForSeparateSPSAndPPSPackets -count=1
 go test ./module/webrtc -run 'Test(RegisterCodecs|WHEPPCMAudioPassthroughDeliversRTP)$' -count=1
 go test -race ./module/gb28181 -run 'Lab|SelfTest' -v
+CGO_ENABLED=1 go test -tags audiocodec ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1 -v
+LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s CGO_ENABLED=1 go test -tags audiocodec ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1 -v
 ```
 
-The self-tests bind only ephemeral localhost UDP sockets and release their port
-pairs before returning. They do not write recordings or configuration.
+The Chromium matrix checks SIP publish to GB28181 receive plus WHEP,
+GB28181 publish to SIP receive plus WHEP, and WHIP H.264/Opus publish to both
+SIP and GB28181 receive plus WHEP. It requires expected decoded dimensions,
+connected ICE, no browser media error, increasing video/audio RTP and decoded
+frame counters, an advancing media clock, and WHEP server RTP/RTCP state that
+never enters `media_stalled`. The browser checks run when Chromium advertises
+H.264 receive support; otherwise the test reports an environment skip, while
+Pion negotiation tests remain mandatory. The soak duration is a correctness
+soak; it is not evidence of leak freedom, concurrency capacity, or deployment
+capacity.
+
+The self-tests bind their configured RTP/RTCP pair plus ephemeral localhost UDP
+sockets and release every pair before returning. They do not write recordings
+or configuration.

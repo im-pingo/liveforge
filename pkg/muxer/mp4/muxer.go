@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"math"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/codec/aac"
@@ -29,6 +30,8 @@ type Muxer struct {
 
 	audioSampleRate uint32
 	audioChannels   uint16
+	prevVideoDTS    int64
+	prevAudioDTS    int64
 }
 
 type sampleEntry struct {
@@ -47,6 +50,8 @@ func NewMuxer(videoCodec, audioCodec avframe.CodecType) *Muxer {
 		timescale:       90000,
 		audioSampleRate: 44100,
 		audioChannels:   2,
+		prevVideoDTS:    -1,
+		prevAudioDTS:    -1,
 	}
 }
 
@@ -63,8 +68,8 @@ func (m *Muxer) SetAudioParams(sampleRate uint32, channels uint16) {
 // WriteFtyp writes the ftyp box.
 func (m *Muxer) WriteFtyp(w io.Writer) error {
 	var buf bytes.Buffer
-	buf.Write([]byte("isom"))      // major brand
-	putU32Buf(&buf, 0x00000200)    // minor version
+	buf.Write([]byte("isom"))     // major brand
+	putU32Buf(&buf, 0x00000200)   // minor version
 	buf.Write([]byte("isomiso2")) // compatible brands
 	if m.videoCodec == avframe.CodecH264 {
 		buf.Write([]byte("avc1"))
@@ -90,7 +95,7 @@ func (m *Muxer) WriteMdatHeader(w io.WriteSeeker) (int64, error) {
 
 // WriteFrame appends a frame to the mdat region and records sample metadata.
 // Returns the number of bytes written.
-func (m *Muxer) WriteFrame(w io.WriteSeeker, frame *avframe.AVFrame, prevDTS int64) (int, error) {
+func (m *Muxer) WriteFrame(w io.WriteSeeker, frame *avframe.AVFrame) (int, error) {
 	if frame.FrameType == avframe.FrameTypeSequenceHeader {
 		if frame.MediaType.IsVideo() {
 			m.videoCodec = frame.Codec
@@ -126,18 +131,22 @@ func (m *Muxer) WriteFrame(w io.WriteSeeker, frame *avframe.AVFrame, prevDTS int
 	m.mdatSize += int64(n)
 
 	duration := uint32(0)
-	if prevDTS >= 0 {
-		d := frame.DTS - prevDTS
-		if d > 0 {
-			duration = uint32(d * int64(m.timescale) / 1000)
-		}
+	previousDTS := &m.prevVideoDTS
+	timescale := m.timescale
+	if frame.MediaType.IsAudio() {
+		previousDTS = &m.prevAudioDTS
+		timescale = m.audioSampleRate
+	}
+	if *previousDTS >= 0 {
+		d := frame.DTS - *previousDTS
+		duration = scaleDurationMillis(d, timescale)
 	}
 
 	entry := sampleEntry{
 		size:   uint32(n),
 		offset: offset,
 		isSync: frame.FrameType.IsKeyframe() || frame.FrameType == avframe.FrameTypeSequenceHeader,
-		cts:    int32((frame.PTS - frame.DTS) * int64(m.timescale) / 1000),
+		cts:    scaleCompositionOffsetMillis(frame.PTS-frame.DTS, timescale),
 	}
 
 	if frame.MediaType.IsVideo() {
@@ -146,11 +155,13 @@ func (m *Muxer) WriteFrame(w io.WriteSeeker, frame *avframe.AVFrame, prevDTS int
 		}
 		entry.isSync = frame.FrameType.IsKeyframe()
 		m.videoSamples = append(m.videoSamples, entry)
+		m.prevVideoDTS = frame.DTS
 	} else if frame.MediaType.IsAudio() {
 		if len(m.audioSamples) > 0 {
 			m.audioSamples[len(m.audioSamples)-1].duration = duration
 		}
 		m.audioSamples = append(m.audioSamples, entry)
+		m.prevAudioDTS = frame.DTS
 	}
 
 	return n, nil
@@ -218,22 +229,22 @@ func (m *Muxer) totalDuration(samples []sampleEntry) uint64 {
 }
 
 func (m *Muxer) buildMvhd() []byte {
-	d := m.totalDuration(m.videoSamples)
+	d := scaleDurationUnits(m.totalDuration(m.videoSamples), m.timescale, m.timescale)
 	if len(m.audioSamples) > 0 {
-		ad := m.totalDuration(m.audioSamples)
+		ad := scaleDurationUnits(m.totalDuration(m.audioSamples), m.audioSampleRate, m.timescale)
 		if ad > d {
 			d = ad
 		}
 	}
 
 	buf := make([]byte, 100)
-	putU32(buf[0:4], 0)           // version + flags
-	putU32(buf[4:8], 0)           // creation time
-	putU32(buf[8:12], 0)          // modification time
+	putU32(buf[0:4], 0)             // version + flags
+	putU32(buf[4:8], 0)             // creation time
+	putU32(buf[8:12], 0)            // modification time
 	putU32(buf[12:16], m.timescale) // timescale
-	putU32(buf[16:20], uint32(d)) // duration
-	putU32(buf[20:24], 0x00010000) // rate 1.0
-	putU16(buf[24:26], 0x0100)     // volume 1.0
+	putU32(buf[16:20], d)           // duration
+	putU32(buf[20:24], 0x00010000)  // rate 1.0
+	putU16(buf[24:26], 0x0100)      // volume 1.0
 
 	// reserved + matrix + predefined
 	copy(buf[26:], make([]byte, 10+36+24))
@@ -267,7 +278,7 @@ func (m *Muxer) buildTrak(isVideo bool) []byte {
 
 	dur := m.totalDuration(samples)
 
-	tkhd := m.buildTkhd(trackID, uint32(dur), isVideo)
+	tkhd := m.buildTkhd(trackID, scaleDurationUnits(dur, ts, m.timescale), isVideo)
 	writeFullBox(&buf, [4]byte{'t', 'k', 'h', 'd'}, 0, 3, tkhd)
 
 	mdia := m.buildMdia(isVideo, ts, samples)
@@ -278,8 +289,8 @@ func (m *Muxer) buildTrak(isVideo bool) []byte {
 
 func (m *Muxer) buildTkhd(trackID, duration uint32, isVideo bool) []byte {
 	buf := make([]byte, 80)
-	putU32(buf[0:4], 0)           // creation time
-	putU32(buf[4:8], 0)           // modification time
+	putU32(buf[0:4], 0) // creation time
+	putU32(buf[4:8], 0) // modification time
 	putU32(buf[8:12], trackID)
 	// reserved 4 bytes
 	putU32(buf[16:20], duration)
@@ -307,7 +318,7 @@ func (m *Muxer) buildMdia(isVideo bool, timescale uint32, samples []sampleEntry)
 	dur := m.totalDuration(samples)
 	mdhd := make([]byte, 24)
 	putU32(mdhd[8:12], timescale)
-	putU32(mdhd[12:16], uint32(dur))
+	putU32(mdhd[12:16], clampUint64ToUint32(dur))
 	putU32(mdhd[16:20], 0x55C40000) // und language
 	writeFullBox(&buf, [4]byte{'m', 'd', 'h', 'd'}, 0, 0, mdhd)
 
@@ -372,9 +383,9 @@ func (m *Muxer) buildStbl(isVideo bool, samples []sampleEntry) []byte {
 	writeFullBox(&buf, [4]byte{'s', 't', 't', 's'}, 0, 0, stts)
 
 	if isVideo {
-		ctts := buildCtts(samples)
+		ctts, cttsVersion := buildCtts(samples)
 		if ctts != nil {
-			writeFullBox(&buf, [4]byte{'c', 't', 't', 's'}, 0, 0, ctts)
+			writeFullBox(&buf, [4]byte{'c', 't', 't', 's'}, cttsVersion, 0, ctts)
 		}
 
 		stss := buildStss(samples)
@@ -477,26 +488,26 @@ func buildEsds(asc []byte, sampleRate uint32) []byte {
 
 	// ES_Descriptor
 	ascLen := len(asc)
-	decConfigLen := 13 + 2 + ascLen
-	esLen := 3 + 2 + decConfigLen + 2 + 1
+	decConfigLen := 13 + 1 + descriptorLengthWidth(ascLen) + ascLen
+	esLen := 3 + 1 + descriptorLengthWidth(decConfigLen) + decConfigLen + 3
 
-	buf.WriteByte(0x03)              // ES_DescrTag
-	buf.WriteByte(byte(esLen))       // length
-	putU16Buf(&buf, 1)              // ES_ID
-	buf.WriteByte(0)                 // flags
+	buf.WriteByte(0x03) // ES_DescrTag
+	writeDescriptorLength(&buf, esLen)
+	putU16Buf(&buf, 1) // ES_ID
+	buf.WriteByte(0)   // flags
 
 	// DecoderConfigDescriptor
-	buf.WriteByte(0x04)              // DecoderConfigDescrTag
-	buf.WriteByte(byte(decConfigLen))
-	buf.WriteByte(0x40)              // objectTypeIndication (AAC)
-	buf.WriteByte(0x15)              // streamType (audio)
+	buf.WriteByte(0x04) // DecoderConfigDescrTag
+	writeDescriptorLength(&buf, decConfigLen)
+	buf.WriteByte(0x40)                 // objectTypeIndication (AAC)
+	buf.WriteByte(0x15)                 // streamType (audio)
 	buf.Write([]byte{0x00, 0x00, 0x00}) // bufferSizeDB
-	putU32Buf(&buf, 0)              // maxBitrate
-	putU32Buf(&buf, 0)              // avgBitrate
+	putU32Buf(&buf, 0)                  // maxBitrate
+	putU32Buf(&buf, 0)                  // avgBitrate
 
 	// DecoderSpecificInfo
 	buf.WriteByte(0x05)
-	buf.WriteByte(byte(ascLen))
+	writeDescriptorLength(&buf, ascLen)
 	buf.Write(asc)
 
 	// SLConfigDescriptor
@@ -505,6 +516,87 @@ func buildEsds(asc []byte, sampleRate uint32) []byte {
 	buf.WriteByte(0x02)
 
 	return buf.Bytes()
+}
+
+func scaleDurationMillis(milliseconds int64, timescale uint32) uint32 {
+	if milliseconds <= 0 || timescale == 0 {
+		return 0
+	}
+	maxMillis := int64(math.MaxUint32) * 1000 / int64(timescale)
+	if milliseconds > maxMillis {
+		return math.MaxUint32
+	}
+	return uint32(milliseconds * int64(timescale) / 1000) //nolint:gosec // bounded by maxMillis
+}
+
+func scaleCompositionOffsetMillis(milliseconds int64, timescale uint32) int32 {
+	if timescale == 0 {
+		return clampInt64ToInt32(milliseconds)
+	}
+	maxMillis := int64(math.MaxInt32) * 1000 / int64(timescale)
+	minMillis := int64(math.MinInt32) * 1000 / int64(timescale)
+	if milliseconds > maxMillis {
+		return math.MaxInt32
+	}
+	if milliseconds < minMillis {
+		return math.MinInt32
+	}
+	return int32(milliseconds * int64(timescale) / 1000) //nolint:gosec // bounded above
+}
+
+func clampInt64ToInt32(value int64) int32 {
+	if value > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if value < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(value) //nolint:gosec // bounded above
+}
+
+func clampUint64ToUint32(value uint64) uint32 {
+	if value > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(value) //nolint:gosec // bounded above
+}
+
+func scaleDurationUnits(value uint64, sourceTimescale, targetTimescale uint32) uint32 {
+	if value == 0 || sourceTimescale == 0 || targetTimescale == 0 {
+		return 0
+	}
+	source := uint64(sourceTimescale)
+	target := uint64(targetTimescale)
+	whole := value / source
+	if whole > uint64(math.MaxUint32)/target {
+		return math.MaxUint32
+	}
+	scaled := whole * target
+	fraction := (value % source) * target / source
+	if scaled > uint64(math.MaxUint32)-fraction {
+		return math.MaxUint32
+	}
+	return uint32(scaled + fraction) //nolint:gosec // bounded above
+}
+
+func descriptorLengthWidth(value int) int {
+	width := 1
+	for value >= 1<<7 && width < 4 {
+		value >>= 7
+		width++
+	}
+	return width
+}
+
+func writeDescriptorLength(buf *bytes.Buffer, value int) {
+	width := descriptorLengthWidth(value)
+	for shift := (width - 1) * 7; shift >= 0; shift -= 7 {
+		encoded := byte((value >> shift) & 0x7f) //nolint:gosec // masked to seven bits
+		if shift > 0 {
+			encoded |= 0x80
+		}
+		buf.WriteByte(encoded)
+	}
 }
 
 func buildStts(samples []sampleEntry) []byte {
@@ -537,16 +629,19 @@ func buildStts(samples []sampleEntry) []byte {
 	return buf
 }
 
-func buildCtts(samples []sampleEntry) []byte {
+func buildCtts(samples []sampleEntry) ([]byte, uint8) {
 	hasCTS := false
+	version := uint8(0)
 	for _, s := range samples {
 		if s.cts != 0 {
 			hasCTS = true
-			break
+		}
+		if s.cts < 0 {
+			version = 1
 		}
 	}
 	if !hasCTS {
-		return nil
+		return nil, 0
 	}
 
 	type cttsEntry struct {
@@ -570,7 +665,7 @@ func buildCtts(samples []sampleEntry) []byte {
 		putU32(buf[off:off+4], e.count)
 		putU32(buf[off+4:off+8], uint32(e.offset))
 	}
-	return buf
+	return buf, version
 }
 
 func buildStss(samples []sampleEntry) []byte {
@@ -595,9 +690,9 @@ func buildStss(samples []sampleEntry) []byte {
 func buildStsc(sampleCount int) []byte {
 	// One chunk per sample (simplest approach)
 	buf := make([]byte, 4+12)
-	putU32(buf[0:4], 1) // entry count
-	putU32(buf[4:8], 1) // first chunk
-	putU32(buf[8:12], 1) // samples per chunk
+	putU32(buf[0:4], 1)   // entry count
+	putU32(buf[4:8], 1)   // first chunk
+	putU32(buf[8:12], 1)  // samples per chunk
 	putU32(buf[12:16], 1) // sample description index
 	return buf
 }

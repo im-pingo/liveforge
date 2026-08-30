@@ -2,6 +2,7 @@ package gb28181
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 
@@ -24,6 +25,45 @@ func TestModuleSelfTestRunsWithoutExternalDevice(t *testing.T) {
 	if len(report.Checks) < 3 {
 		t.Fatalf("self-test checks = %+v", report.Checks)
 	}
+	pair, err := ports.AllocateBoundUDPPair("udp4", net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("successful self-test did not close/free its port pair: %v", err)
+	}
+	closeBoundUDPPair(pair)
+	ports.Free(pair.RTPPort, pair.RTCPPort)
+}
+
+func TestModuleSelfTestFailsPortCheckWhenConfiguredPairIsExternallyOccupied(t *testing.T) {
+	portRange := freeGBLabRTPPortRange(t, 1)
+	loopback := net.ParseIP("127.0.0.1")
+	rtpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: portRange[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rtpConn.Close()
+	rtcpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: portRange[1]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rtcpConn.Close()
+	ports, err := portalloc.New(portRange[0], portRange[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := (&Module{handler: &handler{ports: ports}}).RunSelfTest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range report.Checks {
+		if check.Name == "rtp_port_allocation" {
+			if check.Passed {
+				t.Fatalf("occupied GB28181 port check passed: %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("self-test omitted rtp_port_allocation: %+v", report.Checks)
 }
 
 func TestModuleSelfTestCoversLocalGBSignalingAndMediaLifecycle(t *testing.T) {

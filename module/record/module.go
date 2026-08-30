@@ -26,6 +26,7 @@ type Module struct {
 	closing   bool
 	closeOnce sync.Once
 	closeDone chan struct{}
+	closeBy   time.Time
 	closeErr  error
 }
 
@@ -119,14 +120,37 @@ func (m *Module) Hooks() []core.HookRegistration {
 // Close stops all active recording sessions.
 func (m *Module) Close() error {
 	m.closeOnce.Do(func() {
-		m.closeErr = m.close()
-		close(m.closeDone)
+		m.closeBy = time.Now().Add(m.drainTimeout())
+		go func() {
+			m.closeErr = m.close(m.closeBy)
+			close(m.closeDone)
+		}()
 	})
-	<-m.closeDone
-	return m.closeErr
+	select {
+	case <-m.closeDone:
+		return m.closeErr
+	default:
+	}
+	remaining := time.Until(m.closeBy)
+	if remaining <= 0 {
+		return fmt.Errorf("record: drain timeout before close completed")
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-m.closeDone:
+		return m.closeErr
+	case <-timer.C:
+		select {
+		case <-m.closeDone:
+			return m.closeErr
+		default:
+			return fmt.Errorf("record: drain timeout before close completed")
+		}
+	}
 }
 
-func (m *Module) close() error {
+func (m *Module) close(deadline time.Time) error {
 	m.mu.Lock()
 	m.closing = true
 	sessions := make([]*RecordSession, 0, len(m.sessions))
@@ -137,7 +161,6 @@ func (m *Module) close() error {
 	m.sessions = make(map[string]*RecordSession)
 	m.mu.Unlock()
 
-	deadline := time.Now().Add(m.drainTimeout())
 	pending := 0
 	for _, session := range sessions {
 		if !session.WaitUntil(deadline) {

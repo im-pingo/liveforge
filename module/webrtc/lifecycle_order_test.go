@@ -2,6 +2,9 @@ package webrtc
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +19,52 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
+
+func TestSessionLifecycleRejectsEventBusBackpressureWithoutStarting(t *testing.T) {
+	bus := core.NewEventBus()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	bus.Register(core.HookRegistration{Event: core.EventPublish, Mode: core.HookAsync, Consumer: "blocked", Handler: func(*core.EventContext) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	}})
+	bus.Register(core.HookRegistration{Event: core.EventPublishStop, Mode: core.HookAsync, Consumer: "blocked", Handler: func(*core.EventContext) error {
+		return nil
+	}})
+	ctx := &core.EventContext{StreamKey: "live/backpressure", PublisherID: "publisher-1"}
+	if err := bus.EmitAsync(core.EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	for attempts := 0; ; attempts++ {
+		err := bus.EmitAsync(core.EventPublish, ctx)
+		if errors.Is(err, core.ErrAsyncBackpressure) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempts > 32 {
+			t.Fatal("event bus lane did not reach its bounded capacity")
+		}
+	}
+
+	session := &Session{}
+	if session.startLifecycle(bus, core.EventPublish, ctx) {
+		t.Fatal("session marked lifecycle started after EventBus rejected admission")
+	}
+	if session.stopLifecycle(bus, core.EventPublishStop, ctx) {
+		t.Fatal("session emitted stop for a rejected lifecycle start")
+	}
+	close(release)
+	drainCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Drain(drainCtx); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type blockingOfferBody struct {
 	entered chan struct{}
@@ -392,11 +441,22 @@ func TestWHEPLifecycleUsesSubscriberGenerationAndDeleteCleansUp(t *testing.T) {
 	if start.SubscriberID != sessionID {
 		t.Fatalf("WHEP start subscriber ID = %q, want %q", start.SubscriberID, sessionID)
 	}
+	startup := stream.StartupSnapshot()
+	if start.StreamInstanceID != startup.StreamInstanceID || start.PublisherGeneration != startup.Generation || start.PublisherID != startup.PublisherID {
+		t.Fatalf("WHEP start source ownership = (%d,%d,%q), want (%d,%d,%q)",
+			start.StreamInstanceID, start.PublisherGeneration, start.PublisherID,
+			startup.StreamInstanceID, startup.Generation, startup.PublisherID)
+	}
 
 	deleteWebRTCSession(t, m, sessionID, http.StatusOK)
 	stop := receiveLifecycleContext(t, stops, "WHEP stop")
 	if stop.SubscriberID != sessionID {
 		t.Fatalf("WHEP stop subscriber ID = %q, want %q", stop.SubscriberID, sessionID)
+	}
+	if stop.StreamInstanceID != startup.StreamInstanceID || stop.PublisherGeneration != startup.Generation || stop.PublisherID != startup.PublisherID {
+		t.Fatalf("WHEP stop source ownership = (%d,%d,%q), want (%d,%d,%q)",
+			stop.StreamInstanceID, stop.PublisherGeneration, stop.PublisherID,
+			startup.StreamInstanceID, startup.Generation, startup.PublisherID)
 	}
 	deleteWebRTCSession(t, m, sessionID, http.StatusNotFound)
 	assertNoLifecycleContext(t, stops, "duplicate WHEP stop")
@@ -406,6 +466,79 @@ func TestWHEPLifecycleUsesSubscriberGenerationAndDeleteCleansUp(t *testing.T) {
 	if got := server.ConnectionCount(); got != 0 {
 		t.Fatalf("WHEP connection count = %d, want 0", got)
 	}
+}
+
+func TestWHEPGenerationTerminationClosesSessionAndRetainsTerminalStatus(t *testing.T) {
+	m, server := newTestModule(t)
+	stream, err := server.StreamHub().GetOrCreate("live/generation-ended")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id:   "source",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64},
+	))
+	stops := make(chan *core.EventContext, 1)
+	server.GetEventBus().Register(core.HookRegistration{
+		Event: core.EventSubscribeStop,
+		Mode:  core.HookAsync,
+		Handler: func(ctx *core.EventContext) error {
+			stops <- ctx
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/generation-ended", bytes.NewBufferString(createMinimalOffer(t)))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("WHEP status = %d, want 201: %s", rr.Code, rr.Body.String())
+	}
+	sessionID := strings.TrimPrefix(rr.Header().Get("Location"), "/webrtc/session/")
+	if sessionID == "" {
+		t.Fatal("WHEP response did not contain a session ID")
+	}
+
+	stream.RemovePublisher()
+	deadline := time.Now().Add(3 * time.Second)
+	for (sessionCount(m) != 0 || server.ConnectionCount() != 0 || stream.Subscribers()["webrtc"] != 0) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := sessionCount(m); got != 0 {
+		t.Fatalf("session count after generation end = %d, want 0", got)
+	}
+	if got := server.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count after generation end = %d, want 0", got)
+	}
+	if got := stream.Subscribers()["webrtc"]; got != 0 {
+		t.Fatalf("subscriber count after generation end = %d, want 0", got)
+	}
+	stop := receiveLifecycleContext(t, stops, "WHEP generation terminal stop")
+	if stop.SubscriberID != sessionID {
+		t.Fatalf("terminal subscriber ID = %q, want %q", stop.SubscriberID, sessionID)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/webrtc/session/"+sessionID+"/status", nil)
+	statusRR := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(statusRR, statusReq)
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("terminal status response = %d, want 200: %s", statusRR.Code, statusRR.Body.String())
+	}
+	var response sessionStatusResponse
+	if err := json.Unmarshal(statusRR.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Feed.State != WHEPFeedGenerationEnded {
+		t.Fatalf("terminal feed state = %q, want %q", response.Feed.State, WHEPFeedGenerationEnded)
+	}
+	deleteWebRTCSession(t, m, sessionID, http.StatusNotFound)
 }
 
 func deleteWebRTCSession(t *testing.T, m *Module, sessionID string, wantStatus int) {

@@ -105,7 +105,7 @@ paths:
       tags: [server]
       operationId: getRuntimeConfigDocument
       summary: Read the complete effective and desired configuration document
-      description: Sensitive values are redacted. Desired document text is retained from the accepted source so comments and unmapped fields remain editable. The writable flag describes whether the selected runtime source supports POST apply.
+      description: Sensitive values are redacted. Valid absolute hierarchical URL scalars are recognized by value even under unmapped non-URL-shaped keys; safe scheme/host/port identity remains visible while non-root paths, userinfo, query, and fragment are opaque. URL-shaped keys retain TURN/opaque, malformed/hostless fail-closed, and plain-address handling; ordinary strings, durations, IDs, and bare host/address values remain unchanged outside that key policy. Desired document text is retained from the accepted source so comments and unmapped fields remain editable. The writable flag describes whether the selected runtime source supports POST apply.
       x-liveforge-permission: config:read
       responses:
         '200': {description: Configuration documents, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigDocumentResponse'}}}}
@@ -128,6 +128,7 @@ paths:
       tags: [server]
       operationId: validateRuntimeConfigDocument
       summary: Validate a complete YAML or JSON configuration document
+      description: Viewer-accessible validation treats environment references literally without reading the server process environment, accepts exactly one YAML/JSON document, and rejects unknown root or nested typed fields.
       x-liveforge-permission: config:read
       requestBody:
         required: true
@@ -145,7 +146,7 @@ paths:
       tags: [server]
       operationId: applyRuntimeConfigDocument
       summary: Persist a complete document to a writable runtime source and schedule refresh
-      description: The source write completes and is serialized with source loads before the 202 response; parsing, module application, and publication remain on the background manager worker. Listener, module, TLS, port, and audio-codec topology changes remain restart-required.
+      description: The source write completes and is serialized with source loads before the 202 response; parsing, module application, and publication remain on the background manager worker. Apply and trusted runtime source loading remain permissive for source fields not mapped by the typed runtime struct. Consul KV PUT rejects redirects and never forwards X-Consul-Token. Listener, module, TLS, port, and audio-codec topology changes remain restart-required.
       x-liveforge-permission: config:reload
       requestBody:
         required: true
@@ -153,7 +154,7 @@ paths:
           application/yaml: {schema: {$ref: '#/components/schemas/ConfigYAMLDocument'}}
           application/json: {schema: {$ref: '#/components/schemas/ConfigJSONDocumentRequest'}}
       responses:
-        '202': {description: Document written and refresh scheduled, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduledResponse'}}}}
+        '202': {description: Document written and refresh scheduled, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigApplyResponse'}}}}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -298,7 +299,7 @@ paths:
       tags: [sipgateway]
       operationId: startSIPGatewayLabSession
       summary: Start a persistent local fake SIP device
-      description: Publish mode sends real H.264 plus PCMA or PCMU RTP/RTCP into LiveForge receivers. Receive mode accepts LiveForge's outbound INVITE, leaves the selected source stream unchanged, and sends periodic per-track receiver reports. No external PBX is required.
+      description: Publish mode sends real H.264 plus PCMA or PCMU RTP/RTCP into LiveForge receivers. Receive mode accepts LiveForge's outbound INVITE, leaves the selected source stream unchanged, sends periodic per-track receiver reports, and uses the requested PCMA/PCMU target codec through the optional configured audio transcoder when the source codec differs. The configured active lab-session ceiling is enforced atomically; terminal history does not consume it and an exhausted ceiling returns 429. No external PBX is required.
       x-liveforge-permission: sip:calls
       requestBody:
         required: true
@@ -309,7 +310,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
-        '429': {$ref: '#/components/responses/RateLimited'}
+        '429': {$ref: '#/components/responses/ProtocolLabCapacity'}
         '502': {$ref: '#/components/responses/BadGateway'}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/sipgateway/lab/sessions/{labSessionId}:
@@ -400,15 +401,25 @@ paths:
     get:
       tags: [recording]
       operationId: getRecording
-      summary: Read recording metadata
+      summary: Read recording metadata or explicitly play/download the full recording ID
+      description: Without action, an existing exact recordingPath returns metadata. Set action=play or action=download to address that full ID unambiguously, including an ID whose final segment is play or download. Existing exact IDs take precedence over the backward-compatible suffix action forms. Media actions acquire the global connection budget before opening the recording and apply a 10-second write deadline; exhaustion returns 503. Only completed recordings are served; active or failed recordings return 409 with a JSON error and no media body.
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: Explicit media action for the complete recordingPath.
+          schema: {type: string, enum: [play, download]}
       x-liveforge-permission: recordings:read
       responses:
-        '200': {description: Recording metadata, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingResponse'}}}}
+        '200': {description: Recording metadata or complete media, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingResponse'}}, application/octet-stream: {schema: {type: string, format: binary}}, video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
+        '206': {description: Requested media byte range, content: {application/octet-stream: {schema: {type: string, format: binary}}, video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
+        '304': {description: Action response not modified}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
-        '409': {$ref: '#/components/responses/Conflict'}
+        '409': {$ref: '#/components/responses/RecordingNotReady'}
+        '416': {description: Requested action range is not satisfiable}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
         '503': {$ref: '#/components/responses/Unavailable'}
@@ -416,6 +427,7 @@ paths:
       tags: [recording]
       operationId: deleteRecording
       summary: Delete a completed recording
+      description: Always treats the complete recordingPath as the ID, even when its final segment is play or download. Local cleanup removes exact owned sidecars and metadata before the primary; a cleanup error leaves the primary available for retry.
       x-liveforge-permission: recordings:delete
       responses:
         '200': {$ref: '#/components/responses/Success'}
@@ -434,6 +446,7 @@ paths:
       tags: [recording]
       operationId: downloadRecording
       summary: Download a completed recording with HTTP range support
+      description: Backward-compatible suffix action used only when no exact recording ID includes the final /download segment. Use action=download on /api/v1/recordings/{recordingPath} for an unambiguous full-ID request. Only completed recordings are served; active or failed recordings return 409 with a JSON error and no media body. The media response acquires the global connection budget before opening the recording and applies a 10-second write deadline; exhaustion returns 503.
       x-liveforge-permission: recordings:read
       responses:
         '200': {description: Complete recording, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
@@ -443,7 +456,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
-        '409': {$ref: '#/components/responses/Conflict'}
+        '409': {$ref: '#/components/responses/RecordingNotReady'}
         '416': {description: Requested range is not satisfiable}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -455,7 +468,7 @@ paths:
       tags: [recording]
       operationId: playRecording
       summary: Stream a completed recording inline with HTTP range support
-      description: Returns the recording with a media MIME type and Content-Disposition inline. The endpoint accepts HTTP Range requests for browser seeking; active or not-ready recordings return 409.
+      description: Backward-compatible suffix action used only when no exact recording ID includes the final /play segment. Use action=play on /api/v1/recordings/{recordingPath} for an unambiguous full-ID request. Returns the recording with a media MIME type and Content-Disposition inline. The endpoint accepts HTTP Range requests for browser seeking; active or failed recordings return 409 with a JSON error and no media body. The media response acquires the global connection budget before opening the recording and applies a 10-second write deadline; exhaustion returns 503.
       x-liveforge-permission: recordings:read
       responses:
         '200': {description: Complete recording media, content: {video/mp4: {schema: {type: string, format: binary}}, video/x-flv: {schema: {type: string, format: binary}}, video/mp2t: {schema: {type: string, format: binary}}}}
@@ -465,7 +478,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
-        '409': {$ref: '#/components/responses/Conflict'}
+        '409': {$ref: '#/components/responses/RecordingNotReady'}
         '416': {description: Requested range is not satisfiable}
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/InternalError'}
@@ -506,15 +519,16 @@ paths:
       tags: [dvr]
       operationId: getDVRPlaylist
       summary: Read a DVR HLS playlist
-      description: The configured DVR media listener authorizes this request through synchronous subscribe hooks. It returns non-credentialed CORS headers for a split-port browser Console.
+      description: The configured DVR media listener authorizes this request through synchronous subscribe hooks. It returns non-credentialed CORS headers for a split-port browser Console. The key may contain nested slash-separated stream-key segments; each segment is escaped independently in playlist URIs. Audio-only sessions publish a playlist as soon as audio reaches the segment duration and do not wait for a video keyframe.
       parameters:
         - {name: app, in: path, required: true, schema: {type: string}}
-        - {name: key, in: path, required: true, schema: {type: string}}
+        - {name: key, in: path, required: true, description: URL-decoded nested stream-key suffix; each path segment is escaped independently. Encoded separators, dot segments, and backslashes are rejected., schema: {type: string}}
       responses:
         '200': {description: HLS playlist, content: {application/vnd.apple.mpegurl: {schema: {type: string}}}}
         '401': {description: Subscribe authentication required}
         '403': {description: Subscribe authorization denied}
         '404': {description: Session or playlist not found}
+        '503': {description: Global connection limit reached}
   /dvr/{app}/{key}/{filename}:
     servers:
       - url: http://127.0.0.1:8070
@@ -523,16 +537,17 @@ paths:
       tags: [dvr]
       operationId: getDVRSegment
       summary: Read a DVR HLS segment
-      description: The configured DVR media listener authorizes this request through synchronous subscribe hooks and returns non-credentialed CORS headers for a split-port browser Console.
+      description: The configured DVR media listener authorizes this request through synchronous subscribe hooks and returns non-credentialed CORS headers for a split-port browser Console. Nested stream-key segments remain part of the key, while `?`, `#`, and `%` are escaped per segment so they cannot change the resource boundary.
       parameters:
         - {name: app, in: path, required: true, schema: {type: string}}
-        - {name: key, in: path, required: true, schema: {type: string}}
+        - {name: key, in: path, required: true, description: URL-decoded nested stream-key suffix; each path segment is escaped independently. Encoded separators, dot segments, and backslashes are rejected., schema: {type: string}}
         - {name: filename, in: path, required: true, schema: {type: string}}
       responses:
         '200': {description: MPEG-TS segment, content: {video/mp2t: {schema: {type: string, format: binary}}}}
         '401': {description: Subscribe authentication required}
         '403': {description: Subscribe authorization denied}
         '404': {description: Segment not found}
+        '503': {description: Global connection limit reached}
   /api/v1/gb28181/devices:
     get:
       tags: [gb28181]
@@ -729,7 +744,7 @@ paths:
       tags: [gb28181]
       operationId: startGB28181LabSession
       summary: Start a persistent local fake GB28181 device
-      description: Publish mode performs REGISTER, Keepalive, Catalog, accepts LiveForge's server-initiated INVITE/ACK/BYE, and sends deterministic H.264 plus G.711A in PS/RTP with RTCP to LiveForge's receiver. Receive mode validates an H.264/G.711A source and admits its subscriber before activation, then uses a module-owned outbound session to send PS/RTP/RTCP to the fake device. Subscriber admission rejection fails startup synchronously; a later outbound media failure transitions the Lab to failed with a bounded redacted last_error and releases its signaling, session, subscriber, sockets, and ports. No external GB28181 platform is required.
+      description: Publish mode performs REGISTER, Keepalive, Catalog, accepts LiveForge's server-initiated INVITE/ACK/BYE, and sends deterministic H.264 plus G.711A in PS/RTP with RTCP to LiveForge's receiver. Receive mode validates H.264 plus direct G.711A or audio that the tagged runtime can convert to G.711A and admits its subscriber before activation, then uses a module-owned outbound session with direct H.264 and an independent generation-bound target-audio reader to send PS/RTP/RTCP to the fake device; unavailable conversion fails before signaling. The configured active lab-session ceiling is enforced atomically; terminal history does not consume it and an exhausted ceiling returns 429. Subscriber admission rejection fails startup synchronously; a later outbound media failure transitions the Lab to failed with a bounded redacted last_error and releases its signaling, session, subscriber, sockets, and ports. No external GB28181 platform is required.
       x-liveforge-permission: gb28181:control
       requestBody:
         required: true
@@ -740,7 +755,7 @@ paths:
         '401': {$ref: '#/components/responses/GBUnauthorized'}
         '403': {$ref: '#/components/responses/GBForbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
-        '429': {$ref: '#/components/responses/GBRateLimited'}
+        '429': {$ref: '#/components/responses/ProtocolLabCapacity'}
         '502': {$ref: '#/components/responses/BadGateway'}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v1/gb28181/lab/sessions/{labSessionId}:
@@ -869,7 +884,7 @@ paths:
       operationId: playWHEP
       summary: Play with a WHEP SDP offer
       security: [{streamBearerAuth: []}, {streamToken: []}, {}]
-      requestBody: {required: true, description: SDP offer body; limited to 1 MiB (1048576 bytes)., content: {application/sdp: {schema: {type: string}}}}
+      requestBody: {required: true, description: SDP offer body; limited to 1 MiB (1048576 bytes). Every source media kind requested by a non-zero receiving m-line must negotiate. Media direction inherits the session-level direction when absent; codecs require an exact rtpmap name on a payload listed by that m-line. Unsupported requested codecs fail with 415, while disabled or non-receiving m-lines are intentionally omitted., content: {application/sdp: {schema: {type: string}}}}
       responses:
         '201': {$ref: '#/components/responses/SDPAnswer'}
         '400': {$ref: '#/components/responses/MediaBadRequest'}
@@ -924,6 +939,25 @@ paths:
       responses:
         '204': {description: CORS preflight accepted}
         '429': {$ref: '#/components/responses/MediaRateLimited'}
+  /webrtc/session/{sessionId}/status:
+    servers:
+      - url: '{scheme}://127.0.0.1:8443'
+        description: Local WebRTC signaling listener; the checked-in sample uses plain HTTP.
+        variables:
+          scheme: {default: http, enum: [http, https], description: Select https when WebRTC TLS is enabled.}
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    get:
+      tags: [webrtc]
+      operationId: getWebRTCSessionStatus
+      summary: Read WHEP media startup diagnostics
+      description: Returns the generation, cursor, startup mode, media counters, actual RTP packet/byte and received RTCP packet counters, keyframe gate, and bounded terminal error for an active or recently closed WHEP session. Closed status is retained in a bounded short-lived tombstone.
+      security: []
+      responses:
+        '200': {description: WHEP feed status, content: {application/json: {schema: {$ref: '#/components/schemas/WHEPSessionStatusResponse'}}}}
+        '404': {$ref: '#/components/responses/MediaNotFound'}
+        '409': {description: Session does not own a WHEP feed}
+        '429': {$ref: '#/components/responses/MediaRateLimited'}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque management token}
@@ -946,6 +980,8 @@ components:
     Forbidden: {description: Principal lacks the required permission, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
     NotFound: {description: Resource not found, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
     Conflict: {description: Resource state conflicts with the operation, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    RecordingNotReady: {description: Recording is active or failed and has no downloadable media; the response is JSON and never contains the media body, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+    ProtocolLabCapacity: {description: Configured active SIP or GB28181 protocol-lab session ceiling reached; terminal history is not counted, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
     RateLimited: {description: Per-IP request limit exceeded, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
     Unprocessable: {description: Valid JSON but missing target data or a compatible codec, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
     BadGateway: {description: Upstream SIP call setup failed; internal details are redacted, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
@@ -986,10 +1022,16 @@ components:
       allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: healthy}}}}}]
     ScheduledResponse:
       allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: scheduled}}}}}]
+    ConfigApplyResponse:
+      allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: written_and_refresh_scheduled}}}}}]
     ServerInfo:
       type: object
-      required: [version, uptime_sec, modules]
-      properties: {version: {type: string}, uptime_sec: {type: integer, format: int64}, modules: {type: array, items: {type: string}}, endpoints: {type: object, additionalProperties: {type: string}}}
+      required: [version, uptime_sec, modules, capabilities]
+      properties: {version: {type: string}, uptime_sec: {type: integer, format: int64}, modules: {type: array, items: {type: string}}, endpoints: {type: object, additionalProperties: {type: string}, description: Bound host:port values for listener-backed endpoints when initialized; otherwise configured values.}, endpoint_schemes: {type: object, additionalProperties: {type: string, enum: [http, https]}, description: Transport scheme for HTTP/WebRTC/DVR endpoints; the DVR value is required to build media URLs when its listener is TLS-enabled.}, capabilities: {$ref: '#/components/schemas/ServerCapabilities'}}
+    ServerCapabilities:
+      type: object
+      required: [audio_transcoding]
+      properties: {audio_transcoding: {type: boolean, description: True only when audio transcoding is configured and this process can transcode both G.711 A-law and mu-law to AAC.}}
     ServerInfoResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ServerInfo'}}}]}
     ServerStats: {type: object, required: [streams, connections], properties: {streams: {type: integer}, connections: {type: integer, format: int64}}}
     ServerStatsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ServerStats'}}}]}
@@ -1030,7 +1072,7 @@ components:
         desired: {type: object, additionalProperties: true}
         effective_document: {type: string}
         desired_document: {type: string}
-        source_details: {type: object, additionalProperties: true, description: Credentials are omitted.}
+        source_details: {type: object, additionalProperties: true, description: Credentials are omitted; URL userinfo/query/fragment and non-root paths are opaque while safe host/address identity remains visible. Consul KV GET and PUT reject redirects and never forward X-Consul-Token.}
         schema: {type: object, additionalProperties: true, description: The complete versioned docs/config/config.schema.json object.}
         writable: {type: boolean}
     ConfigDocumentResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ConfigDocument'}}}]}
@@ -1057,8 +1099,8 @@ components:
       properties: {legacy_bearer_configured: {type: boolean}, tokens: {type: array, items: {type: object, properties: {name: {type: string}, role: {type: string}}}}, console_configured: {type: boolean}, console_role: {type: string}, audit_enabled: {type: boolean}, audit_entries: {type: integer}, audit_events_total: {type: integer, format: int64}}
     SecurityStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SecurityStatus'}}}]}
     SIPDialRequest: {type: object, additionalProperties: false, required: [target_uri, stream_key], properties: {target_uri: {type: string}, stream_key: {type: string}}}
-    SIPLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, stream_key, codec], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string, maxLength: 128, pattern: '^[A-Za-z0-9._-]+$', description: 'Letters, digits, hyphens, underscores, and periods only.'}, stream_key: {type: string, maxLength: 256, pattern: '^(?!/)(?!.*\/$)(?!.*//)(?!\.{1,2}(?:/|$))(?!.*\/\.{1,2}(?:/|$))[\x21-\x7E]+$', description: 'Printable ASCII without whitespace; slash-separated segments must be non-empty and cannot be dot or dot-dot segments.'}, codec: {type: string, enum: [PCMA, PCMU]}}}
-    ProtocolLabPlayback: {type: object, required: [stream_key, available], description: Playback paths URL-escape each stream-key segment; absolute RTMP/RTSP URLs use bound listener discovery and normalize wildcard bind hosts to the management request host., properties: {stream_key: {type: string}, available: {type: boolean}, rtmp: {type: string}, rtsp: {type: string}, http_flv: {type: string}, ws_flv: {type: string}, http_ts: {type: string}, fmp4: {type: string}, hls: {type: string}, dash: {type: string}, whep: {type: string}, whep_live: {type: string}}}
+    SIPLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, stream_key, codec], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string, maxLength: 128, pattern: '^[A-Za-z0-9._-]+$', description: 'Letters, digits, hyphens, underscores, and periods only.'}, stream_key: {type: string, maxLength: 256, pattern: '^(?!/)(?!.*\/$)(?!.*//)(?!\.{1,2}(?:/|$))(?!.*\/\.{1,2}(?:/|$))[\x21-\x7E]+$', description: 'Printable ASCII without whitespace; slash-separated segments must be non-empty and cannot be dot or dot-dot segments.'}, codec: {type: string, enum: [PCMA, PCMU], description: 'Publish source codec or receive target codec. Receive requires direct compatibility or the configured audiocodec runtime.'}}}
+    ProtocolLabPlayback: {type: object, required: [stream_key, available], description: Playback paths URL-escape each stream-key segment; absolute RTMP/RTSP URLs use bound listener discovery and normalize wildcard bind hosts to the management request host. WHEP and WHEP Live use mode=live; WHEP Realtime uses mode=realtime., properties: {stream_key: {type: string}, available: {type: boolean}, rtmp: {type: string}, rtsp: {type: string}, http_flv: {type: string}, ws_flv: {type: string}, http_ts: {type: string}, fmp4: {type: string}, hls: {type: string}, dash: {type: string}, whep: {type: string}, whep_live: {type: string}, whep_realtime: {type: string}}}
     SIPLabSession: {type: object, properties: {id: {type: string}, identity: {type: string}, device_id: {type: string}, stream_key: {type: string}, mode: {type: string, enum: [publish, receive]}, state: {type: string, enum: [starting, active, contract, stopped, failed]}, direction: {type: string, enum: [inbound, outbound]}, codec: {type: string}, last_error: {type: string, description: Bounded redacted setup or terminal error}, rtp_packets_sent: {type: integer, format: int64}, rtp_packets_received: {type: integer, format: int64}, audio_rtp_packets_sent: {type: integer, format: int64}, audio_rtp_packets_received: {type: integer, format: int64}, video_rtp_packets_sent: {type: integer, format: int64}, video_rtp_packets_received: {type: integer, format: int64}, rtp_bytes_sent: {type: integer, format: int64}, rtp_bytes_received: {type: integer, format: int64}, rtcp_packets_sent: {type: integer, format: int64}, rtcp_packets_received: {type: integer, format: int64}, started_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}, last_media_at: {type: string, format: date-time}, stopped_at: {type: string, format: date-time}}}
     SIPLabSessionView: {type: object, required: [session, playback], properties: {session: {$ref: '#/components/schemas/SIPLabSession'}, playback: {$ref: '#/components/schemas/ProtocolLabPlayback'}}}
     SIPLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/SIPLabSessionView'}}}}}}]}
@@ -1100,7 +1142,7 @@ components:
     ClusterStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/ClusterStatus'}}}]}
     Recording:
       type: object
-      properties: {id: {type: string}, stream_key: {type: string}, format: {type: string, enum: [flv, fmp4, mp4, ts, hls]}, state: {type: string}, size_bytes: {type: integer, format: int64}, started_at: {type: string, format: date-time}, completed_at: {type: string, format: date-time}, duration_sec: {type: number}, error: {type: string}}
+      properties: {id: {type: string}, stream_key: {type: string}, format: {type: string, enum: [flv, fmp4, mp4, ts, hls]}, state: {type: string, enum: [active, completed, failed]}, size_bytes: {type: integer, format: int64}, started_at: {type: string, format: date-time}, completed_at: {type: string, format: date-time}, duration_sec: {type: number}, error: {type: string}}
     StorageHealth: {type: object, properties: {backend: {type: string}, root: {type: string}, healthy: {type: boolean}, low_space: {type: boolean}, total_bytes: {type: integer, format: int64}, available_bytes: {type: integer, format: int64}, error: {type: string}}}
     RecordingSession: {type: object, properties: {stream_key: {type: string}, recording_id: {type: string}, state: {type: string}, started_at: {type: string, format: date-time}, completed_at: {type: string, format: date-time}, duration_sec: {type: number}, bytes: {type: integer, format: int64}, write_retries: {type: integer, format: int64}, last_error: {type: string}}}
     RecordingMetrics: {type: object, properties: {files_completed: {type: integer}, files_failed: {type: integer}, write_retries: {type: integer}, write_failures: {type: integer}, files_deleted: {type: integer}, bytes_written: {type: integer}, storage_errors: {type: integer}}}
@@ -1136,3 +1178,5 @@ components:
     GBLabSessionView: {type: object, required: [session, playback], properties: {session: {$ref: '#/components/schemas/GBLabSession'}, playback: {$ref: '#/components/schemas/ProtocolLabPlayback'}}}
     GBLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/GBLabSessionView'}}}}}}]}
     GBLabSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/GBLabSessionView'}}}]}
+    WHEPFeedStatus: {type: object, required: [generation, cursor, mode, state, first_media_wait_ms, updated_at, expected_video, expected_audio], properties: {generation: {type: integer, format: int64}, cursor: {type: integer, format: int64}, mode: {type: string, enum: [live, realtime]}, state: {type: string, enum: [waiting_keyframe, playing, no_media_input, media_stalled, codec_mismatch, sample_write_failed, generation_ended, closed]}, first_media_at: {type: string, format: date-time, description: Time of the first successfully emitted audio or video sample.}, first_media_wait_ms: {type: integer, format: int64, minimum: 0, description: Stable delay from feed status creation to the first successfully emitted audio or video sample; zero before the first sample.}, last_video_at: {type: string, format: date-time, description: Last successfully emitted video sample for this feed.}, last_audio_at: {type: string, format: date-time, description: Last successfully emitted audio sample for this feed.}, updated_at: {type: string, format: date-time}, expected_video: {type: boolean}, expected_audio: {type: boolean}, video_frames: {type: integer, format: int64}, audio_frames: {type: integer, format: int64}, dropped_video: {type: integer, format: int64, description: Dropped frames for the negotiated video track only.}, dropped_audio: {type: integer, format: int64, description: Dropped frames for the negotiated audio track only.}, source_overwrites: {type: integer, format: int64, description: Source-ring positions lost during overwrite recovery; mixed source positions are not classified as video or audio drops.}, rtp_packets_sent: {type: integer, format: int64, description: RTP packets successfully written by the PeerConnection interceptor for this feed; session close captures one final monotonic snapshot.}, rtp_bytes_sent: {type: integer, format: int64, description: RTP header plus payload bytes successfully written for this feed; session close captures one final monotonic snapshot.}, rtcp_packets_received: {type: integer, format: int64, description: Valid RTCP packets read by the outbound track sender; session close captures one final monotonic snapshot.}, last_error: {type: string, description: Bounded terminal media error}}}
+    WHEPSessionStatusResponse: {type: object, required: [session_id, stream_key, role, feed], properties: {session_id: {type: string}, stream_key: {type: string}, role: {type: string, enum: [whep]}, feed: {$ref: '#/components/schemas/WHEPFeedStatus'}}}

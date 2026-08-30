@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/im-pingo/liveforge/module/dvr"
 	"github.com/im-pingo/liveforge/module/record"
 )
+
+const recordingMediaWriteTimeout = 10 * time.Second
 
 func (h *Handlers) recordingProvider() (record.RecordingProvider, bool) {
 	module := h.server.ModuleByName("record")
@@ -48,6 +51,33 @@ func (h *Handlers) handleRecordingStatus(w http.ResponseWriter, r *http.Request)
 
 func (h *Handlers) handleRecordingRoute(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("recording_path")
+	r.SetPathValue("id", id)
+	if r.Method == http.MethodDelete {
+		h.handleRecording(w, r)
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("action"))) {
+	case "download":
+		h.handleRecordingDownload(w, r)
+		return
+	case "play":
+		h.handleRecordingPlay(w, r)
+		return
+	}
+	provider, ok := h.recordingProvider()
+	if !ok {
+		h.handleRecording(w, r)
+		return
+	}
+	info, err := provider.Recording(r.Context(), id)
+	if err == nil {
+		writeJSON(w, http.StatusOK, info)
+		return
+	}
+	if !errors.Is(err, record.ErrRecordingNotFound) {
+		writeRecordingError(w, err)
+		return
+	}
 	if strings.HasSuffix(id, "/download") {
 		r.SetPathValue("id", strings.TrimSuffix(id, "/download"))
 		h.handleRecordingDownload(w, r)
@@ -58,8 +88,7 @@ func (h *Handlers) handleRecordingRoute(w http.ResponseWriter, r *http.Request) 
 		h.handleRecordingPlay(w, r)
 		return
 	}
-	r.SetPathValue("id", id)
-	h.handleRecording(w, r)
+	writeRecordingError(w, err)
 }
 
 func (h *Handlers) handleRecording(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +119,12 @@ func (h *Handlers) handleRecording(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) handleRecordingDownload(w http.ResponseWriter, r *http.Request) {
+	release, ok := h.acquireRecordingMediaConnection(w)
+	if !ok {
+		return
+	}
+	defer release()
+
 	provider, ok := h.recordingProvider()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "recording module unavailable")
@@ -106,6 +141,10 @@ func (h *Handlers) handleRecordingDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer reader.Close()
+	if info.State != record.RecordingCompleted {
+		writeRecordingError(w, record.ErrRecordingNotReady)
+		return
+	}
 	if disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(info.ID)}); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
 	}
@@ -113,10 +152,17 @@ func (h *Handlers) handleRecordingDownload(w http.ResponseWriter, r *http.Reques
 	if modified.IsZero() {
 		modified = info.StartedAt
 	}
+	setRecordingMediaWriteDeadline(w)
 	http.ServeContent(w, r, path.Base(info.ID), modified, reader)
 }
 
 func (h *Handlers) handleRecordingPlay(w http.ResponseWriter, r *http.Request) {
+	release, ok := h.acquireRecordingMediaConnection(w)
+	if !ok {
+		return
+	}
+	defer release()
+
 	provider, ok := h.recordingProvider()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "recording module unavailable")
@@ -145,7 +191,23 @@ func (h *Handlers) handleRecordingPlay(w http.ResponseWriter, r *http.Request) {
 	if modified.IsZero() {
 		modified = info.StartedAt
 	}
+	setRecordingMediaWriteDeadline(w)
 	http.ServeContent(w, r, path.Base(info.ID), modified, reader)
+}
+
+func (h *Handlers) acquireRecordingMediaConnection(w http.ResponseWriter) (func(), bool) {
+	if h.server == nil {
+		return func() {}, true
+	}
+	if !h.server.AcquireConn() {
+		writeError(w, http.StatusServiceUnavailable, "max connections reached")
+		return nil, false
+	}
+	return h.server.ReleaseConn, true
+}
+
+func setRecordingMediaWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(recordingMediaWriteTimeout))
 }
 
 func recordingMediaType(info record.RecordingInfo) string {

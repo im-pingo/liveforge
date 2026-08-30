@@ -17,28 +17,28 @@ import (
 // MediaInfo is stored behind an atomic pointer: the demux goroutine
 // publishes updated snapshots while subscriber goroutines read concurrently.
 type Publisher struct {
-	conn      gosrt.Conn
-	streamKey string
-	id        string
-	hub       *core.StreamHub
-	eventBus  *core.EventBus
-	info      atomic.Pointer[avframe.MediaInfo]
+	conn                gosrt.Conn
+	streamKey           string
+	id                  string
+	hub                 *core.StreamHub
+	eventBus            *core.EventBus
+	info                atomic.Pointer[avframe.MediaInfo]
+	streamInstanceID    uint64
+	publisherGeneration uint64
 }
 
 var publisherSequence atomic.Uint64
 
 // NewPublisher creates a new SRT publisher.
 func NewPublisher(conn gosrt.Conn, streamKey string, hub *core.StreamHub, bus *core.EventBus) *Publisher {
-	id := ""
+	connectionID := fmt.Sprintf("srt-pub-%s-local", streamKey)
 	if conn != nil {
-		id = publisherID(streamKey, conn.SocketId(), conn.PeerSocketId())
-	} else {
-		id = fmt.Sprintf("srt-pub-%s-local-%d", streamKey, publisherSequence.Add(1))
+		connectionID = publisherID(streamKey, conn.SocketId(), conn.PeerSocketId())
 	}
 	p := &Publisher{
 		conn:      conn,
 		streamKey: streamKey,
-		id:        id,
+		id:        fmt.Sprintf("%s-%d", connectionID, publisherSequence.Add(1)),
 		hub:       hub,
 		eventBus:  bus,
 	}
@@ -74,20 +74,28 @@ func (p *Publisher) Run() {
 		slog.Error("set publisher error", "module", "srt", "stream", p.streamKey, "error", err)
 		return
 	}
-	p.eventBus.EmitAsync(core.EventPublish, &core.EventContext{
-		StreamKey:   p.streamKey,
-		PublisherID: p.ID(),
-		Protocol:    "srt",
-		RemoteAddr:  p.conn.RemoteAddr().String(),
-	})
+	startup := stream.StartupSnapshot()
+	p.streamInstanceID = startup.StreamInstanceID
+	p.publisherGeneration = startup.Generation
+	lifecycleCtx := &core.EventContext{
+		StreamKey:           p.streamKey,
+		StreamInstanceID:    p.streamInstanceID,
+		PublisherGeneration: p.publisherGeneration,
+		PublisherID:         p.ID(),
+		Protocol:            "srt",
+		RemoteAddr:          p.conn.RemoteAddr().String(),
+	}
+	if err := p.eventBus.EmitAsync(core.EventPublish, lifecycleCtx); err != nil {
+		stream.RemovePublisherIf(p)
+		slog.Error("publisher lifecycle admission failed", "module", "srt", "stream", p.streamKey, "error", err)
+		return
+	}
 
 	defer func() {
 		stream.RemovePublisherIf(p)
-		p.eventBus.Emit(core.EventPublishStop, &core.EventContext{ //nolint:errcheck
-			StreamKey:   p.streamKey,
-			PublisherID: p.ID(),
-			Protocol:    "srt",
-		})
+		if err := p.eventBus.EmitAsync(core.EventPublishStop, lifecycleCtx); err != nil {
+			slog.Error("publisher terminal lifecycle admission failed", "module", "srt", "stream", p.streamKey, "error", err)
+		}
 	}()
 
 	// Demux MPEG-TS data from SRT connection into AVFrames.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,6 +72,109 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.Stream.RingBufferSize != 1024 {
 		t.Errorf("expected default ring_buffer_size 1024, got %d", cfg.Stream.RingBufferSize)
+	}
+	if cfg.Stream.GOPCacheMaxFrames <= 0 || cfg.Stream.GOPCacheMaxDuration <= 0 || cfg.Stream.GOPCacheMaxBytes <= 0 {
+		t.Fatalf("GOP cache bounds must have positive defaults: frames=%d duration=%s bytes=%d", cfg.Stream.GOPCacheMaxFrames, cfg.Stream.GOPCacheMaxDuration, cfg.Stream.GOPCacheMaxBytes)
+	}
+	if cfg.SIP.Gateway.MaxLabSessions != 16 || cfg.GB28181.MaxLabSessions != 16 {
+		t.Fatalf("expected default protocol lab session ceilings of 16, got SIP=%d GB=%d", cfg.SIP.Gateway.MaxLabSessions, cfg.GB28181.MaxLabSessions)
+	}
+}
+
+func TestLoadConfigGOPCacheBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	doc := "stream:\n  gop_cache_max_frames: 7\n  gop_cache_max_duration: 2s\n  gop_cache_max_bytes: 8192\n"
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Stream.GOPCacheMaxFrames != 7 || cfg.Stream.GOPCacheMaxDuration != 2*time.Second || cfg.Stream.GOPCacheMaxBytes != 8192 {
+		t.Fatalf("loaded GOP bounds = frames=%d duration=%s bytes=%d", cfg.Stream.GOPCacheMaxFrames, cfg.Stream.GOPCacheMaxDuration, cfg.Stream.GOPCacheMaxBytes)
+	}
+}
+
+func TestValidateRejectsNonPositiveRingBufferSize(t *testing.T) {
+	cfg := Defaults()
+	cfg.Stream.RingBufferSize = 0
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "stream.ring_buffer_size") {
+		t.Fatalf("Validate() error = %v, want ring buffer size rejection", err)
+	}
+}
+
+func TestValidateMetricsStreamDetailLimitAllowsZeroAndRejectsNegative(t *testing.T) {
+	zero := Defaults()
+	zero.Metrics.StreamDetailLimit = 0
+	if err := Validate(zero); err != nil {
+		t.Fatalf("Validate() rejected metrics.stream_detail_limit=0: %v", err)
+	}
+
+	negative := Defaults()
+	negative.Metrics.StreamDetailLimit = -1
+	if err := Validate(negative); err == nil || !strings.Contains(err.Error(), "metrics.stream_detail_limit must not be negative") {
+		t.Fatalf("Validate() error = %v, want negative metrics stream detail limit rejection", err)
+	}
+}
+
+func TestValidateRejectsInvalidTrustedProxy(t *testing.T) {
+	cfg := Defaults()
+	cfg.Limits.RateLimit.TrustedProxies = []string{"127.0.0.1", "not-a-network"}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "limits.rate_limit.trusted_proxies[1]") {
+		t.Fatalf("Validate() error = %v, want invalid trusted proxy rejection", err)
+	}
+}
+
+func TestValidateRejectsUnboundedEnabledGOPCache(t *testing.T) {
+	cfg := Defaults()
+	cfg.Stream.GOPCache = true
+	cfg.Stream.GOPCacheMaxFrames = 0
+	cfg.Stream.GOPCacheMaxBytes = 0
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "gop_cache_max_frames or stream.gop_cache_max_bytes") {
+		t.Fatalf("Validate() error = %v, want hard GOP bound rejection", err)
+	}
+}
+
+func TestValidateRecordFormatAndMaxSize(t *testing.T) {
+	for _, format := range []string{"flv", "fmp4", "mp4", "ts", "hls", " HLS "} {
+		cfg := Defaults()
+		cfg.Record.Format = format
+		if err := Validate(cfg); err != nil {
+			t.Errorf("Validate() rejected record format %q: %v", format, err)
+		}
+	}
+
+	for _, maxSize := range []string{"", "0", "0MB", "512KB", "1GB", " 256mb "} {
+		cfg := Defaults()
+		cfg.Record.Segment.MaxSize = maxSize
+		if err := Validate(cfg); err != nil {
+			t.Errorf("Validate() rejected record.segment.max_size %q: %v", maxSize, err)
+		}
+	}
+
+	for _, test := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "format", field: "record.format", value: "webm"},
+		{name: "fractional size", field: "record.segment.max_size", value: "1.5MB"},
+		{name: "negative size", field: "record.segment.max_size", value: "-1MB"},
+		{name: "unknown suffix", field: "record.segment.max_size", value: "1TB"},
+		{name: "overflow size", field: "record.segment.max_size", value: "9223372036854775808B"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Defaults()
+			if test.field == "record.format" {
+				cfg.Record.Format = test.value
+			} else {
+				cfg.Record.Segment.MaxSize = test.value
+			}
+			if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), test.field) {
+				t.Fatalf("Validate() error = %v, want %s rejection", err, test.field)
+			}
+		})
 	}
 }
 
@@ -229,7 +333,9 @@ http_stream:
     container: "ts"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -257,7 +363,9 @@ http_stream:
   listen: ":8080"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -303,7 +411,9 @@ http_stream:
     container: "mpegts"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -320,7 +430,9 @@ http_stream:
     container: "mpeg-ts"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -401,7 +513,9 @@ func TestLoadConfigInvalidPath(t *testing.T) {
 
 func TestLoadConfigInvalidYAML(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "bad.yaml")
-	os.WriteFile(tmpFile, []byte("{{invalid yaml"), 0644)
+	if err := os.WriteFile(tmpFile, []byte("{{invalid yaml"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	_, err := Load(tmpFile)
 	if err == nil {
 		t.Error("expected error for invalid YAML")

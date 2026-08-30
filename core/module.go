@@ -39,13 +39,15 @@ const (
 
 // EventContext carries event data passed to hook handlers.
 type EventContext struct {
-	StreamKey    string
-	PublisherID  string
-	SubscriberID string
-	Protocol     string
-	RemoteAddr   string
-	Params       map[string]string // URL query params (e.g. "token" -> "xxx")
-	Extra        map[string]any
+	StreamKey           string
+	StreamInstanceID    uint64
+	PublisherGeneration uint64
+	PublisherID         string
+	SubscriberID        string
+	Protocol            string
+	RemoteAddr          string
+	Params              map[string]string // URL query params (e.g. "token" -> "xxx")
+	Extra               map[string]any
 }
 
 // EventHandler is a function that handles an event.

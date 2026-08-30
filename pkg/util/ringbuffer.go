@@ -17,10 +17,29 @@ type RingBuffer[T any] struct {
 	mu          sync.Mutex   // protects cond for Read() blocking
 	cond        *sync.Cond   // wakes blocked Read() callers on Write/Close
 	dataMu      sync.RWMutex // protects buf slot access against concurrent read/write
+	testHooks   *ringBufferTestHooks
+}
+
+type ringBufferTestHooks struct {
+	beforeReadSlotLock     func()
+	afterAdvanceCapture    func()
+	writeSlotLockAttempted func(bool)
+}
+
+// RingReadResult binds overwrite metadata to the value returned by one read.
+type RingReadResult[T any] struct {
+	Value       T
+	OK          bool
+	Overwritten int64
 }
 
 // NewRingBuffer creates a new ring buffer with the given capacity.
 func NewRingBuffer[T any](size int) *RingBuffer[T] {
+	if size <= 0 {
+		// Keep the low-level container safe for direct callers. Configuration
+		// validation still rejects this value so production streams fail closed.
+		size = 1
+	}
 	rb := &RingBuffer[T]{
 		buf:    make([]T, size),
 		size:   int64(size),
@@ -41,7 +60,16 @@ func (rb *RingBuffer[T]) Write(val T) {
 	// contents (otherwise a reader could fetch a just-overwritten slot
 	// before the cursor reveals the overwrite, breaking frame ordering).
 	pos := rb.writeCursor.Load()
-	rb.dataMu.Lock()
+	if hooks := rb.testHooks; hooks != nil && hooks.writeSlotLockAttempted != nil {
+		if rb.dataMu.TryLock() {
+			hooks.writeSlotLockAttempted(false)
+		} else {
+			hooks.writeSlotLockAttempted(true)
+			rb.dataMu.Lock()
+		}
+	} else {
+		rb.dataMu.Lock()
+	}
 	rb.buf[pos%rb.size] = val
 	rb.writeCursor.Store(pos + 1)
 	rb.dataMu.Unlock()
@@ -118,7 +146,7 @@ func newRingReader[T any](rb *RingBuffer[T], pos int64) *RingReader[T] {
 type RingReader[T any] struct {
 	rb          *RingBuffer[T]
 	readCursor  atomic.Int64
-	lastSkipped int64
+	lastSkipped atomic.Int64
 	closed      atomic.Bool // per-reader close flag
 	contextMu   sync.Mutex
 	contextDone <-chan struct{}
@@ -128,33 +156,46 @@ type RingReader[T any] struct {
 // Read returns the next value, blocking until data is available.
 // Returns (value, true) on success, or (zero, false) if the buffer or reader is closed and no data remains.
 func (r *RingReader[T]) Read() (T, bool) {
-	return r.readContext(context.Background())
+	result := r.ReadResult()
+	return result.Value, result.OK
 }
 
 // ReadContext returns the next value, blocking until data is available, the
 // reader or buffer is closed, or ctx is cancelled. Unlike Signal, the wait is
 // scoped to this reader and cannot be consumed by another consumer.
 func (r *RingReader[T]) ReadContext(ctx context.Context) (T, bool) {
+	result := r.ReadResultContext(ctx)
+	return result.Value, result.OK
+}
+
+// ReadResult returns the next value and its overwrite metadata, blocking until
+// data is available or the buffer or reader is closed.
+func (r *RingReader[T]) ReadResult() RingReadResult[T] {
+	return r.readResultContext(context.Background())
+}
+
+// ReadResultContext returns the next value and its overwrite metadata,
+// blocking until data is available, the reader or buffer is closed, or ctx is
+// cancelled.
+func (r *RingReader[T]) ReadResultContext(ctx context.Context) RingReadResult[T] {
 	if ctx == nil {
 		panic("nil context")
 	}
-	return r.readContext(ctx)
+	return r.readResultContext(ctx)
 }
 
-func (r *RingReader[T]) readContext(ctx context.Context) (T, bool) {
+func (r *RingReader[T]) readResultContext(ctx context.Context) RingReadResult[T] {
 	if r.closed.Load() || contextCanceled(ctx) {
-		var zero T
-		return zero, false
+		return RingReadResult[T]{}
 	}
-	if val, ok := r.TryRead(); ok {
-		return val, true
+	if result := r.TryReadResult(); result.OK {
+		return result
 	}
 	r.ensureContextWake(ctx)
 
 	for {
 		if r.closed.Load() || contextCanceled(ctx) {
-			var zero T
-			return zero, false
+			return RingReadResult[T]{}
 		}
 		r.rb.mu.Lock()
 		for r.readCursor.Load() >= r.rb.writeCursor.Load() &&
@@ -164,15 +205,13 @@ func (r *RingReader[T]) readContext(ctx context.Context) (T, bool) {
 		r.rb.mu.Unlock()
 
 		if contextCanceled(ctx) {
-			var zero T
-			return zero, false
+			return RingReadResult[T]{}
 		}
-		if val, ok := r.TryRead(); ok {
-			return val, true
+		if result := r.TryReadResult(); result.OK {
+			return result
 		}
 		if r.rb.closed.Load() || r.closed.Load() {
-			var zero T
-			return zero, false
+			return RingReadResult[T]{}
 		}
 	}
 }
@@ -259,24 +298,34 @@ func (r *RingReader[T]) Signal() <-chan struct{} {
 
 // TryRead attempts a non-blocking read. Returns (value, false) if no data available.
 func (r *RingReader[T]) TryRead() (T, bool) {
-	r.lastSkipped = 0
+	result := r.TryReadResult()
+	return result.Value, result.OK
+}
+
+// TryReadResult attempts a non-blocking read and returns overwrite metadata
+// from the same operation as the value.
+func (r *RingReader[T]) TryReadResult() RingReadResult[T] {
+	r.lastSkipped.Store(0)
+	var result RingReadResult[T]
 
 	for {
 		wc := r.rb.writeCursor.Load()
 		readCursor := r.readCursor.Load()
 		if readCursor >= wc {
-			var zero T
-			return zero, false
+			return result
 		}
 
 		// Check if our position was overwritten (reader too slow)
 		oldest := wc - r.rb.size
 		if readCursor < oldest {
-			r.lastSkipped += oldest - readCursor
+			result.Overwritten += oldest - readCursor
 			readCursor = oldest
 			r.readCursor.Store(readCursor)
 		}
 
+		if hooks := r.rb.testHooks; hooks != nil && hooks.beforeReadSlotLock != nil {
+			hooks.beforeReadSlotLock()
+		}
 		r.rb.dataMu.RLock()
 		val := r.rb.buf[readCursor%r.rb.size]
 		// Re-check under the lock: if the writer lapped us between loading
@@ -290,14 +339,35 @@ func (r *RingReader[T]) TryRead() (T, bool) {
 		}
 
 		r.readCursor.Store(readCursor + 1)
-		return val, true
+		result.Value = val
+		result.OK = true
+		r.lastSkipped.Store(result.Overwritten)
+		return result
 	}
 }
 
 // Skipped returns the number of frames skipped in the last TryRead call
 // due to the reader being too slow (ring buffer overwrite).
 func (r *RingReader[T]) Skipped() int64 {
-	return r.lastSkipped
+	return r.lastSkipped.Load()
+}
+
+// AdvanceToLive discards unread positions through a captured write cursor.
+// Values written after that cursor remain available to the reader.
+func (r *RingReader[T]) AdvanceToLive() int64 {
+	r.rb.dataMu.RLock()
+	defer r.rb.dataMu.RUnlock()
+
+	writeCursor := r.rb.writeCursor.Load()
+	if hooks := r.rb.testHooks; hooks != nil && hooks.afterAdvanceCapture != nil {
+		hooks.afterAdvanceCapture()
+	}
+	readCursor := r.readCursor.Load()
+	if readCursor >= writeCursor {
+		return 0
+	}
+	r.readCursor.Store(writeCursor)
+	return writeCursor - readCursor
 }
 
 // Lag returns the fraction of the ring buffer capacity that the reader trails behind the writer.

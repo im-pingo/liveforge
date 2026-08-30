@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -38,6 +39,8 @@ type Server struct {
 	startTime     time.Time
 	connCount     atomic.Int64
 	done          chan struct{}
+	shutdownOnce  sync.Once
+	aliveWG       sync.WaitGroup
 
 	apiMu          sync.RWMutex
 	apiHandlers    map[string]http.Handler
@@ -216,18 +219,35 @@ func (s *Server) Init() error {
 		}
 	}
 
-	go s.aliveLoop()
+	s.aliveWG.Add(1)
+	go func() {
+		defer s.aliveWG.Done()
+		s.aliveLoop()
+	}()
 
 	return nil
 }
 
 // Shutdown stops the alive loop and closes all modules in reverse registration order.
 func (s *Server) Shutdown() {
-	close(s.done)
-	modules := s.attemptedModuleSnapshot()
-	for i := len(modules) - 1; i >= 0; i-- {
-		modules[i].Close() //nolint:errcheck
-	}
+	s.shutdownOnce.Do(func() {
+		close(s.done)
+		s.aliveWG.Wait()
+		modules := s.attemptedModuleSnapshot()
+		for i := len(modules) - 1; i >= 0; i-- {
+			modules[i].Close() //nolint:errcheck
+		}
+
+		timeout := s.Config().Server.DrainTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := s.eventBus.Drain(ctx); err != nil {
+			slog.Error("event bus drain timed out during shutdown", "timeout", timeout, "error", err)
+		}
+	})
 }
 
 // StartTime returns when the server was created.
@@ -282,18 +302,34 @@ func (s *Server) APIHandlers() map[string]http.Handler {
 // AcquireConn increments the connection counter. Returns false if max_connections is exceeded.
 func (s *Server) AcquireConn() bool {
 	max := s.Config().Limits.MaxConnections
-	if max > 0 {
-		if s.connCount.Load() >= int64(max) {
+	if max <= 0 {
+		s.connCount.Add(1)
+		return true
+	}
+
+	limit := int64(max)
+	for {
+		current := s.connCount.Load()
+		if current >= limit {
 			return false
 		}
+		if s.connCount.CompareAndSwap(current, current+1) {
+			return true
+		}
 	}
-	s.connCount.Add(1)
-	return true
 }
 
 // ReleaseConn decrements the connection counter.
 func (s *Server) ReleaseConn() {
-	s.connCount.Add(-1)
+	for {
+		current := s.connCount.Load()
+		if current <= 0 {
+			return
+		}
+		if s.connCount.CompareAndSwap(current, current-1) {
+			return
+		}
+	}
 }
 
 // ConnectionCount returns the current number of active connections.

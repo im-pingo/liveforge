@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,9 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	flvmux "github.com/im-pingo/liveforge/pkg/muxer/flv"
+	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
+	tsmux "github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
 func newTestConfig(dir string) *config.Config {
@@ -294,6 +298,58 @@ func TestRecordSessionDoesNotDrainReplacementGeneration(t *testing.T) {
 	}
 	if got := session.writer.BytesWritten(); got != 0 {
 		t.Fatalf("replacement generation bytes drained = %d, want 0", got)
+	}
+}
+
+func TestRecordSessionStartsAfterPublisherRemovalDrainsDirectGenerationOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfg := newTestConfig(dir)
+	cfg.Record.Format = "flv"
+	stream := core.NewStream("live/delayed-direct-drain", cfg.Stream, config.LimitsConfig{}, core.NewEventBus())
+	defer stream.Close()
+
+	old := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(old); err != nil {
+		t.Fatal(err)
+	}
+	session, err := NewRecordSession("live/delayed-direct-drain", stream, cfg.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPayload := []byte{0xff, 0xfb, 0x11, 0x22, 0x33, 0x44}
+	if !stream.WriteFrameForPublisher(old, avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+		0, 0, oldPayload,
+	)) {
+		t.Fatal("old-generation frame was rejected")
+	}
+	stream.RemovePublisher()
+
+	replacement := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if setErr := stream.SetPublisher(replacement); setErr != nil {
+		t.Fatal(setErr)
+	}
+	replacementPayload := []byte{0xff, 0xfb, 0xaa, 0xbb, 0xcc, 0xdd}
+	if !stream.WriteFrameForPublisher(replacement, avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+		0, 0, replacementPayload,
+	)) {
+		t.Fatal("replacement-generation frame was rejected")
+	}
+
+	session.Run()
+	if status := session.Status(); status.State != RecordingCompleted {
+		t.Fatalf("delayed direct recording status = %+v, want completed", status)
+	}
+	data, err := os.ReadFile(session.writer.FilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, oldPayload) {
+		t.Fatal("delayed direct recording omitted the ended generation's pending frame")
+	}
+	if bytes.Contains(data, replacementPayload) {
+		t.Fatal("delayed direct recording included a replacement-generation frame")
 	}
 }
 
@@ -622,6 +678,227 @@ func TestFileWriterDoesNotRotateOnSequenceHeader(t *testing.T) {
 	}
 }
 
+func TestFileWriterAutomaticRotationStopAtThresholdDoesNotCreateEmptySuccessor(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	w, err := newFileWriterWithStorage("live/automatic-stop", config.RecordConfig{
+		Format:  "flv",
+		Segment: config.SegmentConfig{MaxSize: "1B"},
+	}, local, "live/automatic-stop_{time}.flv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetExpectedTracks(avframe.CodecH264, 0)
+	if writeErr := w.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
+	)); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatalf("close immediately after automatic rotation threshold: %v", closeErr)
+	}
+
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].State != RecordingCompleted {
+		t.Fatalf("recordings = %+v, want one completed recording and no empty successor", items)
+	}
+}
+
+func TestFileWriterAutomaticRotationStartsVideoSegmentsOnKeyframes(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	w, err := newFileWriterWithStorage("live/automatic-video", config.RecordConfig{
+		Format:  "flv",
+		Segment: config.SegmentConfig{MaxSize: "1B"},
+	}, local, "live/automatic-video_{time}.flv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetExpectedTracks(avframe.CodecH264, 0)
+	frames := []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0,
+			[]byte{0x01, 0x64, 0x00, 0x28, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xee, 0x3c, 0x80}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0,
+			[]byte{0, 0, 0, 2, 0x65, 0x01}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 40, 40,
+			[]byte{0, 0, 0, 2, 0x41, 0x02}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 80, 80,
+			[]byte{0, 0, 0, 2, 0x65, 0x03}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 120, 120,
+			[]byte{0, 0, 0, 2, 0x41, 0x04}),
+	}
+	for _, frame := range frames {
+		if writeErr := w.WriteFrame(frame); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	closeErr := w.CloseWithError(nil)
+
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := 0
+	for _, item := range items {
+		if item.State != RecordingCompleted {
+			continue
+		}
+		completed++
+		data, err := os.ReadFile(filepath.Join(local.Root(), filepath.FromSlash(item.ID)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		demuxer := flvmux.NewDemuxer(bytes.NewReader(data))
+		for {
+			frame, err := demuxer.ReadTag()
+			if errors.Is(err, io.EOF) {
+				t.Fatalf("recording %q contains no video media", item.ID)
+			}
+			if err != nil {
+				t.Fatalf("parse recording %q: %v", item.ID, err)
+			}
+			if !frame.MediaType.IsVideo() || frame.FrameType == avframe.FrameTypeSequenceHeader {
+				continue
+			}
+			if !frame.FrameType.IsKeyframe() {
+				t.Fatalf("recording %q starts video with %v, want keyframe", item.ID, frame.FrameType)
+			}
+			break
+		}
+	}
+	if completed != 2 {
+		t.Fatalf("completed recordings = %d, want 2: %+v", completed, items)
+	}
+	if closeErr != nil {
+		t.Fatalf("close automatic video rotation: %v", closeErr)
+	}
+}
+
+func TestFileWriterAutomaticRotationPreservesAudioOnlySegments(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	w, err := newFileWriterWithStorage("live/automatic-audio", config.RecordConfig{
+		Format:  "flv",
+		Segment: config.SegmentConfig{MaxSize: "1B"},
+	}, local, "live/automatic-audio_{time}.flv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetExpectedTracks(0, avframe.CodecMP3)
+	for index, payload := range [][]byte{
+		{0xff, 0xfb, 0x11, 0x22, 0x33, 0x44},
+		{0xff, 0xfb, 0xaa, 0xbb, 0xcc, 0xdd},
+	} {
+		if writeErr := w.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+			int64(index*26), int64(index*26), payload,
+		)); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatalf("close automatic audio-only rotation: %v", closeErr)
+	}
+
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("audio-only recordings = %+v, want two completed segments", items)
+	}
+	for _, item := range items {
+		if item.State != RecordingCompleted {
+			t.Fatalf("audio-only recording %q state = %s, want completed", item.ID, item.State)
+		}
+		data, err := os.ReadFile(filepath.Join(local.Root(), filepath.FromSlash(item.ID)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		demuxer := flvmux.NewDemuxer(bytes.NewReader(data))
+		audioFrames := 0
+		for {
+			frame, err := demuxer.ReadTag()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("parse audio-only recording %q: %v", item.ID, err)
+			}
+			if frame.MediaType.IsVideo() {
+				t.Fatalf("audio-only recording %q contains video", item.ID)
+			}
+			if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+				audioFrames++
+			}
+		}
+		if audioFrames != 1 {
+			t.Fatalf("audio-only recording %q media frames = %d, want 1", item.ID, audioFrames)
+		}
+	}
+}
+
+func TestFileWriterAutomaticRotationUsesDistinctPathsWithoutTimePlaceholder(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	w, err := newFileWriterWithStorage("live/automatic-fixed", config.RecordConfig{
+		Format:  "flv",
+		Segment: config.SegmentConfig{MaxSize: "1B"},
+	}, local, "live/automatic-fixed.flv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.CloseWithError(errors.New("test cleanup")) }()
+	w.SetExpectedTracks(0, avframe.CodecMP3)
+	for index := 0; index < 3; index++ {
+		payload := []byte{0xff, 0xfb, byte(index + 1), 0x22, 0x33, 0x44}
+		if writeErr := w.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+			int64(index*26), int64(index*26), payload,
+		)); writeErr != nil {
+			t.Fatalf("write automatic segment %d: %v", index, writeErr)
+		}
+	}
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatalf("close fixed-path automatic rotation: %v", closeErr)
+	}
+
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if item.State != RecordingCompleted {
+			t.Fatalf("fixed-path recording %q state = %s, want completed", item.ID, item.State)
+		}
+		ids[item.ID] = struct{}{}
+	}
+	if len(items) != 3 || len(ids) != 3 {
+		t.Fatalf("fixed-path recordings = %+v, want three distinct completed IDs", items)
+	}
+}
+
 func TestFMP4WriterWaitsForAllKnownSequenceHeaders(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.RecordConfig{
@@ -669,6 +946,246 @@ func TestFMP4WriterWaitsForAllKnownSequenceHeaders(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("mp4a")) {
 		t.Fatal("fMP4 init segment does not contain the AAC track")
+	}
+}
+
+func TestFMP4FileWriterRotationPreservesDeclaredTracks(t *testing.T) {
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	w, err := newFileWriterWithStorage("live/rotation", config.RecordConfig{Format: "fmp4"}, local, "live/rotation_{time}.mp4", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetExpectedTracks(avframe.CodecH264, avframe.CodecAAC)
+	frames := []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0,
+			[]byte{0x01, 0x64, 0x00, 0x28, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xee, 0x3c, 0x80}),
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x12, 0x10}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0, 0, 0, 2, 0x65, 0x01}),
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 0, 0, []byte{0xde, 0xad}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 40, 40, []byte{0, 0, 0, 2, 0x41, 0x02}),
+	}
+	for _, frame := range frames {
+		if writeErr := w.WriteFrame(frame); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if rotateErr := w.rotate(); rotateErr != nil {
+		t.Fatal(rotateErr)
+	}
+
+	for _, frame := range []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 1000, 1000, []byte{0xbe, 0xef}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 1000, 1000, []byte{0, 0, 0, 2, 0x65, 0x03}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 1040, 1040, []byte{0, 0, 0, 2, 0x41, 0x04}),
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, 1023, 1023, []byte{0xca, 0xfe}),
+	} {
+		if writeErr := w.WriteFrame(frame); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("completed recordings = %d, want 2: %+v", len(items), items)
+	}
+	for _, item := range items {
+		data, err := os.ReadFile(filepath.Join(local.Root(), filepath.FromSlash(item.ID)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		demuxer, err := fmp4.NewDemuxer(data)
+		if err != nil {
+			t.Fatalf("parse init segment %q: %v", item.ID, err)
+		}
+		parsed, err := demuxer.Parse(data)
+		if err != nil {
+			t.Fatalf("parse media segment %q: %v", item.ID, err)
+		}
+		var hasVideo, hasAudio bool
+		var firstVideoDTS, firstAudioDTS int64
+		for _, frame := range parsed {
+			if frame.MediaType.IsVideo() && !hasVideo {
+				firstVideoDTS = frame.DTS
+				hasVideo = true
+			}
+			if frame.MediaType.IsAudio() && !hasAudio {
+				firstAudioDTS = frame.DTS
+				hasAudio = true
+			}
+		}
+		if !hasVideo || !hasAudio {
+			t.Fatalf("recording %q tracks: video=%v audio=%v, want both", item.ID, hasVideo, hasAudio)
+		}
+		if firstVideoDTS != 0 || firstAudioDTS != 0 {
+			t.Fatalf("recording %q first DTS: video=%d audio=%d, want both rebased to zero", item.ID, firstVideoDTS, firstAudioDTS)
+		}
+	}
+}
+
+func TestFileWriterRotationPreservesContainerInitialization(t *testing.T) {
+	for _, format := range []string{"flv", "mp4", "ts"} {
+		t.Run(format, func(t *testing.T) {
+			segments := writeRotatedAVRecording(t, format)
+			if len(segments) != 2 {
+				t.Fatalf("completed recordings = %d, want 2", len(segments))
+			}
+			for index, data := range segments {
+				switch format {
+				case "flv":
+					assertFLVInitialization(t, index, data)
+				case "mp4":
+					if !bytes.Contains(data, []byte("avc1")) || !bytes.Contains(data, []byte("mp4a")) {
+						t.Fatalf("segment %d MP4 sample entries missing: avc1=%v mp4a=%v", index,
+							bytes.Contains(data, []byte("avc1")), bytes.Contains(data, []byte("mp4a")))
+					}
+				case "ts":
+					assertTSInitialization(t, index, data)
+				}
+			}
+		})
+	}
+}
+
+func writeRotatedAVRecording(t *testing.T, format string) [][]byte {
+	t.Helper()
+	local, err := NewLocalStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	w, err := newFileWriterWithStorage("live/rotation", config.RecordConfig{Format: format}, local,
+		"live/rotation_{time}.{ext}", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetExpectedTracks(avframe.CodecH264, avframe.CodecAAC)
+	for _, frame := range append(rotationSequenceHeaders(), rotationMediaFrames(0)...) {
+		if writeErr := w.WriteFrame(frame); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if rotateErr := w.rotate(); rotateErr != nil {
+		t.Fatal(rotateErr)
+	}
+	for _, frame := range rotationMediaFrames(1000) {
+		if writeErr := w.WriteFrame(frame); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	items, err := local.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	segments := make([][]byte, 0, len(items))
+	for i := len(items) - 1; i >= 0; i-- {
+		data, err := os.ReadFile(filepath.Join(local.Root(), filepath.FromSlash(items[i].ID)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		segments = append(segments, data)
+	}
+	return segments
+}
+
+func rotationSequenceHeaders() []*avframe.AVFrame {
+	return []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0,
+			[]byte{0x01, 0x64, 0x00, 0x28, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xee, 0x3c, 0x80}),
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeSequenceHeader, 0, 0, []byte{0x12, 0x10}),
+	}
+}
+
+func rotationMediaFrames(base int64) []*avframe.AVFrame {
+	return []*avframe.AVFrame{
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, base, base, []byte{0xde, 0xad, 0xbe, 0xef}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, base, base, []byte{0, 0, 0, 2, 0x65, 0x01}),
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, base+23, base+23, []byte{0xca, 0xfe, 0xba, 0xbe}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, base+40, base+40, []byte{0, 0, 0, 2, 0x41, 0x02}),
+		avframe.NewAVFrame(avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe, base+46, base+46, []byte{0xfa, 0xce, 0xb0, 0x0c}),
+		avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, base+80, base+80, []byte{0, 0, 0, 2, 0x41, 0x03}),
+	}
+}
+
+func assertFLVInitialization(t *testing.T, index int, data []byte) {
+	t.Helper()
+	if len(data) < 5 {
+		t.Fatalf("segment %d FLV header too short: %d bytes", index, len(data))
+	}
+	if data[4]&0x05 != 0x05 {
+		t.Fatalf("segment %d FLV track flags = %#x, want audio+video", index, data[4])
+	}
+	demuxer := flvmux.NewDemuxer(bytes.NewReader(data))
+	var videoSeq, audioSeq bool
+	var videoMedia, audioMedia bool
+	var firstVideoDTS, firstAudioDTS int64
+	for {
+		frame, err := demuxer.ReadTag()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("segment %d FLV parse: %v", index, err)
+		}
+		if frame.FrameType != avframe.FrameTypeSequenceHeader {
+			if frame.MediaType.IsVideo() && !videoMedia {
+				firstVideoDTS = frame.DTS
+				videoMedia = true
+			}
+			if frame.MediaType.IsAudio() && !audioMedia {
+				firstAudioDTS = frame.DTS
+				audioMedia = true
+			}
+			continue
+		}
+		videoSeq = videoSeq || frame.MediaType.IsVideo()
+		audioSeq = audioSeq || frame.MediaType.IsAudio()
+	}
+	if !videoSeq || !audioSeq {
+		t.Fatalf("segment %d FLV sequence headers: video=%v audio=%v, want both", index, videoSeq, audioSeq)
+	}
+	if !videoMedia || !audioMedia || firstVideoDTS != 0 || firstAudioDTS != 0 {
+		t.Fatalf("segment %d FLV first DTS: video=%d (found=%v) audio=%d (found=%v), want both zero",
+			index, firstVideoDTS, videoMedia, firstAudioDTS, audioMedia)
+	}
+}
+
+func assertTSInitialization(t *testing.T, index int, data []byte) {
+	t.Helper()
+	var videoSeq, videoMedia, audioMedia bool
+	var firstVideoDTS, firstAudioDTS int64
+	demuxer := tsmux.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.MediaType.IsVideo() {
+			videoSeq = videoSeq || frame.FrameType == avframe.FrameTypeSequenceHeader
+			if frame.FrameType != avframe.FrameTypeSequenceHeader && !videoMedia {
+				firstVideoDTS = frame.DTS
+				videoMedia = true
+			}
+		}
+		if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && !audioMedia {
+			firstAudioDTS = frame.DTS
+			audioMedia = true
+		}
+	})
+	demuxer.Feed(data)
+	if !videoSeq || !videoMedia || !audioMedia {
+		t.Fatalf("segment %d TS frames: video_seq=%v video=%v audio=%v, want all", index, videoSeq, videoMedia, audioMedia)
+	}
+	if firstVideoDTS != 0 || firstAudioDTS != 0 {
+		t.Fatalf("segment %d TS first DTS: video=%d audio=%d, want both zero", index, firstVideoDTS, firstAudioDTS)
 	}
 }
 
@@ -937,17 +1454,56 @@ func TestFileWriterDurationSegmentation(t *testing.T) {
 
 	// Write a frame
 	frame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65, 0x01})
-	_ = w.WriteFrame(frame)
+	if err := w.WriteFrame(frame); err != nil {
+		t.Fatalf("write first video keyframe: %v", err)
+	}
 
 	// Wait for duration to exceed
 	time.Sleep(60 * time.Millisecond)
 
-	// Write another frame to trigger rotation
+	// The first boundary after expiry starts the successor.
 	frame2 := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 33, 33, []byte{0x65, 0x02})
-	_ = w.WriteFrame(frame2)
+	if err := w.WriteFrame(frame2); err != nil {
+		t.Fatalf("write first post-expiry video keyframe: %v", err)
+	}
 
 	if w.FilePath() == firstFile {
-		t.Error("expected file rotation due to duration, but file path didn't change")
+		t.Error("expected duration rotation before the first post-expiry video keyframe")
+	}
+}
+
+func TestFileWriterAutomaticRotationDurationUsesFirstPostExpiryAudioFrame(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewFileWriter("live/audio-duration", config.RecordConfig{
+		Format: "flv",
+		Path:   filepath.Join(dir, "{stream_key}", "{date}_{time}.flv"),
+		Segment: config.SegmentConfig{
+			Duration: 50 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.SetExpectedTracks(0, avframe.CodecMP3)
+
+	firstFile := w.FilePath()
+	if err := w.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+		0, 0, []byte{0xff, 0xfb, 0x11, 0x22, 0x33, 0x44},
+	)); err != nil {
+		t.Fatalf("write first audio frame: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if err := w.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
+		26, 26, []byte{0xff, 0xfb, 0xaa, 0xbb, 0xcc, 0xdd},
+	)); err != nil {
+		t.Fatalf("write first post-expiry audio frame: %v", err)
+	}
+
+	if w.FilePath() == firstFile {
+		t.Error("expected duration rotation before the first post-expiry audio frame")
 	}
 }
 
@@ -1014,9 +1570,12 @@ func TestLocalStorageListOmitsTSPlaylistArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, data := range map[string][]byte{
-		"record.ts":        []byte("primary"),
-		"segment_00000.ts": []byte("segment"),
-		"index.m3u8":       []byte("#EXTM3U"),
+		"record.ts":                  []byte("primary"),
+		"record.ts.segment_00000.ts": []byte("segment"),
+		"record.ts.m3u8":             []byte("#EXTM3U"),
+		"legacy-owner.ts":            []byte("primary"),
+		"segment_00000.ts":           []byte("legacy segment"),
+		"index.m3u8":                 []byte("#EXTM3U"),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
 			t.Fatal(err)
@@ -1030,8 +1589,12 @@ func TestLocalStorageListOmitsTSPlaylistArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].ID != "live/ts/record.ts" {
+	if len(items) != 2 {
 		t.Fatalf("playlist artifacts leaked into recording list: %+v", items)
+	}
+	ids := map[string]bool{items[0].ID: true, items[1].ID: true}
+	if !ids["live/ts/record.ts"] || !ids["live/ts/legacy-owner.ts"] {
+		t.Fatalf("recording list = %+v, want only primary TS files", items)
 	}
 }
 
@@ -1147,6 +1710,133 @@ func TestTSRecordingCreatesSegmentsAndPlaylist(t *testing.T) {
 			t.Error("playlist missing #EXT-X-ENDLIST")
 		}
 		t.Logf("TS segments: %v, playlist:\n%s", tsFiles, content)
+	}
+}
+
+func TestTSRecordingsInSharedDirectoryUseOwnedSidecarsAndDeleteIndependently(t *testing.T) {
+	root := t.TempDir()
+	recordings := []struct {
+		id      string
+		payload byte
+	}{
+		{id: "first.ts", payload: 0x88},
+		{id: "second.ts", payload: 0x89},
+	}
+
+	for _, recording := range recordings {
+		cfg := config.RecordConfig{
+			Format: "ts",
+			Path:   filepath.Join(root, recording.id),
+		}
+		writer, err := NewFileWriter("live/shared", cfg)
+		if err != nil {
+			t.Fatalf("create %s writer: %v", recording.id, err)
+		}
+		sequenceHeader := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+			0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+		)
+		keyframe := avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+			0, 0, []byte{0x00, 0x00, 0x00, 0x02, 0x65, recording.payload},
+		)
+		if err := writer.WriteFrame(sequenceHeader); err != nil {
+			t.Fatalf("write %s sequence header: %v", recording.id, err)
+		}
+		if err := writer.WriteFrame(keyframe); err != nil {
+			t.Fatalf("write %s keyframe: %v", recording.id, err)
+		}
+		if err := writer.CloseWithError(nil); err != nil {
+			t.Fatalf("close %s writer: %v", recording.id, err)
+		}
+	}
+
+	for _, recording := range recordings {
+		segmentName := recording.id + ".segment_00000.ts"
+		playlistName := recording.id + ".m3u8"
+		for _, name := range []string{recording.id, recording.id + metadataSuffix, segmentName, playlistName} {
+			if info, err := os.Stat(filepath.Join(root, name)); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("generated artifact %q info=%v err=%v", name, info, err)
+			}
+		}
+		playlist, err := os.ReadFile(filepath.Join(root, playlistName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(playlist), segmentName) {
+			t.Fatalf("playlist %q does not own segment %q:\n%s", playlistName, segmentName, playlist)
+		}
+	}
+	for _, legacyName := range []string{"segment_00000.ts", "index.m3u8"} {
+		if _, err := os.Lstat(filepath.Join(root, legacyName)); !os.IsNotExist(err) {
+			t.Fatalf("new TS recordings created shared legacy artifact %q: %v", legacyName, err)
+		}
+	}
+
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.Delete(context.Background(), recordings[0].id); err != nil {
+		t.Fatalf("delete generated recording %q: %v", recordings[0].id, err)
+	}
+	for _, suffix := range []string{"", metadataSuffix, ".segment_00000.ts", ".m3u8"} {
+		if _, err := os.Lstat(filepath.Join(root, recordings[0].id+suffix)); !os.IsNotExist(err) {
+			t.Errorf("deleted recording artifact %q remains: %v", recordings[0].id+suffix, err)
+		}
+		if info, err := os.Stat(filepath.Join(root, recordings[1].id+suffix)); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("other recording artifact %q info=%v err=%v", recordings[1].id+suffix, info, err)
+		}
+	}
+}
+
+func TestTSRecordingSidecarsStayInPinnedDirectoryAfterPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	cfg := config.RecordConfig{
+		Format: "ts",
+		Path:   filepath.Join(root, "{stream_key}", "record.ts"),
+	}
+	w, err := NewFileWriter("live/camera", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalDir := filepath.Join(root, "live", "camera")
+	pinnedDir := filepath.Join(root, "live", "camera-pinned")
+	if err := os.Rename(originalDir, pinnedDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, originalDir); err != nil {
+		t.Fatal(err)
+	}
+
+	sequenceHeader := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x28, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x64, 0x00, 0x28, 0x01, 0x00, 0x04, 0x68, 0xEE, 0x3C, 0x80},
+	)
+	keyframe := avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88},
+	)
+	if err := w.WriteFrame(sequenceHeader); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFrame(keyframe); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CloseWithError(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"record.ts.segment_00000.ts", "record.ts.m3u8"} {
+		if _, err := os.Stat(filepath.Join(pinnedDir, name)); err != nil {
+			t.Fatalf("pinned TS sidecar %q unavailable: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(outside, name)); !os.IsNotExist(err) {
+			t.Fatalf("TS sidecar %q escaped through replacement symlink: %v", name, err)
+		}
 	}
 }
 

@@ -2,10 +2,14 @@ package webrtc
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +18,7 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 type authorizationTestPublisher struct {
@@ -58,6 +63,159 @@ func TestHandlePatchNotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestHandleStatusReturnsWHEPFeedDiagnostics(t *testing.T) {
+	m, _ := newTestModule(t)
+	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newSession("status-session", pc, "live/status", "whep", m)
+	status := newWHEPFeedStatus(3, 17, "realtime")
+	status.setExpectedMedia(true, true)
+	status.RecordVideo(true)
+	sess.setFeedStatus(status)
+	if !m.storeSession(sess) {
+		t.Fatal("failed to store test session")
+	}
+	defer sess.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/webrtc/session/status-session/status", nil)
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status response = %d: %s", rr.Code, rr.Body.String())
+	}
+	var response sessionStatusResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	got := response.Feed
+	if got.Generation != 3 || got.Cursor != 17 || got.State != WHEPFeedWaitingKeyframe {
+		t.Fatalf("status = %+v", got)
+	}
+	if !got.ExpectedVideo || !got.ExpectedAudio || got.LastVideoAt.IsZero() || !got.LastAudioAt.IsZero() {
+		t.Fatalf("per-kind feed diagnostics = %+v", got)
+	}
+}
+
+func TestSessionFeedStatusIncludesActualRTPAndRTCPTransportCounters(t *testing.T) {
+	trackSender, receiverPC, senderPC, rtpStats, mediaSSRC := testPCPair(t)
+	trackSender.Start()
+	status := newWHEPFeedStatus(4, 21, "live")
+	sess := &Session{pc: senderPC, feedStatus: status, feedVideo: trackSender, feedRTPStats: rtpStats}
+
+	if err := trackSender.WriteSample(media.Sample{
+		Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84},
+		Duration: 40 * time.Millisecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiverPC.WriteRTCP([]rtcp.Packet{&rtcp.ReceiverReport{Reports: []rtcp.ReceptionReport{{SSRC: mediaSSRC}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		feed, ok := sess.FeedStatus()
+		if ok && feed.RTPPacketsSent > 0 && feed.RTPBytesSent > 0 && feed.RTCPPacketsReceived > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	feed, _ := sess.FeedStatus()
+	t.Fatalf("transport counters did not advance: %+v", feed)
+}
+
+func TestSessionCloseCapturesTransportCountersBeforeTerminalState(t *testing.T) {
+	trackSender, _, senderPC, rtpStats, _ := testPCPair(t)
+	status := newWHEPFeedStatus(5, 22, "live")
+	sess := newSession("final-transport-stats", senderPC, "live/final-stats", "whep", nil)
+	sess.setFeedStatus(status)
+	sess.setFeedTracks(trackSender, nil, rtpStats)
+
+	if err := trackSender.WriteSample(media.Sample{
+		Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84},
+		Duration: 40 * time.Millisecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		packets, _ := trackRTPTransportStats(trackSender, rtpStats)
+		if packets > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sess.Close()
+
+	feed := status.Snapshot()
+	if feed.State != WHEPFeedClosed {
+		t.Fatalf("terminal feed state = %q, want %q", feed.State, WHEPFeedClosed)
+	}
+	if feed.RTPPacketsSent == 0 || feed.RTPBytesSent == 0 {
+		t.Fatalf("terminal transport counters were not captured: %+v", feed)
+	}
+}
+
+func TestSessionCloseCapturesTransportCountersForExistingTerminalState(t *testing.T) {
+	trackSender, _, senderPC, rtpStats, _ := testPCPair(t)
+	status := newWHEPFeedStatus(6, 23, "live")
+	sess := newSession("existing-terminal-stats", senderPC, "live/existing-terminal", "whep", nil)
+	sess.setFeedStatus(status)
+	sess.setFeedTracks(trackSender, nil, rtpStats)
+
+	if err := trackSender.WriteSample(media.Sample{
+		Data:     []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84},
+		Duration: 40 * time.Millisecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		packets, _ := trackRTPTransportStats(trackSender, rtpStats)
+		if packets > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	status.SetError(WHEPFeedSampleWriteFailed, errors.New("terminal before close"))
+	sess.Close()
+
+	feed := status.Snapshot()
+	if feed.State != WHEPFeedSampleWriteFailed || feed.LastError != "terminal before close" {
+		t.Fatalf("terminal feed changed during close: %+v", feed)
+	}
+	if feed.RTPPacketsSent == 0 || feed.RTPBytesSent == 0 {
+		t.Fatalf("existing terminal transport counters were not captured: %+v", feed)
+	}
+}
+
+func TestClosedWHEPStatusTombstonesAreBounded(t *testing.T) {
+	m := &Module{}
+	for index := 0; index < maxSessionStatusTombstones+5; index++ {
+		id := fmt.Sprintf("closed-%d", index)
+		m.storeStatusTombstone(sessionStatusResponse{
+			SessionID: id,
+			StreamKey: "live/tombstone",
+			Role:      "whep",
+			Feed:      WHEPFeedStatus{State: WHEPFeedClosed},
+		})
+	}
+	m.statusMu.Lock()
+	count := len(m.statusTombstones)
+	m.statusMu.Unlock()
+	if count != maxSessionStatusTombstones {
+		t.Fatalf("status tombstones = %d, want %d", count, maxSessionStatusTombstones)
+	}
+	if _, ok := m.findSessionStatus("closed-0"); ok {
+		t.Fatal("oldest status tombstone was not evicted")
+	}
+	if _, ok := m.findSessionStatus(fmt.Sprintf("closed-%d", maxSessionStatusTombstones+4)); !ok {
+		t.Fatal("newest status tombstone was evicted")
 	}
 }
 
@@ -287,6 +445,289 @@ func TestWHEPRejectsAuthorizationBeforeSubscriberMutationAndMapsQuery(t *testing
 	}
 }
 
+func TestWHEPPeerConnectionFailureReleasesGenerationLease(t *testing.T) {
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/peer-connection-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id:   "source",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64},
+	))
+
+	cfg := *s.Config()
+	cfg.WebRTC.ICEServers = []config.ICEServer{{URLs: []string{"turn:127.0.0.1:3478"}}}
+	s.UpdateConfig(&cfg)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webrtc/whep/live/peer-connection-failure",
+		bytes.NewBufferString(createMinimalOffer(t)),
+	)
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	if got := stream.Subscribers()["webrtc"]; got != 0 {
+		t.Fatalf("webrtc subscribers = %d, want 0", got)
+	}
+	leases := reflect.ValueOf(stream).Elem().FieldByName("generationSubscribers")
+	if got := leases.Len(); got != 0 {
+		t.Fatalf("generation subscriber lease maps = %d, want 0", got)
+	}
+	if got := s.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d, want 0", got)
+	}
+}
+
+func TestWHEPMixedRequestedTracksRejectUnsupportedSourceVideo(t *testing.T) {
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/mixed-codec-mismatch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id: "mixed-source",
+		info: &avframe.MediaInfo{
+			VideoCodec:          avframe.CodecH265,
+			VideoSequenceHeader: []byte{0x01},
+			AudioCodec:          avframe.CodecG711A,
+			SampleRate:          8000,
+			Channels:            1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	offer := createH264PCMAReceiveOffer(t)
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/mixed-codec-mismatch", strings.NewReader(offer))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusUnsupportedMediaType, rr.Body.String())
+	}
+	if got := stream.Subscribers()["webrtc"]; got != 0 {
+		t.Fatalf("webrtc subscribers = %d, want 0", got)
+	}
+	if got := sessionCount(m); got != 0 {
+		t.Fatalf("stored sessions = %d, want 0", got)
+	}
+	if got := s.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d, want 0", got)
+	}
+}
+
+func TestWHEPDisabledSourceVideoMLineDoesNotBlockRequestedAudio(t *testing.T) {
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/audio-requested-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id: "mixed-source",
+		info: &avframe.MediaInfo{
+			VideoCodec:          avframe.CodecH265,
+			VideoSequenceHeader: []byte{0x01},
+			AudioCodec:          avframe.CodecG711A,
+			SampleRate:          8000,
+			Channels:            1,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	offer := createH264PCMAReceiveOffer(t)
+	offer = strings.Replace(offer, "m=video 9 ", "m=video 0 ", 1)
+	req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/audio-requested-only", strings.NewReader(offer))
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+}
+
+func TestWHEPRequestedUnsupportedAudioFailsButOmittedAudioDoesNot(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		offer      func(*testing.T) string
+		wantStatus int
+	}{
+		{name: "requested", offer: createH264PCMAReceiveOffer, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "omitted", offer: createMinimalOffer, wantStatus: http.StatusCreated},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, s := newTestModule(t)
+			stream, err := s.StreamHub().GetOrCreate("live/unsupported-audio-" + test.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stream.SetPublisher(&authorizationTestPublisher{
+				id: "aac-source",
+				info: &avframe.MediaInfo{
+					VideoCodec:          avframe.CodecH264,
+					VideoSequenceHeader: []byte{0x01},
+					AudioCodec:          avframe.CodecAAC,
+					AudioSequenceHeader: []byte{0x12, 0x10},
+					SampleRate:          44100,
+					Channels:            2,
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/webrtc/whep/live/unsupported-audio-"+test.name, strings.NewReader(test.offer(t)))
+			req.Header.Set("Content-Type", "application/sdp")
+			rr := httptest.NewRecorder()
+			m.httpSrv.Handler.ServeHTTP(rr, req)
+			if rr.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, test.wantStatus, rr.Body.String())
+			}
+			if test.wantStatus != http.StatusCreated {
+				if got := stream.Subscribers()["webrtc"]; got != 0 {
+					t.Fatalf("webrtc subscribers = %d, want 0", got)
+				}
+				if got := sessionCount(m); got != 0 {
+					t.Fatalf("stored sessions = %d, want 0", got)
+				}
+				if got := s.ConnectionCount(); got != 0 {
+					t.Fatalf("connection count = %d, want 0", got)
+				}
+			}
+		})
+	}
+}
+
+func TestWHEPTrackCreationFailureReturns500AndReleasesResources(t *testing.T) {
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/track-creation-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&authorizationTestPublisher{
+		id: "track-failure-source",
+		info: &avframe.MediaInfo{
+			VideoCodec:          avframe.CodecH264,
+			VideoSequenceHeader: []byte{0x01},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedPC *webrtc.PeerConnection
+	factoryCalls := 0
+	m.whepTrackFactory = func(pc *webrtc.PeerConnection, _ webrtc.RTPCodecCapability, _, _, _ string) (*TrackSender, error) {
+		factoryCalls++
+		capturedPC = pc
+		return nil, errors.New("injected track creation failure")
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webrtc/whep/live/track-creation-failure",
+		strings.NewReader(createMinimalOffer(t)),
+	)
+	req.Header.Set("Content-Type", "application/sdp")
+	rr := httptest.NewRecorder()
+	m.httpSrv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("track factory calls = %d, want 1", factoryCalls)
+	}
+	if capturedPC == nil || capturedPC.ConnectionState() != webrtc.PeerConnectionStateClosed {
+		t.Fatalf("peer connection state = %v, want closed", capturedPC)
+	}
+	if got := stream.Subscribers()["webrtc"]; got != 0 {
+		t.Fatalf("webrtc subscribers = %d, want 0", got)
+	}
+	leases := reflect.ValueOf(stream).Elem().FieldByName("generationSubscribers")
+	if got := leases.Len(); got != 0 {
+		t.Fatalf("generation subscriber lease maps = %d, want 0", got)
+	}
+	if got := sessionCount(m); got != 0 {
+		t.Fatalf("stored sessions = %d, want 0", got)
+	}
+	if got := s.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d, want 0", got)
+	}
+}
+
+func TestCreateWHEPTrackSenderReturnsRealAddTrackFailure(t *testing.T) {
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr := pc.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	m := NewModule()
+	sender, err := m.createWHEPTrackSender(
+		pc,
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000},
+		"closed-session",
+		"closed-video",
+		"liveforge",
+	)
+	if err == nil || sender != nil {
+		t.Fatalf("closed PeerConnection track creation = (%v, %v), want nil sender and error", sender, err)
+	}
+}
+
+func createH264PCMAReceiveOffer(t *testing.T) string {
+	t.Helper()
+	clientME := &webrtc.MediaEngine{}
+	if err := clientME.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeH264,
+			ClockRate:   90000,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		},
+		PayloadType: 96,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientME.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypePCMA,
+			ClockRate: 8000,
+			Channels:  1,
+		},
+		PayloadType: 8,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		t.Fatal(err)
+	}
+	clientPC, err := webrtc.NewAPI(webrtc.WithMediaEngine(clientME)).NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientPC.Close()
+	for _, kind := range []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo, webrtc.RTPCodecTypeAudio} {
+		if _, transceiverErr := clientPC.AddTransceiverFromKind(kind, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); transceiverErr != nil {
+			t.Fatal(transceiverErr)
+		}
+	}
+	offer, err := clientPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offer.SDP
+}
+
 func TestWHEPBadContentType(t *testing.T) {
 	m, _ := newTestModule(t)
 
@@ -453,6 +894,39 @@ func TestWHIPPublisherMethods(t *testing.T) {
 	// Double close should not panic
 	if err := pub.Close(); err != nil {
 		t.Fatalf("double Close: %v", err)
+	}
+}
+
+func TestWHIPPublisherConcurrentCloseDoesNotPanic(t *testing.T) {
+	m, _ := newTestModule(t)
+	pc, err := m.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range 200 {
+		pub := &WHIPPublisher{id: "concurrent-close", pc: pc, done: make(chan struct{})}
+		start := make(chan struct{})
+		panics := make(chan any, 32)
+		var wg sync.WaitGroup
+		for range 32 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						panics <- recovered
+					}
+				}()
+				<-start
+				_ = pub.Close()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if len(panics) > 0 {
+			t.Fatalf("concurrent WHIP publisher close panicked: %v", <-panics)
+		}
 	}
 }
 

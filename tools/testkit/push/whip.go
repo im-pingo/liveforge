@@ -13,6 +13,7 @@ import (
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/tools/testkit/report"
 	"github.com/im-pingo/liveforge/tools/testkit/source"
+	pionrtp "github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -22,12 +23,11 @@ const (
 
 // whipPusher implements Pusher for the WebRTC WHIP protocol. It creates a
 // PeerConnection, negotiates via HTTP POST to the WHIP endpoint, and sends
-// RTP-packetized H.264 video frames over a WebRTC media track.
+// RTP-packetized H.264 video and, when available, Opus audio tracks.
 type whipPusher struct{}
 
 // Push creates a WebRTC PeerConnection, performs WHIP signaling with the target
-// endpoint, and sends H.264 video frames as RTP packets. Audio frames are
-// skipped because the server only supports Opus while the source emits AAC.
+// endpoint, and sends H.264 video plus an optional Opus audio track.
 func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig) (*report.PushReport, error) {
 	start := time.Now()
 	var framesSent int64
@@ -53,6 +53,31 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 	if _, err := pc.AddTrack(track); err != nil {
 		return buildPushReport(cfg, start, framesSent, bytesSent),
 			fmt.Errorf("whip: add track: %w", err)
+	}
+
+	var audioTrack *webrtc.TrackLocalStaticRTP
+	audioProcessor, err := newWHIPAudioProcessor(src.MediaInfo().AudioCodec)
+	if err != nil {
+		return buildPushReport(cfg, start, framesSent, bytesSent), err
+	}
+	if audioProcessor != nil {
+		defer audioProcessor.Close()
+		audioTrack, err = webrtc.NewTrackLocalStaticRTP(
+			webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypeOpus,
+				ClockRate: 48000,
+				Channels:  2,
+			},
+			"audio", "lf-test",
+		)
+		if err != nil {
+			return buildPushReport(cfg, start, framesSent, bytesSent),
+				fmt.Errorf("whip: create audio track: %w", err)
+		}
+		if _, err := pc.AddTrack(audioTrack); err != nil {
+			return buildPushReport(cfg, start, framesSent, bytesSent),
+				fmt.Errorf("whip: add audio track: %w", err)
+		}
 	}
 
 	// Set up connection state callback before signaling.
@@ -118,12 +143,17 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 			fmt.Errorf("whip: create packetizer: %w", err)
 	}
 	session := pkgrtp.NewSession(106, 90000) // H264 PT=106, 90kHz clock
+	var audioSequence uint16
+	var audioTimestamp uint32
+	var audioBaseDTS int64
+	var audioBaseSet bool
 
 	// Determine deadline from cfg.Duration.
 	var deadline time.Time
 	if cfg.Duration > 0 {
 		deadline = start.Add(cfg.Duration)
 	}
+	pacer := whipRealtimePacer{enabled: cfg.Realtime}
 
 	// Frame loop: read frames from source and send as RTP.
 	for {
@@ -145,15 +175,58 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 			return buildPushReport(cfg, start, framesSent, bytesSent),
 				fmt.Errorf("whip: read source frame: %w", err)
 		}
-
-		// Skip audio frames entirely (server only supports Opus, source has AAC).
 		if frame.MediaType.IsAudio() {
+			if audioTrack == nil || audioProcessor == nil {
+				continue
+			}
+			if frame.FrameType != avframe.FrameTypeSequenceHeader && !audioBaseSet {
+				audioBaseDTS = frame.DTS
+				audioBaseSet = true
+			}
+			packets, processErr := audioProcessor.Process(frame)
+			if processErr != nil {
+				return buildPushReport(cfg, start, framesSent, bytesSent),
+					fmt.Errorf("whip: process audio: %w", processErr)
+			}
+			for _, payload := range packets {
+				durationSamples, ok := whipOpusPacketDurationSamples(payload)
+				if !ok {
+					return buildPushReport(cfg, start, framesSent, bytesSent),
+						fmt.Errorf("whip: invalid Opus packet duration")
+				}
+				mediaTime := time.Duration(audioBaseDTS)*time.Millisecond +
+					time.Duration(audioTimestamp)*time.Second/48000
+				if err := pacer.Wait(ctx, mediaTime); err != nil {
+					return buildPushReport(cfg, start, framesSent, bytesSent), err
+				}
+				packet := &pionrtp.Packet{
+					Header: pionrtp.Header{
+						Version:        2,
+						SequenceNumber: audioSequence,
+						Timestamp:      audioTimestamp,
+					},
+					Payload: payload,
+				}
+				if err := audioTrack.WriteRTP(packet); err != nil {
+					return buildPushReport(cfg, start, framesSent, bytesSent),
+						fmt.Errorf("whip: write audio RTP: %w", err)
+				}
+				audioSequence++
+				audioTimestamp += durationSamples
+				framesSent++
+				bytesSent += int64(packet.MarshalSize())
+			}
 			continue
 		}
 
 		// Skip non-video frames.
 		if !frame.MediaType.IsVideo() {
 			continue
+		}
+		if frame.FrameType != avframe.FrameTypeSequenceHeader {
+			if err := pacer.Wait(ctx, time.Duration(frame.DTS)*time.Millisecond); err != nil {
+				return buildPushReport(cfg, start, framesSent, bytesSent), err
+			}
 		}
 
 		// Packetize the video frame (including sequence headers with SPS/PPS).
@@ -188,6 +261,44 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 	}
 
 	return buildPushReport(cfg, start, framesSent, bytesSent), nil
+}
+
+type whipRealtimePacer struct {
+	enabled   bool
+	baseWall  time.Time
+	baseMedia time.Duration
+}
+
+func (p *whipRealtimePacer) Wait(ctx context.Context, mediaTime time.Duration) error {
+	if !p.enabled {
+		return nil
+	}
+	now := time.Now()
+	if p.baseWall.IsZero() {
+		p.baseWall = now
+		p.baseMedia = mediaTime
+		return nil
+	}
+	target := p.baseWall.Add(mediaTime - p.baseMedia)
+	if !target.After(now) && mediaTime > p.baseMedia {
+		// Processing or transport can fall behind the source timeline. Rebase
+		// the current packet instead of sending a burst to catch up.
+		p.baseWall = now
+		p.baseMedia = mediaTime
+		return nil
+	}
+	wait := target.Sub(now)
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // whipSignal sends the SDP offer to the WHIP endpoint via HTTP POST and returns

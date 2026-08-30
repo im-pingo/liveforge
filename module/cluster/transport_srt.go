@@ -90,7 +90,10 @@ func (t *SRTTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(relayCtx)
+		frame, ok, readErr := core.ReadFrameContext(relayCtx, reader)
+		if readErr != nil {
+			return fmt.Errorf("source ring continuity lost: %w", readErr)
+		}
 		if !ok {
 			return nil
 		}
@@ -148,10 +151,7 @@ func (t *SRTTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	slog.Info("srt relay pull connected", "module", "cluster", "source", sourceURL)
 	markRelayConnected(ctx)
 
-	pub := &originPublisher{
-		id:   fmt.Sprintf("srt-pull-%s", stream.Key()),
-		info: &avframe.MediaInfo{},
-	}
+	pub := newOriginPublisher("srt-pull", stream.Key(), &avframe.MediaInfo{})
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -35,12 +36,15 @@ type Handler struct {
 	hub      *core.StreamHub
 	eventBus *core.EventBus
 
-	app         string
-	streamKey   string
-	isPublisher bool
-	publisher   *Publisher
-	appParams   map[string]string // params from connect (app field query string)
-	caps        PeerCapabilities
+	app                 string
+	streamKey           string
+	isPublisher         bool
+	publisher           *Publisher
+	streamInstanceID    uint64
+	publisherGeneration uint64
+	publishCleanupOnce  sync.Once
+	appParams           map[string]string // params from connect (app field query string)
+	caps                PeerCapabilities
 
 	chunkSize int
 	skipCfg   *config.SkipTrackerConfig
@@ -81,22 +85,28 @@ func (h *Handler) Handle() error {
 
 // cleanup releases the publisher when the connection closes for any reason.
 func (h *Handler) cleanup() {
-	if h.streamKey == "" || !h.isPublisher {
-		return
-	}
-	if stream, ok := h.hub.Find(h.streamKey); ok {
-		stream.RemovePublisherIf(h.publisher)
+	h.publishCleanupOnce.Do(func() {
+		if h.streamKey == "" || !h.isPublisher {
+			return
+		}
+		if stream, ok := h.hub.Find(h.streamKey); ok {
+			stream.RemovePublisherIf(h.publisher)
+		}
 		publisherID := ""
 		if h.publisher != nil {
 			publisherID = h.publisher.ID()
 		}
-		h.eventBus.Emit(core.EventPublishStop, &core.EventContext{
-			StreamKey:   h.streamKey,
-			PublisherID: publisherID,
-			Protocol:    "rtmp",
-			RemoteAddr:  h.conn.RemoteAddr().String(),
-		})
-	}
+		if err := h.eventBus.EmitAsync(core.EventPublishStop, &core.EventContext{
+			StreamKey:           h.streamKey,
+			StreamInstanceID:    h.streamInstanceID,
+			PublisherGeneration: h.publisherGeneration,
+			PublisherID:         publisherID,
+			Protocol:            "rtmp",
+			RemoteAddr:          h.conn.RemoteAddr().String(),
+		}); err != nil {
+			slog.Error("publisher terminal lifecycle admission failed", "module", "rtmp", "stream", h.streamKey, "error", err)
+		}
+	})
 }
 
 func (h *Handler) handleMessage(msg *Message) error {
@@ -255,9 +265,18 @@ func (h *Handler) onPublish(vals []any) error {
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("publish %s: %w", h.streamKey, err)
 	}
+	startup := stream.StartupSnapshot()
+	publishCtx.StreamInstanceID = startup.StreamInstanceID
+	publishCtx.PublisherGeneration = startup.Generation
+	if err := h.eventBus.EmitAsync(core.EventPublish, publishCtx); err != nil {
+		stream.RemovePublisherIf(pub)
+		_ = h.sendOnStatus("error", "NetStream.Publish.Rejected", err.Error())
+		return fmt.Errorf("publish %s: %w", h.streamKey, err)
+	}
 	h.publisher = pub
 	h.isPublisher = true
-	h.eventBus.EmitAsync(core.EventPublish, publishCtx)
+	h.streamInstanceID = startup.StreamInstanceID
+	h.publisherGeneration = startup.Generation
 
 	// Send onStatus(NetStream.Publish.Start)
 	return h.sendOnStatus("status", "NetStream.Publish.Start", "Publishing started")
@@ -303,32 +322,36 @@ func (h *Handler) onPlay(vals []any) error {
 		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
 		return fmt.Errorf("play %s: %w", h.streamKey, err)
 	}
-	if err := stream.AddSubscriber("rtmp"); err != nil {
+	startup := stream.StartupSnapshot()
+	releaseSubscriber, err := stream.AddSubscriberForGeneration("rtmp", startup.Generation)
+	if err != nil {
 		_ = h.sendOnStatus("error", "NetStream.Play.Rejected", err.Error())
 		return fmt.Errorf("play %s: %w", h.streamKey, err)
 	}
 	sub := NewSubscriberWithCapabilities(h.streamKey, h.conn, h.cw, stream, h.skipCfg, h.caps, func(err error) {
 		slog.Warn("rtmp subscriber cannot represent stream codec", "subscriber", "rtmp-sub-"+h.streamKey, "error", err)
 	})
-	startup := stream.StartupSnapshot()
-	if startup.Ready {
-		sub.startup = &startup
-	}
+	sub.startup = &startup
 	lifecycleCtx := &core.EventContext{
-		StreamKey:    h.streamKey,
-		SubscriberID: sub.ID(),
-		Protocol:     "rtmp",
-		RemoteAddr:   h.conn.RemoteAddr().String(),
+		StreamKey:           h.streamKey,
+		StreamInstanceID:    startup.StreamInstanceID,
+		PublisherGeneration: startup.Generation,
+		PublisherID:         startup.PublisherID,
+		SubscriberID:        sub.ID(),
+		Protocol:            "rtmp",
+		RemoteAddr:          h.conn.RemoteAddr().String(),
 	}
 	if err := h.eventBus.EmitAsync(core.EventSubscribe, lifecycleCtx); err != nil {
-		stream.RemoveSubscriber("rtmp")
+		releaseSubscriber()
 		_ = sub.Close()
 		return fmt.Errorf("play %s: %w", h.streamKey, err)
 	}
 	go func() {
 		defer func() {
-			stream.RemoveSubscriber("rtmp")
-			h.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx) //nolint:errcheck
+			releaseSubscriber()
+			if err := h.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx); err != nil {
+				slog.Error("subscriber terminal lifecycle admission failed", "module", "rtmp", "stream", h.streamKey, "error", err)
+			}
 		}()
 		sub.WriteLoop()
 	}()

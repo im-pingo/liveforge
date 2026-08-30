@@ -11,6 +11,135 @@ import (
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
 
+func TestLLHLSAudioOnlyOverwriteResumesAtNextAudio(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/llhls-audio-overwrite")
+	input := newControlledSegmentInput(2, false)
+	var segments []*LLHLSSegment
+	segmenter := NewLLHLSSegmenter(0.05, 0.1, "ts", LLHLSSegmenterCallbacks{
+		OnSegment: func(segment *LLHLSSegment) {
+			segments = append(segments, segment)
+		},
+	})
+	segmenter.inputFactory = input.factory
+	segmenter.beforeLiveRead = input.beforeRead(segmenter.done)
+	done := make(chan struct{})
+	go func() {
+		segmenter.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		segmenter.Stop()
+		input.ring.Close()
+		<-done
+	})
+
+	audio := func(dts int64, marker byte) *avframe.AVFrame {
+		return avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			dts, dts, []byte{0x21, marker, 0x34, 0x55},
+		)
+	}
+	for dts := int64(0); dts <= 120; dts += 20 {
+		input.writeAndRead(t, audio(dts, byte(dts/20)))
+	}
+	input.writeBurstAndRead(t, audio(140, 0x31), audio(160, 0x32), audio(180, 0x33), audio(200, 0x34))
+	for i, marker := range []byte{0x50, 0x51, 0x52, 0x53, 0x54, 0x55} {
+		input.writeAndRead(t, audio(300+int64(i)*20, marker))
+	}
+	input.waitReady(t)
+
+	if len(segments) != 2 {
+		t.Fatalf("audio-only LL-HLS completed segments = %d, want pre-gap and recovered segments", len(segments))
+	}
+	recovered := segments[1]
+	if recovered.MSN != 2 || !recovered.Discontinuity || len(recovered.Parts) == 0 {
+		t.Fatalf("recovered audio-only LL-HLS segment = %+v, want MSN 2 discontinuity with parts", recovered)
+	}
+	if !recovered.Parts[0].Independent || !recovered.Parts[0].Discontinuity {
+		t.Fatalf("first recovered audio-only LL-HLS part = %+v, want independent discontinuity", recovered.Parts[0])
+	}
+	frames := demuxTSAudioFrames(recovered.Parts[0].Data)
+	if len(frames) == 0 || !bytes.Equal(frames[0].Payload, []byte{0x21, 0x50, 0x34, 0x55}) {
+		t.Fatalf("first recovered LL-HLS audio payload = %v, want next live audio marker", frames)
+	}
+}
+
+func TestLLHLSOverwriteRefreshToVideoWaitsForKeyframe(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/llhls-overwrite-add-video")
+	input := newControlledSegmentInput(2, false)
+	var partsMu sync.Mutex
+	var parts []*LLHLSPart
+	segmenter := NewLLHLSSegmenter(0.05, 0.1, "ts", LLHLSSegmenterCallbacks{
+		OnPart: func(part *LLHLSPart) {
+			partsMu.Lock()
+			parts = append(parts, part)
+			partsMu.Unlock()
+		},
+	})
+	segmenter.inputFactory = input.factory
+	segmenter.beforeLiveRead = input.beforeRead(segmenter.done)
+	done := make(chan struct{})
+	go func() {
+		segmenter.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		segmenter.Stop()
+		input.ring.Close()
+		stream.RingBuffer().Close()
+		<-done
+	})
+
+	audio := func(dts int64, marker byte) *avframe.AVFrame {
+		return avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			dts, dts, []byte{0x21, marker, 0x34, 0x55},
+		)
+	}
+	video := func(frameType avframe.FrameType, dts int64, marker byte) *avframe.AVFrame {
+		nalType := byte(0x41)
+		if frameType.IsKeyframe() {
+			nalType = 0x65
+		}
+		return avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, frameType,
+			dts, dts, []byte{0, 0, 0, 2, nalType, marker},
+		)
+	}
+
+	input.writeAndRead(t, audio(0, 0x10))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		500, 500, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	input.writeBurstAndRead(t,
+		audio(20, 0x20), audio(40, 0x21), audio(60, 0x22), audio(80, 0x23),
+	)
+
+	input.writeAndRead(t, audio(1000, 0x30))
+	input.writeAndRead(t, video(avframe.FrameTypeInterframe, 1020, 0x31))
+	input.writeAndRead(t, video(avframe.FrameTypeKeyframe, 1100, 0x40))
+	input.writeAndRead(t, video(avframe.FrameTypeInterframe, 1160, 0x41))
+	input.waitReady(t)
+
+	partsMu.Lock()
+	recoveredParts := append([]*LLHLSPart(nil), parts...)
+	partsMu.Unlock()
+	if len(recoveredParts) != 1 {
+		t.Fatalf("recovered parts before/at first IDR = %d, want only the IDR-led part", len(recoveredParts))
+	}
+	if !recoveredParts[0].Independent {
+		t.Fatal("first recovered part after video topology appeared is not independent")
+	}
+	if audioFrames := demuxTSAudioFrames(recoveredParts[0].Data); len(audioFrames) != 0 {
+		t.Fatalf("first recovered video part contains %d pre-keyframe audio frames, want 0", len(audioFrames))
+	}
+	videoFrames := demuxTSVideoFrames(recoveredParts[0].Data)
+	if len(videoFrames) == 0 || !videoFrames[0].FrameType.IsKeyframe() {
+		t.Fatalf("first recovered video frames = %+v, want an IDR first", videoFrames)
+	}
+}
+
 func TestLLHLSSegmenter_PartDurationSplit(t *testing.T) {
 	var parts []*LLHLSPart
 	var mu sync.Mutex

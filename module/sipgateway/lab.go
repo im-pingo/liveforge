@@ -23,20 +23,32 @@ import (
 	pionrtp "github.com/pion/rtp/v2"
 )
 
-const sipLabTerminalHistoryLimit = 16
+const (
+	sipLabTerminalHistoryLimit = 16
+	defaultSIPLabMaxSessions   = 16
+)
 
 type labManager struct {
-	mu         sync.RWMutex
-	gateway    *Gateway
-	sessions   map[string]*sipLabSession
-	identities map[string]string
+	mu          sync.RWMutex
+	gateway     *Gateway
+	sessions    map[string]*sipLabSession
+	identities  map[string]string
+	maxSessions int
 }
 
 func newLabManager(gateway *Gateway) *labManager {
+	return newLabManagerWithLimit(gateway, defaultSIPLabMaxSessions)
+}
+
+func newLabManagerWithLimit(gateway *Gateway, maxSessions int) *labManager {
+	if maxSessions <= 0 {
+		maxSessions = defaultSIPLabMaxSessions
+	}
 	return &labManager{
-		gateway:    gateway,
-		sessions:   make(map[string]*sipLabSession),
-		identities: make(map[string]string),
+		gateway:     gateway,
+		sessions:    make(map[string]*sipLabSession),
+		identities:  make(map[string]string),
+		maxSessions: maxSessions,
 	}
 }
 
@@ -54,6 +66,10 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 	}
 	identity := request.DeviceID
 	m.mu.Lock()
+	if m.activeSessionsLocked() >= m.maxSessions {
+		m.mu.Unlock()
+		return LabSessionSnapshot{}, ErrLabCapacity
+	}
 	if existingID, ok := m.identities[identity]; ok {
 		existing := m.sessions[existingID]
 		if existing != nil && existing.isReserved() {
@@ -82,6 +98,16 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 		go m.watchCall(session, call)
 	}
 	return session.snapshot(), nil
+}
+
+func (m *labManager) activeSessionsLocked() int {
+	active := 0
+	for _, session := range m.sessions {
+		if session != nil && session.isReserved() {
+			active++
+		}
+	}
+	return active
 }
 
 func (m *labManager) watchCall(session *sipLabSession, call *CallSession) {
@@ -326,11 +352,11 @@ func (s *sipLabSession) protocolContext(caller context.Context) (context.Context
 }
 
 func (s *sipLabSession) startPublish(requestContext context.Context) error {
-	rtpConn, rtcpConn, err := listenLabUDPPair()
+	rtpConn, rtcpConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		return err
 	}
-	videoRTPConn, videoRTCPConn, err := listenLabUDPPair()
+	videoRTPConn, videoRTCPConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		_ = rtpConn.Close()
 		_ = rtcpConn.Close()
@@ -401,14 +427,17 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 		return fmt.Errorf("%w: receive stream %q", ErrStreamNotFound, s.request.StreamKey)
 	}
 	mediaInfo := stream.Publisher().MediaInfo()
-	if mediaInfo == nil || codecNameForAV(mediaInfo.AudioCodec) != strings.ToUpper(strings.TrimSpace(s.request.Codec)) || mediaInfo.VideoCodec != avframe.CodecH264 {
+	if mediaInfo == nil || mediaInfo.VideoCodec != avframe.CodecH264 {
 		return ErrCodecMismatch
 	}
-	rtpConn, rtcpConn, err := listenLabUDPPair()
+	if _, ok := s.gateway.outboundCodec(stream, mediaInfo.AudioCodec, s.request.Codec); !ok {
+		return ErrCodecMismatch
+	}
+	rtpConn, rtcpConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		return err
 	}
-	videoRTPConn, videoRTCPConn, err := listenLabUDPPair()
+	videoRTPConn, videoRTCPConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		_ = rtpConn.Close()
 		_ = rtcpConn.Close()
@@ -443,7 +472,7 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 			return
 		}
 		codec := codecNameFromMedia(audio)
-		if codec != "PCMA" && codec != "PCMU" {
+		if codec != strings.ToUpper(strings.TrimSpace(s.request.Codec)) {
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, "Not Acceptable Here", nil))
 			return
 		}
@@ -502,7 +531,7 @@ func (s *sipLabSession) startReceive(requestContext context.Context) error {
 	}
 
 	target := fmt.Sprintf("sip:%s@%s", s.request.DeviceID, peerAddr)
-	callID, err := s.gateway.Dial(requestContext, target, s.request.StreamKey)
+	callID, err := s.gateway.dial(requestContext, target, s.request.StreamKey, s.request.Codec)
 	if err != nil {
 		return err
 	}
@@ -1000,12 +1029,24 @@ func listenLabUDP() (*net.UDPConn, error) {
 }
 
 func listenLabUDPPair() (*net.UDPConn, *net.UDPConn, error) {
+	return listenLabUDPPairOutside(0, 0)
+}
+
+func (gw *Gateway) listenLabUDPPair() (*net.UDPConn, *net.UDPConn, error) {
+	return listenLabUDPPairOutside(gw.rtpPortMin, gw.rtpPortMax)
+}
+
+func listenLabUDPPairOutside(excludedMin, excludedMax int) (*net.UDPConn, *net.UDPConn, error) {
 	for attempt := 0; attempt < 20; attempt++ {
 		rtpConn, err := listenLabUDP()
 		if err != nil {
 			return nil, nil, err
 		}
 		rtpPort := rtpConn.LocalAddr().(*net.UDPAddr).Port
+		if excludedMin > 0 && excludedMax >= excludedMin && rtpPort <= excludedMax && rtpPort+1 >= excludedMin {
+			_ = rtpConn.Close()
+			continue
+		}
 		rtcpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: rtpPort + 1})
 		if err == nil {
 			return rtpConn, rtcpConn, nil

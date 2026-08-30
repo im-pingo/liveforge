@@ -22,6 +22,7 @@ type Module struct {
 	server    *core.Server
 	policy    atomic.Pointer[config.DVRConfig]
 	listener  net.Listener
+	tls       bool
 	httpSrv   *http.Server
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -29,12 +30,15 @@ type Module struct {
 	sessions  map[string]*Session
 	reloadCh  chan struct{}
 	metrics   DVRMetrics
-	storage   *dvrStorage
+	storage   dvrStorageBoundary
 	closing   bool
 	closeOnce sync.Once
 	closeDone chan struct{}
+	closeBy   time.Time
 	closeErr  error
 }
+
+const dvrResponseWriteTimeout = 10 * time.Second
 
 // NewModule creates a new DVR module.
 func NewModule() *Module {
@@ -47,6 +51,22 @@ func NewModule() *Module {
 
 // Name returns the module name.
 func (m *Module) Name() string { return "dvr" }
+
+// Addr returns the bound media listener address after initialization.
+func (m *Module) Addr() net.Addr {
+	if m.listener != nil {
+		return m.listener.Addr()
+	}
+	return nil
+}
+
+// EndpointScheme returns the scheme required to reach the media listener.
+func (m *Module) EndpointScheme() string {
+	if m.tls {
+		return "https"
+	}
+	return "http"
+}
 
 // Init starts the DVR HTTP server and cleanup goroutine.
 func (m *Module) Init(s *core.Server) error {
@@ -66,11 +86,9 @@ func (m *Module) Init(s *core.Server) error {
 		return err
 	}
 	m.listener = ln
+	m.tls = s.HasTLS()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /dvr/{app}/{resource...}", m.handleMedia)
-
-	m.httpSrv = &http.Server{Handler: dvrMediaCORS(strictDVRMediaRoutes(mux))}
+	m.httpSrv = newDVRHTTPServer(m)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
@@ -91,6 +109,17 @@ func (m *Module) Init(s *core.Server) error {
 		"window", cfg.Window, "segment", cfg.SegmentDuration)
 
 	return nil
+}
+
+func newDVRHTTPServer(m *Module) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dvr/{app}/{resource...}", m.handleMedia)
+	return &http.Server{
+		Handler:           dvrMediaCORS(strictDVRMediaRoutes(mux)),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      dvrResponseWriteTimeout,
+		IdleTimeout:       2 * time.Minute,
+	}
 }
 
 // OnReload applies DVR retention and segmentation policy to new work. Active
@@ -144,14 +173,37 @@ func (m *Module) Hooks() []core.HookRegistration {
 // Close shuts down the DVR server and stops all sessions.
 func (m *Module) Close() error {
 	m.closeOnce.Do(func() {
-		m.closeErr = m.close()
-		close(m.closeDone)
+		m.closeBy = time.Now().Add(m.drainTimeout())
+		go func() {
+			m.closeErr = m.close(m.closeBy)
+			close(m.closeDone)
+		}()
 	})
-	<-m.closeDone
-	return m.closeErr
+	select {
+	case <-m.closeDone:
+		return m.closeErr
+	default:
+	}
+	remaining := time.Until(m.closeBy)
+	if remaining <= 0 {
+		return fmt.Errorf("dvr: drain timeout before close completed")
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-m.closeDone:
+		return m.closeErr
+	case <-timer.C:
+		select {
+		case <-m.closeDone:
+			return m.closeErr
+		default:
+			return fmt.Errorf("dvr: drain timeout before close completed")
+		}
+	}
 }
 
-func (m *Module) close() error {
+func (m *Module) close(deadline time.Time) error {
 	m.mu.Lock()
 	m.closing = true
 	sessions := make([]*Session, 0, len(m.sessions))
@@ -168,7 +220,6 @@ func (m *Module) close() error {
 		m.httpSrv.Close()
 	}
 
-	deadline := time.Now().Add(m.drainTimeout())
 	pending := 0
 	for _, session := range sessions {
 		if !session.WaitUntil(deadline) {
@@ -235,16 +286,18 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 	m.wg.Add(1)
 	m.mu.Unlock()
 	defer m.wg.Done()
-	publisherID := ctx.PublisherID
+	startup := stream.StartupSnapshot()
+	if startup.PublisherID == "" {
+		if _, ended := startup.GenerationEndCursor(); ended {
+			startup.PublisherID = stream.LastPublisherID()
+		}
+	}
+	if !dvrSnapshotMatchesEvent(startup, ctx) {
+		return nil
+	}
+	publisherID := startup.PublisherID
 
 	for {
-		if publisher := stream.Publisher(); publisher != nil {
-			if publisherID == "" {
-				publisherID = publisher.ID()
-			} else if publisher.ID() != publisherID {
-				return nil
-			}
-		}
 		m.mu.Lock()
 		if m.closing {
 			m.mu.Unlock()
@@ -252,7 +305,7 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 		}
 
 		existing := m.sessions[ctx.StreamKey]
-		if existing != nil && existing.publisherID == publisherID && existing.IsLive() {
+		if existing != nil && dvrSessionMatchesEvent(existing, ctx) && existing.IsLive() {
 			m.mu.Unlock()
 			return nil
 		}
@@ -283,10 +336,21 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 				return nil
 			}
 		}
-		session, err := newSessionWithStorage(ctx.StreamKey, stream, cfg, existingIndex, startSeq, &m.metrics, m.storage, existingDir, false)
+		session, err := newSessionWithStorage(ctx.StreamKey, stream, startup, cfg, existingIndex, startSeq, &m.metrics, m.storage, existingDir)
 		if err != nil {
 			m.mu.Unlock()
 			slog.Error("failed to start dvr session", "module", "dvr", "stream", ctx.StreamKey, "error", err)
+			return nil
+		}
+		currentStream, current := m.server.StreamHub().Find(ctx.StreamKey)
+		if !current || currentStream != stream || !stream.IsPublisherGeneration(startup.Generation) {
+			// A retained session owns an existing directory until a replacement is
+			// installed. A rejected candidate may close only a directory it opened.
+			if existingDir != nil {
+				session.dir = nil
+			}
+			_ = session.Close()
+			m.mu.Unlock()
 			return nil
 		}
 		session.publisherID = publisherID
@@ -302,7 +366,7 @@ func (m *Module) onPublish(ctx *core.EventContext) error {
 func (m *Module) onPublishStop(ctx *core.EventContext) error {
 	m.mu.Lock()
 	session := m.sessions[ctx.StreamKey]
-	if session != nil && ctx.PublisherID != "" && session.publisherID != "" && session.publisherID != ctx.PublisherID {
+	if session != nil && !dvrSessionMatchesEvent(session, ctx) {
 		session = nil
 	}
 	if session != nil {
@@ -316,6 +380,32 @@ func (m *Module) onPublishStop(ctx *core.EventContext) error {
 		}
 	}
 	return nil
+}
+
+func dvrSnapshotMatchesEvent(snapshot core.StreamStartupSnapshot, ctx *core.EventContext) bool {
+	if ctx == nil {
+		return true
+	}
+	if ctx.StreamInstanceID != 0 && snapshot.StreamInstanceID != ctx.StreamInstanceID {
+		return false
+	}
+	if ctx.PublisherGeneration != 0 && snapshot.Generation != ctx.PublisherGeneration {
+		return false
+	}
+	return ctx.PublisherID == "" || snapshot.PublisherID == ctx.PublisherID
+}
+
+func dvrSessionMatchesEvent(session *Session, ctx *core.EventContext) bool {
+	if session == nil || ctx == nil {
+		return true
+	}
+	if ctx.StreamInstanceID != 0 && session.snapshot.StreamInstanceID != ctx.StreamInstanceID {
+		return false
+	}
+	if ctx.PublisherGeneration != 0 && session.snapshot.Generation != ctx.PublisherGeneration {
+		return false
+	}
+	return ctx.PublisherID == "" || session.publisherID == ctx.PublisherID
 }
 
 // SessionStatus returns the status of all DVR sessions (implements DVRStatusProvider for the API module).

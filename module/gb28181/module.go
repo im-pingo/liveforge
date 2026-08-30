@@ -104,7 +104,7 @@ func (m *Module) Init(s *core.Server) error {
 	m.alarm = &alarmHandler{
 		registry: m.registry,
 	}
-	m.labs = newLabManager(m)
+	m.labs = newLabManagerWithLimit(m, cfg.MaxLabSessions)
 
 	// Register SIP handlers
 	m.sipService.OnRegister(m.handler.handleRegister)

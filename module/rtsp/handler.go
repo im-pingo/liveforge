@@ -229,6 +229,9 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 			_ = pub.Close()
 			return newResponse(500, "Internal Server Error", req)
 		}
+		publisherStartup := stream.StartupSnapshot()
+		publishCtx.StreamInstanceID = publisherStartup.StreamInstanceID
+		publishCtx.PublisherGeneration = publisherStartup.Generation
 		if !session.SetPublisher(mediaInfo, stream, pub) {
 			stream.RemovePublisherIf(pub)
 			_ = pub.Close()
@@ -263,9 +266,14 @@ func (h *Handler) HandleAnnounce(req *Request, session *RTSPSession, remoteAddr 
 			}
 			return newResponse(455, "Method Not Valid in This State", req)
 		}
-		session.startPublishLifecycle(func() {
-			h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
-		})
+		if !session.startPublishLifecycle(func() error {
+			return h.server.GetEventBus().EmitAsync(core.EventPublish, publishCtx)
+		}) {
+			session.ClearPublisher(pub)
+			stream.RemovePublisherIf(pub)
+			_ = pub.Close()
+			return newResponse(503, "Service Unavailable", req)
+		}
 	}
 
 	if session != nil && h.server == nil {

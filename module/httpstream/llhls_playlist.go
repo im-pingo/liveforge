@@ -9,17 +9,21 @@ import (
 
 // LLHLSPart represents a partial segment.
 type LLHLSPart struct {
-	Index       int     // part index within parent segment
-	Duration    float64 // actual duration in seconds
-	Independent bool    // starts with keyframe (IDR)
-	Data        []byte  // muxed bytes
+	Index         int     // part index within parent segment
+	Duration      float64 // actual duration in seconds
+	Independent   bool    // starts with keyframe (IDR)
+	Data          []byte  // muxed bytes
+	Discontinuity bool
+	initVersion   string
 }
 
 // LLHLSSegment represents a completed full segment.
 type LLHLSSegment struct {
-	MSN      int          // media sequence number
-	Duration float64      // total duration in seconds
-	Parts    []*LLHLSPart // partial segments
+	MSN           int          // media sequence number
+	Duration      float64      // total duration in seconds
+	Parts         []*LLHLSPart // partial segments
+	Discontinuity bool
+	initVersion   string
 }
 
 // LLHLSPlaylist generates m3u8 playlists with LL-HLS tags.
@@ -78,15 +82,6 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 	fmt.Fprintf(&sb, "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=%.3f,CAN-SKIP-UNTIL=%.1f\n",
 		partHoldBack, canSkipUntil)
 
-	// EXT-X-MAP (fMP4 only)
-	if p.container == "fmp4" {
-		initURL := p.basePath + "/init.mp4"
-		if p.initVersion != "" {
-			initURL += "?v=" + p.initVersion
-		}
-		fmt.Fprintf(&sb, "#EXT-X-MAP:URI=\"%s\"\n", initURL)
-	}
-
 	// EXT-X-MEDIA-SEQUENCE
 	seqBase := 0
 	if len(segments) > 0 {
@@ -104,8 +99,37 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 			fmt.Fprintf(&sb, "#EXT-X-SKIP:SKIPPED-SEGMENTS=%d\n", skipCount)
 		}
 	}
+	discontinuitySequence := 0
+	for _, seg := range segments[:startIdx] {
+		if seg.Discontinuity {
+			discontinuitySequence++
+		}
+	}
+	if discontinuitySequence > 0 {
+		fmt.Fprintf(&sb, "#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", discontinuitySequence)
+	}
 
 	sb.WriteString("\n")
+	initWritten := false
+	writtenInitVersion := ""
+	writeInitMap := func(version string) {
+		if p.container != "fmp4" {
+			return
+		}
+		if version == "" {
+			version = p.initVersion
+		}
+		if initWritten && writtenInitVersion == version {
+			return
+		}
+		initURL := p.basePath + "/init.mp4"
+		if version != "" {
+			initURL += "?v=" + version
+		}
+		fmt.Fprintf(&sb, "#EXT-X-MAP:URI=\"%s\"\n", initURL)
+		initWritten = true
+		writtenInitVersion = version
+	}
 
 	// Segment extension
 	ext := "m4s"
@@ -116,6 +140,8 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 	// Completed segments
 	for i := startIdx; i < len(segments); i++ {
 		seg := segments[i]
+		wroteDiscontinuity := false
+		writeInitMap(seg.initVersion)
 		// The initial manifest omits completed parts so Hls.js does not append the
 		// same cold-start media as both parts and a full segment. Blocking reloads
 		// retain the latest completed parts so a client that already loaded them
@@ -123,7 +149,11 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 		if includeLatestCompletedParts && i == len(segments)-1 {
 			for _, part := range seg.Parts {
 				p.writePart(&sb, seg.MSN, part, ext)
+				wroteDiscontinuity = wroteDiscontinuity || part.Discontinuity
 			}
+		}
+		if seg.Discontinuity && !wroteDiscontinuity {
+			sb.WriteString("#EXT-X-DISCONTINUITY\n")
 		}
 		fmt.Fprintf(&sb, "#EXTINF:%.3f,\n", seg.Duration)
 		fmt.Fprintf(&sb, "%s/%d.%s\n", p.basePath, seg.MSN, ext)
@@ -131,10 +161,12 @@ func (p *LLHLSPlaylist) Generate(segments []*LLHLSSegment, currentParts []*LLHLS
 
 	// Current in-progress segment's partial segments
 	for _, part := range currentParts {
+		writeInitMap(part.initVersion)
 		p.writePart(&sb, currentMSN, part, ext)
 	}
 
 	// EXT-X-PRELOAD-HINT for next expected partial
+	writeInitMap(p.initVersion)
 	nextPartIdx := len(currentParts)
 	fmt.Fprintf(&sb, "#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"%s/%d.%d.%s\"\n",
 		p.basePath, currentMSN, nextPartIdx, ext)
@@ -151,6 +183,9 @@ func initSegmentVersion(data []byte) string {
 }
 
 func (p *LLHLSPlaylist) writePart(sb *strings.Builder, msn int, part *LLHLSPart, ext string) {
+	if part.Discontinuity {
+		sb.WriteString("#EXT-X-DISCONTINUITY\n")
+	}
 	sb.WriteString("#EXT-X-PART:")
 	fmt.Fprintf(sb, "DURATION=%.5f", part.Duration)
 	fmt.Fprintf(sb, ",URI=\"%s/%d.%d.%s\"", p.basePath, msn, part.Index, ext)

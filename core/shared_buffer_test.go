@@ -55,6 +55,60 @@ func TestSharedBufferOverflow(t *testing.T) {
 	}
 }
 
+func TestSharedBufferReadResultReportsRetainedPacketOverwrite(t *testing.T) {
+	sb := NewSharedBuffer(2)
+	reader := sb.NewReader()
+
+	for _, packet := range [][]byte{{0}, {1}, {2}, {3}} {
+		sb.Write(packet)
+	}
+
+	result := reader.ReadResult()
+	if !result.OK || !bytes.Equal(result.Data, []byte{2}) || result.Overwritten != 2 {
+		t.Fatalf("ReadResult = %+v, want data [2], OK, and 2 overwritten packets", result)
+	}
+	result = reader.ReadResult()
+	if !result.OK || !bytes.Equal(result.Data, []byte{3}) || result.Overwritten != 0 {
+		t.Fatalf("next ReadResult = %+v, want data [3], OK, and no overwrite", result)
+	}
+}
+
+func TestSharedBufferTryReadResultReportsRetainedPacketOverwrite(t *testing.T) {
+	sb := NewSharedBuffer(2)
+	reader := sb.NewReader()
+
+	for _, packet := range [][]byte{{0}, {1}, {2}, {3}, {4}} {
+		sb.Write(packet)
+	}
+
+	result := reader.TryReadResult()
+	if !result.OK || !bytes.Equal(result.Data, []byte{3}) || result.Overwritten != 3 {
+		t.Fatalf("TryReadResult = %+v, want data [3], OK, and 3 overwritten packets", result)
+	}
+	result = reader.TryReadResult()
+	if !result.OK || !bytes.Equal(result.Data, []byte{4}) || result.Overwritten != 0 {
+		t.Fatalf("next TryReadResult = %+v, want data [4], OK, and no overwrite", result)
+	}
+}
+
+func TestSharedBufferLegacyReadWrappersRetainBehavior(t *testing.T) {
+	sb := NewSharedBuffer(2)
+	reader := sb.NewReader()
+
+	for _, packet := range [][]byte{{0}, {1}, {2}, {3}} {
+		sb.Write(packet)
+	}
+
+	data, ok := reader.Read()
+	if !ok || !bytes.Equal(data, []byte{2}) {
+		t.Fatalf("Read = (%v, %v), want ([2], true)", data, ok)
+	}
+	data, ok = reader.TryRead()
+	if !ok || !bytes.Equal(data, []byte{3}) {
+		t.Fatalf("TryRead = (%v, %v), want ([3], true)", data, ok)
+	}
+}
+
 func TestSharedBufferTryRead(t *testing.T) {
 	sb := NewSharedBuffer(64)
 	r := sb.NewReader()

@@ -199,11 +199,13 @@ func TestProtocolLabPlaybackEscapesStreamPathAndUsesBoundWildcardListeners(t *te
 	playback := view["playback"].(map[string]any)
 	escaped := "tenant/cam%3Fvariant%23one%25raw"
 	want := map[string]string{
-		"rtmp":     "rtmp://console.example:41935/" + escaped,
-		"rtsp":     "rtsp://console.example:48554/" + escaped,
-		"http_flv": "/" + escaped + ".flv",
-		"ws_flv":   "/ws/" + escaped + ".flv",
-		"whep":     "/webrtc/whep/" + escaped + "?mode=realtime",
+		"rtmp":          "rtmp://console.example:41935/" + escaped,
+		"rtsp":          "rtsp://console.example:48554/" + escaped,
+		"http_flv":      "/" + escaped + ".flv",
+		"ws_flv":        "/ws/" + escaped + ".flv",
+		"whep":          "/webrtc/whep/" + escaped + "?mode=live",
+		"whep_live":     "/webrtc/whep/" + escaped + "?mode=live",
+		"whep_realtime": "/webrtc/whep/" + escaped + "?mode=realtime",
 	}
 	for field, expected := range want {
 		if playback[field] != expected {

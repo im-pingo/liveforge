@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -522,6 +523,102 @@ func TestConsoleConfigBrowserRevokesWriteStateAfterRefreshFailure(t *testing.T) 
 	})
 }
 
+func TestConsoleConfigApplyDoesNotOverwriteNewerEditorRevisionWithStaleDesiredSnapshot(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Editor    string `json:"editor"`
+			ApplyBody string `json:"applyBody"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			sourceWritable = true;
+			var applyResolve;
+			var applyBody = "";
+			apiFetch = function(url, options) {
+				if (url === "/api/v1/server/config/apply") {
+					applyBody = options.body;
+					return new Promise(function(resolve) { applyResolve = resolve; });
+				}
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"file"});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:"server:\n  name: stale-desired\n", effective_document:"server:\n  name: active\n", writable:true, source_details:{kind:"file"}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1"});
+				return Promise.resolve({});
+			};
+			showModal = function(_title, _message, confirm) { pendingAction = confirm; };
+			var editor = document.getElementById("config-editor");
+			editor.value = "server:\n  name: submitted\n";
+			editor.dispatchEvent(new Event("input", {bubbles:true}));
+			applyConfigEditor();
+			var applyPromise = pendingAction();
+			editor.value = "server:\n  name: newer-local-edit\n";
+			editor.dispatchEvent(new Event("input", {bubbles:true}));
+			document.body.focus();
+			applyResolve({status:"written_and_refresh_scheduled"});
+			window.__configProbe = null;
+			applyPromise.then(function() {
+				window.__configProbe = {editor:editor.value, applyBody:applyBody};
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(50*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("exercise Apply/editor revision race: %v", err)
+		}
+		if !strings.Contains(probe.ApplyBody, "name: submitted") {
+			t.Fatalf("Apply body=%q, want submitted revision", probe.ApplyBody)
+		}
+		if !strings.Contains(probe.Editor, "name: newer-local-edit") {
+			t.Fatalf("editor=%q, newer local edit was overwritten by stale desired snapshot", probe.Editor)
+		}
+	})
+}
+
+func TestConsoleConfigApplyPreservesSubmittedEditorWhenDesiredSnapshotIsStale(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Editor    string `json:"editor"`
+			ApplyBody string `json:"applyBody"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			sourceWritable = true;
+			var applyResolve;
+			var applyBody = "";
+			apiFetch = function(url, options) {
+				if (url === "/api/v1/server/config/apply") {
+					applyBody = options.body;
+					return new Promise(function(resolve) { applyResolve = resolve; });
+				}
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"file"});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:"server:\n  name: stale-desired\n", effective_document:"server:\n  name: active\n", writable:true, source_details:{kind:"file"}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1"});
+				return Promise.resolve({});
+			};
+			showModal = function(_title, _message, confirm) { pendingAction = confirm; };
+			var editor = document.getElementById("config-editor");
+			editor.value = "server:\n  name: submitted\n";
+			editor.dispatchEvent(new Event("input", {bubbles:true}));
+			applyConfigEditor();
+			var applyPromise = pendingAction();
+			document.body.focus();
+			applyResolve({status:"written_and_refresh_scheduled"});
+			window.__configProbe = null;
+			applyPromise.then(function() {
+				window.__configProbe = {editor:editor.value, applyBody:applyBody};
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(50*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("exercise Apply/stale desired race: %v", err)
+		}
+		if !strings.Contains(probe.ApplyBody, "name: submitted") {
+			t.Fatalf("Apply body=%q, want submitted document", probe.ApplyBody)
+		}
+		if !strings.Contains(probe.Editor, "name: submitted") {
+			t.Fatalf("editor=%q, submitted document was overwritten by stale desired snapshot", probe.Editor)
+		}
+	})
+}
+
 func TestConsoleStorageHidesRecordingPlaybackWhenDisabledAndKeepsFMP4Action(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var probe struct {
@@ -542,8 +639,27 @@ func TestConsoleStorageHidesRecordingPlaybackWhenDisabledAndKeepsFMP4Action(t *t
 		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
 			t.Fatalf("probe storage playback actions: %v", err)
 		}
-		if probe.DisabledActions != 0 || probe.EnabledActions != 1 || probe.Format != "fmp4" || !strings.HasSuffix(probe.PlayURL, "/archive/cam.mp4/play") {
+		if probe.DisabledActions != 0 || probe.EnabledActions != 1 || probe.Format != "fmp4" || probe.PlayURL != "/api/v1/recordings/archive/cam.mp4?action=play" {
 			t.Fatalf("storage playback actions = %#v", probe)
+		}
+	})
+}
+
+func TestConsoleRecordingActionURLsPreserveActionLookingIDs(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Play     string `json:"play"`
+			Download string `json:"download"`
+		}
+		expression := `({
+			play: recordingPlayURL("archive/play"),
+			download: recordingDownloadURL("archive/download")
+		})`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+			t.Fatalf("probe recording action URLs: %v", err)
+		}
+		if probe.Play != "/api/v1/recordings/archive/play?action=play" || probe.Download != "/api/v1/recordings/archive/download?action=download" {
+			t.Fatalf("recording action URLs = %#v", probe)
 		}
 	})
 }
@@ -580,6 +696,108 @@ func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
 			t.Errorf("audio-only playback contract is missing %q", contract)
 		}
 	}
+}
+
+func TestConsoleUsesLiveWHEPAsDefaultAndKeepsRealtimeOption(t *testing.T) {
+
+	_, script := consoleDocument(t)
+	start := strings.Index(script, "function addWHEPProtocols")
+	if start < 0 {
+		t.Fatal("addWHEPProtocols is missing")
+	}
+	end := strings.Index(script[start:], "function addHTTPProtocols")
+	if end < 0 {
+		t.Fatal("addWHEPProtocols boundary is missing")
+	}
+	block := script[start : start+end]
+	live := strings.Index(block, `id: "whep-live"`)
+	realtime := strings.Index(block, `id: "whep-realtime"`)
+	if live < 0 || realtime < 0 {
+		t.Fatalf("WHEP tabs missing from addWHEPProtocols: %q", block)
+	}
+	if live > realtime {
+		t.Fatalf("default WHEP tab is not live-first: live=%d realtime=%d", live, realtime)
+	}
+	if !strings.Contains(block, `playWHEP(k, "live"`) {
+		t.Fatal("default WHEP tab does not call live mode")
+	}
+	if !strings.Contains(block, `playWHEP(k, "realtime"`) {
+		t.Fatal("realtime WHEP diagnostic tab was removed")
+	}
+}
+
+func TestConsoleWHEPTabsUseDistinctPlaybackMetadata(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var calls []struct {
+			Mode string `json:"mode"`
+			Path string `json:"path"`
+		}
+		expression := `(function() {
+			var original = playWHEP;
+			var captured = [];
+			try {
+				playWHEP = function(_streamKey, mode, path) { captured.push({mode:mode, path:path}); };
+				endpoints.webrtc = location.host;
+				var protocols = [];
+				addWHEPProtocols(protocols, {
+					whep:"/webrtc/whep/live/camera?mode=live",
+					whep_live:"/webrtc/whep/live/camera?mode=live&source=explicit-live",
+					whep_realtime:"/webrtc/whep/live/camera?mode=realtime&source=explicit-realtime"
+				});
+				protocols[0].fn("live/camera");
+				protocols[1].fn("live/camera");
+				return captured;
+			} finally {
+				playWHEP = original;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &calls)); err != nil {
+			t.Fatalf("exercise WHEP protocol metadata: %v", err)
+		}
+		if len(calls) != 2 {
+			t.Fatalf("WHEP play calls = %#v, want live and realtime", calls)
+		}
+		if calls[0].Mode != "live" || calls[0].Path != "/webrtc/whep/live/camera?mode=live&source=explicit-live" {
+			t.Fatalf("live WHEP call = %#v", calls[0])
+		}
+		if calls[1].Mode != "realtime" || calls[1].Path != "/webrtc/whep/live/camera?mode=realtime&source=explicit-realtime" {
+			t.Fatalf("realtime WHEP call = %#v", calls[1])
+		}
+	})
+}
+
+func TestConsoleWHEPStalledStatusNamesOnlyStaleExpectedMedia(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var got [][]string
+		expression := `[
+			whepStalledMediaKinds({
+				expected_video:true,
+				expected_audio:true,
+				updated_at:"2026-08-29T08:00:10Z",
+				last_video_at:"2026-08-29T08:00:01Z",
+				last_audio_at:"2026-08-29T08:00:09Z"
+			}),
+			whepStalledMediaKinds({
+				expected_video:true,
+				expected_audio:true,
+				updated_at:"2026-08-29T08:00:10Z",
+				last_video_at:"2026-08-29T08:00:09Z"
+			}),
+			whepStalledMediaKinds({
+				expected_video:false,
+				expected_audio:true,
+				updated_at:"2026-08-29T08:00:10Z",
+				last_audio_at:"2026-08-29T08:00:01Z"
+			})
+		]`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &got)); err != nil {
+			t.Fatalf("evaluate WHEP stalled media diagnostics: %v", err)
+		}
+		want := [][]string{{"video"}, {"audio"}, {"audio"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("stalled media kinds = %#v, want %#v", got, want)
+		}
+	})
 }
 
 func TestConsoleWHEPVideoAutoplayFallbackKeepsAudioControl(t *testing.T) {

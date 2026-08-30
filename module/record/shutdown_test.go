@@ -207,6 +207,42 @@ func TestModuleCloseIsBoundedByDrainTimeout(t *testing.T) {
 	}
 }
 
+func TestModuleCloseDeadlineIncludesAdmissionLockWait(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{DrainTimeout: 20 * time.Millisecond}}
+	m := NewModule()
+	m.server = core.NewServer(cfg)
+
+	// Publish setup owns this mutex while opening or recovering storage. Close
+	// must capture its deadline before waiting for that ownership.
+	m.mu.Lock()
+	result := make(chan error, 1)
+	started := time.Now()
+	go func() { result <- m.Close() }()
+
+	select {
+	case err := <-result:
+		if err == nil {
+			m.mu.Unlock()
+			t.Fatal("expected close timeout while admission lock is held")
+		}
+		if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+			m.mu.Unlock()
+			t.Fatalf("close exceeded drain bound before lock release: %v", elapsed)
+		}
+	case <-time.After(250 * time.Millisecond):
+		m.mu.Unlock()
+		<-result
+		t.Fatal("close waited for admission lock before starting drain timeout")
+	}
+
+	m.mu.Unlock()
+	select {
+	case <-m.closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("background close did not finish after admission lock release")
+	}
+}
+
 func TestModuleRepublishStartsReplacementWhenNewPublishArrivesBeforeOldStop(t *testing.T) {
 	m, stream, _ := newLifecycleTestModule(t, "live/reorder")
 	oldPublisher := &testPublisher{id: "old"}

@@ -27,12 +27,13 @@ func (m *Module) RunSelfTest(ctx context.Context) (protocoltest.Report, error) {
 	if m.handler == nil || m.handler.ports == nil {
 		return protocoltest.NewWithDuration("gb28181", []protocoltest.Check{{Name: "module_initialized", Detail: "GB28181 module is not initialized"}}, time.Since(started)), nil
 	}
-	rtpPort, rtcpPort, err := m.handler.ports.AllocatePair()
+	pair, err := m.handler.ports.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		checks = append(checks, protocoltest.Check{Name: "rtp_port_allocation", Detail: err.Error()})
 	} else {
-		m.handler.ports.Free(rtpPort, rtcpPort)
-		checks = append(checks, protocoltest.Check{Name: "rtp_port_allocation", Passed: true, Detail: fmt.Sprintf("%d/%d", rtpPort, rtcpPort)})
+		closeBoundUDPPair(pair)
+		m.handler.ports.Free(pair.RTPPort, pair.RTCPPort)
+		checks = append(checks, protocoltest.Check{Name: "rtp_port_allocation", Passed: true, Detail: fmt.Sprintf("%d/%d", pair.RTPPort, pair.RTCPPort)})
 	}
 
 	muxer := ps.NewMuxer()

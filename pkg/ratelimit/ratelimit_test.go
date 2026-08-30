@@ -78,7 +78,7 @@ func TestExtractIP(t *testing.T) {
 	}{
 		{"remote addr", "192.168.1.1:12345", "", "", "192.168.1.1"},
 		{"x-forwarded-for single", "10.0.0.1:80", "203.0.113.50", "", "203.0.113.50"},
-		{"x-forwarded-for chain", "10.0.0.1:80", "203.0.113.50, 70.41.3.18", "", "203.0.113.50"},
+		{"x-forwarded-for chain", "10.0.0.1:80", "203.0.113.50, 70.41.3.18", "", "70.41.3.18"},
 		{"x-real-ip", "10.0.0.1:80", "", "198.51.100.178", "198.51.100.178"},
 		{"xff takes priority over xri", "10.0.0.1:80", "203.0.113.50", "198.51.100.178", "203.0.113.50"},
 	}
@@ -93,10 +93,54 @@ func TestExtractIP(t *testing.T) {
 			if tt.xri != "" {
 				r.Header.Set("X-Real-IP", tt.xri)
 			}
-			got := extractIP(r)
+			got := extractIPWithTrustedProxies(r, parseTrustedProxies([]string{"10.0.0.1/32"}))
 			if got != tt.want {
 				t.Errorf("extractIP() = %q, want %q", got, tt.want)
 			}
 		})
 	}
+}
+
+func TestExtractIPStripsTrustedProxyChainFromRight(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.3:1234"
+	r.Header.Set("X-Forwarded-For", "203.0.113.50, 10.0.0.1, 10.0.0.2")
+
+	trusted := parseTrustedProxies([]string{"10.0.0.0/8"})
+	if got := extractIPWithTrustedProxies(r, trusted); got != "203.0.113.50" {
+		t.Fatalf("multi-proxy client IP = %q, want first untrusted hop from the right", got)
+	}
+}
+
+func TestLimiterCannotBypassTrustedProxyBucketWithAttackerControlledXFFPrefix(t *testing.T) {
+	limiter := NewWithTrustedProxies(0, 1, []string{"10.0.0.0/8"})
+	defer limiter.Close()
+
+	request := func(attackerPrefix string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "10.0.0.2:1234"
+		r.Header.Set("X-Forwarded-For", attackerPrefix+", 203.0.113.50")
+		return r
+	}
+	if !limiter.AllowRequest(request("198.51.100.1")) {
+		t.Fatal("first request was unexpectedly limited")
+	}
+	if limiter.AllowRequest(request("198.51.100.2")) {
+		t.Fatal("changed attacker-controlled XFF prefix bypassed the existing client bucket")
+	}
+}
+
+func TestExtractIPIgnoresForwardedHeadersFromUntrustedPeer(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:1234"
+	r.Header.Set("X-Forwarded-For", "203.0.113.50")
+	if got := extractIPWithTrustedProxies(r, nil); got != "10.0.0.1" {
+		t.Fatalf("untrusted forwarded address = %q, want remote peer", got)
+	}
+}
+
+func TestLimiterCloseIsIdempotent(t *testing.T) {
+	l := New(1, 1)
+	l.Close()
+	l.Close()
 }

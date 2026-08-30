@@ -509,6 +509,32 @@ func TestConsoleFMP4MIMECandidatesFollowStreamCodecs(t *testing.T) {
 	})
 }
 
+func TestConsoleFMP4MIMECandidatesUseEffectiveTranscodedAudio(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var candidates struct {
+			Enabled  []string `json:"enabled"`
+			Disabled []string `json:"disabled"`
+		}
+		expression := `(function() {
+			streamMedia["live/g711"] = {video_codec:"H264", audio_codec:"G711A"};
+			serverCapabilities.audio_transcoding = true;
+			var enabled = fmp4MimeCandidates("live/g711");
+			serverCapabilities.audio_transcoding = false;
+			var disabled = fmp4MimeCandidates("live/g711");
+			return {enabled: enabled, disabled: disabled};
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &candidates)); err != nil {
+			t.Fatalf("evaluate G711 FMP4 MIME candidates: %v", err)
+		}
+		if len(candidates.Enabled) == 0 || !strings.Contains(candidates.Enabled[0], "mp4a.40.2") {
+			t.Fatalf("transcoded G711 candidates = %v, want AAC output codec", candidates.Enabled)
+		}
+		if len(candidates.Disabled) == 0 || strings.Contains(candidates.Disabled[0], "mp4a") {
+			t.Fatalf("non-transcoded G711 candidates = %v, want video-only output codec", candidates.Disabled)
+		}
+	})
+}
+
 func TestConsoleFMP4UsesSegmentTimestamps(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var mode string

@@ -2,18 +2,18 @@
 
 > Source-aligned project status. Update this file only after implementation and a passing verification path exist.
 >
-> Last updated: 2026-08-28
+> Last updated: 2026-08-30
 
 ## Current Status
 
 LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. A new Console WHEP regression for real H.264 input is open; the project is not considered fully complete until WEBRTC-001 in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md) is reproduced, fixed, and browser-verified.
+Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. The Console WHEP H.264 regression is fixed and browser-verified; the remaining work is limited to the explicitly documented Simulcast boundary and long-duration/concurrency capacity testing.
 
-## Open Review Items
+## Review Items
 
-- **WEBRTC-001 (P0)**: Console WHEP can show `No advancing media received (check codec support and keyframes)`. Root cause is confirmed: the default Console path requests realtime mode, which starts after `LiveCursor` and discards media until a later keyframe; the 8-second watchdog can report failure before a long GOP's next IDR arrives. `mode=live` and the current H.264 browser path can decode, but the default behavior, error state, media-write diagnostics, and real GB28181/SIP H.264 browser coverage remain open.
-- **WEBRTC-002 (P1)**: Add a browser regression path for real H.264 inputs and distinguish no keyframe, codec negotiation, malformed payload, and `WriteSample` failure.
+- **WEBRTC-001 (P0)**: Closed. The default Console and protocol-lab WHEP path uses atomic `mode=live` GOP startup; explicit realtime mode retains its waiting-keyframe semantics, while feed status and bounded diagnostics distinguish waiting, codec mismatch, write failure, generation end, and media stall.
+- **WEBRTC-002 (P1)**: Closed for the supported matrix. Chromium coverage verifies real H.264/VP8 playback when the browser advertises H.264, SIP/GB28181/WHIP cross-protocol paths, decoded dimensions, advancing media time, RTP/RTCP counters, and non-stalled server status; browsers without H.264 receive an explicit environment skip, while Pion negotiation coverage remains required. Long-duration and high-concurrency capacity remain separate operational work.
 - Performance, lifecycle, resource, security, and functional-boundary findings are recorded with source locations in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md). They are not silently treated as completed work.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
@@ -68,7 +68,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - Authenticated recording list/status/detail, HTTP range download, inline browser playback, and admin delete operations.
 - Storage Console actions preview completed recordings and DVR sessions with available segments; recording media uses the management session while DVR media remains on its separate listener without browser bearer-token persistence.
 - DVR playlist/segment serving with synchronous-only subscribe authorization and no asynchronous subscribe lifecycle emission, retention cleanup, storage/session status, and Prometheus metrics.
-- DVR media registration is valid on Go 1.26 and strictly dispatches only `GET /dvr/{app}/{key}.m3u8` and `GET /dvr/{app}/{key}/{filename}`; malformed or nested resources return 404 before playback authorization or storage lookup.
+- DVR media registration is valid on Go 1.26 and dispatches `GET /dvr/{app}/{key}.m3u8` and `GET /dvr/{app}/{key}/{filename}`, including nested stream keys. Encoded path separators, dot segments, and extra resource levels return 404 before playback authorization or storage lookup.
 
 ### SIP Gateway
 
@@ -115,7 +115,9 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | WHIP H.265 + Opus eight-protocol browser playback | Codec-specific Annex-B tests, atomic WHEP Live snapshot test, and `docs/recipes/whip-h265-opus-playback.md` |
 | Storage recording availability and unified fMP4 playback | `module/record/record_test.go`, `module/api/recording_test.go`, and `RecordingStatusResponse` contract |
 | Config document/schema/validate/apply and five runtime sources | `module/api/config_api_test.go`, `config/runtime/source_test.go`, and `docs/recipes/runtime-config-sources.md` |
+| CONFIG-004 through CONFIG-008 runtime/API hardening | `config/runtime/source_test.go`, `module/api/console_management_test.go`, `module/api/openapi_contract_test.go`, and the synchronized schema/recipe/OpenAPI docs |
 | SIP/GB28181 fast self-tests and persistent provider labs | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, `module/sipgateway/lab_test.go`, `module/gb28181/lab_test.go`, and `docs/recipes/protocol-test-lab.md` |
+| ARCH-033 unified HTTP header and idle timeouts | `module/api`, `module/webrtc`, and `module/metrics` `TestHTTPServerTimeouts`; `docs/recipes/auth-and-tls.md` |
 
 ## Operations Documentation
 

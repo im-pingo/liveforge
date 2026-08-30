@@ -78,6 +78,23 @@ func (mm *MuxerManager) GetOrCreateMuxer(format string) (*SharedBufferReader, *M
 	defer mm.mu.Unlock()
 
 	generation, active := mm.stream.activePublisherGeneration()
+	return mm.getOrCreateMuxerLocked(format, generation, active)
+}
+
+// GetOrCreateMuxerForGeneration returns a muxer only while the requested
+// publisher generation is still active.
+func (mm *MuxerManager) GetOrCreateMuxerForGeneration(format string, generation uint64) (*SharedBufferReader, *MuxerInstance) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	activeGeneration, active := mm.stream.activePublisherGeneration()
+	if !active || activeGeneration != generation {
+		return nil, nil
+	}
+	return mm.getOrCreateMuxerLocked(format, generation, true)
+}
+
+func (mm *MuxerManager) getOrCreateMuxerLocked(format string, generation uint64, active bool) (*SharedBufferReader, *MuxerInstance) {
 	inst, ok := mm.muxers[format]
 	if !active {
 		if ok {

@@ -11,6 +11,34 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestWSSenderBoundsSlowClientQueueAndReportsDrops(t *testing.T) {
+	sender := NewWSSender()
+	client := &wsClient{
+		ctx:  context.Background(),
+		send: make(chan []byte, wsClientQueueDepth),
+	}
+	sender.mu.Lock()
+	sender.clients[client] = struct{}{}
+	sender.mu.Unlock()
+
+	for i := 0; i < wsClientQueueDepth; i++ {
+		sender.Send(&NotifyPayload{Event: "on_publish", StreamKey: "live/slow"})
+	}
+	done := make(chan struct{})
+	go func() {
+		sender.Send(&NotifyPayload{Event: "on_publish_stop", StreamKey: "live/slow"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("notification send blocked on a full slow-client queue")
+	}
+	if got := sender.Dropped(); got != 1 {
+		t.Fatalf("dropped slow-client notifications = %d, want 1", got)
+	}
+}
+
 func TestParseEventFilter(t *testing.T) {
 	if f := parseEventFilter(""); f != nil {
 		t.Error("empty string should return nil")

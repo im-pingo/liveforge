@@ -740,6 +740,73 @@ func TestGBLabReceiveRejectsIncompatibleSourceBeforeActivation(t *testing.T) {
 	}
 }
 
+func TestGBLabReceiveBindsSourceGenerationBeforeSignaling(t *testing.T) {
+	h := newRealGBLabHarness(t)
+	stream, err := h.hub.GetOrCreate("gb28181/receive-generation-snapshot")
+	if err != nil {
+		t.Fatalf("GetOrCreate source: %v", err)
+	}
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "publisher-a", info: avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecG711A,
+		SampleRate: 8000,
+		Channels:   1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher A: %v", err)
+	}
+
+	request := LabSessionRequest{
+		Mode:      LabModeReceive,
+		DeviceID:  "34020000001320000083",
+		ChannelID: "34020000001320000084",
+		StreamKey: stream.Key(),
+	}
+	type startResult struct {
+		snapshot LabSessionSnapshot
+		err      error
+	}
+	result := make(chan startResult, 1)
+	go func() {
+		snapshot, startErr := h.module.StartLabSession(context.Background(), request)
+		result <- startResult{snapshot: snapshot, err: startErr}
+	}()
+
+	select {
+	case started := <-result:
+		t.Fatalf("unready publisher A completed receive setup: snapshot=%+v err=%v", started.snapshot, started.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	signaledBeforeReplacement := h.module.registry.Get(request.DeviceID) != nil
+	stream.RemovePublisher()
+	if err := stream.SetPublisher(&gbLabSourcePublisher{id: "publisher-b", info: avframe.MediaInfo{
+		VideoCodec:          avframe.CodecH264,
+		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
+		AudioCodec:          avframe.CodecG711A,
+		SampleRate:          8000,
+		Channels:            1,
+	}}); err != nil {
+		t.Fatalf("SetPublisher B: %v", err)
+	}
+
+	select {
+	case started := <-result:
+		if started.err == nil {
+			t.Fatalf("receive setup captured replacement publisher B: %+v", started.snapshot)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("receive setup did not reject retired publisher A")
+	}
+	if signaledBeforeReplacement {
+		t.Fatal("GB28181 receive signaled before captured publisher A became ready")
+	}
+	if h.module.registry.Get(request.DeviceID) != nil {
+		t.Fatal("failed generation-bound receive left the fake device registered")
+	}
+	if publisher := stream.Publisher(); publisher == nil || publisher.ID() != "publisher-b" {
+		t.Fatalf("replacement source publisher = %v, want publisher-b", publisher)
+	}
+}
+
 func TestGBLabReceiveRejectsSubscriberAdmissionBeforeActivation(t *testing.T) {
 	h := newRealGBLabHarnessWithConfig(t, func(cfg *config.Config) {
 		cfg.Limits.MaxSubscribersPerStream = 1
@@ -1073,6 +1140,31 @@ func TestGBLabRejectsDuplicateIdentity(t *testing.T) {
 	}
 }
 
+func TestGBLabManagerEnforcesActiveSessionCeiling(t *testing.T) {
+	h := newRealGBLabHarnessWithConfig(t, func(cfg *config.Config) {
+		cfg.GB28181.MaxLabSessions = 1
+	})
+	firstRequest := validGBLabRequest()
+	firstRequest.DeviceID = "34020000001320000031"
+	firstRequest.ChannelID = "34020000001320000032"
+	first, err := h.module.StartLabSession(context.Background(), firstRequest)
+	if err != nil {
+		t.Fatalf("first StartLabSession: %v", err)
+	}
+	secondRequest := validGBLabRequest()
+	secondRequest.DeviceID = "34020000001320000033"
+	secondRequest.ChannelID = "34020000001320000034"
+	if _, err := h.module.StartLabSession(context.Background(), secondRequest); !errors.Is(err, ErrLabCapacity) {
+		t.Fatalf("second StartLabSession error = %v, want ErrLabCapacity", err)
+	}
+	if err := h.module.StopLabSession(first.ID); err != nil {
+		t.Fatalf("Stop first session: %v", err)
+	}
+	if _, err := h.module.StartLabSession(context.Background(), secondRequest); err != nil {
+		t.Fatalf("Start after terminal session: %v", err)
+	}
+}
+
 func TestGBLabManagerBoundsTerminalHistoryAndReleasesReceiveResources(t *testing.T) {
 	const historyLimit = 16
 	h := newRealGBLabHarness(t)
@@ -1260,8 +1352,8 @@ func freeGBLabRTPPortRange(t *testing.T, pairCount int, excludedRanges ...[]int)
 	}
 
 	const (
-		minPort = 20000
-		maxPort = 29999
+		minPort = 35000
+		maxPort = 39999
 	)
 	portCount := pairCount * 2
 	loopback := net.ParseIP("127.0.0.1")

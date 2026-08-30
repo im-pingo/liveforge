@@ -3,6 +3,7 @@ package testutil
 import (
 	"net"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -161,4 +162,15 @@ func TestStartTestServer_ShutdownIdempotent(t *testing.T) {
 	srv := StartTestServer(t, WithRTMP())
 	// Explicit shutdown before t.Cleanup fires should not panic.
 	srv.Shutdown()
+}
+
+func TestStartTestServer_SIPGatewayAndGB28181Modules(t *testing.T) {
+	srv := StartTestServer(t, WithSIP(), WithGB28181(), WithSIPGateway())
+
+	if got, want := srv.server.ModuleNames(), []string{"sip", "gb28181", "sipgateway"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("module order = %v, want %v", got, want)
+	}
+	if !srv.Config().SIP.Gateway.Enabled {
+		t.Fatal("SIP gateway config was not enabled")
+	}
 }

@@ -38,6 +38,7 @@ configs/liveforge.local.yaml
 # Recordings
 /data/
 /recordings/
+/module/record/recordings/
 
 # Node (Playwright test tooling)
 node_modules/

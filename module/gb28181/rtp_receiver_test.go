@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
@@ -193,6 +194,32 @@ func TestNewRTPReceiverUsesAssignedPortForRTCP(t *testing.T) {
 	}
 }
 
+func TestNewRTPReceiverFromBoundPairAdoptsAllocatedSockets(t *testing.T) {
+	rtpConn, rtcpConn, err := listenGBLabUDPPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := &portalloc.BoundUDPPair{
+		RTPPort:  rtpConn.LocalAddr().(*net.UDPAddr).Port,
+		RTCPPort: rtcpConn.LocalAddr().(*net.UDPAddr).Port,
+		RTPConn:  rtpConn,
+		RTCPConn: rtcpConn,
+	}
+	receiver, err := NewRTPReceiverFromBoundPair(pair, NewPublisher("bound-pair", nil))
+	if err != nil {
+		_ = rtpConn.Close()
+		_ = rtcpConn.Close()
+		t.Fatal(err)
+	}
+	if receiver.conn != rtpConn || receiver.rtcpConn != rtcpConn {
+		receiver.Close()
+		t.Fatal("receiver rebound sockets instead of adopting the allocated pair")
+	}
+	receiver.Close()
+	assertGBLabPortFree(t, rtpConn.LocalAddr().String())
+	assertGBLabPortFree(t, rtcpConn.LocalAddr().String())
+}
+
 func TestSeqDiff(t *testing.T) {
 	tests := []struct {
 		a, b uint16
@@ -208,6 +235,18 @@ func TestSeqDiff(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("seqDiff(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+func TestOwnRTPPacketCopiesPayload(t *testing.T) {
+	original := &pionrtp.Packet{
+		Header:  pionrtp.Header{SequenceNumber: 7, Timestamp: 9},
+		Payload: []byte{1, 2, 3},
+	}
+	owned := ownRTPPacket(original)
+	original.Payload[0] = 99
+	if owned.Payload[0] != 1 {
+		t.Fatalf("owned payload changed with source buffer: %v", owned.Payload)
 	}
 }
 

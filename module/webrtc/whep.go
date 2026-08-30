@@ -12,10 +12,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
-	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
+
+type whepTrackFactory func(*webrtc.PeerConnection, webrtc.RTPCodecCapability, string, string, string) (*TrackSender, error)
 
 // handleWHEP handles POST /webrtc/whep/{path...} for WHEP playback.
 func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
@@ -110,37 +111,29 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set GCC initial bitrate to the stream's actual bitrate (with 20% headroom)
-	// so the pacer doesn't throttle at startup. The factory closure reads this
-	// value when pion creates the BWE for this PeerConnection.
+	// so the pacer doesn't throttle at startup.
+	var initialBitrate int64
 	if stats := stream.Stats(); stats.BitrateKbps > 0 {
-		m.nextInitialBitrateMu.Lock()
-		m.nextInitialBitrate = stats.BitrateKbps * 1000 * 120 / 100 // kbps→bps + 20%
-		m.nextInitialBitrateMu.Unlock()
+		initialBitrate = stats.BitrateKbps * 1000 * 120 / 100 // kbps→bps + 20%
 	}
 
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{
+	pc, rtpStats, bwe, err := m.newPeerConnection(webrtc.Configuration{
 		ICEServers: m.iceServersFromConfig(),
-	})
+	}, initialBitrate)
 	if err != nil {
-		stream.RemoveSubscriber("webrtc")
+		releaseSubscriber()
 		releaseConn()
 		http.Error(w, "failed to create peer connection", http.StatusInternalServerError)
 		return
-	}
-
-	// Retrieve bandwidth estimator for this PeerConnection (if GCC enabled).
-	var bwe cc.BandwidthEstimator
-	if m.latestBWE != nil {
-		select {
-		case bwe = <-m.latestBWE:
-		default:
-		}
 	}
 
 	sessionID := uuid.New().String()
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
 	lifecycleCtx := *subscribeCtx
 	lifecycleCtx.SubscriberID = sessionID
+	lifecycleCtx.StreamInstanceID = startup.StreamInstanceID
+	lifecycleCtx.PublisherGeneration = startup.Generation
+	lifecycleCtx.PublisherID = startup.PublisherID
 	sess.setCleanup(func() {
 		releaseSubscriber()
 		sess.stopLifecycle(m.server.GetEventBus(), core.EventSubscribeStop, &lifecycleCtx)
@@ -159,14 +152,8 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	var offerHasVideo, offerHasAudio bool
 	var parsedSDP sdp.SessionDescription
 	if err := parsedSDP.UnmarshalString(offer.SDP); err == nil {
-		for _, md := range parsedSDP.MediaDescriptions {
-			switch md.MediaName.Media {
-			case "video":
-				offerHasVideo = true
-			case "audio":
-				offerHasAudio = true
-			}
-		}
+		offerHasVideo = offerRequestsMedia(&parsedSDP, "video")
+		offerHasAudio = offerRequestsMedia(&parsedSDP, "audio")
 	}
 
 	// Create TrackSenders for video and audio. Each TrackSender owns its
@@ -180,57 +167,69 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	// but pion's Bind resolved a different PT from the global negotiated list,
 	// resulting in Chrome receiving packets with an unexpected payload type.
 	var videoSender, audioSender *TrackSender
+	var targetAudioCodec avframe.CodecType
+	var audioNeedsTranscode bool
 
 	if info.HasVideo() && offerHasVideo {
 		mime := codecToMime(info.VideoCodec)
-		if mime != "" && !offerSupportsCodec(&parsedSDP, "video", mime) {
-			// Publisher codec not in offer; H.265 publishers with H.264-only peers
-			// would need video transcoding (deferred). Log and skip video.
+		if mime == "" || !offerSupportsCodec(&parsedSDP, "video", mime) {
 			slog.Debug("WHEP video codec mismatch", "module", "webrtc",
 				"publisher", mime, "stream", streamKey)
-			mime = ""
+			sess.Close()
+			http.Error(w, "source video codec is not supported by the offer", http.StatusUnsupportedMediaType)
+			return
 		}
-		if mime != "" {
-			vt, err := webrtc.NewTrackLocalStaticSample(
-				webrtc.RTPCodecCapability{MimeType: mime, ClockRate: 90000},
-				"video", "liveforge",
-			)
-			if err == nil {
-				if s, err := pc.AddTrack(vt); err == nil {
-					videoSender = NewTrackSender(sessionID, vt, s)
-				}
-			}
+		videoSender, err = m.createWHEPTrackSender(pc,
+			webrtc.RTPCodecCapability{MimeType: mime, ClockRate: 90000},
+			sessionID, sessionID+"-video", "liveforge",
+		)
+		if err != nil {
+			sess.Close()
+			http.Error(w, "failed to create WHEP video track", http.StatusInternalServerError)
+			return
 		}
 	}
 
 	if info.HasAudio() && offerHasAudio {
-		mime := codecToMime(info.AudioCodec)
-		if mime == "" && stream.TranscodeManager() != nil {
-			// Publisher codec not WebRTC-compatible; transcode to Opus.
-			mime = webrtc.MimeTypeOpus
+		canTranscode := stream.TranscodeManager() != nil &&
+			stream.TranscodeManager().CanTranscode(info.AudioCodec, avframe.CodecOpus)
+		targetAudioCodec, audioNeedsTranscode = selectWHEPAudioCodec(&parsedSDP, info.AudioCodec, canTranscode)
+		mime := codecToMime(targetAudioCodec)
+		if mime == "" {
+			sess.Close()
+			http.Error(w, "source audio codec is not supported by the offer", http.StatusUnsupportedMediaType)
+			return
 		}
-		if mime != "" {
-			clockRate := uint32(48000)
-			channels := uint16(2)
-			// When transcoding, always use Opus defaults (48kHz/2ch).
-			// For direct codec passthrough, use publisher's parameters.
-			if codecToMime(info.AudioCodec) != "" {
-				if info.SampleRate > 0 {
-					clockRate = uint32(info.SampleRate)
+		clockRate := uint32(48000)
+		channels := uint16(2)
+		// When transcoding, always use Opus defaults (48kHz/2ch).
+		// For direct codec passthrough, use publisher's parameters.
+		if !audioNeedsTranscode {
+			if info.SampleRate > 0 {
+				if info.SampleRate > 1<<32-1 {
+					sess.Close()
+					http.Error(w, "source audio sample rate is out of range", http.StatusUnsupportedMediaType)
+					return
 				}
-				if info.Channels > 0 {
-					channels = uint16(info.Channels)
-				}
+				clockRate = uint32(info.SampleRate) // #nosec G115 -- range checked against RTP's uint32 clock rate.
 			}
-			at, err := webrtc.NewTrackLocalStaticSample(
-				webrtc.RTPCodecCapability{MimeType: mime, ClockRate: clockRate, Channels: channels},
-				"audio", "liveforge",
-			)
-			if err == nil {
-				if s, err := pc.AddTrack(at); err == nil {
-					audioSender = NewTrackSender(sessionID, at, s)
+			if info.Channels > 0 {
+				if info.Channels > 1<<16-1 {
+					sess.Close()
+					http.Error(w, "source audio channel count is out of range", http.StatusUnsupportedMediaType)
+					return
 				}
+				channels = uint16(info.Channels) // #nosec G115 -- range checked against RTP's uint16 channel count.
 			}
+		}
+		audioSender, err = m.createWHEPTrackSender(pc,
+			webrtc.RTPCodecCapability{MimeType: mime, ClockRate: clockRate, Channels: channels},
+			sessionID, sessionID+"-audio", "liveforge",
+		)
+		if err != nil {
+			sess.Close()
+			http.Error(w, "failed to create WHEP audio track", http.StatusInternalServerError)
+			return
 		}
 	}
 
@@ -311,29 +310,26 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	// Determine playback mode from query parameter.
-	// "realtime" (default): skip GOP cache, wait for next live keyframe.
-	// "live": send GOP cache like other protocols for immediate playback.
-	mode := r.URL.Query().Get("mode")
-	if mode != "live" {
-		mode = "realtime"
-	}
-
-	// Determine target audio codec for the feed loop.
-	targetAudioCodec := info.AudioCodec
-	if audioSender != nil && codecToMime(info.AudioCodec) == "" {
-		targetAudioCodec = avframe.CodecOpus // transcoding to Opus
-	}
+	// "live" (default): send GOP cache like other protocols for immediate
+	// playback. "realtime" is explicit low-latency mode and waits for the next
+	// live keyframe when the snapshot cannot provide one.
+	mode := normalizeWHEPMode(r.URL.Query().Get("mode"))
 
 	// Start the feed goroutine. It waits for ICE+DTLS to complete before
 	// sending media. RTCP handling (PLI/FIR) runs independently via TrackSender.
-	go whepFeedLoop(stream, startup, videoSender, audioSender, sess.done, connected, mode, targetAudioCodec, bwe)
-
+	feedStatus := newWHEPFeedStatus(startup.Generation, startup.LiveCursor, mode)
+	feedStatus.setExpectedMedia(videoSender != nil, audioSender != nil)
+	sess.setFeedStatus(feedStatus)
+	sess.setFeedTracks(videoSender, audioSender, rtpStats)
 	if !sess.startLifecycle(m.server.GetEventBus(), core.EventSubscribe, &lifecycleCtx) {
 		sess.Close()
 		http.Error(w, "session closed during setup", http.StatusServiceUnavailable)
 		return
 	}
+	go func() {
+		whepFeedLoop(stream, startup, videoSender, audioSender, sess.done, connected, mode, targetAudioCodec, bwe, feedStatus, sess.sendGate)
+		sess.Close()
+	}()
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/webrtc/session/"+sessionID)
@@ -341,6 +337,32 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(pc.LocalDescription().SDP))
 
 	slog.Info("WHEP session started", "module", "webrtc", "session", sessionID, "stream", streamKey)
+}
+
+func (m *Module) createWHEPTrackSender(pc *webrtc.PeerConnection, capability webrtc.RTPCodecCapability, sessionID, trackID, streamID string) (*TrackSender, error) {
+	if m.whepTrackFactory != nil {
+		return m.whepTrackFactory(pc, capability, sessionID, trackID, streamID)
+	}
+	track, err := webrtc.NewTrackLocalStaticSample(capability, trackID, streamID)
+	if err != nil {
+		return nil, fmt.Errorf("create local track: %w", err)
+	}
+	sender, err := pc.AddTrack(track)
+	if err != nil {
+		return nil, fmt.Errorf("add local track: %w", err)
+	}
+	return NewTrackSender(sessionID, track, sender), nil
+}
+
+func normalizeWHEPMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "realtime":
+		return "realtime"
+	case "live":
+		return "live"
+	default:
+		return "live"
+	}
 }
 
 func waitWHEPStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
@@ -428,14 +450,74 @@ func offerSupportsCodec(parsed *sdp.SessionDescription, media, mime string) bool
 		codecName = codecName[idx+1:]
 	}
 	for _, md := range parsed.MediaDescriptions {
-		if md.MediaName.Media != media {
+		if md.MediaName.Media != media || !mediaDescriptionRequestsReceive(parsed, md) {
 			continue
 		}
+		offeredPayloads := make(map[string]struct{}, len(md.MediaName.Formats))
+		for _, payload := range md.MediaName.Formats {
+			offeredPayloads[payload] = struct{}{}
+		}
 		for _, attr := range md.Attributes {
-			if attr.Key == "rtpmap" && strings.Contains(strings.ToUpper(attr.Value), codecName+"/") {
+			if attr.Key != "rtpmap" {
+				continue
+			}
+			fields := strings.Fields(attr.Value)
+			if len(fields) != 2 {
+				continue
+			}
+			if _, ok := offeredPayloads[fields[0]]; !ok {
+				continue
+			}
+			encoding := strings.SplitN(fields[1], "/", 2)[0]
+			if strings.EqualFold(encoding, codecName) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func offerRequestsMedia(parsed *sdp.SessionDescription, media string) bool {
+	for _, description := range parsed.MediaDescriptions {
+		if description.MediaName.Media == media && mediaDescriptionRequestsReceive(parsed, description) {
+			return true
+		}
+	}
+	return false
+}
+
+func mediaDescriptionRequestsReceive(parsed *sdp.SessionDescription, description *sdp.MediaDescription) bool {
+	if description.MediaName.Port.Value == 0 {
+		return false
+	}
+	if receives, specified := directionRequestsReceive(description.Attributes); specified {
+		return receives
+	}
+	if receives, specified := directionRequestsReceive(parsed.Attributes); specified {
+		return receives
+	}
+	return true
+}
+
+func directionRequestsReceive(attributes []sdp.Attribute) (receives, specified bool) {
+	for _, attribute := range attributes {
+		switch strings.ToLower(attribute.Key) {
+		case "inactive", "sendonly":
+			return false, true
+		case "recvonly", "sendrecv":
+			return true, true
+		}
+	}
+	return false, false
+}
+
+func selectWHEPAudioCodec(parsed *sdp.SessionDescription, source avframe.CodecType, canTranscode bool) (avframe.CodecType, bool) {
+	if mime := codecToMime(source); mime != "" && offerSupportsCodec(parsed, "audio", mime) {
+		return source, false
+	}
+	if canTranscode && source != 0 && source != avframe.CodecOpus &&
+		offerSupportsCodec(parsed, "audio", webrtc.MimeTypeOpus) {
+		return avframe.CodecOpus, true
+	}
+	return 0, false
 }

@@ -122,7 +122,9 @@ func (s *RecordSession) run() error {
 	}()
 	snapshot := s.snapshot
 	if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-		return nil
+		if _, ended := snapshot.GenerationEndCursor(); !ended {
+			return nil
+		}
 	}
 	videoCodec := snapshot.MediaInfo.VideoCodec
 	audioCodec := snapshot.MediaInfo.AudioCodec
@@ -204,7 +206,9 @@ func (s *RecordSession) run() error {
 		}
 		for _, frame := range snapshot.ReplayFrames {
 			if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-				return nil
+				if _, ended := snapshot.GenerationEndCursor(); !ended {
+					return nil
+				}
 			}
 			if !recordFrameAccepted(frame, videoCodec, audioCodec, allowUndeclaredTracks) {
 				continue
@@ -229,15 +233,23 @@ func (s *RecordSession) run() error {
 	}
 
 	for {
-		frame, ok := s.reader.ReadContext(generationCtx)
+		frame, ok, readErr := core.ReadFrameContext(generationCtx, s.reader)
+		if readErr != nil {
+			slog.Error("record source continuity lost", "module", "record", "stream", s.streamKey, "error", readErr)
+			return readErr
+		}
 		if !ok {
-			if isRecordStopRequested(s.done) {
+			_, generationEnded := snapshot.GenerationEndCursor()
+			if isRecordStopRequested(s.done) || generationEnded {
 				return s.drainPendingFrames()
 			}
 			return nil
 		}
 		if snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(snapshot.Generation) {
-			return nil
+			endCursor, ended := snapshot.GenerationEndCursor()
+			if !ended || (s.transcoder == nil && s.reader.ReadCursor() > endCursor) {
+				return nil
+			}
 		}
 		if !recordFrameAccepted(frame, videoCodec, audioCodec, allowUndeclaredTracks) {
 			continue
@@ -300,21 +312,56 @@ func (s *RecordSession) drainPendingFrames() error {
 	if s.reader == nil {
 		return nil
 	}
+	generationEndCursor, generationEnded := s.snapshot.GenerationEndCursor()
+	targetCursor := s.stopCursor.Load()
+	finiteTarget := isRecordStopRequested(s.done)
+	if generationEnded {
+		targetCursor = generationEndCursor
+		finiteTarget = true
+	}
 	if s.transcoder != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		s.transcoder.WaitForSourceCursor(avframe.CodecAAC, s.stopCursor.Load(), ctx)
+		s.transcoder.WaitForSourceCursor(avframe.CodecAAC, targetCursor, ctx)
 		cancel()
+	}
+	drainCtx := context.Background()
+	var cancelDrain context.CancelFunc
+	if s.transcoder != nil && generationEnded {
+		drainCtx, cancelDrain = context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelDrain()
 	}
 	for {
 		allowUndeclaredTracks := s.snapshot.Generation == 0
-		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+		// A transcoded reader owns a generation-specific output ring. It remains
+		// safe to drain after the source publisher detaches and cannot expose a
+		// replacement generation. A direct source-ring reader still requires the
+		// active-generation guard below.
+		if s.transcoder == nil && finiteTarget && s.reader.ReadCursor() >= targetCursor {
 			return nil
 		}
-		frame, ok := s.reader.TryRead()
+		if s.transcoder == nil && !generationEnded && s.snapshot.Generation != 0 &&
+			!s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+			return nil
+		}
+		var frame *avframe.AVFrame
+		var ok bool
+		var readErr error
+		if s.transcoder != nil && generationEnded {
+			frame, ok, readErr = core.ReadFrameContext(drainCtx, s.reader)
+		} else {
+			frame, ok, readErr = core.TryReadFrame(s.reader)
+		}
+		if readErr != nil {
+			return readErr
+		}
 		if !ok {
 			return nil
 		}
-		if s.snapshot.Generation != 0 && !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+		if s.transcoder == nil && finiteTarget && s.reader.ReadCursor() > targetCursor {
+			return nil
+		}
+		if s.transcoder == nil && !generationEnded && s.snapshot.Generation != 0 &&
+			!s.stream.IsPublisherGeneration(s.snapshot.Generation) {
 			return nil
 		}
 		if !recordFrameAccepted(frame, s.inputVideo, s.inputAudio, allowUndeclaredTracks) {

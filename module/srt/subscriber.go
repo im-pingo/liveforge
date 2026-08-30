@@ -57,36 +57,50 @@ func (s *Subscriber) Run() {
 		return
 	}
 
-	if err := stream.AddSubscriber("srt"); err != nil {
+	pending := stream.StartupSnapshot()
+	releaseSubscriber, err := stream.AddSubscriberForGeneration("srt", pending.Generation)
+	if err != nil {
 		slog.Error("add subscriber error", "module", "srt", "stream", s.streamKey, "error", err)
 		return
 	}
-	defer stream.RemoveSubscriber("srt")
+	defer releaseSubscriber()
 
 	lifecycleCtx := &core.EventContext{
-		StreamKey:    s.streamKey,
-		SubscriberID: s.id,
-		Protocol:     "srt",
-		RemoteAddr:   s.conn.RemoteAddr().String(),
+		StreamKey:           s.streamKey,
+		StreamInstanceID:    pending.StreamInstanceID,
+		PublisherGeneration: pending.Generation,
+		PublisherID:         pending.PublisherID,
+		SubscriberID:        s.id,
+		Protocol:            "srt",
+		RemoteAddr:          s.conn.RemoteAddr().String(),
 	}
 	if err := s.eventBus.EmitAsync(core.EventSubscribe, lifecycleCtx); err != nil {
 		slog.Error("subscriber lifecycle admission failed", "module", "srt", "stream", s.streamKey, "error", err)
 		return
 	}
-	defer s.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx) //nolint:errcheck
+	defer func() {
+		if err := s.eventBus.EmitAsync(core.EventSubscribeStop, lifecycleCtx); err != nil {
+			slog.Error("subscriber terminal lifecycle admission failed", "module", "srt", "stream", s.streamKey, "error", err)
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
 		select {
 		case <-s.closed:
+		case <-pending.GenerationDone:
 			cancel()
 		case <-ctx.Done():
 		}
 	}()
-	snapshot, ok := stream.WaitForStartup(ctx)
-	if !ok {
-		return
+	snapshot := pending
+	if !snapshot.Ready {
+		var ok bool
+		snapshot, ok = stream.WaitForStartup(ctx)
+		if !ok || snapshot.Generation != pending.Generation {
+			return
+		}
 	}
 
 	videoCodec := snapshot.MediaInfo.VideoCodec
@@ -122,9 +136,18 @@ func (s *Subscriber) Run() {
 	}()
 
 	for {
-		frame, ok := filter.NextFrame()
-		if !ok {
+		result := filter.NextFrameResult()
+		if result.Overwritten > 0 {
+			reader.AdvanceToLive()
+			slog.Warn("srt subscriber source reader overwritten", "module", "srt", "stream", s.streamKey, "overwritten", result.Overwritten)
 			return
+		}
+		if !result.OK {
+			return
+		}
+		frame := result.Frame
+		if frame == nil {
+			continue
 		}
 		if !stream.IsPublisherGeneration(snapshot.Generation) {
 			return

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,11 +97,12 @@ func (d *failingACKDialog) SendBYE(ctx context.Context) error {
 func (d *failingACKDialog) Close() { d.closed.Store(true) }
 
 type successfulInviteDialog struct {
-	response *sip.Response
-	done     chan struct{}
-	ackCalls atomic.Int32
-	byeCalls atomic.Int32
-	closed   atomic.Bool
+	response   *sip.Response
+	done       chan struct{}
+	ackCalls   atomic.Int32
+	byeCalls   atomic.Int32
+	closeCalls atomic.Int32
+	closed     atomic.Bool
 }
 
 func newSuccessfulInviteDialog(req *sip.Request) *successfulInviteDialog {
@@ -108,6 +110,10 @@ func newSuccessfulInviteDialog(req *sip.Request) *successfulInviteDialog {
 	close(done)
 	resp := sip.NewResponseFromRequest(req, 200, "OK", []byte("v=0\r\nm=video 30000 RTP/AVP 96\r\n"))
 	resp.AppendHeader(sip.NewHeader("To", "<sip:channel@127.0.0.1>;tag=accepted"))
+	if resp.CallID() == nil {
+		callID := sip.CallIDHeader("accepted-test-dialog")
+		resp.AppendHeader(&callID)
+	}
 	return &successfulInviteDialog{response: resp, done: done}
 }
 
@@ -121,7 +127,10 @@ func (d *successfulInviteDialog) SendBYE(ctx context.Context) error {
 	d.byeCalls.Add(1)
 	return nil
 }
-func (d *successfulInviteDialog) Close() { d.closed.Store(true) }
+func (d *successfulInviteDialog) Close() {
+	d.closeCalls.Add(1)
+	d.closed.Store(true)
+}
 
 type failingFinalResponseTransaction struct {
 	*captureServerTransaction
@@ -133,6 +142,16 @@ func (t *failingFinalResponseTransaction) Respond(response *sip.Response) error 
 		return errors.New("final response write failed")
 	}
 	return nil
+}
+
+type countingServerTransaction struct {
+	*captureServerTransaction
+	respondCalls atomic.Int32
+}
+
+func (t *countingServerTransaction) Respond(response *sip.Response) error {
+	t.respondCalls.Add(1)
+	return t.captureServerTransaction.Respond(response)
 }
 
 type failingInviteService struct{}
@@ -170,11 +189,11 @@ func TestInboundReceiverFailureRollsBackAllResources(t *testing.T) {
 		prefix:   "gb28181",
 	}
 
-	original := newRTPReceiver
-	newRTPReceiver = func(int, *Publisher) (*RTPReceiver, error) {
+	original := newBoundRTPReceiver
+	newBoundRTPReceiver = func(*portalloc.BoundUDPPair, *Publisher) (*RTPReceiver, error) {
 		return nil, errors.New("receiver failed")
 	}
-	t.Cleanup(func() { newRTPReceiver = original })
+	t.Cleanup(func() { newBoundRTPReceiver = original })
 
 	stops := make(chan *core.EventContext, 1)
 	bus.Register(core.HookRegistration{
@@ -221,10 +240,11 @@ func TestInboundFinalResponseFailureRollsBackAcceptedSetup(t *testing.T) {
 	}
 	sessions := NewSessionManager()
 	h := &handler{registry: NewDeviceRegistry(time.Minute, ""), sessions: sessions, hub: hub, bus: bus, ports: ports, prefix: "gb28181"}
-	var starts, stops atomic.Int32
-	for event, counter := range map[core.EventType]*atomic.Int32{core.EventPublish: &starts, core.EventPublishStop: &stops} {
-		bus.Register(core.HookRegistration{Event: event, Mode: core.HookAsync, Handler: func(*core.EventContext) error {
-			counter.Add(1)
+	starts := make(chan *core.EventContext, 1)
+	stops := make(chan *core.EventContext, 1)
+	for event, events := range map[core.EventType]chan<- *core.EventContext{core.EventPublish: starts, core.EventPublishStop: stops} {
+		bus.Register(core.HookRegistration{Event: event, Mode: core.HookAsync, Consumer: "lifecycle", Handler: func(ctx *core.EventContext) error {
+			events <- ctx
 			return nil
 		}})
 	}
@@ -250,9 +270,148 @@ func TestInboundFinalResponseFailureRollsBackAcceptedSetup(t *testing.T) {
 		t.Fatalf("final-response failure did not release allocator pair: %d/%d, %v", rtpPort, rtcpPort, err)
 	}
 	ports.Free(rtpPort, rtcpPort)
-	time.Sleep(20 * time.Millisecond)
-	if starts.Load() != 0 || stops.Load() != 0 {
-		t.Fatalf("failed setup emitted lifecycle start/stop = %d/%d", starts.Load(), stops.Load())
+	drainCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bus.Drain(drainCtx); err != nil {
+		t.Fatalf("drain response-failure lifecycle: %v", err)
+	}
+	start := receiveGBLifecycle(t, starts, "response-failure start")
+	stop := receiveGBLifecycle(t, stops, "response-failure stop")
+	if start.StreamKey != stop.StreamKey ||
+		start.StreamInstanceID == 0 || start.StreamInstanceID != stop.StreamInstanceID ||
+		start.PublisherGeneration == 0 || start.PublisherGeneration != stop.PublisherGeneration ||
+		start.PublisherID == "" || start.PublisherID != stop.PublisherID {
+		t.Fatalf("response failure lifecycle mismatch: start=%+v stop=%+v", start, stop)
+	}
+}
+
+func TestInboundPublishBackpressureRejectsBeforeFinalResponseAndRollsBack(t *testing.T) {
+	bus := core.NewEventBus()
+	var starts atomic.Int32
+	for range 9 {
+		bus.Register(core.HookRegistration{
+			Event:    core.EventPublish,
+			Mode:     core.HookAsync,
+			Consumer: "saturated",
+			Handler: func(*core.EventContext) error {
+				starts.Add(1)
+				return nil
+			},
+		})
+	}
+	stops := make(chan *core.EventContext, 1)
+	bus.Register(core.HookRegistration{
+		Event:    core.EventPublishStop,
+		Mode:     core.HookAsync,
+		Consumer: "terminal",
+		Handler: func(ctx *core.EventContext) error {
+			stops <- ctx
+			return nil
+		},
+	})
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, bus)
+	portRange := freeGBLabRTPPortRange(t, 1)
+	ports, err := portalloc.New(portRange[0], portRange[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := NewSessionManager()
+	h := &handler{
+		registry: NewDeviceRegistry(time.Minute, ""),
+		sessions: sessions,
+		hub:      hub,
+		bus:      bus,
+		ports:    ports,
+		prefix:   "gb28181",
+	}
+	req := newGBRequest(sip.INVITE, "device", "backpressure")
+	req.SetBody([]byte("v=0\r\nm=video 30000 RTP/AVP 96\r\n"))
+	tx := &countingServerTransaction{captureServerTransaction: &captureServerTransaction{}}
+
+	h.handleInvite(req, tx)
+
+	response := tx.lastResponse()
+	if response == nil || response.StatusCode >= 200 && response.StatusCode < 300 {
+		t.Fatalf("backpressured INVITE response = %#v, want non-2xx", response)
+	}
+	if got := tx.respondCalls.Load(); got != 1 {
+		t.Fatalf("backpressured INVITE response calls = %d, want exactly 1", got)
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("backpressured INVITE ran %d publish-start hooks, want 0", got)
+	}
+	if got := len(sessions.All()); got != 0 {
+		t.Fatalf("backpressured INVITE left %d sessions", got)
+	}
+	if _, ok := hub.Find("gb28181/backpressure"); ok {
+		t.Fatal("backpressured INVITE left its newly created stream")
+	}
+	reused, err := ports.AllocateBoundUDPPair("udp4", net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("backpressured INVITE did not release bound pair: %v", err)
+	}
+	if reused.RTPPort != portRange[0] || reused.RTCPPort != portRange[1] {
+		t.Fatalf("reused pair = %d/%d, want %d/%d", reused.RTPPort, reused.RTCPPort, portRange[0], portRange[1])
+	}
+	closeBoundUDPPair(reused)
+	ports.Free(reused.RTPPort, reused.RTCPPort)
+	select {
+	case stop := <-stops:
+		t.Fatalf("rejected publish-start emitted unmatched stop: %#v", stop)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestLivePlayBackpressureTerminatesManagedDialogExactlyOnce(t *testing.T) {
+	bus := core.NewEventBus()
+	for range 9 {
+		bus.Register(core.HookRegistration{
+			Event:    core.EventPublish,
+			Mode:     core.HookAsync,
+			Consumer: "saturated",
+			Handler:  func(*core.EventContext) error { return nil },
+		})
+	}
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, bus)
+	portRange := freeGBLabRTPPortRange(t, 1)
+	ports, err := portalloc.New(portRange[0], portRange[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := NewSessionManager()
+	h := &handler{sessions: sessions, hub: hub, bus: bus, ports: ports, prefix: "gb28181"}
+	device := &Device{DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp"}
+	var dialog *successfulInviteDialog
+
+	_, err = (&inviteClient{
+		sipService: failingInviteService{},
+		handler:    h,
+		sendInvite: func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+			dialog = newSuccessfulInviteDialog(req)
+			return dialog, nil
+		},
+	}).invite(context.Background(), device, "backpressure", nil)
+
+	if !errors.Is(err, core.ErrAsyncBackpressure) {
+		t.Fatalf("live-play admission error = %v, want %v", err, core.ErrAsyncBackpressure)
+	}
+	if dialog == nil {
+		t.Fatal("live-play did not reach an accepted dialog")
+	}
+	if got := dialog.ackCalls.Load(); got != 1 {
+		t.Fatalf("live-play ACK calls = %d, want 1", got)
+	}
+	if got := dialog.byeCalls.Load(); got != 1 {
+		t.Fatalf("live-play BYE calls = %d, want 1", got)
+	}
+	if got := dialog.closeCalls.Load(); got != 1 {
+		t.Fatalf("live-play close calls = %d, want 1", got)
+	}
+	if got := len(sessions.All()); got != 0 {
+		t.Fatalf("live-play admission failure left %d sessions", got)
+	}
+	if _, ok := hub.Find("gb28181/backpressure"); ok {
+		t.Fatal("live-play admission failure left its newly created stream")
 	}
 }
 
@@ -331,6 +490,51 @@ func TestOutboundACKFailureTerminatesDialogAndRollsBack(t *testing.T) {
 				t.Fatalf("failed setup emitted lifecycle start/stop = %d/%d", starts.Load(), stops.Load())
 			}
 		})
+	}
+}
+
+func TestPlaybackSuccessfulDialogIsOwnedUntilSessionStops(t *testing.T) {
+	bus := core.NewEventBus()
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, bus)
+	ports, err := portalloc.New(42200, 42201)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := NewSessionManager()
+	h := &handler{sessions: sessions, hub: hub, bus: bus, ports: ports, prefix: "gb28181"}
+	device := &Device{DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp"}
+	var dialog *successfulInviteDialog
+
+	session, err := (&playbackClient{
+		sipService: failingInviteService{},
+		handler:    h,
+		sendInvite: func(_ context.Context, req *sip.Request) (inviteDialog, error) {
+			dialog = newSuccessfulInviteDialog(req)
+			return dialog, nil
+		},
+	}).playback(context.Background(), device, "channel", time.Now(), time.Now().Add(time.Minute), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.closeSession(session, "") })
+
+	if session.Snapshot().InviteTx == nil {
+		t.Fatal("successful playback session did not retain its INVITE dialog")
+	}
+	if dialog.closed.Load() {
+		t.Fatal("successful playback dialog closed before the session stopped")
+	}
+	if !h.closeSession(session, "") {
+		t.Fatal("first playback stop did not own session cleanup")
+	}
+	if h.closeSession(session, "") {
+		t.Fatal("second playback stop repeated session cleanup")
+	}
+	if got := dialog.byeCalls.Load(); got != 1 {
+		t.Fatalf("playback BYE calls = %d, want exactly 1", got)
+	}
+	if !dialog.closed.Load() {
+		t.Fatal("playback dialog remained open after session stop")
 	}
 }
 
@@ -460,15 +664,15 @@ func TestOutboundSendFailureClosesOwnedReceiverAndRollsBack(t *testing.T) {
 			h := &handler{sessions: sessions, hub: hub, bus: bus, ports: ports, prefix: "gb28181"}
 			device := &Device{DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp"}
 
-			original := newRTPReceiver
+			original := newBoundRTPReceiver
 			created := 0
 			boundPort := 0
-			newRTPReceiver = func(port int, publisher *Publisher) (*RTPReceiver, error) {
+			newBoundRTPReceiver = func(pair *portalloc.BoundUDPPair, publisher *Publisher) (*RTPReceiver, error) {
 				created++
-				boundPort = port
-				return NewRTPReceiver(port, publisher)
+				boundPort = pair.RTPPort
+				return NewRTPReceiverFromBoundPair(pair, publisher)
 			}
-			t.Cleanup(func() { newRTPReceiver = original })
+			t.Cleanup(func() { newBoundRTPReceiver = original })
 
 			if err := test.run(h, device); err == nil {
 				t.Fatal("outbound setup unexpectedly succeeded")
@@ -531,9 +735,10 @@ func TestMediaSessionPublishLifecycleIsAtomicWithClose(t *testing.T) {
 	releaseEmit := make(chan struct{})
 	startResult := make(chan bool, 1)
 	go func() {
-		startResult <- session.startPublishLifecycle(func() {
+		startResult <- session.startPublishLifecycle(func() error {
 			close(emitEntered)
 			<-releaseEmit
+			return nil
 		})
 	}()
 	<-emitEntered
@@ -566,11 +771,21 @@ func TestMediaSessionPublishLifecycleRejectsStartAfterClose(t *testing.T) {
 		t.Fatal("session close did not own cleanup")
 	}
 	emitted := false
-	if session.startPublishLifecycle(func() { emitted = true }) {
+	if session.startPublishLifecycle(func() error { emitted = true; return nil }) {
 		t.Fatal("publish lifecycle started after close")
 	}
 	if emitted {
 		t.Fatal("publish lifecycle callback ran after close")
+	}
+}
+
+func TestMediaSessionPublishLifecycleRejectsAdmissionError(t *testing.T) {
+	session := &MediaSession{State: SessionStateStreaming}
+	if session.startPublishLifecycle(func() error { return core.ErrAsyncBackpressure }) {
+		t.Fatal("publish lifecycle started after admission error")
+	}
+	if session.publishLifecycleStarted() {
+		t.Fatal("failed admission was retained as a started publish lifecycle")
 	}
 }
 

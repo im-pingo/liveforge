@@ -340,6 +340,14 @@ func TestOriginManagerDefaults(t *testing.T) {
 	}
 }
 
+func TestOriginPublisherIDsAreUniqueAcrossReconnects(t *testing.T) {
+	first := newOriginPublisher("rtmp-pull", "live/reconnect", &avframe.MediaInfo{})
+	second := newOriginPublisher("rtmp-pull", "live/reconnect", &avframe.MediaInfo{})
+	if first.ID() == second.ID() {
+		t.Fatalf("origin publisher IDs were reused across reconnects: %q", first.ID())
+	}
+}
+
 func TestOriginManagerOnSubscribeNoStream(t *testing.T) {
 	hub, bus := newTestHub()
 	om := NewOriginManager(hub, bus, NewScheduler("", []string{"rtmp://127.0.0.1:19999/live"}, "", 0), newTestRegistry(), nil, nil, 1, time.Second, time.Second)

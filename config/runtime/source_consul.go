@@ -43,10 +43,14 @@ func NewConsulSource(opts ConsulSourceOptions) (*ConsulSource, error) {
 	if opts.Client == nil {
 		opts.Client = http.DefaultClient
 	}
+	client := *opts.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	if opts.MaxBytes <= 0 {
 		opts.MaxBytes = 4 << 20
 	}
-	return &ConsulSource{address: strings.TrimRight(opts.Address, "/"), prefix: strings.Trim(opts.Prefix, "/"), token: opts.Token, client: opts.Client, maxBytes: opts.MaxBytes}, nil
+	return &ConsulSource{address: strings.TrimRight(opts.Address, "/"), prefix: strings.Trim(opts.Prefix, "/"), token: opts.Token, client: &client, maxBytes: opts.MaxBytes}, nil
 }
 
 func (s *ConsulSource) Name() string { return "consul" }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
@@ -203,6 +204,15 @@ func (op *OriginPull) Close() {
 type originPublisher struct {
 	id   string
 	info *avframe.MediaInfo
+}
+
+var originPublisherSequence atomic.Uint64
+
+func newOriginPublisher(kind, streamKey string, info *avframe.MediaInfo) *originPublisher {
+	return &originPublisher{
+		id:   fmt.Sprintf("%s-%s-%d", kind, streamKey, originPublisherSequence.Add(1)),
+		info: info,
+	}
 }
 
 func (p *originPublisher) ID() string                    { return p.id }

@@ -27,7 +27,10 @@ import (
 	pionrtp "github.com/pion/rtp/v2"
 )
 
-const gbLabTerminalHistoryLimit = 16
+const (
+	gbLabTerminalHistoryLimit = 16
+	defaultGBLabMaxSessions   = 16
+)
 
 const (
 	labRTPPayloadType = 96
@@ -36,17 +39,26 @@ const (
 )
 
 type labManager struct {
-	mu         sync.RWMutex
-	module     *Module
-	sessions   map[string]*gbLabSession
-	identities map[string]string
+	mu          sync.RWMutex
+	module      *Module
+	sessions    map[string]*gbLabSession
+	identities  map[string]string
+	maxSessions int
 }
 
 func newLabManager(module *Module) *labManager {
+	return newLabManagerWithLimit(module, defaultGBLabMaxSessions)
+}
+
+func newLabManagerWithLimit(module *Module, maxSessions int) *labManager {
+	if maxSessions <= 0 {
+		maxSessions = defaultGBLabMaxSessions
+	}
 	return &labManager{
-		module:     module,
-		sessions:   make(map[string]*gbLabSession),
-		identities: make(map[string]string),
+		module:      module,
+		sessions:    make(map[string]*gbLabSession),
+		identities:  make(map[string]string),
+		maxSessions: maxSessions,
 	}
 }
 
@@ -56,6 +68,10 @@ func (m *labManager) Start(ctx context.Context, request LabSessionRequest) (LabS
 	}
 	identity := request.DeviceID
 	m.mu.Lock()
+	if m.activeSessionsLocked() >= m.maxSessions {
+		m.mu.Unlock()
+		return LabSessionSnapshot{}, ErrLabCapacity
+	}
 	if existingID := m.identities[identity]; existingID != "" {
 		if existing := m.sessions[existingID]; existing != nil && existing.isReserved() {
 			m.mu.Unlock()
@@ -81,6 +97,16 @@ func (m *labManager) Start(ctx context.Context, request LabSessionRequest) (LabS
 	}
 	go m.watchSession(session)
 	return session.snapshot(), nil
+}
+
+func (m *labManager) activeSessionsLocked() int {
+	active := 0
+	for _, session := range m.sessions {
+		if session != nil && session.isReserved() {
+			active++
+		}
+	}
+	return active
 }
 
 func (m *labManager) watchSession(session *gbLabSession) {
@@ -427,14 +453,12 @@ func (s *gbLabSession) startPublish(ctx context.Context) error {
 }
 
 func (s *gbLabSession) startReceive(ctx context.Context) error {
-	stream, ok := s.module.handler.hub.Find(s.request.StreamKey)
-	if !ok || stream.Publisher() == nil || stream.Publisher().MediaInfo() == nil {
-		return fmt.Errorf("%w: receive stream %q", ErrLabInvalidRequest, s.request.StreamKey)
+	source, err := s.module.prepareGBOutboundMedia(ctx, s.request.StreamKey)
+	if err != nil {
+		return err
 	}
-	mediaInfo := stream.Publisher().MediaInfo()
-	if mediaInfo.VideoCodec != avframe.CodecH264 || mediaInfo.AudioCodec != avframe.CodecG711A {
-		return fmt.Errorf("%w: receive stream requires H.264 and G.711A", ErrLabInvalidRequest)
-	}
+	sourceCtx, cancelSource := bindGBGeneration(ctx, source.snapshot)
+	defer cancelSource()
 	if err := s.openMediaPair(); err != nil {
 		return err
 	}
@@ -448,23 +472,26 @@ func (s *gbLabSession) startReceive(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.register(ctx, serverHost, serverPort); err != nil {
-		return err
+	if !source.stream.IsPublisherGeneration(source.snapshot.Generation) {
+		return errors.New("GB28181 outbound media source generation ended")
+	}
+	if _, registerErr := s.register(sourceCtx, serverHost, serverPort); registerErr != nil {
+		return registerErr
 	}
 	// REGISTER proves the real device path. The GB handler records the source
 	// address, while a SIP endpoint may advertise a separate Contact address.
 	s.module.registry.Register(s.request.DeviceID, s.peerConn.LocalAddr().String(), "udp")
-	if err := s.sendKeepalive(ctx, serverHost, serverPort); err != nil {
-		return err
+	if keepaliveErr := s.sendKeepalive(sourceCtx, serverHost, serverPort); keepaliveErr != nil {
+		return keepaliveErr
 	}
-	if err := s.sendCatalog(ctx, serverHost, serverPort); err != nil {
-		return err
+	if catalogErr := s.sendCatalog(sourceCtx, serverHost, serverPort); catalogErr != nil {
+		return catalogErr
 	}
 	device, channel := s.module.registry.FindChannel(s.request.ChannelID)
 	if device == nil || channel == nil || device.DeviceID != s.request.DeviceID {
 		return errors.New("GB28181 lab catalog channel was not registered")
 	}
-	moduleSession, err := s.module.startOutboundMedia(ctx, device, s.request.ChannelID, s.request.StreamKey)
+	moduleSession, err := s.module.startOutboundMediaFromSource(sourceCtx, device, s.request.ChannelID, s.request.StreamKey, source)
 	if err != nil {
 		return err
 	}

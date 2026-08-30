@@ -1,13 +1,71 @@
 package core
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/util"
 )
+
+type partialPCMDecoder struct {
+	closed bool
+}
+
+func (d *partialPCMDecoder) SetExtradata([]byte) {}
+func (d *partialPCMDecoder) Decode([]byte) (*audiocodec.PCMFrame, error) {
+	return &audiocodec.PCMFrame{Samples: []int16{11, 22, 33}, SampleRate: 50, Channels: 1}, nil
+}
+func (d *partialPCMDecoder) SampleRate() int { return 50 }
+func (d *partialPCMDecoder) Channels() int   { return 1 }
+func (d *partialPCMDecoder) Close()          { d.closed = true }
+
+type observableDrainingEncoder struct {
+	ring              *util.RingBuffer[transcodeOutput]
+	encoded           [][]int16
+	drainCalls        int
+	drainedAfterClose bool
+	closed            bool
+}
+
+func (e *observableDrainingEncoder) Encode(pcm *audiocodec.PCMFrame) ([]byte, error) {
+	e.encoded = append(e.encoded, append([]int16(nil), pcm.Samples...))
+	return []byte{0x10}, nil
+}
+func (e *observableDrainingEncoder) Drain() ([][]byte, error) {
+	e.drainCalls++
+	e.drainedAfterClose = e.drainedAfterClose || e.ring.IsClosed()
+	return [][]byte{{0x20}, {0x30}}, nil
+}
+func (e *observableDrainingEncoder) SampleRate() int { return 50 }
+func (e *observableDrainingEncoder) Channels() int   { return 1 }
+func (e *observableDrainingEncoder) FrameSize() int  { return 4 }
+func (e *observableDrainingEncoder) Close()          { e.closed = true }
+
+type observableDrainingResampler struct {
+	drainCalls int
+	drained    bool
+}
+
+func (r *observableDrainingResampler) Resample(pcm *audiocodec.PCMFrame) *audiocodec.PCMFrame {
+	return &audiocodec.PCMFrame{
+		Samples: append([]int16(nil), pcm.Samples...), SampleRate: 50, Channels: 1,
+	}
+}
+
+func (r *observableDrainingResampler) Drain() *audiocodec.PCMFrame {
+	r.drainCalls++
+	if r.drained {
+		return &audiocodec.PCMFrame{SampleRate: 50, Channels: 1}
+	}
+	r.drained = true
+	return &audiocodec.PCMFrame{Samples: []int16{44, 55}, SampleRate: 50, Channels: 1}
+}
+
+func (r *observableDrainingResampler) Close() {}
 
 // TestTranscodeManagerZeroOverhead verifies no TranscodedTrack is created
 // when the subscriber requests the same codec as the publisher.
@@ -280,6 +338,90 @@ func TestTranscodeManagerNoPublisher(t *testing.T) {
 	_, _, err := tm.GetOrCreateReader(avframe.CodecOpus)
 	if err == nil {
 		t.Fatal("expected error when no publisher")
+	}
+}
+
+func TestAudioTranscodePipelineFinalizesPartialPCMBeforeRingClose(t *testing.T) {
+	ring := util.NewRingBuffer[transcodeOutput](8)
+	track := &TranscodedTrack{targetCodec: avframe.CodecAAC, ringBuffer: ring}
+	decoder := &partialPCMDecoder{}
+	encoder := &observableDrainingEncoder{ring: ring}
+	resampler := &observableDrainingResampler{}
+	pipeline := &audioTranscodePipeline{
+		track:       track,
+		sourceCodec: avframe.CodecG711U,
+		sourceEpoch: 7,
+		decoder:     decoder,
+		encoder:     encoder,
+		resampler:   resampler,
+		resampled:   true,
+	}
+	pipeline.encode(avframe.NewAVFrame(
+		avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
+		500, 500, []byte{0xff},
+	), audiocodec.SourceSpan{Begin: 10, End: 11})
+	if got := ring.WriteCursor(); got != 0 {
+		t.Fatalf("partial PCM wrote %d packets before finalization, want 0", got)
+	}
+
+	pipeline.finalize()
+	if len(encoder.encoded) != 2 {
+		t.Fatalf("encoder calls = %d, want 1 full resampler-tail frame plus 1 padded frame", len(encoder.encoded))
+	}
+	wantPCM := [][]int16{{11, 22, 33, 44}, {55, 0, 0, 0}}
+	for frameIndex := range wantPCM {
+		if got := encoder.encoded[frameIndex]; len(got) != len(wantPCM[frameIndex]) {
+			t.Fatalf("encoded PCM frame %d length = %d, want %d", frameIndex, len(got), len(wantPCM[frameIndex]))
+		} else {
+			for i := range wantPCM[frameIndex] {
+				if got[i] != wantPCM[frameIndex][i] {
+					t.Fatalf("encoded PCM frame %d sample[%d] = %d, want %d", frameIndex, i, got[i], wantPCM[frameIndex][i])
+				}
+			}
+		}
+	}
+	if resampler.drainCalls != 1 {
+		t.Fatalf("resampler drain calls = %d, want exactly 1", resampler.drainCalls)
+	}
+	if encoder.drainCalls != 1 || encoder.drainedAfterClose {
+		t.Fatalf("drain calls/after-close = %d/%v, want 1/false", encoder.drainCalls, encoder.drainedAfterClose)
+	}
+	if got := ring.WriteCursor(); got != 4 {
+		t.Fatalf("finalized packet count = %d, want 2 encoded packets plus 2 delayed packets", got)
+	}
+
+	ring.Close()
+	closedCursor := ring.WriteCursor()
+	pipeline.finalize()
+	if got := ring.WriteCursor(); got != closedCursor {
+		t.Fatalf("ring cursor advanced from %d to %d after close", closedCursor, got)
+	}
+	if encoder.drainCalls != 1 {
+		t.Fatalf("repeated finalization called drain %d times, want exactly once", encoder.drainCalls)
+	}
+	if resampler.drainCalls != 1 {
+		t.Fatalf("repeated finalization called resampler drain %d times, want exactly once", resampler.drainCalls)
+	}
+
+	reader := ring.NewReader()
+	wantDTS := []int64{500, 580, 660, 740}
+	wantPayload := [][]byte{{0x10}, {0x10}, {0x20}, {0x30}}
+	for i := range wantDTS {
+		output, ok := reader.TryRead()
+		if !ok {
+			t.Fatalf("finalized output ended at packet %d", i)
+		}
+		frame := output.frame
+		if frame.DTS != wantDTS[i] || !bytes.Equal(frame.Payload, wantPayload[i]) {
+			t.Fatalf("packet %d = DTS %d payload %x, want DTS %d payload %x", i, frame.DTS, frame.Payload, wantDTS[i], wantPayload[i])
+		}
+		if frame.AudioCodecEpoch != 7 || frame.AudioProvenance != avframe.FrameProvenanceTranscoded {
+			t.Fatalf("packet %d epoch/provenance = %d/%d, want 7/transcoded", i, frame.AudioCodecEpoch, frame.AudioProvenance)
+		}
+	}
+	pipeline.close()
+	if !decoder.closed || !encoder.closed {
+		t.Fatal("pipeline close did not release decoder and encoder")
 	}
 }
 

@@ -23,15 +23,17 @@ type Muxer struct {
 
 	pat []byte
 	pmt []byte
+
+	tablesSent bool
 }
 
 // NewMuxer creates a TS muxer. videoSeqHeader/audioSeqHeader are the raw codec config data
 // (e.g., AVCDecoderConfigurationRecord for H.264, AudioSpecificConfig for AAC).
 func NewMuxer(videoCodec, audioCodec avframe.CodecType, videoSeqHeader, audioSeqHeader []byte) *Muxer {
 	m := &Muxer{
-		videoCodec:     videoCodec,
-		audioCodec:     audioCodec,
-		lastPCR:        -1,
+		videoCodec: videoCodec,
+		audioCodec: audioCodec,
+		lastPCR:    -1,
 	}
 
 	// Parse video sequence header into Annex-B format for prepending on keyframes
@@ -99,24 +101,27 @@ func (m *Muxer) WriteFrame(frame *avframe.AVFrame) []byte {
 		return nil
 	}
 
+	var data []byte
 	if frame.MediaType.IsVideo() {
-		return m.writeVideoFrame(frame)
+		data = m.writeVideoFrame(frame)
+	} else if frame.MediaType.IsAudio() {
+		data = m.writeAudioFrame(frame)
 	}
-	if frame.MediaType.IsAudio() {
-		return m.writeAudioFrame(frame)
+	if len(data) == 0 {
+		return nil
 	}
-	return nil
+	if !m.tablesSent || (frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe()) {
+		tables := m.rebuildPATandPMT()
+		m.tablesSent = true
+		return append(tables, data...)
+	}
+	return data
 }
 
 func (m *Muxer) writeVideoFrame(frame *avframe.AVFrame) []byte {
 	// Estimate output size: PAT+PMT (376 bytes) + PES header + payload + TS overhead
 	estSize := len(frame.Payload)*2 + 1024
 	result := make([]byte, 0, estSize)
-
-	// Prepend PAT+PMT before keyframes
-	if frame.FrameType.IsKeyframe() {
-		result = append(result, m.rebuildPATandPMT()...)
-	}
 
 	// Build video payload
 	var payload []byte
@@ -198,10 +203,10 @@ func (m *Muxer) shouldInsertPCR(dts int64) bool {
 	return dts-m.lastPCR >= MaxPCRInterval
 }
 
-
 // WritePATAndPMT generates fresh PAT and PMT packets.
 // Used by LL-HLS to insert PAT/PMT at partial segment boundaries.
 func (m *Muxer) WritePATAndPMT() []byte {
+	m.tablesSent = true
 	return m.rebuildPATandPMT()
 }
 

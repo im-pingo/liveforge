@@ -2,6 +2,7 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 )
@@ -63,6 +64,35 @@ func TestStreamHubList(t *testing.T) {
 	}
 }
 
+func TestStreamHubStableStreamsReturnsBoundedCreationOrder(t *testing.T) {
+	hub := NewStreamHub(newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	for _, key := range []string{"live/z", "live/a", "live/m"} {
+		if _, err := hub.GetOrCreate(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertStreamKeys := func(want []string) {
+		t.Helper()
+		streams := hub.StableStreams(len(want))
+		if len(streams) != len(want) {
+			t.Fatalf("stable stream count = %d, want %d", len(streams), len(want))
+		}
+		for index, stream := range streams {
+			if got := stream.Key(); got != want[index] {
+				t.Fatalf("stable stream %d = %q, want %q", index, got, want[index])
+			}
+		}
+	}
+
+	assertStreamKeys([]string{"live/z", "live/a"})
+	hub.Remove("live/z")
+	assertStreamKeys([]string{"live/a", "live/m"})
+	if got := hub.StableStreams(0); len(got) != 0 {
+		t.Fatalf("zero-limit stable streams = %d, want 0", len(got))
+	}
+}
+
 func TestStreamHubFind(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()
@@ -100,6 +130,28 @@ func TestStreamHubGetOrCreateReplacesDestroying(t *testing.T) {
 	if s1 == s2 {
 		t.Error("expected new stream after destroying")
 	}
+}
+
+func TestStreamHubRemovesStreamAfterPublisherTimeout(t *testing.T) {
+	cfg := config.StreamConfig{RingBufferSize: 8, NoPublisherTimeout: 20 * time.Millisecond}
+	hub := NewStreamHub(cfg, config.LimitsConfig{}, NewEventBus())
+	stream, err := hub.GetOrCreate("live/timeout-removal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&testPublisher{id: "timeout-publisher"}); err != nil {
+		t.Fatal(err)
+	}
+	stream.RemovePublisher()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := hub.Find("live/timeout-removal"); !ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("publisher-timeout stream remained in hub")
 }
 
 func TestStreamHubMaxStreams(t *testing.T) {

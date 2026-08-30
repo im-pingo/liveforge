@@ -158,7 +158,10 @@ func (t *RTSPTransport) Push(ctx context.Context, targetURL string, stream *core
 
 	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(relayCtx)
+		frame, ok, readErr := core.ReadFrameContext(relayCtx, reader)
+		if readErr != nil {
+			return fmt.Errorf("source ring continuity lost: %w", readErr)
+		}
 		if !ok {
 			return nil
 		}
@@ -282,10 +285,7 @@ func (t *RTSPTransport) Pull(ctx context.Context, sourceURL string, stream *core
 	slog.Info("rtsp relay pull connected", "module", "cluster", "source", sourceURL)
 	markRelayConnected(ctx)
 
-	pub := &originPublisher{
-		id:   fmt.Sprintf("rtsp-pull-%s", stream.Key()),
-		info: mi,
-	}
+	pub := newOriginPublisher("rtsp-pull", stream.Key(), mi)
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}

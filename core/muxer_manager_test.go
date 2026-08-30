@@ -259,6 +259,33 @@ func TestMuxerManagerGenerationReplacementAndInstanceRelease(t *testing.T) {
 	}
 }
 
+func TestMuxerManagerRejectsStaleRequestedGeneration(t *testing.T) {
+	stream := NewStream("live/muxer-stale-request", newTestStreamConfig(), config.LimitsConfig{}, NewEventBus())
+	pubA := &testPublisher{id: "publisher-a", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(pubA); err != nil {
+		t.Fatal(err)
+	}
+	generationA := stream.StartupSnapshot().Generation
+	if !stream.RemovePublisherIf(pubA) {
+		t.Fatal("publisher A was not removed")
+	}
+	pubB := &testPublisher{id: "publisher-b", info: &avframe.MediaInfo{AudioCodec: avframe.CodecMP3}}
+	if err := stream.SetPublisher(pubB); err != nil {
+		t.Fatal(err)
+	}
+	mm := NewMuxerManager(stream, 256)
+	starts := 0
+	mm.RegisterMuxerStart("flv", func(*MuxerInstance, *Stream) { starts++ })
+
+	reader, inst := mm.GetOrCreateMuxerForGeneration("flv", generationA)
+	if reader != nil || inst != nil {
+		t.Fatalf("stale generation muxer = (%p, %p), want nil", reader, inst)
+	}
+	if starts != 0 || mm.SubscriberCount("flv") != 0 {
+		t.Fatalf("stale request started muxer: starts=%d subscribers=%d", starts, mm.SubscriberCount("flv"))
+	}
+}
+
 func TestMuxerManagerSubscriberCountNonExistent(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

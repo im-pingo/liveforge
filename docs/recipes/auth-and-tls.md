@@ -32,7 +32,11 @@ api:
   audit:
     max_entries: 1000
 limits:
-  rate_limit: {enabled: true, rate: 20, burst: 40}
+  rate_limit:
+    enabled: true
+    rate: 20
+    burst: 40
+    trusted_proxies: []
 auth:
   enabled: true
   publish:
@@ -42,6 +46,23 @@ auth:
     mode: token
     token: {secret: "${SUBSCRIBE_JWT_SECRET}", algorithm: HS256}
 ```
+
+Client-IP forwarding headers are ignored by default. Add only the exact reverse
+proxy IP addresses or CIDR networks you operate to `trusted_proxies`; malformed
+entries are rejected during configuration validation. Never trust a broad
+network merely to make `X-Forwarded-For` appear in logs, because that lets any
+peer in the network choose a new rate-limit identity.
+For a trusted direct peer, LiveForge scans `X-Forwarded-For` from right to left,
+removes configured trusted proxy hops, and uses the first untrusted hop. This
+prevents an attacker-controlled left prefix from creating a fresh rate-limit
+bucket on every request. A malformed non-empty chain falls back to the direct
+peer.
+
+The API, WebRTC signaling, and metrics HTTP listeners use fixed transport
+guards: `ReadHeaderTimeout` is 5 seconds and `IdleTimeout` is 2 minutes. This
+limits slow header parsing and idle keep-alive connections without replacing
+the existing handler or media write deadlines; no server-level `WriteTimeout`
+is added by this policy.
 
 Global TLS files/mode, `api.listen`, `api.tls`, `auth.enabled`, and audit capacity require restart. Named management tokens, the legacy management bearer, console credentials/role, and publish/subscribe rule details are hot-reloadable.
 

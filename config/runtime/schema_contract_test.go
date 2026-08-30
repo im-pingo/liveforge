@@ -78,13 +78,79 @@ func TestConfigSchemaRequiresPracticalLLHLSSegmentDuration(t *testing.T) {
 	}
 }
 
+func TestConfigSchemaAndRuntimeRejectNegativeMetricsStreamDetailLimit(t *testing.T) {
+	schema := loadConfigSchema(t)
+	zero := map[string]any{"metrics": map[string]any{"stream_detail_limit": 0}}
+	if err := validateSchemaValue(schema, schema, zero, "$"); err != nil {
+		t.Fatalf("schema rejected metrics.stream_detail_limit=0: %v", err)
+	}
+	if _, err := ParseDocument([]byte("metrics:\n  stream_detail_limit: 0\n")); err != nil {
+		t.Fatalf("runtime parser rejected metrics.stream_detail_limit=0: %v", err)
+	}
+
+	negative := map[string]any{"metrics": map[string]any{"stream_detail_limit": -1}}
+	if err := validateSchemaValue(schema, schema, negative, "$"); err == nil {
+		t.Fatal("schema accepted negative metrics.stream_detail_limit")
+	}
+	if _, err := ParseDocument([]byte("metrics:\n  stream_detail_limit: -1\n")); err == nil || !strings.Contains(err.Error(), "metrics.stream_detail_limit must not be negative") {
+		t.Fatalf("runtime parser error = %v, want negative metrics stream detail limit rejection", err)
+	}
+}
+
+func TestConfigSchemaRejectsUnboundedEnabledGOPCache(t *testing.T) {
+	schema := loadConfigSchema(t)
+	document := map[string]any{
+		"stream": map[string]any{
+			"gop_cache":              true,
+			"gop_cache_num":          1,
+			"gop_cache_max_frames":   0,
+			"gop_cache_max_duration": "10s",
+			"gop_cache_max_bytes":    0,
+		},
+	}
+	if err := validateSchemaValue(schema, schema, document, "$"); err == nil {
+		t.Fatal("schema accepted an enabled GOP cache without a hard bound")
+	}
+}
+
+func TestConfigSchemaMatchesRecordMaxSizeContract(t *testing.T) {
+	schema := loadConfigSchema(t)
+	valid := []string{"", "   ", "0", "0B", "512KB", "1gb", "42b"}
+	for _, value := range valid {
+		document := map[string]any{
+			"record": map[string]any{
+				"segment": map[string]any{"max_size": value},
+			},
+		}
+		if err := validateSchemaValue(schema, schema, document, "$"); err != nil {
+			t.Errorf("schema rejected record.segment.max_size=%q: %v", value, err)
+		}
+	}
+
+	for _, value := range []string{"K", "1K", "1M", "1G", "1TB", "1.5MB", "-1MB"} {
+		document := map[string]any{
+			"record": map[string]any{
+				"segment": map[string]any{"max_size": value},
+			},
+		}
+		if err := validateSchemaValue(schema, schema, document, "$"); err == nil {
+			t.Errorf("schema accepted invalid record.segment.max_size=%q", value)
+		}
+	}
+}
+
 func TestConfigSchemaAcceptsNegativeScalarDefaultSentinels(t *testing.T) {
 	schema := loadConfigSchema(t)
 	document := map[string]any{
 		"sip":     map[string]any{"gateway": map[string]any{"max_calls": -1}},
 		"cluster": map[string]any{"health_check": map[string]any{"evict_threshold": -1}},
 		"api":     map[string]any{"audit": map[string]any{"max_entries": -1}},
-		"runtime": map[string]any{"http": map[string]any{"max_bytes": -1}, "consul": map[string]any{"max_bytes": -1}},
+		"runtime": map[string]any{
+			"file":   map[string]any{"max_bytes": -1},
+			"http":   map[string]any{"max_bytes": -1},
+			"consul": map[string]any{"max_bytes": -1},
+			"redis":  map[string]any{"max_bytes": -1},
+		},
 	}
 	if err := validateSchemaValue(schema, schema, document, "$"); err != nil {
 		t.Fatalf("schema rejected source-supported negative default sentinels: %v", err)
@@ -101,9 +167,13 @@ api:
   audit:
     max_entries: -1
 runtime:
+  file:
+    max_bytes: -1
   http:
     max_bytes: -1
   consul:
+    max_bytes: -1
+  redis:
     max_bytes: -1
 `
 	cfg, err := ParseDocument([]byte(yamlDocument))
@@ -111,10 +181,11 @@ runtime:
 		t.Fatalf("runtime parser rejected source-supported negative default sentinels: %v", err)
 	}
 	if cfg.SIP.Gateway.MaxCalls != -1 || cfg.Cluster.HealthCheck.EvictThreshold != -1 ||
-		cfg.API.Audit.MaxEntries != -1 || cfg.Runtime.HTTP.MaxBytes != -1 || cfg.Runtime.Consul.MaxBytes != -1 {
-		t.Fatalf("runtime parser did not preserve negative sentinels: max_calls=%d evict_threshold=%d max_entries=%d http_max_bytes=%d consul_max_bytes=%d",
+		cfg.API.Audit.MaxEntries != -1 || cfg.Runtime.File.MaxBytes != -1 || cfg.Runtime.HTTP.MaxBytes != -1 ||
+		cfg.Runtime.Consul.MaxBytes != -1 || cfg.Runtime.Redis.MaxBytes != -1 {
+		t.Fatalf("runtime parser did not preserve negative sentinels: max_calls=%d evict_threshold=%d max_entries=%d file_max_bytes=%d http_max_bytes=%d consul_max_bytes=%d redis_max_bytes=%d",
 			cfg.SIP.Gateway.MaxCalls, cfg.Cluster.HealthCheck.EvictThreshold, cfg.API.Audit.MaxEntries,
-			cfg.Runtime.HTTP.MaxBytes, cfg.Runtime.Consul.MaxBytes)
+			cfg.Runtime.File.MaxBytes, cfg.Runtime.HTTP.MaxBytes, cfg.Runtime.Consul.MaxBytes, cfg.Runtime.Redis.MaxBytes)
 	}
 }
 
@@ -177,6 +248,20 @@ func TestConfigSchemaAcceptsCheckedInSample(t *testing.T) {
 	}
 }
 
+func TestConfigSchemaExposesTrustedProxyPolicy(t *testing.T) {
+	schema := loadConfigSchema(t)
+	document := map[string]any{
+		"limits": map[string]any{
+			"rate_limit": map[string]any{
+				"trusted_proxies": []any{"127.0.0.1", "10.0.0.0/8"},
+			},
+		},
+	}
+	if err := validateSchemaValue(schema, schema, document, "$"); err != nil {
+		t.Fatalf("schema rejected trusted proxy policy: %v", err)
+	}
+}
+
 func loadConfigSchema(t *testing.T) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile("../../docs/config/config.schema.json")
@@ -193,12 +278,35 @@ func loadConfigSchema(t *testing.T) map[string]any {
 // validateSchemaValue executes the JSON Schema keywords used by the focused
 // sentinel fixtures, including local refs and combinators.
 func validateSchemaValue(root, schema map[string]any, value any, path string) error {
+	if condition, ok := schema["if"].(map[string]any); ok {
+		if validateSchemaValue(root, condition, value, path) == nil {
+			if thenSchema, ok := schema["then"].(map[string]any); ok {
+				if err := validateSchemaValue(root, thenSchema, value, path); err != nil {
+					return err
+				}
+			}
+		} else if elseSchema, ok := schema["else"].(map[string]any); ok {
+			if err := validateSchemaValue(root, elseSchema, value, path); err != nil {
+				return err
+			}
+		}
+	}
+	if expected, ok := schema["const"]; ok && !schemaValuesEqual(expected, value) {
+		return fmt.Errorf("%s is %v, want %v", path, value, expected)
+	}
 	if ref, ok := schema["$ref"].(string); ok {
 		resolved, err := resolveLocalSchemaRef(root, ref)
 		if err != nil {
 			return err
 		}
 		return validateSchemaValue(root, resolved, value, path)
+	}
+	if clauses, ok := schema["allOf"].([]any); ok {
+		for _, clause := range clauses {
+			if err := validateSchemaValue(root, clause.(map[string]any), value, path); err != nil {
+				return err
+			}
+		}
 	}
 	if branches, ok := schema["anyOf"].([]any); ok {
 		if !anySchemaBranchAccepts(root, branches, value, path) {

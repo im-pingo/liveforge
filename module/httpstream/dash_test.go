@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,122 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 )
+
+func TestDASHVideoOverwriteRetiresManagerWithoutFlushing(t *testing.T) {
+	stream := newVideoStreamWithoutGOPCache(t)
+	mgr := NewDASHManager(stream.Key(), "/live/dash-overwrite", 6, 8)
+	input := newControlledSegmentInput(2, false)
+	mgr.inputFactory = input.factory
+	mgr.beforeLiveRead = input.beforeRead(mgr.done)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		input.ring.Close()
+		<-done
+	})
+
+	frame := func(frameType avframe.FrameType, dts int64, marker byte) *avframe.AVFrame {
+		nalType := byte(0x41)
+		if frameType.IsKeyframe() {
+			nalType = 0x65
+		}
+		return avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, frameType,
+			dts, dts, []byte{0, 0, 0, 2, nalType, marker},
+		)
+	}
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 0, 0x10))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 500, 0x11))
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 1000, 0x20))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 1200, 0x21))
+	input.writeBurstAndRead(t,
+		frame(avframe.FrameTypeInterframe, 1300, 0x31),
+		frame(avframe.FrameTypeInterframe, 1400, 0x32),
+		frame(avframe.FrameTypeInterframe, 1500, 0x33),
+		frame(avframe.FrameTypeInterframe, 1600, 0x34),
+	)
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("DASH manager continued its single Period after input overwrite")
+	}
+	if !mgr.isRetired() || !mgr.isTerminal() {
+		t.Fatal("DASH overwrite did not expose retired terminal state")
+	}
+	if got := mgr.SegmentCount(); got != 1 {
+		t.Fatalf("DASH segments after overwrite = %d, want only completed pre-gap segment", got)
+	}
+	segment, ok := mgr.GetSegment(0)
+	if !ok || len(segment) == 0 {
+		t.Fatal("completed pre-gap DASH segment was not retained")
+	}
+	for _, marker := range []byte{0x20, 0x21, 0x31, 0x32, 0x33, 0x34} {
+		if bytes.Contains(segment, []byte{0x41, marker}) || bytes.Contains(segment, []byte{0x65, marker}) {
+			t.Fatalf("DASH output retained abandoned/post-gap marker %#x", marker)
+		}
+	}
+}
+
+func TestDASHAudioOnlyOverwriteRetiresAndEndsFutureSegmentWait(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/dash-audio-overwrite")
+	mgr := NewDASHManager(stream.Key(), "/live/dash-audio-overwrite", 0.1, 8)
+	input := newControlledSegmentInput(2, false)
+	mgr.inputFactory = input.factory
+	mgr.beforeLiveRead = input.beforeRead(mgr.done)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		input.ring.Close()
+		<-done
+	})
+
+	audio := func(dts int64, marker byte) *avframe.AVFrame {
+		return avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			dts, dts, []byte{0x21, marker, 0x34, 0x55},
+		)
+	}
+	for dts := int64(0); dts <= 120; dts += 20 {
+		input.writeAndRead(t, audio(dts, byte(dts/20)))
+	}
+	input.writeBurstAndRead(t, audio(140, 0x31), audio(160, 0x32), audio(180, 0x33), audio(200, 0x34))
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("audio-only DASH manager did not retire after overwrite")
+	}
+	if !mgr.isRetired() || mgr.SegmentCount() != 1 {
+		t.Fatalf("audio-only DASH retired/count = %v/%d, want true/1", mgr.isRetired(), mgr.SegmentCount())
+	}
+	if _, ok := mgr.GetAudioSegment(0); !ok {
+		t.Fatal("completed pre-gap audio-only DASH segment was not retained")
+	}
+	if _, ok := mgr.GetAudioSegment(1); ok {
+		t.Fatal("audio-only DASH flushed its abandoned current batch")
+	}
+
+	module := NewModule()
+	module.dashManagers[stream.Key()] = mgr
+	request := httptest.NewRequest(http.MethodGet, "/future.m4s", nil)
+	recorder := httptest.NewRecorder()
+	started := time.Now()
+	module.serveDASHAudioSegment(recorder, request, stream.Key(), 99)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("future segment after DASH retirement status = %d, want 404", recorder.Code)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("future DASH segment wait continued after terminal state for %v", elapsed)
+	}
+}
 
 func TestDASHVideoCodecString(t *testing.T) {
 	tests := []struct {

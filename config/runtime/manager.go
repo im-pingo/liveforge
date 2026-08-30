@@ -154,7 +154,7 @@ func (m *Manager) run(ctx context.Context) {
 		m.initialResult <- nil
 	}
 	if err != nil && !isContextError(err) {
-		slog.Warn("runtime config source initial refresh failed; keeping bootstrap config", "source", m.sourceName, "error", err)
+		slog.Warn("runtime config source initial refresh failed; keeping bootstrap config", "source", m.sourceName, "error", RedactError(err))
 	}
 	ticker := time.NewTicker(m.pollInterval)
 	defer ticker.Stop()
@@ -337,7 +337,13 @@ func (m *Manager) Refresh(ctx context.Context) error {
 // ValidateDocument parses and validates a complete source document without
 // changing the active snapshot or the backing source.
 func ValidateDocument(data []byte) (*config.Config, error) {
-	return ParseDocument(data)
+	return parseDocument(data, false, false)
+}
+
+// ValidateKnownDocument validates an untrusted candidate without expanding
+// process environment variables and rejects fields outside the typed contract.
+func ValidateKnownDocument(data []byte) (*config.Config, error) {
+	return parseDocument(data, false, true)
 }
 
 // Write validates and persists a complete configuration document when the
@@ -430,7 +436,7 @@ func (m *Manager) callbackLoop() {
 				m.statusMu.Lock()
 				m.status.CallbackFailures++
 				m.statusMu.Unlock()
-				slog.Error("runtime config callback failed", "error", err)
+				slog.Error("runtime config callback failed", "error", RedactError(err))
 			}
 		}
 	}
@@ -494,7 +500,7 @@ func (m *Manager) setAcceptedVersion(v Version, pending []string) {
 func (m *Manager) setRejected(err error) {
 	m.statusMu.Lock()
 	m.status.ConsecutiveFailures++
-	m.status.LastError = err.Error()
+	m.status.LastError = RedactError(err)
 	m.status.ConfigChangesRejected++
 	m.statusMu.Unlock()
 }
@@ -502,7 +508,7 @@ func (m *Manager) setRejected(err error) {
 func (m *Manager) setApplicationFailure(err error) {
 	m.statusMu.Lock()
 	m.status.ConsecutiveFailures++
-	m.status.LastError = err.Error()
+	m.status.LastError = RedactError(err)
 	m.status.ConfigChangesApplicationFailed++
 	m.statusMu.Unlock()
 }

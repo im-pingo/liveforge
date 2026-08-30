@@ -19,19 +19,26 @@ type LLHLSManager struct {
 	currentParts []*LLHLSPart
 	currentMSN   int
 	initSegment  []byte
+	initSegments map[string][]byte
 
 	segmenter           *LLHLSSegmenter
 	playlist            *LLHLSPlaylist
 	streamKey           string
 	basePath            string
+	streamInstanceID    uint64
+	publisherGeneration uint64
 	publisherID         string
 	container           string
 	segmentCount        int
 	partDuration        float64
 	segmentDuration     float64
 	initialPlaylistWait time.Duration
+	blockingReloadHold  time.Duration
 
-	done chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+
+	beforeBlockingWait func()
 }
 
 // NewLLHLSManager creates a new LL-HLS manager.
@@ -44,6 +51,7 @@ func NewLLHLSManager(streamKey, basePath string, partDuration, segmentDuration f
 		partDuration:        partDuration,
 		segmentDuration:     segmentDuration,
 		initialPlaylistWait: llhlsInitialPlaylistWaitDuration(segmentDuration, partDuration),
+		blockingReloadHold:  llhlsBlockingReloadHoldDuration(segmentCount, partDuration),
 		done:                make(chan struct{}),
 	}
 	m.cond = sync.NewCond(&m.mu)
@@ -53,18 +61,32 @@ func NewLLHLSManager(streamKey, basePath string, partDuration, segmentDuration f
 	m.segmenter = NewLLHLSSegmenter(partDuration, segmentDuration, container, LLHLSSegmenterCallbacks{
 		OnInit: func(data []byte) {
 			m.mu.Lock()
-			m.initSegment = data
+			m.initSegment = copyBytes(data)
 			m.playlist.initVersion = initSegmentVersion(data)
+			if m.initSegments == nil {
+				m.initSegments = make(map[string][]byte)
+			}
+			if m.playlist.initVersion != "" {
+				m.initSegments[m.playlist.initVersion] = copyBytes(data)
+			}
+			m.pruneInitSegmentsLocked()
 			m.mu.Unlock()
 		},
 		OnPart: func(part *LLHLSPart) {
 			m.mu.Lock()
+			part.initVersion = m.playlist.initVersion
 			m.currentParts = append(m.currentParts, part)
 			m.cond.Broadcast()
 			m.mu.Unlock()
 		},
 		OnSegment: func(seg *LLHLSSegment) {
 			m.mu.Lock()
+			seg.initVersion = m.playlist.initVersion
+			for _, part := range seg.Parts {
+				if part.initVersion == "" {
+					part.initVersion = seg.initVersion
+				}
+			}
 			m.segments = append(m.segments, seg)
 			m.currentParts = nil
 			m.currentMSN = seg.MSN + 1
@@ -72,12 +94,36 @@ func NewLLHLSManager(streamKey, basePath string, partDuration, segmentDuration f
 				excess := len(m.segments) - m.segmentCount
 				m.segments = m.segments[excess:]
 			}
+			m.pruneInitSegmentsLocked()
+			m.cond.Broadcast()
+			m.mu.Unlock()
+		},
+		OnDiscontinuity: func() {
+			m.mu.Lock()
+			m.currentParts = nil
+			m.currentMSN++
+			m.pruneInitSegmentsLocked()
 			m.cond.Broadcast()
 			m.mu.Unlock()
 		},
 	})
 
 	return m
+}
+
+func llhlsBlockingReloadHoldDuration(segmentCount int, partDuration float64) time.Duration {
+	const (
+		minimumHold = 10 * time.Second
+		maximumHold = 30 * time.Second
+	)
+	holdSeconds := float64(segmentCount) * partDuration * 30
+	if math.IsNaN(holdSeconds) || math.IsInf(holdSeconds, 0) || holdSeconds >= maximumHold.Seconds() {
+		return maximumHold
+	}
+	if holdSeconds <= minimumHold.Seconds() {
+		return minimumHold
+	}
+	return time.Duration(math.Ceil(holdSeconds*float64(time.Second/time.Millisecond))) * time.Millisecond
 }
 
 func llhlsInitialPlaylistWaitDuration(segmentDuration, partDuration float64) time.Duration {
@@ -107,18 +153,18 @@ func llhlsInitialPlaylistWaitDuration(segmentDuration, partDuration float64) tim
 func (m *LLHLSManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "llhls", "stream", m.streamKey)
 	defer slog.Info("manager stopped", "module", "llhls", "stream", m.streamKey)
-	m.segmenter.Run(stream, m.publisherID)
+	m.segmenter.Run(stream, m.streamInstanceID, m.publisherGeneration, m.publisherID)
 }
 
 // Stop signals shutdown.
 func (m *LLHLSManager) Stop() {
-	select {
-	case <-m.done:
-	default:
+	m.stopOnce.Do(func() {
 		close(m.done)
-	}
-	m.segmenter.Stop()
-	m.cond.Broadcast()
+		m.segmenter.Stop()
+		m.mu.Lock()
+		m.cond.Broadcast()
+		m.mu.Unlock()
+	})
 }
 
 // GeneratePlaylist returns the m3u8 playlist. If targetMSN >= 0, blocks until
@@ -128,37 +174,43 @@ func (m *LLHLSManager) GeneratePlaylist(ctx context.Context, targetMSN, targetPa
 	defer m.mu.Unlock()
 
 	if targetMSN >= 0 {
+		holdCtx, cancelHold := context.WithTimeout(ctx, m.blockingReloadHold)
+		defer cancelHold()
 		cancelCh := make(chan struct{})
 		go func() {
 			select {
-			case <-ctx.Done():
+			case <-holdCtx.Done():
 			case <-m.done:
 			case <-cancelCh:
 				return
 			}
+			m.mu.Lock()
 			m.cond.Broadcast()
+			m.mu.Unlock()
 		}()
 		defer close(cancelCh)
 
-		// Server-side max hold timeout
-		holdDuration := min(max(
-			time.Duration(float64(m.segmentCount)*m.partDuration*30*float64(time.Second)),
-			10*time.Second,
-		), 30*time.Second)
-		deadline := time.Now().Add(holdDuration)
-
 		for !m.hasContent(targetMSN, targetPart) {
-			if ctx.Err() != nil {
+			if holdCtx.Err() != nil || managerStopped(m.done) {
 				break
 			}
-			if time.Now().After(deadline) {
-				break
+			if m.beforeBlockingWait != nil {
+				m.beforeBlockingWait()
 			}
 			m.cond.Wait()
 		}
 	}
 
 	return m.playlist.Generate(m.segments, m.currentParts, m.currentMSN, skip, targetMSN >= 0), nil
+}
+
+func managerStopped(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // WaitForCompletedSegment blocks until the playlist contains one complete
@@ -228,7 +280,50 @@ func (m *LLHLSManager) GetInitSegment() ([]byte, bool) {
 	if m.initSegment == nil {
 		return nil, false
 	}
-	return m.initSegment, true
+	return copyBytes(m.initSegment), true
+}
+
+// GetInitSegmentVersion returns immutable fMP4 initialization bytes for a
+// retained content-derived version. An empty version selects the current init.
+func (m *LLHLSManager) GetInitSegmentVersion(version string) ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if version == "" {
+		if m.initSegment == nil {
+			return nil, false
+		}
+		return copyBytes(m.initSegment), true
+	}
+	data, ok := m.initSegments[version]
+	if !ok {
+		return nil, false
+	}
+	return copyBytes(data), true
+}
+
+func (m *LLHLSManager) pruneInitSegmentsLocked() {
+	if len(m.initSegments) == 0 {
+		return
+	}
+	retained := make(map[string]struct{}, len(m.segments)+1)
+	if m.playlist.initVersion != "" {
+		retained[m.playlist.initVersion] = struct{}{}
+	}
+	for _, seg := range m.segments {
+		if seg.initVersion != "" {
+			retained[seg.initVersion] = struct{}{}
+		}
+	}
+	for _, part := range m.currentParts {
+		if part.initVersion != "" {
+			retained[part.initVersion] = struct{}{}
+		}
+	}
+	for version := range m.initSegments {
+		if _, ok := retained[version]; !ok {
+			delete(m.initSegments, version)
+		}
+	}
 }
 
 // GetPartialSegment returns a partial segment by MSN and part index.

@@ -28,10 +28,11 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		return nil, err
 	}
 
-	rtpPort, _, err := pc.handler.ports.AllocatePair()
+	pair, err := pc.handler.ports.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		return nil, fmt.Errorf("allocate port pair: %w", err)
 	}
+	rtpPort := pair.RTPPort
 
 	localIP := getLocalIP()
 	// Build SDP offer with time range for playback
@@ -63,6 +64,7 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 	_, streamExisted := pc.handler.hub.Find(streamKey)
 	stream, err := pc.handler.hub.GetOrCreate(streamKey)
 	if err != nil {
+		closeBoundUDPPair(pair)
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		return nil, fmt.Errorf("create playback stream: %w", err)
 	}
@@ -73,9 +75,10 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 			stream.WriteFrameForPublisher(pub, frame)
 		},
 	)
-	receiver, err := newRTPReceiver(rtpPort, pub)
+	receiver, err := newBoundRTPReceiver(pair, pub)
 	if err != nil {
 		_ = pub.Close()
+		closeBoundUDPPair(pair)
 		pc.handler.ports.Free(rtpPort, rtpPort+1)
 		if !streamExisted {
 			pc.handler.hub.Remove(streamKey)
@@ -103,7 +106,13 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("send playback INVITE: %w", err)
 	}
-	defer invTx.Close()
+	invTx = newManagedInviteDialog(invTx)
+	keepTransaction := false
+	defer func() {
+		if !keepTransaction {
+			invTx.Close()
+		}
+	}()
 
 	select {
 	case <-invTx.Done():
@@ -145,19 +154,32 @@ func (pc *playbackClient) playback(ctx context.Context, device *Device, channelI
 		pc.handler.rollbackSession(session, !streamExisted)
 		return nil, fmt.Errorf("set playback publisher: %w", err)
 	}
+	startup := stream.StartupSnapshot()
+	session.StreamInstanceID = startup.StreamInstanceID
+	session.PublisherGeneration = startup.Generation
+	session.InviteTx = invTx
 	session.SetState(SessionStateStreaming)
 	pc.handler.sessions.Add(session)
 	pc.handler.runReceiver(session, receiver)
 
 	publishCtx.PublisherID = pub.ID()
+	publishCtx.StreamInstanceID = startup.StreamInstanceID
+	publishCtx.PublisherGeneration = startup.Generation
 	publishCtx.Extra = map[string]any{
 		"gb28181_device_id":  device.DeviceID,
 		"gb28181_channel_id": channelID,
 		"gb28181_playback":   true,
 	}
-	session.startPublishLifecycle(func() {
-		pc.handler.bus.EmitAsync(core.EventPublish, publishCtx)
-	})
+	var lifecycleErr error
+	if !session.startPublishLifecycle(func() error {
+		lifecycleErr = pc.handler.bus.EmitAsync(core.EventPublish, publishCtx)
+		return lifecycleErr
+	}) {
+		terminateAcceptedDialog(invTx)
+		pc.handler.rollbackSession(session, !streamExisted)
+		return nil, fmt.Errorf("playback lifecycle admission: %w", lifecycleErr)
+	}
+	keepTransaction = true
 
 	slog.Info("playback started", "module", "gb28181",
 		"device", device.DeviceID, "channel", channelID,

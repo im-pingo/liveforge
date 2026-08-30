@@ -1,6 +1,7 @@
 package core
 
 import (
+	"container/list"
 	"fmt"
 	"sync"
 
@@ -12,19 +13,28 @@ import (
 type StreamHub struct {
 	mu                sync.RWMutex
 	streams           map[string]*Stream
+	streamOrder       *list.List
+	streamOrderByKey  map[string]*list.Element
 	config            config.StreamConfig
 	limits            config.LimitsConfig
 	eventBus          *EventBus
 	audioCodecEnabled bool
 }
 
+type orderedStream struct {
+	key    string
+	stream *Stream
+}
+
 // NewStreamHub creates a new StreamHub.
 func NewStreamHub(cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *StreamHub {
 	return &StreamHub{
-		streams:  make(map[string]*Stream),
-		config:   cfg,
-		limits:   limits,
-		eventBus: bus,
+		streams:          make(map[string]*Stream),
+		streamOrder:      list.New(),
+		streamOrderByKey: make(map[string]*list.Element),
+		config:           cfg,
+		limits:           limits,
+		eventBus:         bus,
 	}
 }
 
@@ -64,25 +74,41 @@ func (h *StreamHub) Limits() config.LimitsConfig {
 // Returns an error if max_streams limit is reached and the stream does not already exist.
 func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
+	var replacing *Stream
 	if s, ok := h.streams[key]; ok {
 		if s.State() != StreamStateDestroying {
+			h.mu.Unlock()
 			return s, nil
 		}
 		// Stream is being destroyed; replace it with a fresh one.
 		delete(h.streams, key)
+		h.removeOrderedStreamLocked(key, s)
+		replacing = s
 	}
 
 	if max := h.limits.MaxStreams; max > 0 && len(h.streams) >= max {
+		h.mu.Unlock()
 		return nil, fmt.Errorf("max streams limit reached (%d)", max)
 	}
 
 	s := NewStream(key, h.config, h.limits, h.eventBus)
+	s.setDestroyCallback(func() { h.removeIfCurrent(key, s) })
 	if h.audioCodecEnabled {
 		s.transcodeManager = NewTranscodeManager(s, audiocodec.Global(), h.config.RingBufferSize)
 	}
 	h.streams[key] = s
+	h.addOrderedStreamLocked(key, s)
+	h.mu.Unlock()
+
+	if replacing != nil {
+		replacing.Close()
+		_ = h.eventBus.Emit(EventStreamDestroy, &EventContext{
+			StreamKey:           key,
+			StreamInstanceID:    replacing.InstanceID(),
+			PublisherGeneration: replacing.LastPublisherGeneration(),
+			PublisherID:         replacing.LastPublisherID(),
+		}) //nolint:errcheck
+	}
 
 	h.eventBus.Emit(EventStreamCreate, &EventContext{StreamKey: key}) //nolint:errcheck
 
@@ -100,11 +126,44 @@ func (h *StreamHub) Find(key string) (*Stream, bool) {
 // Remove deletes a stream from the hub and emits EventStreamDestroy.
 func (h *StreamHub) Remove(key string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, ok := h.streams[key]; ok {
+	stream, ok := h.streams[key]
+	if ok {
 		delete(h.streams, key)
-		h.eventBus.Emit(EventStreamDestroy, &EventContext{StreamKey: key}) //nolint:errcheck
+		h.removeOrderedStreamLocked(key, stream)
 	}
+	h.mu.Unlock()
+	if !ok {
+		return
+	}
+	stream.Close()
+	_ = h.eventBus.Emit(EventStreamDestroy, &EventContext{
+		StreamKey:           key,
+		StreamInstanceID:    stream.InstanceID(),
+		PublisherGeneration: stream.LastPublisherGeneration(),
+		PublisherID:         stream.LastPublisherID(),
+	}) //nolint:errcheck
+}
+
+func (h *StreamHub) removeIfCurrent(key string, stream *Stream) {
+	h.mu.Lock()
+	current, ok := h.streams[key]
+	if ok && current == stream {
+		delete(h.streams, key)
+		h.removeOrderedStreamLocked(key, stream)
+	}
+	h.mu.Unlock()
+	if !ok || current != stream {
+		return
+	}
+	// The timer already transitioned the stream to Destroying. Close the ring
+	// without re-entering the once-guarded destroy callback.
+	stream.ringBuffer.Close()
+	_ = h.eventBus.Emit(EventStreamDestroy, &EventContext{
+		StreamKey:           key,
+		StreamInstanceID:    stream.InstanceID(),
+		PublisherGeneration: stream.LastPublisherGeneration(),
+		PublisherID:         stream.LastPublisherID(),
+	}) //nolint:errcheck
 }
 
 // Count returns the number of active streams.
@@ -123,4 +182,41 @@ func (h *StreamHub) Keys() []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// StableStreams returns at most limit non-destroying streams in creation
+// order. The returned slice is detached from Hub state and bounded by limit.
+func (h *StreamHub) StableStreams(limit int) []*Stream {
+	if limit <= 0 {
+		return nil
+	}
+	h.mu.RLock()
+	capacity := min(limit, len(h.streams))
+	streams := make([]*Stream, 0, capacity)
+	for element := h.streamOrder.Front(); element != nil && len(streams) < limit; element = element.Next() {
+		entry := element.Value.(orderedStream)
+		if entry.stream.State() == StreamStateDestroying {
+			continue
+		}
+		streams = append(streams, entry.stream)
+	}
+	h.mu.RUnlock()
+	return streams
+}
+
+func (h *StreamHub) addOrderedStreamLocked(key string, stream *Stream) {
+	h.streamOrderByKey[key] = h.streamOrder.PushBack(orderedStream{key: key, stream: stream})
+}
+
+func (h *StreamHub) removeOrderedStreamLocked(key string, stream *Stream) {
+	element, ok := h.streamOrderByKey[key]
+	if !ok {
+		return
+	}
+	entry := element.Value.(orderedStream)
+	if entry.stream != stream {
+		return
+	}
+	h.streamOrder.Remove(element)
+	delete(h.streamOrderByKey, key)
 }

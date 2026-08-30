@@ -15,6 +15,15 @@ type dvrStorage struct {
 	once     sync.Once
 }
 
+type dvrDirectoryStore interface {
+	openStreamDir(pathTemplate, streamKey string) (*localfs.Dir, string, error)
+}
+
+type dvrStorageBoundary interface {
+	dvrDirectoryStore
+	Close() error
+}
+
 func newDVRStorage(pathTemplate string) (*dvrStorage, error) {
 	basePath, err := filepath.Abs(dvrStorageRoot(pathTemplate))
 	if err != nil {

@@ -73,9 +73,9 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		SDP:  string(offerBytes),
 	}
 
-	pc, err := m.api.NewPeerConnection(webrtc.Configuration{
+	pc, _, _, err := m.newPeerConnection(webrtc.Configuration{
 		ICEServers: m.iceServersFromConfig(),
-	})
+	}, 0)
 	if err != nil {
 		releaseConn()
 		http.Error(w, "failed to create peer connection", http.StatusInternalServerError)
@@ -102,21 +102,27 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
 
 	var (
-		videoDetected bool
-		audioDetected bool
-		publisherSet  bool
-		pubMu         sync.Mutex
+		videoDetected       bool
+		audioDetected       bool
+		publisherSet        bool
+		publisherInstanceID uint64
+		publisherGeneration uint64
+		pubMu               sync.Mutex
 	)
 	mediaClock := newWHIPMediaClock()
 	sess.setCleanup(func() {
 		pubMu.Lock()
 		wasPublisher := publisherSet
+		instanceID := publisherInstanceID
+		generation := publisherGeneration
 		pubMu.Unlock()
 		if wasPublisher {
 			stream.RemovePublisherIf(pub)
 		}
 		lifecycleCtx := *publishCtx
 		lifecycleCtx.PublisherID = pub.ID()
+		lifecycleCtx.StreamInstanceID = instanceID
+		lifecycleCtx.PublisherGeneration = generation
 		sess.stopLifecycle(m.server.GetEventBus(), core.EventPublishStop, &lifecycleCtx)
 		releaseConn()
 	})
@@ -128,18 +134,31 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 
 	setPublisherOnce := func() {
 		pubMu.Lock()
-		defer pubMu.Unlock()
 		if publisherSet || (!videoDetected && !audioDetected) || sess.isClosed() {
+			pubMu.Unlock()
 			return
 		}
 		if err := stream.SetPublisher(pub); err != nil {
+			pubMu.Unlock()
 			slog.Error("WHIP set publisher failed", "module", "webrtc", "error", err)
 			return
 		}
-		publisherSet = true
+		startup := stream.StartupSnapshot()
+		publisherInstanceID = startup.StreamInstanceID
+		publisherGeneration = startup.Generation
 		lifecycleCtx := *publishCtx
 		lifecycleCtx.PublisherID = pub.ID()
-		sess.startLifecycle(m.server.GetEventBus(), core.EventPublish, &lifecycleCtx)
+		lifecycleCtx.StreamInstanceID = publisherInstanceID
+		lifecycleCtx.PublisherGeneration = publisherGeneration
+		if !sess.startLifecycle(m.server.GetEventBus(), core.EventPublish, &lifecycleCtx) {
+			stream.RemovePublisherIf(pub)
+			pubMu.Unlock()
+			slog.Error("WHIP publish lifecycle admission failed", "module", "webrtc", "stream", streamKey)
+			sess.Close()
+			return
+		}
+		publisherSet = true
+		pubMu.Unlock()
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -418,10 +437,12 @@ func mimeToCodecType(mime string) avframe.CodecType {
 // MediaInfo is stored behind an atomic pointer: OnTrack callbacks publish
 // updated snapshots while subscriber goroutines read concurrently.
 type WHIPPublisher struct {
-	id   string
-	info atomic.Pointer[avframe.MediaInfo]
-	pc   *webrtc.PeerConnection
-	done chan struct{}
+	id        string
+	info      atomic.Pointer[avframe.MediaInfo]
+	pc        *webrtc.PeerConnection
+	done      chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 var _ core.Publisher = (*WHIPPublisher)(nil)
@@ -429,10 +450,11 @@ var _ core.Publisher = (*WHIPPublisher)(nil)
 func (p *WHIPPublisher) ID() string                    { return p.id }
 func (p *WHIPPublisher) MediaInfo() *avframe.MediaInfo { return p.info.Load() }
 func (p *WHIPPublisher) Close() error {
-	select {
-	case <-p.done:
-	default:
+	p.closeOnce.Do(func() {
 		close(p.done)
-	}
-	return p.pc.Close()
+		if p.pc != nil {
+			p.closeErr = p.pc.Close()
+		}
+	})
+	return p.closeErr
 }

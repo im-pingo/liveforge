@@ -16,6 +16,8 @@ type DeviceRegistry struct {
 	keepaliveTimeout time.Duration
 	dumpFile         string
 	done             chan struct{}
+	stopOnce         sync.Once
+	monitorOnce      sync.Once
 }
 
 // NewDeviceRegistry creates a new device registry.
@@ -53,7 +55,7 @@ func (r *DeviceRegistry) Register(deviceID, remoteAddr, transport string) *Devic
 	d.Transport = transport
 	d.LastKeepalive = now
 	d.Status = DeviceStatusOnline
-	return d
+	return cloneDevice(d)
 }
 
 // Unregister removes a device.
@@ -78,7 +80,7 @@ func (r *DeviceRegistry) Keepalive(deviceID string) {
 func (r *DeviceRegistry) Get(deviceID string) *Device {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.devices[deviceID]
+	return cloneDevice(r.devices[deviceID])
 }
 
 // UpdateChannels replaces the channels for a device.
@@ -86,7 +88,7 @@ func (r *DeviceRegistry) UpdateChannels(deviceID string, channels map[string]*Ch
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if d, ok := r.devices[deviceID]; ok {
-		d.Channels = channels
+		d.Channels = cloneChannels(channels)
 		slog.Info("channels updated", "module", "gb28181", "device", deviceID, "count", len(channels))
 	}
 }
@@ -97,7 +99,7 @@ func (r *DeviceRegistry) FindChannel(channelID string) (*Device, *Channel) {
 	defer r.mu.RUnlock()
 	for _, d := range r.devices {
 		if ch, ok := d.Channels[channelID]; ok {
-			return d, ch
+			return cloneDevice(d), cloneChannel(ch)
 		}
 	}
 	return nil, nil
@@ -109,7 +111,7 @@ func (r *DeviceRegistry) All() []*Device {
 	defer r.mu.RUnlock()
 	result := make([]*Device, 0, len(r.devices))
 	for _, d := range r.devices {
-		result = append(result, d)
+		result = append(result, cloneDevice(d))
 	}
 	return result
 }
@@ -121,7 +123,7 @@ func (r *DeviceRegistry) AllChannels() []*Channel {
 	var result []*Channel
 	for _, d := range r.devices {
 		for _, ch := range d.Channels {
-			result = append(result, ch)
+			result = append(result, cloneChannel(ch))
 		}
 	}
 	return result
@@ -130,27 +132,31 @@ func (r *DeviceRegistry) AllChannels() []*Channel {
 // StartMonitor starts the background keepalive checker.
 // The onOffline callback is invoked for each device that goes offline.
 func (r *DeviceRegistry) StartMonitor(onOffline func(deviceID string)) {
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
+	r.monitorOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				r.checkKeepalives(onOffline)
-			case <-r.done:
-				return
+			for {
+				select {
+				case <-ticker.C:
+					r.checkKeepalives(onOffline)
+				case <-r.done:
+					return
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // Stop stops the monitor and optionally dumps to file.
 func (r *DeviceRegistry) Stop() {
-	close(r.done)
-	if r.dumpFile != "" {
-		r.DumpToFile()
-	}
+	r.stopOnce.Do(func() {
+		close(r.done)
+		if r.dumpFile != "" {
+			r.DumpToFile()
+		}
+	})
 }
 
 func (r *DeviceRegistry) checkKeepalives(onOffline func(string)) {
@@ -206,11 +212,41 @@ func (r *DeviceRegistry) RestoreFromFile() {
 		return
 	}
 	r.mu.Lock()
-	r.devices = devices
-	// Mark all restored devices as offline until they re-register
-	for _, d := range r.devices {
-		d.Status = DeviceStatusOffline
+	cloned := make(map[string]*Device, len(devices))
+	for id, d := range devices {
+		copy := cloneDevice(d)
+		copy.Status = DeviceStatusOffline
+		cloned[id] = copy
 	}
+	r.devices = cloned
 	r.mu.Unlock()
 	slog.Info("device registry restored", "module", "gb28181", "devices", len(devices))
+}
+
+func cloneChannel(ch *Channel) *Channel {
+	if ch == nil {
+		return nil
+	}
+	copy := *ch
+	return &copy
+}
+
+func cloneChannels(channels map[string]*Channel) map[string]*Channel {
+	if channels == nil {
+		return nil
+	}
+	copy := make(map[string]*Channel, len(channels))
+	for id, channel := range channels {
+		copy[id] = cloneChannel(channel)
+	}
+	return copy
+}
+
+func cloneDevice(device *Device) *Device {
+	if device == nil {
+		return nil
+	}
+	copy := *device
+	copy.Channels = cloneChannels(device.Channels)
+	return &copy
 }

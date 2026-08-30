@@ -3,6 +3,7 @@ package httpstream
 import (
 	"bytes"
 	"log/slog"
+	"sync"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
@@ -12,9 +13,10 @@ import (
 
 // LLHLSSegmenterCallbacks are invoked when segments are produced.
 type LLHLSSegmenterCallbacks struct {
-	OnInit    func(data []byte)
-	OnPart    func(part *LLHLSPart)
-	OnSegment func(seg *LLHLSSegment)
+	OnInit          func(data []byte)
+	OnPart          func(part *LLHLSPart)
+	OnSegment       func(seg *LLHLSSegment)
+	OnDiscontinuity func()
 }
 
 // LLHLSSegmenter reads AVFrames from a stream and produces LL-HLS segments.
@@ -33,6 +35,7 @@ type LLHLSSegmenter struct {
 	partHasData     bool
 	partIndependent bool
 	partIdx         int
+	partMediaClock  segmentMediaClock
 
 	segParts    []*LLHLSPart
 	segStartDTS int64
@@ -43,8 +46,13 @@ type LLHLSSegmenter struct {
 	gotFirstKeyframe bool // first video keyframe received
 	audioPlan        muxerAudioPlan
 	audioPlanSet     bool
+	recoveryPending  bool
 
-	done chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+
+	inputFactory   segmentInputFactory
+	beforeLiveRead func()
 }
 
 // NewLLHLSSegmenter creates a new segmenter.
@@ -59,15 +67,22 @@ func NewLLHLSSegmenter(partDuration, segmentDuration float64, container string, 
 }
 
 // Run starts the segmenter loop. Blocks until stream ends or Stop() is called.
-func (s *LLHLSSegmenter) Run(stream *core.Stream, publisherIDs ...string) {
+func (s *LLHLSSegmenter) Run(stream *core.Stream, identity ...any) {
 	slog.Info("segmenter started", "module", "llhls", "stream", stream.Key(), "container", s.container, "partDuration", s.partDuration)
 	defer slog.Info("segmenter stopped", "module", "llhls", "stream", stream.Key())
 
+	var instanceID, generation uint64
 	expectedPublisherID := ""
-	if len(publisherIDs) > 0 {
-		expectedPublisherID = publisherIDs[0]
+	if len(identity) > 0 {
+		instanceID, _ = identity[0].(uint64)
 	}
-	snapshot, ok := waitStreamStartupForPublisher(s.done, stream, expectedPublisherID)
+	if len(identity) > 1 {
+		generation, _ = identity[1].(uint64)
+	}
+	if len(identity) > 2 {
+		expectedPublisherID, _ = identity[2].(string)
+	}
+	snapshot, ok := waitStreamStartupForGeneration(s.done, stream, instanceID, generation, expectedPublisherID)
 	if !ok {
 		return
 	}
@@ -76,20 +91,16 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream, publisherIDs ...string) {
 	// and live cursor. This prevents a sequence header arriving just after
 	// manager creation from being skipped by the live loop.
 	gopCache := snapshot.ReplayFrames
-	s.audioPlan = s.selectAudioPlanSnapshot(stream, snapshot)
+	selectedAudioPlan := s.selectAudioPlanSnapshot(stream, snapshot)
+	s.audioPlan = selectedAudioPlan
 	s.audioPlanSet = true
-	reader, release, audioPlan := muxerLiveReaderSnapshot(stream, snapshot, s.audioPlan)
+	input, audioPlan := newSegmentInputOwner(s.inputFactory, stream, snapshot, s.audioPlan, s.done)
 	s.audioPlan = audioPlan
-	defer release()
+	defer input.Close()
 	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
 	s.initMuxerSnapshot(stream, snapshot)
-	stopReaderWatch := watchRingReader(reader, s.done, snapshot.GenerationDone)
-	defer stopReaderWatch()
 
 	for _, f := range gopCache {
-		if !stream.IsPublisherGeneration(snapshot.Generation) {
-			return
-		}
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -111,17 +122,58 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream, publisherIDs ...string) {
 			return
 		default:
 		}
+		if s.beforeLiveRead != nil {
+			s.beforeLiveRead()
+		}
 
-		frame, ok := reader.Read()
-		if !ok || frame == nil {
-			if stream.IsPublisherGeneration(snapshot.Generation) {
+		read := readSegmentFrame(input.readContext, input.reader, snapshot, input.waitForGenerationOutput)
+		if read.Overwritten > 0 {
+			action := "continue_audio"
+			if s.hasVideo {
+				action = "wait_keyframe"
+			}
+			logSegmentOverwrite("llhls", action, read.Overwritten)
+			s.beginRecovery()
+			current, currentOK := currentSegmentSnapshot(stream, snapshot)
+			if !currentOK {
+				return
+			}
+			input.reader.AdvanceToLive()
+			refreshedAudioPlan := s.selectAudioPlanSnapshot(stream, current)
+			if segmentInputSourceChanged(selectedAudioPlan, refreshedAudioPlan) {
+				s.audioPlan = input.Reopen(s.inputFactory, stream, segmentRecoverySnapshot(current), refreshedAudioPlan, s.done)
+			} else {
+				s.audioPlan = refreshedAudioPlan
+			}
+			selectedAudioPlan = refreshedAudioPlan
+			s.audioPlanSet = true
+			s.hasVideo = false
+			s.initMuxerSnapshot(stream, current)
+			s.gotFirstKeyframe = !s.hasVideo
+			continue
+		}
+		frame := read.Frame
+		if !read.OK || frame == nil {
+			if managerStopped(s.done) {
 				s.flushCurrentPart(s.partStartDTS)
 				s.flushCurrentSegment()
+				return
 			}
+			if stream.IsPublisherGeneration(snapshot.Generation) {
+				s.beginRecovery()
+				if input.waitForGenerationOutput {
+					logSegmentProducerEnd("llhls")
+				}
+				return
+			}
+			s.flushCurrentPart(s.partStartDTS)
+			s.flushCurrentSegment()
 			return
 		}
 		if !stream.IsPublisherGeneration(snapshot.Generation) {
-			return
+			if _, ended := snapshot.GenerationEndCursor(); !ended {
+				return
+			}
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -135,11 +187,32 @@ func (s *LLHLSSegmenter) Run(stream *core.Stream, publisherIDs ...string) {
 
 // Stop signals the segmenter to shut down.
 func (s *LLHLSSegmenter) Stop() {
-	select {
-	case <-s.done:
-	default:
-		close(s.done)
+	s.stopOnce.Do(func() { close(s.done) })
+}
+
+func (s *LLHLSSegmenter) beginRecovery() {
+	s.discardCurrent()
+	if !s.recoveryPending {
+		s.segMSN++
+		if s.callbacks.OnDiscontinuity != nil {
+			s.callbacks.OnDiscontinuity()
+		}
 	}
+	s.recoveryPending = true
+}
+
+func (s *LLHLSSegmenter) discardCurrent() {
+	s.partFrames = nil
+	s.partBuf.Reset()
+	s.partStartDTS = 0
+	s.partHasData = false
+	s.partIndependent = false
+	s.partIdx = 0
+	s.partMediaClock.Reset()
+	s.segParts = nil
+	s.segStartDTS = 0
+	s.segHasData = false
+	s.gotFirstKeyframe = !s.hasVideo
 }
 
 func (s *LLHLSSegmenter) initMuxer(stream *core.Stream) {
@@ -163,6 +236,13 @@ func (s *LLHLSSegmenter) initMuxerSnapshot(stream *core.Stream, snapshot core.St
 		audioCodec = s.audioPlan.codec
 		audioSeqHeader = s.audioPlan.sequenceHeader
 	}
+	audioSampleRate := snapshot.MediaInfo.SampleRate
+	if audioSampleRate <= 0 {
+		audioSampleRate = 44100
+	}
+	if sampleRate, _ := parseAudioSeqHeader(audioSeqHeader); sampleRate > 0 {
+		audioSampleRate = sampleRate
+	}
 
 	switch s.container {
 	case "fmp4":
@@ -172,11 +252,9 @@ func (s *LLHLSSegmenter) initMuxerSnapshot(stream *core.Stream, snapshot core.St
 		if videoSeqHeader != nil {
 			videoWidth, videoHeight = fmp4.ParseVideoDimensions(videoCodec, videoSeqHeader.Payload)
 		}
-		audioSampleRate := 44100
 		audioChannels := 2
 		if audioSeqHeader != nil {
 			if sampleRate, channels := parseAudioSeqHeader(audioSeqHeader); sampleRate > 0 {
-				audioSampleRate = sampleRate
 				audioChannels = channels
 			}
 		}
@@ -196,6 +274,7 @@ func (s *LLHLSSegmenter) initMuxerSnapshot(stream *core.Stream, snapshot core.St
 		}
 		s.tsMuxer = ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
 	}
+	s.partMediaClock = newSegmentMediaClock(s.hasVideo, audioSampleRate)
 }
 
 func (s *LLHLSSegmenter) selectAudioPlan(stream *core.Stream) muxerAudioPlan {
@@ -229,7 +308,6 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 			s.gotFirstKeyframe = true
 		}
 	}
-
 	if isKeyframe && s.segHasData {
 		s.flushCurrentPart(frame.DTS)
 		s.flushCurrentSegment()
@@ -256,7 +334,7 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 	if !s.partHasData {
 		s.partStartDTS = frame.DTS
 		s.partHasData = true
-		s.partIndependent = isKeyframe
+		s.partIndependent = isKeyframe || (!s.hasVideo && s.recoveryPending)
 	}
 	if !s.segHasData {
 		s.segStartDTS = frame.DTS
@@ -267,6 +345,7 @@ func (s *LLHLSSegmenter) processFrame(frame *avframe.AVFrame) {
 }
 
 func (s *LLHLSSegmenter) muxFrame(frame *avframe.AVFrame) {
+	s.partMediaClock.Observe(frame)
 	switch s.container {
 	case "fmp4":
 		s.partFrames = append(s.partFrames, frame)
@@ -280,6 +359,9 @@ func (s *LLHLSSegmenter) muxFrame(frame *avframe.AVFrame) {
 func (s *LLHLSSegmenter) flushCurrentPart(endDTS int64) {
 	if !s.partHasData {
 		return
+	}
+	if endDTS <= s.partStartDTS {
+		endDTS = s.partMediaClock.EndDTS(s.partStartDTS)
 	}
 
 	var data []byte
@@ -313,28 +395,29 @@ func (s *LLHLSSegmenter) flushCurrentPart(endDTS int64) {
 	if len(data) == 0 {
 		s.partHasData = false
 		s.partIndependent = false
+		s.partMediaClock.Reset()
 		return
 	}
 
 	dur := float64(endDTS-s.partStartDTS) / 1000.0
-	if dur <= 0 {
-		dur = s.partDuration
-	}
 
 	part := &LLHLSPart{
-		Index:       s.partIdx,
-		Duration:    dur,
-		Independent: s.partIndependent,
-		Data:        data,
+		Index:         s.partIdx,
+		Duration:      dur,
+		Independent:   s.partIndependent,
+		Data:          data,
+		Discontinuity: s.recoveryPending,
 	}
 	s.segParts = append(s.segParts, part)
 	s.partIdx++
 	s.partHasData = false
 	s.partIndependent = false
+	s.partMediaClock.Reset()
 
 	if s.callbacks.OnPart != nil {
 		s.callbacks.OnPart(part)
 	}
+	s.recoveryPending = false
 }
 
 func (s *LLHLSSegmenter) flushCurrentSegment() {
@@ -347,10 +430,15 @@ func (s *LLHLSSegmenter) flushCurrentSegment() {
 		totalDur += p.Duration
 	}
 
+	discontinuity := false
+	for _, part := range s.segParts {
+		discontinuity = discontinuity || part.Discontinuity
+	}
 	seg := &LLHLSSegment{
-		MSN:      s.segMSN,
-		Duration: totalDur,
-		Parts:    s.segParts,
+		MSN:           s.segMSN,
+		Duration:      totalDur,
+		Parts:         s.segParts,
+		Discontinuity: discontinuity,
 	}
 
 	s.segMSN++

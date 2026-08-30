@@ -99,6 +99,27 @@ func TestLabManagerRejectsDuplicateIdentity(t *testing.T) {
 	}
 }
 
+func TestSIPLabManagerEnforcesActiveSessionCeiling(t *testing.T) {
+	manager := newLabManagerWithLimit(nil, 1)
+	firstRequest := validSIPLabRequest()
+	firstRequest.DeviceID = "ceiling-device-1"
+	first, err := manager.Start(context.Background(), firstRequest)
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	secondRequest := validSIPLabRequest()
+	secondRequest.DeviceID = "ceiling-device-2"
+	if _, err := manager.Start(context.Background(), secondRequest); !errors.Is(err, ErrLabCapacity) {
+		t.Fatalf("second Start error = %v, want ErrLabCapacity", err)
+	}
+	if err := manager.Stop(first.ID); err != nil {
+		t.Fatalf("Stop first session: %v", err)
+	}
+	if _, err := manager.Start(context.Background(), secondRequest); err != nil {
+		t.Fatalf("Start after terminal session: %v", err)
+	}
+}
+
 func TestLabManagerStopIsIdempotent(t *testing.T) {
 	manager := NewLabManager()
 	session, err := manager.Start(context.Background(), validSIPLabRequest())
@@ -529,12 +550,11 @@ func TestSIPOutboundSubscriberAdmissionFailsBeforeActivation(t *testing.T) {
 	}
 	localRTPPort := localRTP.LocalAddr().(*net.UDPAddr).Port
 	localRTCPPort := localRTCP.LocalAddr().(*net.UDPAddr).Port
-	_ = localRTP.Close()
-	_ = localRTCP.Close()
 
 	call := newCallSession("admission-call", stream.Key(), negotiatedCodec{
 		Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA",
 	}, "outbound", localRTPPort, localRTCPPort)
+	call.configureMediaSockets(localRTP, localRTCP)
 	defer call.Close()
 	err = call.startOutbound(stream, stream.StartupSnapshot(), "127.0.0.1", remoteRTP.LocalAddr().(*net.UDPAddr).Port)
 	if err == nil || !strings.Contains(err.Error(), "max subscribers per stream") {
@@ -888,8 +908,8 @@ func TestSIPLabHarnessRTPRangeExcludesSIPListener(t *testing.T) {
 	}
 
 	rtpRange := freeSIPLabRTPPortRange(t, sipPort)
-	if len(rtpRange) != 2 || rtpRange[0]%2 != 0 || rtpRange[1] != rtpRange[0]+3 {
-		t.Fatalf("RTP range = %v, want exactly two even-aligned RTP/RTCP pairs", rtpRange)
+	if len(rtpRange) != 2 || rtpRange[0]%2 != 0 || rtpRange[1] != rtpRange[0]+15 {
+		t.Fatalf("RTP range = %v, want eight even-aligned RTP/RTCP pairs", rtpRange)
 	}
 	if sipPort >= rtpRange[0] && sipPort <= rtpRange[1] {
 		t.Fatalf("SIP control port %d overlaps RTP range %v", sipPort, rtpRange)
@@ -907,6 +927,20 @@ func TestSIPLabHarnessRTPRangeExcludesSIPListener(t *testing.T) {
 			t.Fatalf("RTP range port %d is not free: %v", port, err)
 		}
 		reservations = append(reservations, conn)
+	}
+}
+
+func TestSIPLabMediaPortsExcludeGatewayRTPRange(t *testing.T) {
+	gw := &Gateway{rtpPortMin: 1, rtpPortMax: 65535}
+
+	rtpConn, rtcpConn, err := gw.listenLabUDPPair()
+	if err == nil {
+		_ = rtpConn.Close()
+		_ = rtcpConn.Close()
+		t.Fatal("listenLabUDPPair succeeded inside an excluded gateway RTP range")
+	}
+	if rtpConn != nil || rtcpConn != nil {
+		t.Fatalf("failed Lab pair = (%v, %v), want no retained sockets", rtpConn, rtcpConn)
 	}
 }
 
@@ -964,7 +998,7 @@ func freeSIPLabUDPAddress(t *testing.T) string {
 func freeSIPLabRTPPortRange(t *testing.T, excludedPort int) []int {
 	t.Helper()
 	const (
-		portCount   = 4
+		portCount   = 16
 		maxAttempts = 128
 	)
 	loopback := net.ParseIP("127.0.0.1")
@@ -1000,7 +1034,7 @@ func freeSIPLabRTPPortRange(t *testing.T, excludedPort int) []int {
 			return []int{start, end}
 		}
 	}
-	t.Fatalf("could not find two free RTP/RTCP pairs excluding SIP port %d", excludedPort)
+	t.Fatalf("could not find eight free RTP/RTCP pairs excluding SIP port %d", excludedPort)
 	return nil
 }
 

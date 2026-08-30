@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/im-pingo/liveforge/pkg/portalloc"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
@@ -33,24 +34,32 @@ type RTPReceiver struct {
 const gbRTPIdleTimeout = 30 * time.Second
 
 var newRTPReceiver = NewRTPReceiver
+var newBoundRTPReceiver = NewRTPReceiverFromBoundPair
 
 // NewRTPReceiver creates a new RTP receiver bound to a UDP port.
 func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
-	addr := &net.UDPAddr{Port: port}
-	conn, err := net.ListenUDP("udp", addr)
+	conn, rtcpConn, err := listenRTPRTCPPair(port)
 	if err != nil {
-		return nil, fmt.Errorf("listen UDP :%d: %w", port, err)
+		return nil, err
 	}
-	rtcpPort := port + 1
-	if port == 0 {
-		rtcpPort = conn.LocalAddr().(*net.UDPAddr).Port + 1
-	}
-	rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: rtcpPort})
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("listen RTCP UDP :%d: %w", rtcpPort, err)
-	}
+	return newRTPReceiverWithSockets(conn, rtcpConn, publisher), nil
+}
 
+// NewRTPReceiverFromBoundPair transfers ownership of an allocator-bound UDP
+// pair to a receiver without reopening either port.
+func NewRTPReceiverFromBoundPair(pair *portalloc.BoundUDPPair, publisher *Publisher) (*RTPReceiver, error) {
+	if pair == nil || pair.RTPConn == nil || pair.RTCPConn == nil {
+		return nil, errors.New("bound RTP/RTCP pair is incomplete")
+	}
+	rtpAddr, rtpOK := pair.RTPConn.LocalAddr().(*net.UDPAddr)
+	rtcpAddr, rtcpOK := pair.RTCPConn.LocalAddr().(*net.UDPAddr)
+	if !rtpOK || !rtcpOK || pair.RTPPort != rtpAddr.Port || pair.RTCPPort != rtcpAddr.Port || pair.RTCPPort != pair.RTPPort+1 {
+		return nil, errors.New("bound RTP/RTCP pair ports are inconsistent")
+	}
+	return newRTPReceiverWithSockets(pair.RTPConn, pair.RTCPConn, publisher), nil
+}
+
+func newRTPReceiverWithSockets(conn, rtcpConn *net.UDPConn, publisher *Publisher) *RTPReceiver {
 	return &RTPReceiver{
 		conn:        conn,
 		rtcpConn:    rtcpConn,
@@ -58,7 +67,37 @@ func NewRTPReceiver(port int, publisher *Publisher) (*RTPReceiver, error) {
 		reorder:     newReorderBuffer(50),
 		done:        make(chan struct{}),
 		idleTimeout: gbRTPIdleTimeout,
-	}, nil
+	}
+}
+
+func listenRTPRTCPPair(port int) (*net.UDPConn, *net.UDPConn, error) {
+	attempts := 1
+	if port == 0 {
+		attempts = 32
+	}
+	var lastErr error
+	for range attempts {
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
+		if err != nil {
+			return nil, nil, fmt.Errorf("listen UDP :%d: %w", port, err)
+		}
+		rtpPort := conn.LocalAddr().(*net.UDPAddr).Port
+		if rtpPort >= 65535 {
+			lastErr = fmt.Errorf("assigned RTP port %d has no RTCP companion", rtpPort)
+			_ = conn.Close()
+			continue
+		}
+		rtcpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: rtpPort + 1})
+		if err == nil {
+			return conn, rtcpConn, nil
+		}
+		lastErr = err
+		_ = conn.Close()
+		if port != 0 {
+			break
+		}
+	}
+	return nil, nil, fmt.Errorf("listen RTCP UDP companion: %w", lastErr)
 }
 
 // Run starts the receive loop. Blocks until closed or error.
@@ -97,16 +136,29 @@ func (r *RTPReceiver) runRTP() error {
 			continue
 		}
 
+		// Unmarshal into an owned datagram. ReadFromUDP reuses buf on the next
+		// iteration, while reorder may retain packets for several arrivals.
+		data := append([]byte(nil), buf[:n]...)
 		var pkt pionrtp.Packet
-		if err := pkt.Unmarshal(buf[:n]); err != nil {
+		if err := pkt.Unmarshal(data); err != nil {
 			continue
 		}
 
 		// Feed through reorder buffer
-		r.reorder.push(&pkt, func(p *pionrtp.Packet) {
+		r.reorder.push(ownRTPPacket(&pkt), func(p *pionrtp.Packet) {
 			r.publisher.FeedRTP(p)
 		})
 	}
+}
+
+func ownRTPPacket(pkt *pionrtp.Packet) *pionrtp.Packet {
+	if pkt == nil {
+		return nil
+	}
+	owned := *pkt
+	owned.CSRC = append([]uint32(nil), pkt.CSRC...)
+	owned.Payload = append([]byte(nil), pkt.Payload...)
+	return &owned
 }
 
 func (r *RTPReceiver) runRTCP() error {

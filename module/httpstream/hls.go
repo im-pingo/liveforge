@@ -15,9 +15,10 @@ import (
 
 // HLSSegment holds a single TS segment with metadata.
 type HLSSegment struct {
-	SeqNum   int
-	Duration float64 // seconds
-	Data     []byte  // complete TS segment bytes
+	SeqNum        int
+	Duration      float64 // seconds
+	Data          []byte  // complete TS segment bytes
+	Discontinuity bool
 }
 
 // HLSManager accumulates TS segments from a stream and serves m3u8 playlists.
@@ -29,10 +30,15 @@ type HLSManager struct {
 	targetDur   float64 // target segment duration in seconds
 	maxSegments int     // max segments in sliding window
 
-	streamKey   string
-	basePath    string // e.g., "/live/stream1"
-	publisherID string
-	done        chan struct{}
+	streamKey           string
+	basePath            string // e.g., "/live/stream1"
+	streamInstanceID    uint64
+	publisherGeneration uint64
+	publisherID         string
+	done                chan struct{}
+	stopOnce            sync.Once
+	inputFactory        segmentInputFactory
+	beforeLiveRead      func()
 }
 
 // NewHLSManager creates a new HLS manager for a stream.
@@ -59,7 +65,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	slog.Info("manager started", "module", "hls", "stream", h.streamKey)
 	defer slog.Info("manager stopped", "module", "hls", "stream", h.streamKey)
 
-	snapshot, ok := waitStreamStartupForPublisher(h.done, stream, h.publisherID)
+	snapshot, ok := waitStreamStartupForGeneration(h.done, stream, h.streamInstanceID, h.publisherGeneration, h.publisherID)
 	if !ok {
 		return
 	}
@@ -68,46 +74,66 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	// live cursor. This keeps a late sequence header from being skipped after
 	// the muxer has already been initialized with an empty track.
 	gopCache := snapshot.ReplayFrames
-	audioPlan := selectMuxerAudioSnapshot(stream, snapshot, isFlvCompatibleAudio)
-	reader, release, audioPlan := muxerLiveReaderSnapshot(stream, snapshot, audioPlan)
-	defer release()
+	selectedAudioPlan := selectMuxerAudioSnapshot(stream, snapshot, isFlvCompatibleAudio)
+	input, audioPlan := newSegmentInputOwner(h.inputFactory, stream, snapshot, selectedAudioPlan, h.done)
+	defer input.Close()
 	cachedVideoEndDTS, hasCachedVideo := cachedVideoEndDTS(gopCache)
-	stopReaderWatch := watchRingReader(reader, h.done, snapshot.GenerationDone)
-	defer stopReaderWatch()
 
 	var videoCodec, audioCodec avframe.CodecType
 	var videoSeqData, audioSeqData []byte
-
-	if vsh := snapshot.VideoSequenceHeader; vsh != nil {
-		videoCodec = vsh.Codec
-		videoSeqData = vsh.Payload
-	}
-	if audioPlan.hasAudio() {
-		audioCodec = audioPlan.codec
-		if audioPlan.sequenceHeader != nil {
-			audioSeqData = audioPlan.sequenceHeader.Payload
-		}
-	}
-
-	muxer := ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
+	var muxer *ts.Muxer
 	var buf bytes.Buffer
 	var segStartDTS int64
 	hasData := false
-	gotFirstKeyframe := !videoCodec.IsVideo()
+	gotFirstKeyframe := false
+	mediaClock := segmentMediaClock{}
+	recoveryPending := false
+
+	initialize := func(current core.StreamStartupSnapshot, plan muxerAudioPlan) {
+		videoCodec, audioCodec = 0, 0
+		videoSeqData, audioSeqData = nil, nil
+		if vsh := current.VideoSequenceHeader; vsh != nil {
+			videoCodec = vsh.Codec
+			videoSeqData = vsh.Payload
+		}
+		if plan.hasAudio() {
+			audioCodec = plan.codec
+			if plan.sequenceHeader != nil {
+				audioSeqData = plan.sequenceHeader.Payload
+			}
+		}
+		audioSampleRate := current.MediaInfo.SampleRate
+		if sampleRate, _ := parseAudioSeqHeader(plan.sequenceHeader); sampleRate > 0 {
+			audioSampleRate = sampleRate
+		}
+		muxer = ts.NewMuxer(videoCodec, audioCodec, videoSeqData, audioSeqData)
+		gotFirstKeyframe = !videoCodec.IsVideo()
+		mediaClock = newSegmentMediaClock(videoCodec.IsVideo(), audioSampleRate)
+	}
+	initialize(snapshot, audioPlan)
+
+	discardPartial := func() {
+		buf.Reset()
+		segStartDTS = 0
+		hasData = false
+		gotFirstKeyframe = !videoCodec.IsVideo()
+		mediaClock.Reset()
+	}
 
 	// Helper: finalize current segment
 	finalize := func(endDTS int64) {
 		if buf.Len() == 0 {
 			return
 		}
-		dur := float64(endDTS-segStartDTS) / 1000.0
-		if dur <= 0 {
-			dur = h.targetDur
+		if endDTS <= segStartDTS {
+			endDTS = mediaClock.EndDTS(segStartDTS)
 		}
+		dur := float64(endDTS-segStartDTS) / 1000.0
 		seg := &HLSSegment{
-			SeqNum:   h.nextSeqNum,
-			Duration: dur,
-			Data:     copyBytes(buf.Bytes()),
+			SeqNum:        h.nextSeqNum,
+			Duration:      dur,
+			Data:          copyBytes(buf.Bytes()),
+			Discontinuity: recoveryPending,
 		}
 		h.mu.Lock()
 		h.segments = append(h.segments, seg)
@@ -120,6 +146,8 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		}
 		h.mu.Unlock()
 		buf.Reset()
+		mediaClock.Reset()
+		recoveryPending = false
 	}
 
 	// Process the startup snapshot's GOP into the first segment. The snapshot
@@ -129,9 +157,6 @@ func (h *HLSManager) Run(stream *core.Stream) {
 	// different timestamp domains and a late audio frame must not hide a live
 	// video frame.
 	for _, f := range gopCache {
-		if !stream.IsPublisherGeneration(snapshot.Generation) {
-			return
-		}
 		if f.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
 		}
@@ -151,6 +176,7 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		if data := muxer.WriteFrame(f); len(data) > 0 {
 			buf.Write(data)
 		}
+		mediaClock.Observe(f)
 	}
 	// Read live frames.
 	for {
@@ -160,16 +186,54 @@ func (h *HLSManager) Run(stream *core.Stream) {
 			return
 		default:
 		}
+		if h.beforeLiveRead != nil {
+			h.beforeLiveRead()
+		}
 
-		frame, ok := reader.Read()
-		if !ok || frame == nil {
-			if stream.IsPublisherGeneration(snapshot.Generation) {
-				finalize(segStartDTS)
+		read := readSegmentFrame(input.readContext, input.reader, snapshot, input.waitForGenerationOutput)
+		if read.Overwritten > 0 {
+			action := "continue_audio"
+			if videoCodec.IsVideo() {
+				action = "wait_keyframe"
 			}
+			logSegmentOverwrite("hls", action, read.Overwritten)
+			discardPartial()
+			current, currentOK := currentSegmentSnapshot(stream, snapshot)
+			if !currentOK {
+				return
+			}
+			input.reader.AdvanceToLive()
+			refreshedAudioPlan := selectMuxerAudioSnapshot(stream, current, isFlvCompatibleAudio)
+			if segmentInputSourceChanged(selectedAudioPlan, refreshedAudioPlan) {
+				audioPlan = input.Reopen(h.inputFactory, stream, segmentRecoverySnapshot(current), refreshedAudioPlan, h.done)
+			} else {
+				audioPlan = refreshedAudioPlan
+			}
+			selectedAudioPlan = refreshedAudioPlan
+			initialize(current, audioPlan)
+			recoveryPending = true
+			continue
+		}
+		frame := read.Frame
+		if !read.OK || frame == nil {
+			if managerStopped(h.done) {
+				finalize(segStartDTS)
+				return
+			}
+			if stream.IsPublisherGeneration(snapshot.Generation) {
+				discardPartial()
+				if input.waitForGenerationOutput {
+					logSegmentProducerEnd("hls")
+				}
+				return
+			}
+			finalize(segStartDTS)
 			return
 		}
 		if !stream.IsPublisherGeneration(snapshot.Generation) {
-			return
+			if _, ended := snapshot.GenerationEndCursor(); !ended {
+				return
+			}
 		}
 		if frame.FrameType == avframe.FrameTypeSequenceHeader {
 			continue
@@ -207,16 +271,13 @@ func (h *HLSManager) Run(stream *core.Stream) {
 		if data := muxer.WriteFrame(frame); len(data) > 0 {
 			buf.Write(data)
 		}
+		mediaClock.Observe(frame)
 	}
 }
 
 // Stop signals the manager to shut down.
 func (h *HLSManager) Stop() {
-	select {
-	case <-h.done:
-	default:
-		close(h.done)
-	}
+	h.stopOnce.Do(func() { close(h.done) })
 }
 
 // GenerateM3U8 returns the current live m3u8 playlist.
@@ -244,6 +305,9 @@ func (h *HLSManager) GenerateM3U8() string {
 	}
 
 	for _, seg := range h.segments {
+		if seg.Discontinuity {
+			sb.WriteString("#EXT-X-DISCONTINUITY\n")
+		}
 		fmt.Fprintf(&sb, "#EXTINF:%.3f,\n", seg.Duration)
 		fmt.Fprintf(&sb, "%s/%d.ts\n", h.basePath, seg.SeqNum)
 	}

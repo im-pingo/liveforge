@@ -1,6 +1,8 @@
 package dvr
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/localfs"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
@@ -27,11 +30,284 @@ func (f *blockingSyncSegment) Sync() error {
 	return f.segmentFile.Sync()
 }
 
-type lifecyclePublisher struct{ id string }
+type lifecyclePublisher struct {
+	id   string
+	info *avframe.MediaInfo
+}
 
-func (p *lifecyclePublisher) ID() string                    { return p.id }
-func (p *lifecyclePublisher) MediaInfo() *avframe.MediaInfo { return &avframe.MediaInfo{} }
-func (p *lifecyclePublisher) Close() error                  { return nil }
+type observedDVRStorage struct {
+	*dvrStorage
+	opened  chan<- *localfs.Dir
+	release <-chan struct{}
+}
+
+func (s *observedDVRStorage) openStreamDir(pathTemplate, streamKey string) (*localfs.Dir, string, error) {
+	dir, path, err := s.dvrStorage.openStreamDir(pathTemplate, streamKey)
+	if err != nil {
+		return nil, "", err
+	}
+	s.opened <- dir
+	<-s.release
+	return dir, path, nil
+}
+
+func (p *lifecyclePublisher) ID() string { return p.id }
+func (p *lifecyclePublisher) MediaInfo() *avframe.MediaInfo {
+	if p.info == nil {
+		return &avframe.MediaInfo{}
+	}
+	return p.info
+}
+func (p *lifecyclePublisher) Close() error { return nil }
+
+func TestModulePublishAdmissionDoesNotMixPublisherIdentityAndReplacementSnapshot(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{DrainTimeout: time.Second},
+		DVR: config.DVRConfig{
+			StreamPattern: "*",
+			Path:          filepath.Join(t.TempDir(), "{stream_key}"),
+		},
+		Stream: config.StreamConfig{RingBufferSize: 16},
+	}
+	server := core.NewServer(cfg)
+	stream, err := server.StreamHub().GetOrCreate("live/generation-swap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisherA := &lifecyclePublisher{
+		id:   "publisher-a",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+	}
+	if publisherErr := stream.SetPublisher(publisherA); publisherErr != nil {
+		t.Fatal(publisherErr)
+	}
+	snapshotA := stream.StartupSnapshot()
+	eventA := &core.EventContext{
+		StreamKey:           stream.Key(),
+		StreamInstanceID:    snapshotA.StreamInstanceID,
+		PublisherGeneration: snapshotA.Generation,
+		PublisherID:         snapshotA.PublisherID,
+	}
+
+	storage, err := newDVRStorage(cfg.DVR.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModule()
+	m.server = server
+	m.storage = storage
+	m.storePolicy(cfg.DVR)
+	t.Cleanup(func() {
+		if closeErr := m.Close(); closeErr != nil {
+			t.Errorf("close DVR module: %v", closeErr)
+		}
+	})
+	retained, err := newSessionWithStorage(stream.Key(), stream, snapshotA, cfg.DVR, nil, 0, &m.metrics, storage, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const retainedProbe = "seg_000000.ts"
+	retainedData := []byte("retained-directory-owned-data")
+	retainedPath := filepath.Join(retained.dir.Path(), retainedProbe)
+	if writeErr := os.WriteFile(retainedPath, retainedData, 0600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	retainedInfo, err := os.Stat(retainedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedSegment := Segment{
+		SeqNum:    0,
+		StartTime: retainedInfo.ModTime(),
+		Filename:  retainedProbe,
+		Size:      retainedInfo.Size(),
+		DiskPath:  retainedPath,
+	}
+	retained.index.Add(retainedSegment)
+	retained.publisherID = "retained"
+	retained.Stop()
+	retained.finish()
+	m.sessions[stream.Key()] = retained
+
+	retained.index.mu.Lock()
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- m.onPublish(eventA) }()
+	waitForDVRModuleLock(t, &m.mu)
+
+	stream.RemovePublisherIf(publisherA)
+	publisherB := &lifecyclePublisher{
+		id:   "publisher-b",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH265},
+	}
+	if err := stream.SetPublisher(publisherB); err != nil {
+		retained.index.mu.Unlock()
+		t.Fatal(err)
+	}
+	snapshotB := stream.StartupSnapshot()
+	retained.index.mu.Unlock()
+	if err := <-publishDone; err != nil {
+		t.Fatal(err)
+	}
+
+	m.mu.Lock()
+	installed := m.sessions[stream.Key()]
+	m.mu.Unlock()
+	if installed != retained {
+		t.Fatalf("stale A admission installed session identity=%q generation=%d codec=%v; replacement B is generation=%d codec=%v",
+			installed.publisherID, installed.snapshot.Generation, installed.snapshot.MediaInfo.VideoCodec,
+			snapshotB.Generation, snapshotB.MediaInfo.VideoCodec)
+	}
+	assertDVRSegmentReadable(t, retained, retainedSegment, retainedData)
+
+	eventB := &core.EventContext{
+		StreamKey:           stream.Key(),
+		StreamInstanceID:    snapshotB.StreamInstanceID,
+		PublisherGeneration: snapshotB.Generation,
+		PublisherID:         snapshotB.PublisherID,
+	}
+	if err := m.onPublish(eventB); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	installed = m.sessions[stream.Key()]
+	m.mu.Unlock()
+	if installed == nil || installed == retained || installed.publisherID != publisherB.ID() ||
+		installed.snapshot.Generation != snapshotB.Generation || installed.snapshot.MediaInfo.VideoCodec != avframe.CodecH265 {
+		t.Fatalf("replacement B session = %#v, want generation=%d publisher=%q codec=%v",
+			installed, snapshotB.Generation, publisherB.ID(), avframe.CodecH265)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModuleRejectsStalePublishAndClosesCandidateOwnedDirectory(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{DrainTimeout: time.Second},
+		DVR: config.DVRConfig{
+			StreamPattern: "*",
+			Path:          filepath.Join(t.TempDir(), "{stream_key}"),
+		},
+		Stream: config.StreamConfig{RingBufferSize: 16},
+	}
+	server := core.NewServer(cfg)
+	stream, err := server.StreamHub().GetOrCreate("live/candidate-owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisherA := &lifecyclePublisher{id: "publisher-a", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if publisherErr := stream.SetPublisher(publisherA); publisherErr != nil {
+		t.Fatal(publisherErr)
+	}
+	snapshotA := stream.StartupSnapshot()
+	eventA := &core.EventContext{
+		StreamKey:           stream.Key(),
+		StreamInstanceID:    snapshotA.StreamInstanceID,
+		PublisherGeneration: snapshotA.Generation,
+		PublisherID:         snapshotA.PublisherID,
+	}
+
+	storage, err := newDVRStorage(cfg.DVR.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened := make(chan *localfs.Dir, 1)
+	release := make(chan struct{})
+	trackedStorage := &observedDVRStorage{dvrStorage: storage, opened: opened, release: release}
+	m := NewModule()
+	m.server = server
+	m.storage = trackedStorage
+	m.storePolicy(cfg.DVR)
+	var releaseOnce sync.Once
+	releaseConstruction := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseConstruction()
+		if err := m.Close(); err != nil {
+			t.Errorf("close DVR module: %v", err)
+		}
+	})
+
+	publishDone := make(chan error, 1)
+	go func() { publishDone <- m.onPublish(eventA) }()
+	var candidateDir *localfs.Dir
+	select {
+	case candidateDir = <-opened:
+	case <-time.After(time.Second):
+		t.Fatal("stale A did not open its candidate directory")
+	}
+	t.Cleanup(func() { _ = candidateDir.Close() })
+	const candidateProbe = "candidate-owned-probe.ts"
+	candidateData := []byte("candidate-owned-data")
+	if err := os.WriteFile(filepath.Join(candidateDir.Path(), candidateProbe), candidateData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := candidateDir.Stat(candidateProbe); err != nil {
+		t.Fatalf("candidate directory was not usable before rejection: %v", err)
+	}
+
+	stream.RemovePublisherIf(publisherA)
+	publisherB := &lifecyclePublisher{id: "publisher-b", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH265}}
+	if err := stream.SetPublisher(publisherB); err != nil {
+		t.Fatal(err)
+	}
+	releaseConstruction()
+	select {
+	case err := <-publishDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stale A admission did not finish")
+	}
+
+	m.mu.Lock()
+	installed := m.sessions[stream.Key()]
+	m.mu.Unlock()
+	if installed != nil {
+		t.Fatalf("stale A installed session %#v", installed)
+	}
+	if _, err := candidateDir.Stat(candidateProbe); err == nil {
+		t.Fatal("directory opened exclusively by stale A remained usable after rejection")
+	}
+	if _, err := storage.root.Stat("live/candidate-owned/" + candidateProbe); err != nil {
+		t.Fatalf("module-owned storage root closed with stale A candidate: %v", err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDVRSegmentReadable(t *testing.T, session *Session, segment Segment, want []byte) {
+	t.Helper()
+	file, _, err := session.openIndexedSegment(segment)
+	if err != nil {
+		t.Fatalf("open retained segment after stale cleanup: %v", err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		t.Fatalf("read retained segment after stale cleanup: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close retained segment after stale cleanup: %v", closeErr)
+	}
+	if string(data) != string(want) {
+		t.Fatalf("retained segment data = %q, want %q", data, want)
+	}
+}
+
+func waitForDVRModuleLock(t *testing.T, mu *sync.Mutex) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !mu.TryLock() {
+			return
+		}
+		mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("DVR publish admission did not reach the retained-index phase")
+}
 
 func TestModuleRejectsPublishAfterCloseStarts(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{DrainTimeout: time.Second}, DVR: config.DVRConfig{StreamPattern: "*"}, Stream: config.StreamConfig{RingBufferSize: 16}}
@@ -95,20 +371,20 @@ func TestEventBusStopCannotOvertakeBlockedDVRStart(t *testing.T) {
 	bus.EmitAsync(core.EventPublishStop, ctx)
 	close(releaseStart)
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		m.mu.Lock()
-		session := m.sessions[ctx.StreamKey]
-		m.mu.Unlock()
-		if session != nil && !session.IsLive() {
-			if err := m.Close(); err != nil {
-				t.Fatal(err)
-			}
-			return
-		}
-		time.Sleep(time.Millisecond)
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDrain()
+	if err := bus.Drain(drainCtx); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("DVR session remained live after publish-stop for the same generation")
+	m.mu.Lock()
+	session := m.sessions[ctx.StreamKey]
+	m.mu.Unlock()
+	if session != nil {
+		t.Fatalf("stale DVR session was installed after its publisher retired: %+v", session.Status())
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestModuleCloseSignalsEverySessionBeforeWaitingAndTimesOut(t *testing.T) {
@@ -133,6 +409,42 @@ func TestModuleCloseSignalsEverySessionBeforeWaitingAndTimesOut(t *testing.T) {
 		default:
 			t.Errorf("session %d was not signaled", i)
 		}
+	}
+}
+
+func TestModuleCloseDeadlineIncludesAdmissionLockWait(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{DrainTimeout: 20 * time.Millisecond}}
+	m := NewModule()
+	m.server = core.NewServer(cfg)
+
+	// Publish setup currently owns this mutex while opening/recovering storage.
+	// Close must start its drain deadline before waiting for that ownership.
+	m.mu.Lock()
+	result := make(chan error, 1)
+	started := time.Now()
+	go func() { result <- m.Close() }()
+
+	select {
+	case err := <-result:
+		if err == nil {
+			m.mu.Unlock()
+			t.Fatal("expected close timeout while admission lock is held")
+		}
+		if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+			m.mu.Unlock()
+			t.Fatalf("close exceeded drain bound before lock release: %v", elapsed)
+		}
+	case <-time.After(250 * time.Millisecond):
+		m.mu.Unlock()
+		<-result
+		t.Fatal("close waited for admission lock before starting drain timeout")
+	}
+
+	m.mu.Unlock()
+	select {
+	case <-m.closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("background close did not finish after admission lock release")
 	}
 }
 
@@ -224,6 +536,75 @@ func TestModuleStalePublishStopDoesNotStopReplacement(t *testing.T) {
 	}
 }
 
+func TestModuleStaleStreamInstanceStopDoesNotStopReplacementWithSamePublisherID(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{DrainTimeout: time.Second},
+		DVR: config.DVRConfig{
+			StreamPattern: "*",
+			Path:          filepath.Join(t.TempDir(), "{stream_key}"),
+		},
+		Stream: config.StreamConfig{RingBufferSize: 16},
+	}
+	server := core.NewServer(cfg)
+	m := NewModule()
+	m.server = server
+	m.storePolicy(cfg.DVR)
+
+	const streamKey = "live/recreated"
+	oldStream, err := server.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPublisher := &lifecyclePublisher{id: "device-1"}
+	if publisherErr := oldStream.SetPublisher(oldPublisher); publisherErr != nil {
+		t.Fatal(publisherErr)
+	}
+	oldSnapshot := oldStream.StartupSnapshot()
+	oldCtx := &core.EventContext{
+		StreamKey:           streamKey,
+		StreamInstanceID:    oldSnapshot.StreamInstanceID,
+		PublisherGeneration: oldSnapshot.Generation,
+		PublisherID:         oldSnapshot.PublisherID,
+	}
+	if publishErr := m.onPublish(oldCtx); publishErr != nil {
+		t.Fatal(publishErr)
+	}
+
+	server.StreamHub().Remove(streamKey)
+	newStream, err := server.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPublisher := &lifecyclePublisher{id: "device-1"}
+	if err := newStream.SetPublisher(newPublisher); err != nil {
+		t.Fatal(err)
+	}
+	newSnapshot := newStream.StartupSnapshot()
+	newCtx := &core.EventContext{
+		StreamKey:           streamKey,
+		StreamInstanceID:    newSnapshot.StreamInstanceID,
+		PublisherGeneration: newSnapshot.Generation,
+		PublisherID:         newSnapshot.PublisherID,
+	}
+	if err := m.onPublish(newCtx); err != nil {
+		t.Fatal(err)
+	}
+	newSession := m.sessions[streamKey]
+	if newSession == nil {
+		t.Fatal("replacement DVR session was not installed")
+	}
+
+	if err := m.onPublishStop(oldCtx); err != nil {
+		t.Fatal(err)
+	}
+	if !newSession.IsLive() {
+		t.Fatal("stale stream-instance stop stopped the replacement DVR session")
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestModuleRepublishSurvivesFinalizerLongerThanDrainTimeout(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{DrainTimeout: 30 * time.Millisecond},
@@ -247,7 +628,7 @@ func TestModuleRepublishSurvivesFinalizerLongerThanDrainTimeout(t *testing.T) {
 	m.server = server
 	m.storage = storage
 	m.storePolicy(cfg.DVR)
-	oldSession, err := newSessionWithStorage("live/slow-republish", stream, cfg.DVR, nil, 0, &m.metrics, storage, nil, false)
+	oldSession, err := newSessionWithStorage("live/slow-republish", stream, stream.StartupSnapshot(), cfg.DVR, nil, 0, &m.metrics, storage, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,11 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // Handlers holds the API handler methods. It only depends on *core.Server,
@@ -49,18 +52,18 @@ func writeError(w http.ResponseWriter, httpCode int, msg string) {
 
 // StreamInfo represents a single stream in the API response.
 type StreamInfo struct {
-	Key                  string             `json:"key"`
-	State                string             `json:"state"`
-	Publisher            string             `json:"publisher"`
-	VideoCodec           string             `json:"video_codec"`
-	AudioCodec           string             `json:"audio_codec"`
-	GOPCacheLen          int                `json:"gop_cache_len"`
-	GOPVideoFrames       int                `json:"gop_video_frames"`
-	GOPAudioFrames       int                `json:"gop_audio_frames"`
-	GOPDurationMs        int64              `json:"gop_duration_ms"`
-	GOPGeneration        uint64             `json:"gop_generation"`
-	Subscribers          map[string]int     `json:"subscribers"`
-	Stats                *StreamStatsDetail `json:"stats,omitempty"`
+	Key            string             `json:"key"`
+	State          string             `json:"state"`
+	Publisher      string             `json:"publisher"`
+	VideoCodec     string             `json:"video_codec"`
+	AudioCodec     string             `json:"audio_codec"`
+	GOPCacheLen    int                `json:"gop_cache_len"`
+	GOPVideoFrames int                `json:"gop_video_frames"`
+	GOPAudioFrames int                `json:"gop_audio_frames"`
+	GOPDurationMs  int64              `json:"gop_duration_ms"`
+	GOPGeneration  uint64             `json:"gop_generation"`
+	Subscribers    map[string]int     `json:"subscribers"`
+	Stats          *StreamStatsDetail `json:"stats,omitempty"`
 }
 
 // StreamStatsDetail contains detailed stream statistics.
@@ -219,33 +222,49 @@ func (h *Handlers) handleKick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pub.Close()
+	startup := stream.StartupSnapshot()
 	stream.RemovePublisherIf(pub)
 
-	h.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
-		StreamKey:   key,
-		PublisherID: pub.ID(),
-		Protocol:    "api-kick",
-	}) //nolint:errcheck
+	if err := h.server.GetEventBus().Emit(core.EventPublishStop, &core.EventContext{
+		StreamKey:           key,
+		StreamInstanceID:    startup.StreamInstanceID,
+		PublisherGeneration: startup.Generation,
+		PublisherID:         pub.ID(),
+		Protocol:            "api-kick",
+	}); err != nil {
+		slog.Error("publisher terminal lifecycle admission failed", "module", "api", "stream", key, "error", err)
+	}
 
 	writeJSON(w, http.StatusOK, nil)
 }
 
 // ServerInfo is the response for GET /api/v1/server/info.
 type ServerInfo struct {
-	Version   string            `json:"version"`
-	Uptime    int64             `json:"uptime_sec"`
-	Modules   []string          `json:"modules"`
-	Endpoints map[string]string `json:"endpoints,omitempty"`
+	Version         string             `json:"version"`
+	Uptime          int64              `json:"uptime_sec"`
+	Modules         []string           `json:"modules"`
+	Endpoints       map[string]string  `json:"endpoints,omitempty"`
+	EndpointSchemes map[string]string  `json:"endpoint_schemes,omitempty"`
+	Capabilities    ServerCapabilities `json:"capabilities"`
+}
+
+// ServerCapabilities reports configured features that also have their
+// optional runtime dependencies available in this process.
+type ServerCapabilities struct {
+	AudioTranscoding bool `json:"audio_transcoding"`
 }
 
 func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	cfg := h.server.Config()
 	endpoints := make(map[string]string)
+	endpointSchemes := make(map[string]string)
 	if cfg.HTTP.Enabled {
 		endpoints["http"] = endpointAddress(h.server, "httpstream", cfg.HTTP.Listen)
+		endpointSchemes["http"] = endpointScheme(h.server, "httpstream", tlsScheme(h.server))
 	}
 	if cfg.WebRTC.Enabled {
 		endpoints["webrtc"] = endpointAddress(h.server, "webrtc", cfg.WebRTC.Listen)
+		endpointSchemes["webrtc"] = endpointScheme(h.server, "webrtc", tlsScheme(h.server))
 	}
 	if cfg.RTMP.Enabled {
 		endpoints["rtmp"] = cfg.RTMP.Listen
@@ -254,13 +273,20 @@ func (h *Handlers) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		endpoints["rtsp"] = cfg.RTSP.Listen
 	}
 	if cfg.DVR.Enabled {
-		endpoints["dvr"] = cfg.DVR.Listen
+		endpoints["dvr"] = endpointAddress(h.server, "dvr", cfg.DVR.Listen)
+		endpointSchemes["dvr"] = endpointScheme(h.server, "dvr", tlsScheme(h.server))
 	}
 	writeJSON(w, http.StatusOK, ServerInfo{
-		Version:   core.Version,
-		Uptime:    int64(time.Since(h.server.StartTime()).Seconds()),
-		Modules:   h.server.ModuleNames(),
-		Endpoints: endpoints,
+		Version:         core.Version,
+		Uptime:          int64(time.Since(h.server.StartTime()).Seconds()),
+		Modules:         h.server.ModuleNames(),
+		Endpoints:       endpoints,
+		EndpointSchemes: endpointSchemes,
+		Capabilities: ServerCapabilities{
+			AudioTranscoding: cfg.AudioCodec.Enabled &&
+				audiocodec.Global().CanTranscode(avframe.CodecG711A, avframe.CodecAAC) &&
+				audiocodec.Global().CanTranscode(avframe.CodecG711U, avframe.CodecAAC),
+		},
 	})
 }
 
@@ -273,6 +299,29 @@ func endpointAddress(server *core.Server, moduleName, configured string) string 
 		}
 	}
 	return configured
+}
+
+type endpointSchemeProvider interface {
+	EndpointScheme() string
+}
+
+func endpointScheme(server *core.Server, moduleName, fallback string) string {
+	if module := server.ModuleByName(moduleName); module != nil {
+		if provider, ok := module.(endpointSchemeProvider); ok {
+			switch scheme := provider.EndpointScheme(); scheme {
+			case "http", "https":
+				return scheme
+			}
+		}
+	}
+	return fallback
+}
+
+func tlsScheme(server *core.Server) string {
+	if server != nil && server.HasTLS() {
+		return "https"
+	}
+	return "http"
 }
 
 // ServerStats is the response for GET /api/v1/server/stats.

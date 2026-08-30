@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -56,21 +57,25 @@ func (m *Module) Init(s *core.Server) error {
 
 	var handler http.Handler = buildSecurityHandler(mux, s, m.audit, &m.security)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
-		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		m.limiter = ratelimit.NewWithTrustedProxies(rl.Rate, rl.Burst, rl.TrustedProxies)
 	}
 	m.rateCfg = cfg.Limits.RateLimit
-	m.httpSrv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.limiterMu.RLock()
-		limiter := m.limiter
-		m.limiterMu.RUnlock()
-		if limiter != nil && !limiter.AllowRequest(r) {
-			m.security.rateLimitDenials.Add(1)
-			m.auditRateLimitDenial(r)
-			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})}
+	m.httpSrv = &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			m.limiterMu.RLock()
+			limiter := m.limiter
+			m.limiterMu.RUnlock()
+			if limiter != nil && !limiter.AllowRequest(r) {
+				m.security.rateLimitDenials.Add(1)
+				m.auditRateLimitDenial(r)
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			handler.ServeHTTP(w, r)
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.API.TLS == nil || *cfg.API.TLS) {
@@ -138,10 +143,10 @@ func (m *Module) OnReload(s *core.Server) error {
 	previous := m.rateCfg
 	m.rateCfg = rl
 	m.limiterMu.Unlock()
-	if previous != rl {
+	if !reflect.DeepEqual(previous, rl) {
 		var next *ratelimit.Limiter
 		if rl.Enabled && rl.Rate > 0 {
-			next = ratelimit.New(rl.Rate, rl.Burst)
+			next = ratelimit.NewWithTrustedProxies(rl.Rate, rl.Burst, rl.TrustedProxies)
 		}
 		m.limiterMu.Lock()
 		old := m.limiter

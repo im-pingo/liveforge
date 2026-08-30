@@ -3,19 +3,36 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
 
+// FileSourceOptions configures one local YAML/JSON document source.
+type FileSourceOptions struct {
+	Path     string
+	MaxBytes int64
+}
+
 // FileSource reads one local YAML/JSON document.
-type FileSource struct{ path string }
+type FileSource struct {
+	path     string
+	maxBytes int64
+}
 
 func NewFileSource(path string) (*FileSource, error) {
-	if path == "" {
+	return NewFileSourceWithOptions(FileSourceOptions{Path: path})
+}
+
+func NewFileSourceWithOptions(opts FileSourceOptions) (*FileSource, error) {
+	if opts.Path == "" {
 		return nil, fmt.Errorf("config file path is required")
 	}
-	return &FileSource{path: path}, nil
+	if opts.MaxBytes <= 0 {
+		opts.MaxBytes = DefaultSourceMaxBytes
+	}
+	return &FileSource{path: opts.Path, maxBytes: opts.MaxBytes}, nil
 }
 
 func (s *FileSource) Name() string { return "file" }
@@ -33,9 +50,17 @@ func (s *FileSource) Load(ctx context.Context, previous Version) (Snapshot, erro
 	if info.IsDir() {
 		return Snapshot{}, fmt.Errorf("config path is a directory")
 	}
-	data, err := os.ReadFile(s.path)
+	file, err := os.Open(s.path)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("open config file: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, s.maxBytes+1))
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read config file: %w", err)
+	}
+	if int64(len(data)) > s.maxBytes {
+		return Snapshot{}, fmt.Errorf("config file exceeds %d bytes", s.maxBytes)
 	}
 	if len(data) == 0 {
 		return Snapshot{}, fmt.Errorf("config file is empty")
@@ -50,7 +75,7 @@ func (s *FileSource) Write(ctx context.Context, data []byte) error {
 		return err
 	}
 	info, err := os.Stat(s.path)
-	mode := os.FileMode(0644)
+	mode := os.FileMode(0600)
 	if err == nil {
 		mode = info.Mode().Perm()
 	} else if !os.IsNotExist(err) {

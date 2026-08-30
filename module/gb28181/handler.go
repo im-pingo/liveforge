@@ -3,6 +3,7 @@ package gb28181
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -145,19 +146,21 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	// Allocate local RTP port pair
-	rtpPort, _, err := h.ports.AllocatePair()
+	// Reserve and bind both media sockets before exposing the RTP port in SDP.
+	pair, err := h.ports.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		slog.Error("port allocation failed", "module", "gb28181", "error", err)
 		resp := sip.NewResponseFromRequest(req, 500, "Internal Server Error", nil)
 		tx.Respond(resp)
 		return
 	}
+	rtpPort := pair.RTPPort
 
 	// Create or get stream.
 	_, streamExisted := h.hub.Find(streamKey)
 	stream, err := h.hub.GetOrCreate(streamKey)
 	if err != nil {
+		closeBoundUDPPair(pair)
 		h.ports.Free(rtpPort, rtpPort+1)
 		resp := sip.NewResponseFromRequest(req, 500, "Internal Server Error", nil)
 		tx.Respond(resp)
@@ -173,10 +176,11 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		},
 	)
 
-	receiver, err := newRTPReceiver(rtpPort, pub)
+	receiver, err := newBoundRTPReceiver(pair, pub)
 	if err != nil {
 		slog.Error("rtp receiver creation failed", "module", "gb28181", "error", err)
 		_ = pub.Close()
+		closeBoundUDPPair(pair)
 		h.ports.Free(rtpPort, rtpPort+1)
 		if !streamExisted {
 			h.hub.Remove(streamKey)
@@ -212,8 +216,10 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		tx.Respond(resp)
 		return
 	}
+	startup := stream.StartupSnapshot()
+	session.StreamInstanceID = startup.StreamInstanceID
+	session.PublisherGeneration = startup.Generation
 	h.sessions.Add(session)
-	h.runReceiver(session, receiver)
 
 	// Build SDP answer
 	localIP := getLocalIP()
@@ -224,26 +230,56 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	resp := sip.NewResponseFromRequest(req, 200, "OK", []byte(sdpAnswer))
 	resp.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
-	if err := tx.Respond(resp); err != nil {
-		slog.Warn("failed to send INVITE final response", "module", "gb28181", "error", err)
-		h.rollbackSession(session, !streamExisted)
-		return
-	}
-
-	// Marking and enqueueing are one session-owned transition so teardown
-	// cannot overtake a publish start that has not reached the EventBus yet.
+	// Admission and the final response are one session-owned transition so
+	// teardown cannot overtake an accepted publish-start or expose 200 after
+	// the session has already been rejected.
 	publishCtx.PublisherID = pub.ID()
+	publishCtx.StreamInstanceID = startup.StreamInstanceID
+	publishCtx.PublisherGeneration = startup.Generation
 	publishCtx.Extra = map[string]any{
 		"gb28181_device_id":  deviceID,
 		"gb28181_channel_id": channelID,
 	}
-	session.startPublishLifecycle(func() {
-		h.bus.EmitAsync(core.EventPublish, publishCtx)
-	})
+	var lifecycleErr, responseErr error
+	if !session.startPublishLifecycle(func() error {
+		lifecycleErr = h.bus.EmitAsync(core.EventPublish, publishCtx)
+		if lifecycleErr != nil {
+			return lifecycleErr
+		}
+		responseErr = tx.Respond(resp)
+		return nil
+	}) {
+		slog.Warn("publish lifecycle admission failed", "module", "gb28181", "session", session.ID, "error", lifecycleErr)
+		h.rollbackSession(session, !streamExisted)
+		status, reason := 500, "Internal Server Error"
+		if errors.Is(lifecycleErr, core.ErrAsyncBackpressure) {
+			status, reason = 503, "Service Unavailable"
+		}
+		_ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil))
+		return
+	}
+	if responseErr != nil {
+		slog.Warn("failed to send INVITE final response", "module", "gb28181", "error", responseErr)
+		h.rollbackSession(session, !streamExisted)
+		return
+	}
+	h.runReceiver(session, receiver)
 
 	slog.Info("invite accepted", "module", "gb28181",
 		"device", deviceID, "channel", channelID,
 		"stream", streamKey, "local_port", rtpPort)
+}
+
+func closeBoundUDPPair(pair *portalloc.BoundUDPPair) {
+	if pair == nil {
+		return
+	}
+	if pair.RTPConn != nil {
+		_ = pair.RTPConn.Close()
+	}
+	if pair.RTCPConn != nil {
+		_ = pair.RTCPConn.Close()
+	}
 }
 
 func isGB28181VideoInvite(req *sip.Request) bool {
@@ -342,17 +378,21 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 		if remoteAddr == "" && snapshot.RemoteAddr != nil {
 			remoteAddr = snapshot.RemoteAddr.String()
 		}
-		h.bus.EmitAsync(core.EventPublishStop, &core.EventContext{
-			StreamKey:   snapshot.StreamKey,
-			PublisherID: snapshot.PublisherID,
-			Protocol:    "gb28181",
-			RemoteAddr:  remoteAddr,
+		if err := h.bus.EmitAsync(core.EventPublishStop, &core.EventContext{
+			StreamKey:           snapshot.StreamKey,
+			StreamInstanceID:    snapshot.StreamInstanceID,
+			PublisherGeneration: snapshot.PublisherGeneration,
+			PublisherID:         snapshot.PublisherID,
+			Protocol:            "gb28181",
+			RemoteAddr:          remoteAddr,
 			Extra: map[string]any{
 				"gb28181_device_id":  snapshot.DeviceID,
 				"gb28181_channel_id": snapshot.ChannelID,
 				"gb28181_playback":   snapshot.Playback,
 			},
-		})
+		}); err != nil {
+			slog.Error("publisher terminal lifecycle admission failed", "module", "gb28181", "session", snapshot.ID, "error", err)
+		}
 	}
 	return true
 }

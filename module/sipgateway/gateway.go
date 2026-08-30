@@ -16,6 +16,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
 	"github.com/im-pingo/liveforge/pkg/sdp"
@@ -48,6 +49,8 @@ type Gateway struct {
 	maxCalls   int
 	codecs     []string
 	localIP    string
+	rtpPortMin int
+	rtpPortMax int
 	sendInvite func(context.Context, *sip.Request) (inviteDialog, error)
 
 	mu             sync.RWMutex
@@ -97,11 +100,13 @@ func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core
 		maxCalls:       maxCalls,
 		codecs:         codecs,
 		localIP:        localIP,
+		rtpPortMin:     cfg.RTPPortRange[0],
+		rtpPortMax:     cfg.RTPPortRange[1],
 		sessions:       make(map[string]*CallSession),
 		pending:        make(map[string]struct{}),
 		rtpIdleTimeout: 30 * time.Second,
 	}
-	gw.labs = newLabManager(gw)
+	gw.labs = newLabManagerWithLimit(gw, cfg.MaxLabSessions)
 	gw.sendInvite = func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
 		return sipSvc.SendInvite(ctx, req)
 	}
@@ -191,7 +196,7 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
+	audioPair, err := gw.portAlloc.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.portExhaustions.Add(1)
@@ -200,36 +205,49 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(resp)
 		return
 	}
+	audioPairOwned := true
+	var videoPair *portalloc.BoundUDPPair
+	videoPairOwned := false
+	defer func() {
+		if audioPairOwned {
+			gw.releaseBoundUDPPair(audioPair)
+		}
+		if videoPairOwned {
+			gw.releaseBoundUDPPair(videoPair)
+		}
+	}()
+	rtpPort, rtcpPort := audioPair.RTPPort, audioPair.RTCPPort
 	var videoCodec negotiatedCodec
 	var videoRTPPort, videoRTCPPort int
 	if negotiated, ok := negotiateH264(videoMedia); ok {
 		videoCodec = negotiated
-		videoRTPPort, videoRTCPPort, err = gw.portAlloc.AllocatePair()
+		videoPair, err = gw.portAlloc.AllocateBoundUDPPair("udp", nil)
 		if err != nil {
-			gw.portAlloc.Free(rtpPort, rtcpPort)
 			gw.metrics.setupFailures.Add(1)
 			gw.metrics.portExhaustions.Add(1)
 			_ = tx.Respond(sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil))
 			return
 		}
+		videoPairOwned = true
+		videoRTPPort, videoRTCPPort = videoPair.RTPPort, videoPair.RTCPPort
 	}
 
 	stream, _ := gw.hub.GetOrCreate(streamKey)
 
 	cs := newCallSession(callID, streamKey, nc, "inbound", rtpPort, rtcpPort)
+	cs.configureMediaSockets(audioPair.RTPConn, audioPair.RTCPConn)
 	if videoRTPPort > 0 {
 		cs.configureVideo(videoCodec, videoRTPPort, videoRTCPPort, remoteAddress(offerSDP), videoMedia.Port)
+		cs.configureVideoSockets(videoPair.RTPConn, videoPair.RTCPConn)
 	}
 	gw.configureSession(cs)
 	if err := gw.activateReservedCall(cs); err != nil {
-		gw.portAlloc.Free(rtpPort, rtcpPort)
-		if videoRTPPort > 0 {
-			gw.portAlloc.Free(videoRTPPort, videoRTCPPort)
-		}
 		gw.metrics.setupFailures.Add(1)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil))
 		return
 	}
+	audioPairOwned = false
+	videoPairOwned = false
 
 	remoteIP := remoteAddress(offerSDP)
 	if err := cs.startInbound(stream, remoteIP, audioMedia.Port); err != nil {
@@ -241,13 +259,21 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(resp)
 		return
 	}
-	if !cs.startPublishLifecycle(func() {
-		if err := gw.eventBus.EmitAsync(core.EventPublish, publishCtx); err != nil {
-			slog.Warn("failed to enqueue publish lifecycle event", "module", "sipgateway", "call", callID, "error", err)
-		}
+	cs.mu.RLock()
+	startup := cs.startupSnapshot
+	cs.mu.RUnlock()
+	publishCtx.StreamInstanceID = startup.StreamInstanceID
+	publishCtx.PublisherGeneration = startup.Generation
+	var lifecycleErr error
+	if !cs.startPublishLifecycle(func() error {
+		lifecycleErr = gw.eventBus.EmitAsync(core.EventPublish, publishCtx)
+		return lifecycleErr
 	}) {
 		gw.metrics.setupFailures.Add(1)
-		gw.finishSession(cs, CallStateEnded, errors.New("inbound session terminated during publish setup"))
+		if lifecycleErr == nil {
+			lifecycleErr = errors.New("inbound session terminated during publish setup")
+		}
+		gw.finishSession(cs, CallStateEnded, lifecycleErr)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Error", nil))
 		return
 	}
@@ -290,6 +316,10 @@ func (gw *Gateway) handleBye(req *sip.Request, tx sip.ServerTransaction) {
 
 // Dial initiates an outbound call from a stream to a SIP URI.
 func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (string, error) {
+	return gw.dial(ctx, targetURI, streamKey, "")
+}
+
+func (gw *Gateway) dial(ctx context.Context, targetURI, streamKey, requestedCodec string) (string, error) {
 	stream, ok := gw.hub.Find(streamKey)
 	if !ok {
 		return "", fmt.Errorf("%w: %q", ErrStreamNotFound, streamKey)
@@ -309,7 +339,7 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", ErrCodecMismatch
 	}
 	if startupSnapshot.MediaInfo.AudioCodec != 0 {
-		if _, ok := configuredCodecForSource(gw.codecs, startupSnapshot.MediaInfo.AudioCodec); !ok {
+		if _, codecOK := gw.outboundCodec(stream, startupSnapshot.MediaInfo.AudioCodec, requestedCodec); !codecOK {
 			gw.metrics.setupFailures.Add(1)
 			gw.metrics.codecFailures.Add(1)
 			return "", ErrCodecMismatch
@@ -325,7 +355,7 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", errors.New("stream publisher generation is no longer active")
 	}
 	mediaInfo := &startupSnapshot.MediaInfo
-	sourceCodec, ok := configuredCodecForSource(gw.codecs, mediaInfo.AudioCodec)
+	offerCodec, ok := gw.outboundCodec(stream, mediaInfo.AudioCodec, requestedCodec)
 	if !ok {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.codecFailures.Add(1)
@@ -342,21 +372,23 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	}
 	defer gw.cancelReservation(callID)
 
-	rtpPort, rtcpPort, err := gw.portAlloc.AllocatePair()
+	audioPair, err := gw.portAlloc.AllocateBoundUDPPair("udp", nil)
 	if err != nil {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.portExhaustions.Add(1)
 		return "", fmt.Errorf("%w: %v", ErrPortExhausted, err)
 	}
+	rtpPort, rtcpPort := audioPair.RTPPort, audioPair.RTCPPort
 	portsOwned := true
 	videoPortsOwned := false
+	var videoPair *portalloc.BoundUDPPair
 	var videoRTPPort, videoRTCPPort int
 	defer func() {
 		if portsOwned {
-			gw.portAlloc.Free(rtpPort, rtcpPort)
+			gw.releaseBoundUDPPair(audioPair)
 		}
 		if videoPortsOwned {
-			gw.portAlloc.Free(videoRTPPort, videoRTCPPort)
+			gw.releaseBoundUDPPair(videoPair)
 		}
 	}()
 	startupCtx, cancelStartup := bindSIPGeneration(ctx, startupSnapshot)
@@ -365,16 +397,17 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	videoCodec := negotiatedCodec{}
 	if mediaInfo.VideoCodec == avframe.CodecH264 {
 		videoCodec = sipH264Codec
-		videoRTPPort, videoRTCPPort, err = gw.portAlloc.AllocatePair()
+		videoPair, err = gw.portAlloc.AllocateBoundUDPPair("udp", nil)
 		if err != nil {
 			gw.metrics.setupFailures.Add(1)
 			gw.metrics.portExhaustions.Add(1)
 			return "", fmt.Errorf("%w: %v", ErrPortExhausted, err)
 		}
+		videoRTPPort, videoRTCPPort = videoPair.RTPPort, videoPair.RTCPPort
 		videoPortsOwned = true
 	}
 
-	offerBody := buildOfferSDPWithVideo(gw.localIP, rtpPort, []negotiatedCodec{sourceCodec}, videoRTPPort, videoCodec)
+	offerBody := buildOfferSDPWithVideo(gw.localIP, rtpPort, []negotiatedCodec{offerCodec}, videoRTPPort, videoCodec)
 
 	fromURI := sip.Uri{User: gw.sipService.ServerID(), Host: gw.sipService.Domain()}
 
@@ -485,8 +518,8 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		return "", fmt.Errorf("no audio in answer SDP")
 	}
 
-	nc, ok := negotiateCodec(audioMedia, []string{sourceCodec.EncodingName})
-	if !ok || nc.Codec != sourceCodec.Codec {
+	nc, ok := negotiateCodec(audioMedia, []string{offerCodec.EncodingName})
+	if !ok || nc.Codec != offerCodec.Codec {
 		gw.metrics.setupFailures.Add(1)
 		gw.metrics.codecFailures.Add(1)
 		return "", ErrCodecMismatch
@@ -503,8 +536,10 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 	}
 
 	cs := newCallSession(callID, streamKey, nc, "outbound", rtpPort, rtcpPort)
+	cs.configureMediaSockets(audioPair.RTPConn, audioPair.RTCPConn)
 	if videoRTPPort > 0 {
 		cs.configureVideo(negotiatedVideo, videoRTPPort, videoRTCPPort, remoteAddress(answerSDP), videoMedia.Port)
+		cs.configureVideoSockets(videoPair.RTPConn, videoPair.RTCPConn)
 	}
 	cs.dialog = dialog
 	gw.configureSession(cs)
@@ -528,6 +563,39 @@ func (gw *Gateway) Dial(ctx context.Context, targetURI, streamKey string) (strin
 		"call", callID, "stream", streamKey, "codec", nc.EncodingName)
 
 	return callID, nil
+}
+
+func (gw *Gateway) outboundCodec(stream *core.Stream, source avframe.CodecType, requested string) (negotiatedCodec, bool) {
+	if requested != "" {
+		target, ok := configuredCodecForEncoding(gw.codecs, requested)
+		if !ok {
+			return negotiatedCodec{}, false
+		}
+		return gw.usableOutboundCodec(stream, source, target)
+	}
+	if direct, ok := configuredCodecForSource(gw.codecs, source); ok {
+		return direct, true
+	}
+	for _, name := range gw.codecs {
+		target, ok := configuredCodecForEncoding(gw.codecs, name)
+		if !ok {
+			continue
+		}
+		if codec, usable := gw.usableOutboundCodec(stream, source, target); usable {
+			return codec, true
+		}
+	}
+	return negotiatedCodec{}, false
+}
+
+func (gw *Gateway) usableOutboundCodec(stream *core.Stream, source avframe.CodecType, target negotiatedCodec) (negotiatedCodec, bool) {
+	if source == target.Codec {
+		return target, true
+	}
+	if stream.TranscodeManager() == nil || !audiocodec.Global().CanTranscode(source, target.Codec) {
+		return negotiatedCodec{}, false
+	}
+	return target, true
 }
 
 func bindSIPGeneration(parent context.Context, snapshot core.StreamStartupSnapshot) (context.Context, context.CancelFunc) {
@@ -835,6 +903,19 @@ func (gw *Gateway) configureSession(session *CallSession) {
 	session.onTerminate = gw.sessionTerminated
 }
 
+func (gw *Gateway) releaseBoundUDPPair(pair *portalloc.BoundUDPPair) {
+	if pair == nil {
+		return
+	}
+	if pair.RTPConn != nil {
+		_ = pair.RTPConn.Close()
+	}
+	if pair.RTCPConn != nil {
+		_ = pair.RTCPConn.Close()
+	}
+	gw.portAlloc.Free(pair.RTPPort, pair.RTCPPort)
+}
+
 func (gw *Gateway) activateReservedCall(session *CallSession) error {
 	gw.mu.Lock()
 	defer gw.mu.Unlock()
@@ -890,11 +971,16 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 			stream.RemovePublisherIf(currentPublisher)
 		}
 		if session.publishLifecycleStarted() {
+			session.mu.RLock()
+			startup := session.startupSnapshot
+			session.mu.RUnlock()
 			if eventErr := gw.eventBus.EmitAsync(core.EventPublishStop, &core.EventContext{
-				StreamKey:   session.streamKey,
-				PublisherID: publisher.ID(),
-				Protocol:    "sip",
-				RemoteAddr:  session.snapshot().RemoteAddress,
+				StreamKey:           session.streamKey,
+				StreamInstanceID:    startup.StreamInstanceID,
+				PublisherGeneration: startup.Generation,
+				PublisherID:         publisher.ID(),
+				Protocol:            "sip",
+				RemoteAddr:          session.snapshot().RemoteAddress,
 			}); eventErr != nil {
 				slog.Warn("failed to enqueue publish stop lifecycle event", "module", "sipgateway", "call", session.callID, "error", eventErr)
 			}

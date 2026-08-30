@@ -39,9 +39,29 @@ type SharedBufferReader struct {
 	reader *util.RingReader[[]byte]
 }
 
+// SharedBufferReadResult binds overwrite metadata to the packet returned by
+// one SharedBuffer read.
+type SharedBufferReadResult struct {
+	Data        []byte
+	OK          bool
+	Overwritten int64
+}
+
 // Read returns the next packet, blocking until data is available.
 func (r *SharedBufferReader) Read() ([]byte, bool) {
-	return r.reader.Read()
+	result := r.ReadResult()
+	return result.Data, result.OK
+}
+
+// ReadResult returns the next packet and its overwrite metadata, blocking
+// until data is available or the buffer or reader is closed.
+func (r *SharedBufferReader) ReadResult() SharedBufferReadResult {
+	result := r.reader.ReadResult()
+	return SharedBufferReadResult{
+		Data:        result.Value,
+		OK:          result.OK,
+		Overwritten: result.Overwritten,
+	}
 }
 
 // Close marks this reader as closed, unblocking any in-progress Read().
@@ -51,5 +71,17 @@ func (r *SharedBufferReader) Close() {
 
 // TryRead attempts a non-blocking read.
 func (r *SharedBufferReader) TryRead() ([]byte, bool) {
-	return r.reader.TryRead()
+	result := r.TryReadResult()
+	return result.Data, result.OK
+}
+
+// TryReadResult attempts a non-blocking read and returns overwrite metadata
+// from the same operation as the packet.
+func (r *SharedBufferReader) TryReadResult() SharedBufferReadResult {
+	result := r.reader.TryReadResult()
+	return SharedBufferReadResult{
+		Data:        result.Value,
+		OK:          result.OK,
+		Overwritten: result.Overwritten,
+	}
 }

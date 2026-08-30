@@ -70,7 +70,6 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	// Use VP8: Chrome headless decodes VP8 in software without GPU.
 	pubInfo := &avframe.MediaInfo{VideoCodec: avframe.CodecVP8}
 	if withAudio {
@@ -79,8 +78,8 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 		pubInfo.Channels = 2
 	}
 	pub := &testPublisher{id: "browser-jitter-pub", info: pubInfo}
-	if err := stream.SetPublisher(pub); err != nil {
-		t.Fatal(err)
+	if setErr := stream.SetPublisher(pub); setErr != nil {
+		t.Fatal(setErr)
 	}
 
 	// Give the stream a moment to fully initialize before browser connects.
@@ -282,6 +281,7 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 	var totalLostDelta, totalDropDelta int
 	var lastFreeze int
 	var minFPS float64 = 999
+	var activeVideoSamples int
 
 	for _, s := range snapshots {
 		fmt.Printf("%3d | %10.1f | %10.1f | %5.1f | %7d | %6d | %7d | %4d | %3d\n",
@@ -297,6 +297,9 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 		}
 		if s.FPS > 0 && s.FPS < minFPS {
 			minFPS = s.FPS
+		}
+		if s.FPS > 0 {
+			activeVideoSamples++
 		}
 		totalLostDelta += s.PacketsLostDelta
 		totalDropDelta += s.FramesDroppedDelta
@@ -321,6 +324,177 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 	if totalLostDelta > 20 {
 		t.Errorf("Total packet loss %d exceeds threshold — indicates network or pacing issues", totalLostDelta)
 	}
+	if minimum := durationSec * 8 / 10; activeVideoSamples < minimum {
+		t.Errorf("Browser video ended early: %d active one-second samples, want at least %d", activeVideoSamples, minimum)
+	}
+}
+
+func TestWHEPH264BrowserDecode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping browser H.264 regression in short mode")
+	}
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
+		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.Flag("headless", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.Flag("no-sandbox", true),
+			chromedp.Flag("disable-dev-shm-usage", true),
+		)...,
+	)
+	defer allocCancel()
+
+	m, s := newTestModule(t)
+	stream, err := s.StreamHub().GetOrCreate("live/browser-h264")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seqHeader, sourceFrames := loadH264TestFixture(t, "testdata/test_320x180.h264")
+	pub := &testPublisher{id: "browser-h264-pub", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if setErr := stream.SetPublisher(pub); setErr != nil {
+		t.Fatal(setErr)
+	}
+	stream.WriteFrame(&avframe.AVFrame{
+		MediaType: avframe.MediaTypeVideo,
+		Codec:     avframe.CodecH264,
+		FrameType: avframe.FrameTypeSequenceHeader,
+		Payload:   seqHeader,
+	})
+	frames := expandH264Frames(sourceFrames, 250, 40)
+	stream.WriteFrame(&frames[0])
+
+	whepAddr := m.Addr().String()
+	if strings.HasPrefix(whepAddr, "[::]:") {
+		whepAddr = "localhost:" + strings.TrimPrefix(whepAddr, "[::]:")
+	} else if strings.HasPrefix(whepAddr, "0.0.0.0:") {
+		whepAddr = "localhost:" + strings.TrimPrefix(whepAddr, "0.0.0.0:")
+	}
+	pageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(buildH264BrowserPlayerHTML("http://"+whepAddr, "live/browser-h264")))
+	}))
+	defer pageSrv.Close()
+
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(t.Logf))
+	defer browserCancel()
+	err = chromedp.Run(browserCtx,
+		chromedp.Navigate(pageSrv.URL),
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "websocket url timeout") || strings.Contains(err.Error(), "executable file not found") {
+			t.Skipf("headless Chrome unavailable in this environment: %v", err)
+		}
+		t.Fatalf("navigate to H.264 player: %v", err)
+	}
+	if err := chromedp.Run(browserCtx, chromedp.Evaluate(`void window.__connectH264(); true`, nil)); err != nil {
+		t.Fatalf("start H.264 playback: %v", err)
+	}
+
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		start := time.Now()
+		for i := 1; i < len(frames); i++ {
+			if wait := time.Until(start.Add(time.Duration(i) * 40 * time.Millisecond)); wait > 0 {
+				time.Sleep(wait)
+			}
+			stream.WriteFrame(&frames[i])
+		}
+	}()
+
+	deadline := time.Now().Add(8 * time.Second)
+	var probe struct {
+		ReadyState int     `json:"readyState"`
+		Width      int     `json:"width"`
+		Height     int     `json:"height"`
+		Current    float64 `json:"currentTime"`
+		Error      string  `json:"error"`
+		ICE        string  `json:"ice"`
+		ConnectErr string  `json:"connectError"`
+		Stage      string  `json:"stage"`
+		H264       *bool   `json:"h264Supported"`
+	}
+	var previousCurrent float64
+	var clockAdvanced bool
+	for time.Now().Before(deadline) {
+		probeCtx, probeCancel := context.WithTimeout(browserCtx, 2*time.Second)
+		probeErr := chromedp.Run(probeCtx, chromedp.Evaluate(`window.__probeH264()`, &probe))
+		probeCancel()
+		if probeErr != nil {
+			t.Logf("probe H.264 playback: %v", probeErr)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if probe.ConnectErr != "" {
+			if probe.H264 != nil && !*probe.H264 {
+				t.Skip("headless Chrome does not advertise H.264 WebRTC receive support")
+			}
+			t.Fatalf("H.264 browser connection failed: %s (ICE=%s stage=%s)", probe.ConnectErr, probe.ICE, probe.Stage)
+		}
+		if probe.Current > previousCurrent+0.05 {
+			clockAdvanced = true
+		}
+		previousCurrent = probe.Current
+		if probe.ReadyState >= 3 && probe.Width == 320 && probe.Height == 180 && probe.Current > 0.2 && clockAdvanced && probe.Error == "" {
+			<-pumpDone
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	<-pumpDone
+	t.Fatalf("H.264 browser playback did not advance: %+v", probe)
+}
+
+func buildH264BrowserPlayerHTML(whepBase, streamPath string) string {
+	return `<!doctype html><html><body>
+<video id="video" autoplay muted playsinline style="width:320px;height:180px"></video>
+<script>
+const video = document.getElementById('video');
+async function connect() {
+  window.__h264Stage = 'creating_pc';
+	const pc = new RTCPeerConnection();
+	window.__h264Stage = 'created_pc';
+	const stream = new MediaStream();
+	video.srcObject = stream;
+  pc.ontrack = event => { stream.addTrack(event.track); video.srcObject = stream; video.play().catch(() => {}); };
+  pc.oniceconnectionstatechange = () => { window.__h264ICE = pc.iceConnectionState; };
+  pc.addTransceiver('video', {direction:'recvonly'});
+  window.__h264Stage = 'creating_offer';
+  const offer = await pc.createOffer();
+  window.__h264Stage = 'setting_local';
+  await pc.setLocalDescription(offer);
+  window.__h264Supported = /a=rtpmap:\d+ H264\/90000/i.test(pc.localDescription.sdp);
+  if (!window.__h264Supported) throw new Error('browser offer does not advertise H.264');
+  window.__h264Stage = 'gathering';
+  await new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') { resolve(); return; }
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(); } };
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') finish(); };
+    setTimeout(finish, 2000);
+  });
+  window.__h264Stage = 'fetching_whep';
+  const response = await fetch('` + whepBase + `/webrtc/whep/` + streamPath + `?mode=live', {
+    method:'POST', headers:{'Content-Type':'application/sdp'}, body:pc.localDescription.sdp
+  });
+  if (!response.ok) throw new Error('WHEP ' + response.status);
+  window.__h264Stage = 'setting_remote';
+  await pc.setRemoteDescription({type:'answer', sdp:await response.text()});
+  window.__h264Stage = 'remote_set';
+}
+window.__probeH264 = () => ({
+  readyState: video.readyState,
+		width: video.videoWidth,
+  height: video.videoHeight,
+  currentTime: video.currentTime,
+	  error: video.error ? String(video.error.code) : '',
+  ice: window.__h264ICE || '',
+  connectError: window.__h264Error || '',
+  stage: window.__h264Stage || '',
+  h264Supported: typeof window.__h264Supported === 'boolean' ? window.__h264Supported : null
+});
+window.__connectH264 = () => connect().catch(error => { window.__h264Error = String(error); });
+</script></body></html>`
 }
 
 type statsSnapshot struct {
@@ -526,4 +700,3 @@ connect();
 </body>
 </html>`
 }
-

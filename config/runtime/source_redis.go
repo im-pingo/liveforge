@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ type RedisSourceOptions struct {
 	VersionKey string
 	TLSConfig  *tls.Config
 	Client     *redis.Client
+	MaxBytes   int64
 }
 
 type RedisSource struct {
@@ -29,6 +31,7 @@ type RedisSource struct {
 	prefix     string
 	hash       string
 	versionKey string
+	maxBytes   int64
 }
 
 func NewRedisSource(opts RedisSourceOptions) (*RedisSource, error) {
@@ -41,79 +44,327 @@ func NewRedisSource(opts RedisSourceOptions) (*RedisSource, error) {
 	if opts.Hash == "" && opts.Prefix == "" {
 		return nil, fmt.Errorf("redis hash or prefix is required")
 	}
-	return &RedisSource{client: opts.Client, prefix: opts.Prefix, hash: opts.Hash, versionKey: opts.VersionKey}, nil
+	if opts.MaxBytes <= 0 {
+		opts.MaxBytes = DefaultSourceMaxBytes
+	}
+	return &RedisSource{client: opts.Client, prefix: opts.Prefix, hash: opts.Hash, versionKey: opts.VersionKey, maxBytes: opts.MaxBytes}, nil
 }
 
 func (s *RedisSource) Name() string { return "redis" }
 
 func (s *RedisSource) Load(ctx context.Context, previous Version) (Snapshot, error) {
-	values := make(map[string]string)
+	var (
+		values map[string]string
+		err    error
+	)
 	if s.hash != "" {
-		fields, err := s.client.HGetAll(ctx, s.hash).Result()
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("read redis hash: %w", err)
-		}
-		for key, value := range fields {
-			values[key] = value
-		}
+		values, err = s.loadHash(ctx)
 	} else {
-		var keys []string
-		var cursor uint64
-		for {
-			batch, next, err := s.client.Scan(ctx, cursor, s.prefix+"*", 256).Result()
-			if err != nil {
-				return Snapshot{}, fmt.Errorf("scan redis config keys: %w", err)
-			}
-			keys = append(keys, batch...)
-			cursor = next
-			if cursor == 0 {
-				break
-			}
-		}
-		sort.Strings(keys)
-		pipe := s.client.Pipeline()
-		commands := make([]*redis.StringCmd, 0, len(keys))
-		for _, key := range keys {
-			commands = append(commands, pipe.Get(ctx, key))
-		}
-		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-			return Snapshot{}, fmt.Errorf("read redis config keys: %w", err)
-		}
-		for i, key := range keys {
-			value, err := commands[i].Result()
-			if err == nil {
-				values[strings.TrimPrefix(key, s.prefix)] = value
-			}
-		}
+		values, err = s.loadPrefix(ctx)
 	}
-	data, err := documentFromKeyValues(values)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	data, err := documentFromKeyValuesWithLimit(values, s.maxBytes)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	version := ""
 	if s.versionKey != "" {
-		version, err = s.client.Get(ctx, s.versionKey).Result()
-		if err != nil && err != redis.Nil {
+		version, err = s.readString(ctx, s.versionKey)
+		if err != nil {
 			return Snapshot{}, fmt.Errorf("read redis config version: %w", err)
 		}
 	}
 	return Snapshot{Data: data, Version: version}, nil
 }
 
+var completeConfigKeys = []string{"config", "config.yaml", "config.yml", "config.json"}
+
+func (s *RedisSource) loadHash(ctx context.Context) (map[string]string, error) {
+	for _, field := range completeConfigKeys {
+		exists, err := s.client.HExists(ctx, s.hash, field).Result()
+		if err != nil {
+			return nil, fmt.Errorf("check redis hash field: %w", err)
+		}
+		if !exists {
+			continue
+		}
+		value, err := s.readHashString(ctx, field)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{field: value}, nil
+	}
+
+	fields, err := s.hashFieldNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]string, len(fields))
+	var materializedBytes int64
+	for start := 0; start < len(fields); start += 128 {
+		end := start + 128
+		if end > len(fields) {
+			end = len(fields)
+		}
+		lengthPipe := s.client.Pipeline()
+		lengthCommands := make([]*redis.Cmd, 0, end-start)
+		for _, field := range fields[start:end] {
+			lengthCommands = append(lengthCommands, lengthPipe.Do(ctx, "HSTRLEN", s.hash, field))
+		}
+		if _, err := lengthPipe.Exec(ctx); err != nil {
+			return nil, fmt.Errorf("read redis hash field lengths: %w", err)
+		}
+		preflightBytes := materializedBytes
+		for i, field := range fields[start:end] {
+			length, err := lengthCommands[i].Int64()
+			if err != nil {
+				return nil, fmt.Errorf("read redis hash field %q length: %w", field, err)
+			}
+			preflightBytes += int64(len(field)) + length
+			if preflightBytes > s.maxBytes {
+				return nil, fmt.Errorf("redis configuration materialization exceeds %d bytes", s.maxBytes)
+			}
+		}
+
+		valuePipe := s.client.Pipeline()
+		valueCommands := make([]*redis.StringCmd, 0, end-start)
+		for _, field := range fields[start:end] {
+			valueCommands = append(valueCommands, valuePipe.HGet(ctx, s.hash, field))
+		}
+		if _, err := valuePipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("read redis hash fields: %w", err)
+		}
+		for i, field := range fields[start:end] {
+			value, err := valueCommands[i].Result()
+			if errors.Is(err, redis.Nil) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read redis hash field %q: %w", field, err)
+			}
+			materializedBytes += int64(len(field) + len(value))
+			if materializedBytes > s.maxBytes {
+				return nil, fmt.Errorf("redis configuration materialization exceeds %d bytes", s.maxBytes)
+			}
+			values[field] = value
+		}
+	}
+	return values, nil
+}
+
+func (s *RedisSource) hashFieldNames(ctx context.Context) ([]string, error) {
+	fields, err := s.scanHashFieldNames(ctx)
+	if err == nil {
+		return fields, nil
+	}
+	if !redisHashScanWithoutValuesUnsupported(err) {
+		return nil, fmt.Errorf("scan redis hash field names: %w", err)
+	}
+
+	// HSCAN NOVALUES was added after HSCAN. HKEYS keeps the compatibility path
+	// value-free; values are still fetched later in bounded HSTRLEN/HGET batches.
+	fields, err = s.client.HKeys(ctx, s.hash).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list redis hash field names: %w", err)
+	}
+	if len(fields) > maxSourceEntries {
+		return nil, fmt.Errorf("redis configuration exceeds %d entries", maxSourceEntries)
+	}
+	var fieldBytes int64
+	for _, field := range fields {
+		fieldBytes += int64(len(field))
+		if fieldBytes > s.maxBytes {
+			return nil, fmt.Errorf("redis configuration materialization exceeds %d bytes", s.maxBytes)
+		}
+	}
+	sort.Strings(fields)
+	return fields, nil
+}
+
+func (s *RedisSource) scanHashFieldNames(ctx context.Context) ([]string, error) {
+	fields := make([]string, 0)
+	var cursor uint64
+	for {
+		page, next, err := s.client.HScanNoValues(ctx, s.hash, cursor, "", 128).Result()
+		if err != nil {
+			return nil, err
+		}
+		if len(fields)+len(page) > maxSourceEntries {
+			return nil, fmt.Errorf("redis configuration exceeds %d entries", maxSourceEntries)
+		}
+		for _, field := range page {
+			if int64(len(field)) > s.maxBytes {
+				return nil, fmt.Errorf("redis configuration materialization exceeds %d bytes", s.maxBytes)
+			}
+			fields = append(fields, field)
+		}
+		cursor = next
+		if cursor == 0 {
+			sort.Strings(fields)
+			return fields, nil
+		}
+	}
+}
+
+func redisHashScanWithoutValuesUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unknown command") ||
+		strings.Contains(message, "unknown subcommand") ||
+		strings.Contains(message, "syntax error")
+}
+
+func (s *RedisSource) loadPrefix(ctx context.Context) (map[string]string, error) {
+	for _, field := range completeConfigKeys {
+		value, found, err := s.readStringIfPresent(ctx, s.prefix+field)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return map[string]string{field: value}, nil
+		}
+	}
+
+	values := make(map[string]string)
+	var cursor uint64
+	var materializedBytes int64
+	for {
+		keys, next, err := s.client.Scan(ctx, cursor, s.prefix+"*", 128).Result()
+		if err != nil {
+			return nil, fmt.Errorf("scan redis config keys: %w", err)
+		}
+		sort.Strings(keys)
+		if len(values)+len(keys) > maxSourceEntries {
+			return nil, fmt.Errorf("redis configuration exceeds %d entries", maxSourceEntries)
+		}
+		for start := 0; start < len(keys); start += 128 {
+			end := start + 128
+			if end > len(keys) {
+				end = len(keys)
+			}
+			lengthPipe := s.client.Pipeline()
+			lengthCommands := make([]*redis.IntCmd, 0, end-start)
+			for _, key := range keys[start:end] {
+				lengthCommands = append(lengthCommands, lengthPipe.StrLen(ctx, key))
+			}
+			if _, err := lengthPipe.Exec(ctx); err != nil {
+				return nil, fmt.Errorf("read redis config key lengths: %w", err)
+			}
+			preflightBytes := materializedBytes
+			for i, key := range keys[start:end] {
+				length, err := lengthCommands[i].Result()
+				if err != nil {
+					return nil, fmt.Errorf("read redis config key %q length: %w", key, err)
+				}
+				field := strings.TrimPrefix(key, s.prefix)
+				preflightBytes += int64(len(field)) + length
+				if preflightBytes > s.maxBytes {
+					return nil, fmt.Errorf("redis configuration materialization exceeds %d bytes", s.maxBytes)
+				}
+			}
+
+			pipe := s.client.Pipeline()
+			commands := make([]*redis.StringCmd, 0, end-start)
+			for _, key := range keys[start:end] {
+				commands = append(commands, pipe.Get(ctx, key))
+			}
+			if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+				return nil, fmt.Errorf("read redis config keys: %w", err)
+			}
+			for i, key := range keys[start:end] {
+				value, err := commands[i].Result()
+				if errors.Is(err, redis.Nil) {
+					continue
+				}
+				if err != nil {
+					return nil, fmt.Errorf("read redis config key %q: %w", key, err)
+				}
+				field := strings.TrimPrefix(key, s.prefix)
+				materializedBytes += int64(len(field) + len(value))
+				if materializedBytes > s.maxBytes {
+					return nil, fmt.Errorf("redis configuration materialization exceeds %d bytes", s.maxBytes)
+				}
+				values[field] = value
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return values, nil
+		}
+	}
+}
+
+func (s *RedisSource) readHashString(ctx context.Context, field string) (string, error) {
+	length, err := s.client.Do(ctx, "HSTRLEN", s.hash, field).Int64()
+	if err != nil {
+		return "", fmt.Errorf("read redis hash field length: %w", err)
+	}
+	if length > s.maxBytes {
+		return "", fmt.Errorf("redis configuration value exceeds %d bytes", s.maxBytes)
+	}
+	value, err := s.client.HGet(ctx, s.hash, field).Result()
+	if err != nil {
+		return "", fmt.Errorf("read redis hash field: %w", err)
+	}
+	if int64(len(value)) > s.maxBytes {
+		return "", fmt.Errorf("redis configuration value exceeds %d bytes", s.maxBytes)
+	}
+	return value, nil
+}
+
+func (s *RedisSource) readStringIfPresent(ctx context.Context, key string) (string, bool, error) {
+	exists, err := s.client.Exists(ctx, key).Result()
+	if err != nil {
+		return "", false, fmt.Errorf("check redis config key: %w", err)
+	}
+	if exists == 0 {
+		return "", false, nil
+	}
+	value, err := s.readString(ctx, key)
+	return value, true, err
+}
+
+func (s *RedisSource) readString(ctx context.Context, key string) (string, error) {
+	length, err := s.client.StrLen(ctx, key).Result()
+	if err != nil {
+		return "", fmt.Errorf("read Redis value length: %w", err)
+	}
+	if length > s.maxBytes {
+		return "", fmt.Errorf("redis configuration value exceeds %d bytes", s.maxBytes)
+	}
+	value, err := s.client.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read Redis value: %w", err)
+	}
+	if int64(len(value)) > s.maxBytes {
+		return "", fmt.Errorf("redis configuration value exceeds %d bytes", s.maxBytes)
+	}
+	return value, nil
+}
+
 func (s *RedisSource) Close() error { return s.client.Close() }
 
 func (s *RedisSource) Write(ctx context.Context, data []byte) error {
-	if s.hash != "" {
-		if err := s.client.HSet(ctx, s.hash, "config.yaml", string(data)).Err(); err != nil {
-			return fmt.Errorf("write redis config hash: %w", err)
+	_, err := s.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		if s.hash != "" {
+			pipe.HSet(ctx, s.hash, "config.yaml", string(data))
+		} else {
+			pipe.Set(ctx, s.prefix+"config.yaml", data, 0)
 		}
-	} else if err := s.client.Set(ctx, s.prefix+"config.yaml", data, 0).Err(); err != nil {
-		return fmt.Errorf("write redis config key: %w", err)
-	}
-	if s.versionKey != "" {
-		if err := s.client.Incr(ctx, s.versionKey).Err(); err != nil {
-			return fmt.Errorf("write redis config version: %w", err)
+		if s.versionKey != "" {
+			pipe.Incr(ctx, s.versionKey)
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("write redis config transaction: %w", err)
 	}
 	return nil
 }

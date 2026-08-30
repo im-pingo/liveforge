@@ -1,6 +1,7 @@
 package srt
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -19,9 +20,13 @@ type subscriberLifecycleConn struct {
 	streamID     string
 	socketID     uint32
 	peerSocketID uint32
+	readCalls    atomic.Int32
 }
 
-func (c *subscriberLifecycleConn) Read([]byte) (int, error)           { return 0, io.EOF }
+func (c *subscriberLifecycleConn) Read([]byte) (int, error) {
+	c.readCalls.Add(1)
+	return 0, io.EOF
+}
 func (c *subscriberLifecycleConn) ReadPacket() (packet.Packet, error) { return nil, io.EOF }
 func (c *subscriberLifecycleConn) Write(p []byte) (int, error)        { return len(p), nil }
 func (c *subscriberLifecycleConn) WritePacket(packet.Packet) error    { return nil }
@@ -50,6 +55,52 @@ func (r *subscriberLifecycleRequest) Accept() (gosrt.Conn, error) {
 	return r.subscriberLifecycleConn, nil
 }
 func (r *subscriberLifecycleRequest) Reject(gosrt.RejectionReason) {}
+
+func TestSRTPublisherAdmissionFailureStopsBeforeMediaRead(t *testing.T) {
+	bus := core.NewEventBus()
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 256}, config.LimitsConfig{}, bus)
+	conn := &subscriberLifecycleConn{streamID: "publish:/live/admission", socketID: 300, peerSocketID: 400}
+	publisher := NewPublisher(conn, "live/admission", hub, bus)
+	ctx := &core.EventContext{StreamKey: "live/admission", PublisherID: publisher.ID()}
+	release := saturateSRTPublishLifecycle(t, bus, ctx)
+	defer release()
+
+	publisher.Run()
+	if got := conn.readCalls.Load(); got != 0 {
+		t.Fatalf("SRT media reads after lifecycle admission failure = %d, want 0", got)
+	}
+	if stream, ok := hub.Find("live/admission"); ok && stream.Publisher() != nil {
+		t.Fatal("stream retained SRT publisher after lifecycle admission failure")
+	}
+}
+
+func saturateSRTPublishLifecycle(t *testing.T, bus *core.EventBus, ctx *core.EventContext) func() {
+	t.Helper()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	bus.Register(core.HookRegistration{Event: core.EventPublish, Mode: core.HookAsync, Consumer: "srt-admission-test", Handler: func(*core.EventContext) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	}})
+	bus.Register(core.HookRegistration{Event: core.EventPublishStop, Mode: core.HookAsync, Consumer: "srt-admission-test", Handler: func(*core.EventContext) error { return nil }})
+	if err := bus.EmitAsync(core.EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	for attempts := 0; ; attempts++ {
+		err := bus.EmitAsync(core.EventPublish, ctx)
+		if errors.Is(err, core.ErrAsyncBackpressure) {
+			break
+		}
+		if err != nil || attempts > 32 {
+			t.Fatalf("saturate lifecycle lane: attempts=%d error=%v", attempts, err)
+		}
+	}
+	var releaseOnce sync.Once
+	return func() { releaseOnce.Do(func() { close(release) }) }
+}
 
 type subscriberLifecyclePublisher struct{}
 
@@ -174,6 +225,12 @@ func TestSRTSubscriberLifecycleSerializesBlockedStartBeforeStop(t *testing.T) {
 	}
 	if stop.SubscriberID != start.SubscriberID {
 		t.Errorf("SRT subscribe stop ID = %q, want %q", stop.SubscriberID, start.SubscriberID)
+	}
+	if start.StreamInstanceID == 0 || start.PublisherGeneration == 0 || start.PublisherID == "" {
+		t.Errorf("SRT subscribe start omitted publisher identity: %+v", start)
+	}
+	if stop.StreamInstanceID != start.StreamInstanceID || stop.PublisherGeneration != start.PublisherGeneration || stop.PublisherID != start.PublisherID {
+		t.Errorf("SRT subscribe stop publisher identity = %+v, want %+v", stop, start)
 	}
 }
 

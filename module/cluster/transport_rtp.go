@@ -270,24 +270,13 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 		} else {
 			return nil
 		}
-		rtpPackets, err := pkt.Packetize(frame, pkgrtp.DefaultMTU)
+		err := sendRTPFrame(relayCtx, udpConn, frame, pkt, session, func(n int64) {
+			recordRelayBytes(relayCtx, n)
+		})
 		if err != nil {
-			return nil
-		}
-		session.WrapPackets(rtpPackets, frame.DTS)
-		for _, p := range rtpPackets {
-			raw, err := p.Marshal()
-			if err != nil {
-				continue
+			if relayCtx.Err() == nil {
+				return err
 			}
-			n, err := udpConn.Write(raw)
-			if err != nil {
-				if relayCtx.Err() != nil {
-					return nil
-				}
-				return fmt.Errorf("udp write: %w", err)
-			}
-			recordRelayBytes(relayCtx, int64(n))
 		}
 		return nil
 	}
@@ -305,7 +294,10 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(relayCtx)
+		frame, ok, readErr := core.ReadFrameContext(relayCtx, reader)
+		if readErr != nil {
+			return fmt.Errorf("source ring continuity lost: %w", readErr)
+		}
 		if !ok {
 			sendBYE(udpConn, videoSession, audioSession)
 			return nil
@@ -412,10 +404,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		"source", sourceURL, "local_port", localPort)
 	markRelayConnected(ctx)
 
-	pub := &originPublisher{
-		id:   fmt.Sprintf("rtp-pull-%s", stream.Key()),
-		info: mi,
-	}
+	pub := newOriginPublisher("rtp-pull", stream.Key(), mi)
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
@@ -694,10 +683,7 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 	mi := sdpToMediaInfo(offerSD)
 	ptMap := buildPTMap(offerSD)
 
-	pub := &originPublisher{
-		id:   fmt.Sprintf("rtp-push-%s", streamKey),
-		info: mi,
-	}
+	pub := newOriginPublisher("rtp-push", streamKey, mi)
 	if err := stream.SetPublisher(pub); err != nil {
 		slog.Warn("rtp receive: set publisher failed", "module", "cluster",
 			"stream", streamKey, "error", err)
@@ -850,19 +836,9 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupS
 		} else {
 			return nil
 		}
-		rtpPackets, err := pkt.Packetize(frame, pkgrtp.DefaultMTU)
-		if err != nil {
-			return nil
-		}
-		session.WrapPackets(rtpPackets, frame.DTS)
-		for _, p := range rtpPackets {
-			raw, err := p.Marshal()
-			if err != nil {
-				continue
-			}
-			if _, err := udpConn.Write(raw); err != nil {
-				return err
-			}
+		if err := sendRTPFrame(ctx, udpConn, frame, pkt, session, nil); err != nil {
+			slog.Warn("rtp relay frame send failed", "module", "cluster", "error", err)
+			return err
 		}
 		return nil
 	}
@@ -880,7 +856,11 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupS
 
 	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(ctx)
+		frame, ok, readErr := core.ReadFrameContext(ctx, reader)
+		if readErr != nil {
+			slog.Warn("rtp relay source continuity lost", "module", "cluster", "error", readErr)
+			return
+		}
 		if !ok {
 			sendBYE(udpConn, videoSession, audioSession)
 			return
@@ -899,6 +879,56 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupS
 }
 
 // --- Helper functions ---
+
+type rtpFrameWriter interface {
+	Write([]byte) (int, error)
+}
+
+// sendRTPFrame packetizes and writes one media frame. It intentionally treats
+// packetization, serialization, and short writes as fatal so a relay cannot
+// remain healthy while silently dropping media.
+func sendRTPFrame(ctx context.Context, writer rtpFrameWriter, frame *avframe.AVFrame, packetizer pkgrtp.Packetizer, session *pkgrtp.Session, onWrite func(int64)) error {
+	if frame == nil {
+		return fmt.Errorf("nil RTP frame")
+	}
+	if packetizer == nil {
+		return fmt.Errorf("nil RTP packetizer")
+	}
+	if session == nil {
+		return fmt.Errorf("nil RTP session")
+	}
+	rtpPackets, err := packetizer.Packetize(frame, pkgrtp.DefaultMTU)
+	if err != nil {
+		return fmt.Errorf("packetize RTP frame: %w", err)
+	}
+	if len(rtpPackets) == 0 {
+		return fmt.Errorf("packetize RTP frame: no packets")
+	}
+	session.WrapPackets(rtpPackets, frame.DTS)
+	for index, packet := range rtpPackets {
+		if packet == nil {
+			return fmt.Errorf("marshal RTP packet %d: nil packet", index)
+		}
+		raw, err := packet.Marshal()
+		if err != nil {
+			return fmt.Errorf("marshal RTP packet %d: %w", index, err)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		n, err := writer.Write(raw)
+		if err != nil {
+			return fmt.Errorf("write RTP packet %d: %w", index, err)
+		}
+		if n != len(raw) {
+			return fmt.Errorf("write RTP packet %d: %w", index, io.ErrShortWrite)
+		}
+		if onWrite != nil {
+			onWrite(int64(n))
+		}
+	}
+	return nil
+}
 
 // parseRTPURL parses rtp://host:port/streamKey into host:port and stream key.
 func parseRTPURL(rawURL string) (host, streamKey string, err error) {

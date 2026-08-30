@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +27,45 @@ func Validate(cfg *Config) error {
 	if cfg.HTTP.LLHLS.Enabled && cfg.HTTP.LLHLS.SegmentDuration <= 0 {
 		return fmt.Errorf("http_stream.llhls.segment_duration must be greater than zero")
 	}
+	if cfg.Stream.RingBufferSize <= 0 {
+		return fmt.Errorf("stream.ring_buffer_size must be greater than zero")
+	}
+	if cfg.Stream.GOPCacheNum < 0 {
+		return fmt.Errorf("stream.gop_cache_num must not be negative")
+	}
+	if cfg.Stream.GOPCacheMaxFrames < 0 {
+		return fmt.Errorf("stream.gop_cache_max_frames must not be negative")
+	}
+	if cfg.Stream.GOPCacheMaxDuration < 0 {
+		return fmt.Errorf("stream.gop_cache_max_duration must not be negative")
+	}
+	if cfg.Stream.GOPCacheMaxBytes < 0 {
+		return fmt.Errorf("stream.gop_cache_max_bytes must not be negative")
+	}
+	if cfg.Stream.GOPCache && cfg.Stream.GOPCacheNum > 0 &&
+		cfg.Stream.GOPCacheMaxFrames == 0 && cfg.Stream.GOPCacheMaxBytes == 0 {
+		return fmt.Errorf("stream.gop_cache_max_frames or stream.gop_cache_max_bytes must be positive when GOP cache is enabled")
+	}
+	if err := ValidateRecordConfig(cfg.Record); err != nil {
+		return err
+	}
+	if cfg.Metrics.StreamDetailLimit < 0 {
+		return fmt.Errorf("metrics.stream_detail_limit must not be negative")
+	}
+	for i, value := range cfg.Limits.RateLimit.TrustedProxies {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return fmt.Errorf("limits.rate_limit.trusted_proxies[%d] must not be empty", i)
+		}
+		if strings.Contains(value, "/") {
+			if _, _, err := net.ParseCIDR(value); err == nil {
+				continue
+			}
+		} else if net.ParseIP(value) != nil {
+			continue
+		}
+		return fmt.Errorf("limits.rate_limit.trusted_proxies[%d] must be an IP address or CIDR network", i)
+	}
 
 	seenTokens := make(map[string]struct{}, len(cfg.API.Auth.Tokens))
 	for i, binding := range cfg.API.Auth.Tokens {
@@ -43,6 +84,61 @@ func Validate(cfg *Config) error {
 		seenTokens[binding.Token] = struct{}{}
 	}
 	return nil
+}
+
+// ValidateRecordConfig checks recording-specific values without requiring a
+// complete root configuration. Empty and zero max_size values disable size
+// rotation; otherwise the value is a non-negative decimal byte count with an
+// optional B, KB, MB, or GB suffix.
+func ValidateRecordConfig(cfg RecordConfig) error {
+	switch format := strings.ToLower(strings.TrimSpace(cfg.Format)); format {
+	case "", "flv", "fmp4", "mp4", "ts", "hls":
+	default:
+		return fmt.Errorf("record.format must be flv, fmp4, mp4, ts, or hls")
+	}
+	if cfg.Segment.MaxSize == "" {
+		return nil
+	}
+	if _, err := ParseByteSize(cfg.Segment.MaxSize); err != nil {
+		return fmt.Errorf("record.segment.max_size: %w", err)
+	}
+	return nil
+}
+
+// ParseByteSize parses a decimal byte count with an optional binary suffix.
+func ParseByteSize(value string) (int64, error) {
+	value = strings.TrimSpace(strings.ToUpper(value))
+	if value == "" {
+		return 0, nil
+	}
+
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(value, "GB"):
+		value = strings.TrimSuffix(value, "GB")
+		multiplier = 1024 * 1024 * 1024
+	case strings.HasSuffix(value, "MB"):
+		value = strings.TrimSuffix(value, "MB")
+		multiplier = 1024 * 1024
+	case strings.HasSuffix(value, "KB"):
+		value = strings.TrimSuffix(value, "KB")
+		multiplier = 1024
+	case strings.HasSuffix(value, "B"):
+		value = strings.TrimSuffix(value, "B")
+	}
+	if value == "" {
+		return 0, fmt.Errorf("must contain decimal digits")
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return 0, fmt.Errorf("must be a non-negative integer with optional B, KB, MB, or GB suffix")
+		}
+	}
+	n, err := strconv.ParseInt(value, 10, 63)
+	if err != nil || n > (1<<63-1)/multiplier {
+		return 0, fmt.Errorf("is too large")
+	}
+	return n * multiplier, nil
 }
 
 func validAPIRole(role string) bool {

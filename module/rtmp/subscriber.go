@@ -95,10 +95,13 @@ func (s *Subscriber) WriteLoop() {
 		}
 	}()
 	var snapshot core.StreamStartupSnapshot
-	if s.startup != nil {
+	if s.startup != nil && s.startup.Ready {
 		snapshot = *s.startup
 	} else {
 		pending := s.stream.StartupSnapshot()
+		if s.startup != nil {
+			pending = *s.startup
+		}
 		if pending.GenerationDone != nil {
 			go func() {
 				select {
@@ -190,9 +193,18 @@ func (s *Subscriber) WriteLoop() {
 	}()
 
 	for {
-		frame, ok := filter.NextFrame()
-		if !ok {
+		result := filter.NextFrameResult()
+		if result.Overwritten > 0 {
+			reader.AdvanceToLive()
+			s.fail(fmt.Errorf("rtmp: source reader overwritten by %d frame(s)", result.Overwritten))
 			return
+		}
+		if !result.OK {
+			return
+		}
+		frame := result.Frame
+		if frame == nil {
+			continue
 		}
 		if !s.stream.IsPublisherGeneration(snapshot.Generation) {
 			return
@@ -223,10 +235,25 @@ func (s *Subscriber) writeTranscodedLoop(snapshot core.StreamStartupSnapshot, so
 	pump := func(filter *core.SlowConsumerFilter, done chan<- struct{}, accept func(*avframe.AVFrame) bool) {
 		defer pumps.Done()
 		defer close(done)
+		readerName := "source"
+		reader := sourceReader
+		if filter != sourceFilter {
+			readerName = "audio"
+			reader = audioReader
+		}
 		for {
-			frame, ok := filter.NextFrame()
-			if !ok || !s.stream.IsPublisherGeneration(snapshot.Generation) {
+			result := filter.NextFrameResult()
+			if result.Overwritten > 0 {
+				reader.AdvanceToLive()
+				s.fail(fmt.Errorf("rtmp: %s reader overwritten by %d frame(s)", readerName, result.Overwritten))
 				return
+			}
+			if !result.OK || !s.stream.IsPublisherGeneration(snapshot.Generation) {
+				return
+			}
+			frame := result.Frame
+			if frame == nil {
+				continue
 			}
 			if !accept(frame) {
 				continue

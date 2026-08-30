@@ -2,6 +2,8 @@ package httpstream
 
 import (
 	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,172 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
 )
+
+func TestHLSVideoOverwriteRecoversAtKeyframeWithDiscontinuity(t *testing.T) {
+	stream := newVideoStreamWithoutGOPCache(t)
+	mgr := NewHLSManager(stream.Key(), "/live/hls-overwrite", 6, 8)
+	input := newControlledSegmentInput(2, false)
+	mgr.inputFactory = input.factory
+	mgr.beforeLiveRead = input.beforeRead(mgr.done)
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		input.ring.Close()
+		<-done
+	})
+
+	frame := func(frameType avframe.FrameType, dts int64, marker byte) *avframe.AVFrame {
+		nalType := byte(0x41)
+		if frameType.IsKeyframe() {
+			nalType = 0x65
+		}
+		return avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, frameType,
+			dts, dts, []byte{0, 0, 0, 2, nalType, marker},
+		)
+	}
+
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 0, 0x10))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 500, 0x11))
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 1000, 0x20))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 1200, 0x21))
+	input.writeBurstAndRead(t,
+		frame(avframe.FrameTypeInterframe, 1300, 0x31),
+		frame(avframe.FrameTypeInterframe, 1400, 0x32),
+		frame(avframe.FrameTypeInterframe, 1500, 0x33),
+		frame(avframe.FrameTypeInterframe, 1600, 0x34),
+	)
+	input.writeBurstAndRead(t,
+		frame(avframe.FrameTypeInterframe, 1620, 0x35),
+		frame(avframe.FrameTypeInterframe, 1640, 0x36),
+		frame(avframe.FrameTypeInterframe, 1660, 0x37),
+		frame(avframe.FrameTypeInterframe, 1680, 0x38),
+	)
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 1700, 0x40))
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 2000, 0x50))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 2200, 0x51))
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 3000, 0x60))
+	input.waitReady(t)
+
+	if got := mgr.SegmentCount(); got != 2 {
+		t.Fatalf("HLS segments after overwrite = %d, want prior and recovered segments", got)
+	}
+	prior, ok := mgr.GetSegment(0)
+	if !ok {
+		t.Fatal("completed pre-gap HLS segment was not retained")
+	}
+	recovered, ok := mgr.GetSegment(1)
+	if !ok {
+		t.Fatal("first recovered HLS segment is unavailable")
+	}
+	if len(recovered) < 2*ts.PacketSize || tsPacketPID(recovered[:ts.PacketSize]) != ts.PIDPat ||
+		tsPacketPID(recovered[ts.PacketSize:2*ts.PacketSize]) != ts.PIDPmt {
+		t.Fatal("first recovered HLS segment does not begin with PAT/PMT")
+	}
+	priorVideo := demuxTSVideoFrames(prior)
+	recoveredVideo := demuxTSVideoFrames(recovered)
+	if len(priorVideo) == 0 || len(recoveredVideo) == 0 {
+		t.Fatalf("demuxed HLS video frames before/after overwrite = %d/%d", len(priorVideo), len(recoveredVideo))
+	}
+	if !recoveredVideo[0].FrameType.IsKeyframe() || !bytes.Contains(recoveredVideo[0].Payload, []byte{0x65, 0x50}) {
+		t.Fatalf("first recovered HLS video frame = %+v, want recovery IDR marker", recoveredVideo[0])
+	}
+	for _, segment := range [][]byte{prior, recovered} {
+		for _, marker := range []byte{0x20, 0x21, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x40} {
+			if bytes.Contains(segment, []byte{0x41, marker}) || bytes.Contains(segment, []byte{0x65, marker}) {
+				t.Fatalf("HLS output retained abandoned/post-gap marker %#x", marker)
+			}
+		}
+	}
+
+	playlist := mgr.GenerateM3U8()
+	if strings.Count(playlist, "#EXT-X-DISCONTINUITY\n") != 1 {
+		t.Fatalf("HLS discontinuity count = %d, playlist:\n%s", strings.Count(playlist, "#EXT-X-DISCONTINUITY\n"), playlist)
+	}
+	if !strings.Contains(playlist, "/0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:") || !strings.Contains(playlist, "/1.ts\n") {
+		t.Fatalf("HLS recovered sequence/discontinuity ordering is wrong:\n%s", playlist)
+	}
+	logText := logs.String()
+	for _, field := range []string{"format=hls", "consumer=segmenter", "action=wait_keyframe", "overwritten=2"} {
+		if !strings.Contains(logText, field) {
+			t.Fatalf("HLS overwrite transition log missing %q: %s", field, logText)
+		}
+	}
+}
+
+func TestHLSAudioOnlyOverwriteResumesAtNextAudio(t *testing.T) {
+	stream := newAudioOnlyAACStream(t, "live/hls-audio-overwrite")
+	mgr := NewHLSManager(stream.Key(), "/live/hls-audio-overwrite", 0.1, 8)
+	input := newControlledSegmentInput(2, false)
+	mgr.inputFactory = input.factory
+	mgr.beforeLiveRead = input.beforeRead(mgr.done)
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		input.ring.Close()
+		<-done
+	})
+
+	audio := func(dts int64, marker byte) *avframe.AVFrame {
+		return avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			dts, dts, []byte{0x21, marker, 0x34, 0x55},
+		)
+	}
+	for dts := int64(0); dts <= 120; dts += 20 {
+		input.writeAndRead(t, audio(dts, byte(dts/20)))
+	}
+	input.writeBurstAndRead(t, audio(140, 0x31), audio(160, 0x32), audio(180, 0x33), audio(200, 0x34))
+	for i, marker := range []byte{0x50, 0x51, 0x52, 0x53, 0x54, 0x55} {
+		input.writeAndRead(t, audio(300+int64(i)*20, marker))
+	}
+	input.waitReady(t)
+
+	if got := mgr.SegmentCount(); got != 2 {
+		t.Fatalf("audio-only HLS segments after overwrite = %d, want prior and recovered segments", got)
+	}
+	recovered, ok := mgr.GetSegment(1)
+	if !ok {
+		t.Fatal("recovered audio-only HLS segment is unavailable")
+	}
+	frames := demuxTSAudioFrames(recovered)
+	if len(frames) == 0 || !bytes.Equal(frames[0].Payload, []byte{0x21, 0x50, 0x34, 0x55}) {
+		t.Fatalf("first recovered audio payload = %v, want next live audio marker", frames)
+	}
+	if got := strings.Count(mgr.GenerateM3U8(), "#EXT-X-DISCONTINUITY\n"); got != 1 {
+		t.Fatalf("audio-only HLS discontinuity count = %d, want 1", got)
+	}
+}
+
+func tsPacketPID(packet []byte) uint16 {
+	return uint16(packet[1]&0x1f)<<8 | uint16(packet[2])
+}
+
+func demuxTSVideoFrames(segment []byte) []*avframe.AVFrame {
+	var frames []*avframe.AVFrame
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.MediaType.IsVideo() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+			frames = append(frames, frame)
+		}
+	})
+	demuxer.Feed(segment)
+	demuxer.Flush()
+	return frames
+}
 
 func TestHLSManagerGenerateM3U8(t *testing.T) {
 	mgr := NewHLSManager("live/test", "/live/test", 6.0, 3)

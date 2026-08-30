@@ -837,6 +837,9 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 	if withAudio {
 		s.StreamHub().SetAudioCodecEnabled(true)
 	}
+	streamConfig := s.Config().Stream
+	streamConfig.RingBufferSize = 4096
+	s.StreamHub().UpdatePolicy(streamConfig, s.Config().Limits)
 
 	stream, err := s.StreamHub().GetOrCreate(streamPath)
 	if err != nil {
@@ -1092,6 +1095,15 @@ func runJitterDiagnostic(t *testing.T, withAudio bool, streamPath string) {
 
 	if len(frames) < 20 {
 		t.Fatalf("too few video frames: %d", len(frames))
+	}
+	if minimum := totalFrames * 8 / 10; len(frames) < minimum {
+		t.Fatalf("video feed ended early: %d frames, want at least %d", len(frames), minimum)
+	}
+	if withAudio {
+		minimum := len(aacPayloads) * 8 / 10
+		if len(aSamples) < minimum {
+			t.Fatalf("transformed audio ended early: %d packets, want at least %d", len(aSamples), minimum)
+		}
 	}
 
 	// 1. Sequence number gap analysis (packet loss).
