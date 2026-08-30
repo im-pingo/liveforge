@@ -15,6 +15,14 @@ func rejectHardLinks(t *testing.T) {
 	t.Cleanup(func() { linkAt = original })
 }
 
+func TestEntryFileModeAcceptsNamedFileMode(t *testing.T) {
+	mode := os.FileMode(unix.S_IFDIR | 0o750)
+	got := entryFileMode(mode)
+	if !got.IsDir() || got.Perm() != 0o750 {
+		t.Fatalf("entryFileMode(%#o) = %#o, want directory mode 0750", mode, got)
+	}
+}
+
 func TestOpenRootRejectsUnsupportedHardLinksWithoutProbeArtifacts(t *testing.T) {
 	path := t.TempDir()
 	rejectHardLinks(t)

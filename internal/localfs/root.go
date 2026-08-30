@@ -367,24 +367,23 @@ func (d *Dir) list(ctx context.Context, includeNonRegular bool) ([]Entry, error)
 		result = append(result, Entry{
 			RelPath: joinRel(d.rel, entry.Name()),
 			Size:    stat.Size,
-			Mode:    entryFileMode(uint32(stat.Mode)),
+			Mode:    entryFileMode(os.FileMode(stat.Mode)),
 			ModTime: statModTime(stat),
 		})
 	}
 	return result, nil
 }
 
-func entryFileMode(mode uint32) os.FileMode {
-	result := os.FileMode(mode)
-	switch mode & uint32(unix.S_IFMT) {
-	case uint32(unix.S_IFREG):
-		return result
-	case uint32(unix.S_IFDIR):
-		return result | os.ModeDir
-	case uint32(unix.S_IFLNK):
-		return result | os.ModeSymlink
+func entryFileMode(mode os.FileMode) os.FileMode {
+	switch mode & os.FileMode(unix.S_IFMT) {
+	case os.FileMode(unix.S_IFREG):
+		return mode
+	case os.FileMode(unix.S_IFDIR):
+		return mode | os.ModeDir
+	case os.FileMode(unix.S_IFLNK):
+		return mode | os.ModeSymlink
 	default:
-		return result | os.ModeIrregular
+		return mode | os.ModeIrregular
 	}
 }
 

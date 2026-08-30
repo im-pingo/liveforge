@@ -222,7 +222,7 @@ The first command skips FFmpeg-tagged transcoding integration tests. The tagged 
 
 The `lf-test` tool emits human-readable or JSON reports and uses exit code 0 for success, 1 for assertion failure, and 2 for an execution error.
 
-GitHub Actions maintenance uses Node 24-compatible action majors: checkout and setup-go v7, upload-artifact v7, Docker setup-buildx v4, login v4, build-push v7, golangci-lint v9, and action-gh-release v3. CI passes `--new-from-rev` against the fetched base revision (or `HEAD^` on main pushes), so the new-code lint gate does not depend on the GitHub PR diff API's 20,000-line limit. Do not reintroduce deprecated Node 20 action versions or the `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` workaround.
+GitHub Actions maintenance uses Node 24-compatible action majors: checkout and setup-go v7, upload-artifact v7, Docker setup-buildx v4, login v4, build-push v7, golangci-lint v9, and action-gh-release v3. CI passes `--new-from-rev` against the fetched base revision (or `HEAD^` on main pushes), so the new-code lint gate does not depend on the GitHub PR diff API's 20,000-line limit. The Linux lint job remains authoritative for platform-specific `x/sys/unix` types that a Darwin lint run cannot reproduce. Do not reintroduce deprecated Node 20 action versions or the `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` workaround.
 
 ## Security boundaries
 
