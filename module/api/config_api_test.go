@@ -112,8 +112,8 @@ func TestHandleConfigApplyWritesFileAndPreservesRedactedSecretsAndUnmappedFields
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	if err := manager.Start(context.Background()); err != nil {
-		t.Fatal(err)
+	if startErr := manager.Start(context.Background()); startErr != nil {
+		t.Fatal(startErr)
 	}
 
 	h, server := newTestHandlers(t)
@@ -335,8 +335,8 @@ func TestConfigDocumentPreservesRawSourceFieldsAndComments(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	if err := manager.Start(context.Background()); err != nil {
-		t.Fatal(err)
+	if startErr := manager.Start(context.Background()); startErr != nil {
+		t.Fatal(startErr)
 	}
 	if snapshot := manager.Snapshot(); snapshot == nil || string(snapshot.DesiredDocument) != sourceDocument {
 		t.Fatalf("manager did not retain source document: %+v", snapshot)
@@ -354,8 +354,8 @@ func TestConfigDocumentPreservesRawSourceFieldsAndComments(t *testing.T) {
 		DesiredText string         `json:"desired_document"`
 		Schema      map[string]any `json:"schema"`
 	}
-	if err := json.Unmarshal(data, &response); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(data, &response); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	if response.Desired["custom_runtime_field"] != "retained" {
 		t.Fatalf("raw source field was dropped: %+v", response.Desired)
@@ -393,8 +393,8 @@ ordinary:
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	if err := manager.Start(context.Background()); err != nil {
-		t.Fatal(err)
+	if startErr := manager.Start(context.Background()); startErr != nil {
+		t.Fatal(startErr)
 	}
 	server.SetConfigManager(manager)
 
@@ -408,8 +408,8 @@ ordinary:
 		Desired     map[string]any `json:"desired"`
 		DesiredText string         `json:"desired_document"`
 	}
-	if err := json.Unmarshal(data, &response); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(data, &response); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	desiredJSON, err := json.Marshal(response.Desired)
 	if err != nil {
@@ -720,8 +720,8 @@ func TestConfigURLPathCredentialsAreOpaqueAndRestoreByStableIdentity(t *testing.
 	}
 
 	var candidate map[string]any
-	if err := yaml.Unmarshal(redacted, &candidate); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := yaml.Unmarshal(redacted, &candidate); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	reverseConfigSequence(t, candidate, "custom_callback_urls")
 	candidateDocument, err := yaml.Marshal(candidate)
@@ -994,6 +994,7 @@ notify:
 }
 
 func TestRedactedConfigDocumentRedactsOpaqueSensitiveContainers(t *testing.T) {
+	// #nosec G101 -- synthetic credential-like URLs exercise redaction without real secrets.
 	const sourceDocument = `custom_credentials:
   name: primary
   value: mapping-secret
@@ -1044,6 +1045,7 @@ custom_private_keys:
 }
 
 func TestOpaqueSensitiveContainerRedactionKeepsStructuredURLValuesOpaque(t *testing.T) {
+	// #nosec G101 -- synthetic credential-like URLs exercise redaction without real secrets.
 	const sourceDocument = `custom_credentials:
   name: primary
   callback_url:
@@ -1231,8 +1233,8 @@ func TestPreserveRedactedURLKeepsEditedLocationAndRestoresOnlySecretComponents(t
 		t.Fatal(err)
 	}
 	var edited map[string]any
-	if err := yaml.Unmarshal(redacted, &edited); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := yaml.Unmarshal(redacted, &edited); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	edited["runtime"].(map[string]any)["http"].(map[string]any)["url"] = "https://REDACTED@new.example.test/new.yaml?__liveforge_redacted__=1"
 	editedDocument, err := yaml.Marshal(edited)
@@ -1350,8 +1352,8 @@ func TestPreserveRedactedURLSequenceMatchesReorderedPublicIdentity(t *testing.T)
 		t.Fatal(err)
 	}
 	var candidate map[string]any
-	if err := yaml.Unmarshal(redacted, &candidate); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := yaml.Unmarshal(redacted, &candidate); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	reverseConfigSequence(t, candidate, "custom_callback_urls")
 	candidateDocument, err := yaml.Marshal(candidate)
@@ -1367,14 +1369,15 @@ func TestPreserveRedactedURLSequenceMatchesReorderedPublicIdentity(t *testing.T)
 		t.Fatal(err)
 	}
 	urls := document["custom_callback_urls"].([]any)
-	wantFirst := "https://second-user:second-password@second.example.test/hook?token=second-secret"
-	wantSecond := "https://first-user:first-password@first.example.test/hook?token=first-secret"
+	wantFirst := "https://second-user:second-password@second.example.test/hook?token=second-secret" // #nosec G101 -- synthetic redaction fixture.
+	wantSecond := "https://first-user:first-password@first.example.test/hook?token=first-secret"    // #nosec G101 -- synthetic redaction fixture.
 	if len(urls) != 2 || urls[0] != wantFirst || urls[1] != wantSecond {
 		t.Fatalf("restored reordered URLs = %#v, want [%q %q]", urls, wantFirst, wantSecond)
 	}
 }
 
 func TestPreserveRedactedUnmappedURLSequenceUsesStableValueIdentity(t *testing.T) {
+	// #nosec G101 -- synthetic credential-like URLs exercise redaction without real secrets.
 	const currentDocument = `mirrors:
   - https://first-user:first-password@hooks.slack.com/services/T111/B111/first-path-token?token=first-query#first-fragment
   - https://second-user:second-password@hooks.slack.com/services/T222/B222/second-path-token?token=second-query#second-fragment
@@ -1408,8 +1411,8 @@ func TestPreserveRedactedUnmappedURLSequenceUsesStableValueIdentity(t *testing.T
 			t.Fatal(err)
 		}
 		urls := document["mirrors"].([]any)
-		wantFirst := "https://second-user:second-password@hooks.slack.com/services/T222/B222/second-path-token?token=second-query#second-fragment"
-		wantSecond := "https://first-user:first-password@hooks.slack.com/services/T111/B111/first-path-token?token=first-query#first-fragment"
+		wantFirst := "https://second-user:second-password@hooks.slack.com/services/T222/B222/second-path-token?token=second-query#second-fragment" // #nosec G101 -- synthetic redaction fixture.
+		wantSecond := "https://first-user:first-password@hooks.slack.com/services/T111/B111/first-path-token?token=first-query#first-fragment"     // #nosec G101 -- synthetic redaction fixture.
 		if len(urls) != 2 || urls[0] != wantFirst || urls[1] != wantSecond {
 			t.Fatalf("restored reordered unmapped URLs = %#v, want [%q %q]", urls, wantFirst, wantSecond)
 		}
@@ -1432,6 +1435,7 @@ func TestPreserveRedactedUnmappedURLSequenceUsesStableValueIdentity(t *testing.T
 	})
 
 	t.Run("ambiguous identity", func(t *testing.T) {
+		// #nosec G101 -- synthetic credential-like URLs exercise ambiguous restoration handling.
 		const ambiguousDocument = `mirrors:
   - https://first-user:first-password@hooks.slack.com/services/SHARED/PATH/token?token=first-query
   - https://second-user:second-password@hooks.slack.com/services/SHARED/PATH/token?token=second-query
@@ -1456,8 +1460,8 @@ func TestPreserveRedactedURLRoundTripsLiteralPathMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	var candidate map[string]any
-	if err := yaml.Unmarshal(redacted, &candidate); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := yaml.Unmarshal(redacted, &candidate); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	if candidate["primary"] != redactedURL {
 		t.Fatalf("redacted URL = %q, want source-path digest %q", candidate["primary"], redactedURL)

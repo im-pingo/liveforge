@@ -693,14 +693,14 @@ func TestFileWriterAutomaticRotationStopAtThresholdDoesNotCreateEmptySuccessor(t
 		t.Fatal(err)
 	}
 	w.SetExpectedTracks(avframe.CodecH264, 0)
-	if err := w.WriteFrame(avframe.NewAVFrame(
+	if writeErr := w.WriteFrame(avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
 		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
-	)); err != nil {
-		t.Fatal(err)
+	)); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := w.CloseWithError(nil); err != nil {
-		t.Fatalf("close immediately after automatic rotation threshold: %v", err)
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatalf("close immediately after automatic rotation threshold: %v", closeErr)
 	}
 
 	items, err := local.List(context.Background())
@@ -740,8 +740,8 @@ func TestFileWriterAutomaticRotationStartsVideoSegmentsOnKeyframes(t *testing.T)
 			[]byte{0, 0, 0, 2, 0x41, 0x04}),
 	}
 	for _, frame := range frames {
-		if err := w.WriteFrame(frame); err != nil {
-			t.Fatal(err)
+		if writeErr := w.WriteFrame(frame); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
 	closeErr := w.CloseWithError(nil)
@@ -805,15 +805,15 @@ func TestFileWriterAutomaticRotationPreservesAudioOnlySegments(t *testing.T) {
 		{0xff, 0xfb, 0x11, 0x22, 0x33, 0x44},
 		{0xff, 0xfb, 0xaa, 0xbb, 0xcc, 0xdd},
 	} {
-		if err := w.WriteFrame(avframe.NewAVFrame(
+		if writeErr := w.WriteFrame(avframe.NewAVFrame(
 			avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
 			int64(index*26), int64(index*26), payload,
-		)); err != nil {
-			t.Fatal(err)
+		)); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
-	if err := w.CloseWithError(nil); err != nil {
-		t.Fatalf("close automatic audio-only rotation: %v", err)
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatalf("close automatic audio-only rotation: %v", closeErr)
 	}
 
 	items, err := local.List(context.Background())
@@ -872,15 +872,15 @@ func TestFileWriterAutomaticRotationUsesDistinctPathsWithoutTimePlaceholder(t *t
 	w.SetExpectedTracks(0, avframe.CodecMP3)
 	for index := 0; index < 3; index++ {
 		payload := []byte{0xff, 0xfb, byte(index + 1), 0x22, 0x33, 0x44}
-		if err := w.WriteFrame(avframe.NewAVFrame(
+		if writeErr := w.WriteFrame(avframe.NewAVFrame(
 			avframe.MediaTypeAudio, avframe.CodecMP3, avframe.FrameTypeInterframe,
 			int64(index*26), int64(index*26), payload,
-		)); err != nil {
-			t.Fatalf("write automatic segment %d: %v", index, err)
+		)); writeErr != nil {
+			t.Fatalf("write automatic segment %d: %v", index, writeErr)
 		}
 	}
-	if err := w.CloseWithError(nil); err != nil {
-		t.Fatalf("close fixed-path automatic rotation: %v", err)
+	if closeErr := w.CloseWithError(nil); closeErr != nil {
+		t.Fatalf("close fixed-path automatic rotation: %v", closeErr)
 	}
 
 	items, err := local.List(context.Background())

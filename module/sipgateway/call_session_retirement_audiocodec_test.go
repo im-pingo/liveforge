@@ -4,6 +4,7 @@ package sipgateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -147,15 +148,15 @@ func TestTranscodedOutboundCallEndsWhenPublisherGenerationRetires(t *testing.T) 
 		t.Fatalf("dialog while BYE blocked = %d BYE/%d close, want 1/0", byesBeforeRelease, closesBeforeRelease)
 	}
 
-	if err := stream.SetPublisher(&gatewayTestPublisher{
+	if publisherErr := stream.SetPublisher(&gatewayTestPublisher{
 		id: "replacement-publisher",
 		info: &avframe.MediaInfo{
 			AudioCodec: avframe.CodecG711A,
 			SampleRate: 8000,
 			Channels:   1,
 		},
-	}); err != nil {
-		t.Fatalf("SetPublisher replacement: %v", err)
+	}); publisherErr != nil {
+		t.Fatalf("SetPublisher replacement: %v", publisherErr)
 	}
 	replacementDialog := &fakeInviteDialog{done: make(chan struct{})}
 	close(replacementDialog.done)
@@ -265,7 +266,8 @@ func TestTranscodedAudioReadyAfterPublisherRetirementDoesNotSendRTP(t *testing.T
 	if readErr == nil {
 		t.Fatalf("received %d bytes of retired-generation transcoded RTP", n)
 	}
-	if netErr, ok := readErr.(net.Error); !ok || !netErr.Timeout() {
+	var netErr net.Error
+	if !errors.As(readErr, &netErr) || !netErr.Timeout() {
 		t.Fatalf("retired-generation RTP read error = %v, want timeout", readErr)
 	}
 }

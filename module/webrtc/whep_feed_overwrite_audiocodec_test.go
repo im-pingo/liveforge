@@ -58,7 +58,7 @@ func (*whepOverwriteEncoder) Encode(pcm *audiocodec.PCMFrame) ([]byte, error) {
 	if pcm == nil || len(pcm.Samples) == 0 {
 		return nil, nil
 	}
-	return []byte{byte(pcm.Samples[0])}, nil
+	return []byte{byte(pcm.Samples[0])}, nil // #nosec G115 -- the encoder intentionally emits a one-byte test marker.
 }
 
 func (*whepOverwriteEncoder) SampleRate() int { return 48000 }
@@ -66,7 +66,7 @@ func (*whepOverwriteEncoder) Channels() int   { return 1 }
 func (*whepOverwriteEncoder) FrameSize() int  { return 1 }
 func (*whepOverwriteEncoder) Close()          {}
 
-func newWHEPOverwriteTranscodeManager(stream *core.Stream, bufferSize int, decoder *whepOverwriteDecoder) *core.TranscodeManager {
+func newWHEPOverwriteTranscodeManager(stream *core.Stream, bufferSize int, decoder *whepOverwriteDecoder) {
 	registry := audiocodec.Global()
 	registry.RegisterDecoder(whepOverwriteSourceAudio, func() audiocodec.Decoder {
 		if decoder != nil {
@@ -77,7 +77,6 @@ func newWHEPOverwriteTranscodeManager(stream *core.Stream, bufferSize int, decod
 	registry.RegisterEncoder(whepOverwriteTargetAudio, func() audiocodec.Encoder { return &whepOverwriteEncoder{} })
 	manager := core.NewTranscodeManager(stream, registry, bufferSize)
 	core.SetTranscodeManagerForTest(stream, manager)
-	return manager
 }
 
 func whepOverwriteTranscodeAudio(marker byte, dts int64) *avframe.AVFrame {
@@ -302,7 +301,7 @@ func TestWHEPTranscodeProducerSourceOverwriteEOFIsTerminalAndReleasesOnce(t *tes
 		nextIndex := 0
 		writeNext := func() {
 			dts := int64(100 + nextIndex*20)
-			stream.WriteFrame(whepOverwriteVideo(avframe.FrameTypeInterframe, byte(nextIndex), dts))
+			stream.WriteFrame(whepOverwriteVideo(avframe.FrameTypeInterframe, byte(nextIndex), dts)) // #nosec G115 -- overwrite fixture index is bounded.
 			nextIndex++
 		}
 		writeNext()

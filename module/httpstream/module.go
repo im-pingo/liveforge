@@ -509,7 +509,7 @@ func (m *Module) startManager(manager segmentManager, run func()) bool {
 }
 
 func (m *Module) takeRegisteredManagers() []segmentManager {
-	var managers []segmentManager
+	managers := make([]segmentManager, 0, len(m.hlsManagers)+len(m.dashManagers)+len(m.llhlsManagers))
 	m.hlsMu.Lock()
 	for key, manager := range m.hlsManagers {
 		managers = append(managers, manager)

@@ -108,7 +108,7 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderUnavailable(t *testi
 		t.Fatal("transcode reader missing")
 	}
 
-	if _, ok := readers.tryReadTargetAudio(); ok {
+	if _, targetAudioOK := readers.tryReadTargetAudio(); targetAudioOK {
 		t.Fatal("unavailable transcoder unexpectedly produced a frame")
 	}
 

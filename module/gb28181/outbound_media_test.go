@@ -63,7 +63,7 @@ func TestGBOutboundNegotiationCancelsWithPublisherGeneration(t *testing.T) {
 	go func() {
 		_, err := m.startOutboundMedia(context.Background(), &Device{
 			DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
-		}, "channel", stream.Key())
+		}, stream.Key())
 		result <- err
 	}()
 
@@ -135,7 +135,7 @@ func TestGBOutboundWaitsForPublisherReadinessBeforeSendingInvite(t *testing.T) {
 	go func() {
 		_, err := m.startOutboundMedia(ctx, &Device{
 			DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
-		}, "channel", stream.Key())
+		}, stream.Key())
 		result <- err
 	}()
 
@@ -201,7 +201,7 @@ func TestGBOutboundGenerationRetirementAfterAccepted2xxSendsBYE(t *testing.T) {
 	go func() {
 		_, err := m.startOutboundMedia(context.Background(), &Device{
 			DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
-		}, "channel", stream.Key())
+		}, stream.Key())
 		result <- err
 	}()
 
@@ -251,14 +251,14 @@ func TestGBOutboundSkipsExternallyOccupiedFirstPortPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreate stream: %v", err)
 	}
-	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+	if publisherErr := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
 		VideoCodec:          avframe.CodecH264,
 		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
 		AudioCodec:          avframe.CodecG711A,
 		SampleRate:          8000,
 		Channels:            1,
-	}}); err != nil {
-		t.Fatalf("SetPublisher: %v", err)
+	}}); publisherErr != nil {
+		t.Fatalf("SetPublisher: %v", publisherErr)
 	}
 	ports, err := portalloc.New(portRange[0], portRange[1])
 	if err != nil {
@@ -285,7 +285,7 @@ func TestGBOutboundSkipsExternallyOccupiedFirstPortPair(t *testing.T) {
 
 	session, err := m.startOutboundMedia(context.Background(), &Device{
 		DeviceID: "device", RemoteAddr: "127.0.0.1:5060", Transport: "udp",
-	}, "channel", stream.Key())
+	}, stream.Key())
 	if err != nil {
 		t.Fatalf("startOutboundMedia with occupied first pair: %v", err)
 	}
@@ -385,11 +385,11 @@ func TestGBOutboundTranscodedHistoryKeepsSharedRTPTimestampsMonotonic(t *testing
 	if err != nil {
 		t.Fatalf("GetOrCreate stream: %v", err)
 	}
-	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+	if publisherErr := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
 		VideoCodec: avframe.CodecH264,
 		AudioCodec: avframe.CodecOpus,
-	}}); err != nil {
-		t.Fatalf("SetPublisher: %v", err)
+	}}); publisherErr != nil {
+		t.Fatalf("SetPublisher: %v", publisherErr)
 	}
 
 	sender, err := newOutboundMediaSession(stream, 0, 0)
@@ -422,7 +422,7 @@ func TestGBOutboundTranscodedHistoryKeepsSharedRTPTimestampsMonotonic(t *testing
 	}
 	sender.start()
 
-	var timestamps []uint32
+	timestamps := make([]uint32, 0, 5)
 	for range 5 {
 		timestamp, _, _ := readGBRTPFrame(t, remoteRTP)
 		timestamps = append(timestamps, timestamp)
@@ -446,7 +446,7 @@ func TestGBOutboundTranscodedLiveVideoAdvancesWhileAudioIsPaused(t *testing.T) {
 		want = append(want, uint32(dts*90))
 	}
 
-	var got []uint32
+	got := make([]uint32, 0, videoFrames+2)
 	for range videoFrames {
 		timestamp, _, _ := readGBRTPFrame(t, h.remoteRTP)
 		got = append(got, timestamp)
@@ -494,7 +494,7 @@ func TestGBOutboundTranscodedLiveInterleaveToleratesShortTrackLatency(t *testing
 		}
 	}
 
-	var got []uint32
+	got := make([]uint32, 0, 6)
 	for range 6 {
 		timestamp, _, _ := readGBRTPFrame(t, h.remoteRTP)
 		got = append(got, timestamp)
@@ -600,11 +600,11 @@ func newGBTranscodedLiveHarness(t *testing.T, ringCapacity int) *gbTranscodedLiv
 	if err != nil {
 		t.Fatalf("GetOrCreate stream: %v", err)
 	}
-	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+	if publisherErr := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
 		VideoCodec: avframe.CodecH264,
 		AudioCodec: avframe.CodecOpus,
-	}}); err != nil {
-		t.Fatalf("SetPublisher: %v", err)
+	}}); publisherErr != nil {
+		t.Fatalf("SetPublisher: %v", publisherErr)
 	}
 
 	sender, err := newOutboundMediaSession(stream, 0, 0)

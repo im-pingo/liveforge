@@ -274,10 +274,9 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 			recordRelayBytes(relayCtx, n)
 		})
 		if err != nil {
-			if relayCtx.Err() != nil {
-				return nil
+			if relayCtx.Err() == nil {
+				return err
 			}
-			return err
 		}
 		return nil
 	}
@@ -914,8 +913,8 @@ func sendRTPFrame(ctx context.Context, writer rtpFrameWriter, frame *avframe.AVF
 		if err != nil {
 			return fmt.Errorf("marshal RTP packet %d: %w", index, err)
 		}
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		n, err := writer.Write(raw)
 		if err != nil {

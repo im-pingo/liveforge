@@ -112,7 +112,7 @@ func ParseByteSize(value string) (int64, error) {
 		return 0, nil
 	}
 
-	multiplier := uint64(1)
+	multiplier := int64(1)
 	switch {
 	case strings.HasSuffix(value, "GB"):
 		value = strings.TrimSuffix(value, "GB")
@@ -134,11 +134,11 @@ func ParseByteSize(value string) (int64, error) {
 			return 0, fmt.Errorf("must be a non-negative integer with optional B, KB, MB, or GB suffix")
 		}
 	}
-	n, err := strconv.ParseUint(value, 10, 64)
-	if err != nil || n > uint64(^uint64(0)>>1)/multiplier {
+	n, err := strconv.ParseInt(value, 10, 63)
+	if err != nil || n > (1<<63-1)/multiplier {
 		return 0, fmt.Errorf("is too large")
 	}
-	return int64(n * multiplier), nil
+	return n * multiplier, nil
 }
 
 func validAPIRole(role string) bool {

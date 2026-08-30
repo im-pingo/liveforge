@@ -69,8 +69,8 @@ func TestFileSourceWriteReplacesDocumentAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := source.Write(context.Background(), []byte("server:\n  name: new\n")); err != nil {
-		t.Fatal(err)
+	if writeErr := source.Write(context.Background(), []byte("server:\n  name: new\n")); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != "server:\n  name: new\n" {
@@ -89,8 +89,8 @@ func TestFileSourceWriteUsesPrivateModeForNewDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	if err := source.Write(context.Background(), []byte("server:\n  name: new\n")); err != nil {
-		t.Fatal(err)
+	if writeErr := source.Write(context.Background(), []byte("server:\n  name: new\n")); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -453,6 +453,7 @@ func TestConsulSourceLoadRejectsRedirectWithoutForwardingToken(t *testing.T) {
 	}))
 	defer target.Close()
 	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// #nosec G710 -- this test intentionally redirects to a loopback server to verify redirect rejection.
 		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
 	}))
 	defer redirect.Close()
@@ -479,6 +480,7 @@ func TestConsulSourceWriteRejectsRedirectWithoutForwardingToken(t *testing.T) {
 	}))
 	defer target.Close()
 	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// #nosec G710 -- this test intentionally redirects to a loopback server to verify redirect rejection.
 		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
 	}))
 	defer redirect.Close()
@@ -550,8 +552,8 @@ func TestRedisHashSourceFallsBackWhenHScanNoValuesIsUnavailable(t *testing.T) {
 		t.Fatalf("load Redis hash with legacy HSCAN support: %v", err)
 	}
 	select {
-	case err := <-serverErrors:
-		t.Fatal(err)
+	case serverErr := <-serverErrors:
+		t.Fatal(serverErr)
 	default:
 	}
 	cfg, err := ParseDocument(snapshot.Data)

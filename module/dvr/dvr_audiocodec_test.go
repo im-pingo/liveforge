@@ -137,7 +137,7 @@ func TestDVRSessionDrainsTranscodedGenerationTail(t *testing.T) {
 	}
 	defer session.Close()
 
-	for dts := int64(labmedia.VideoFrameDurationMs); dts < 400; dts += labmedia.VideoFrameDurationMs {
+	for dts := labmedia.VideoFrameDurationMs; dts < 400; dts += labmedia.VideoFrameDurationMs {
 		stream.WriteFrame(labmedia.VideoFrame(dts))
 		stream.WriteFrame(labmedia.G711Frame(avframe.CodecG711A, dts))
 	}

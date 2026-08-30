@@ -55,7 +55,7 @@ func BenchmarkRTMPRelaySendMediaFrameProduction(b *testing.B) {
 			b.StopTimer()
 			flushRelayBytes(ctx)
 
-			if sink.writes != uint64(b.N) || sink.wireBytes <= uint64(b.N*len(benchmark.frame.Payload)) || sink.checksum == 0 {
+			if sink.writes != uint64(b.N) || sink.wireBytes <= uint64(b.N*len(benchmark.frame.Payload)) || sink.checksum == 0 { // #nosec G115 -- benchmark counters are bounded by testing.B.
 				b.Fatalf("RTMP sink writes=%d bytes=%d checksum=%d, want %d framed writes", sink.writes, sink.wireBytes, sink.checksum, b.N)
 			}
 			if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues(relayDirectionForward, "rtmp")); got != float64(b.N*len(benchmark.frame.Payload)) {
@@ -89,11 +89,11 @@ func BenchmarkRTSPRelaySendFrameProduction(b *testing.B) {
 				b.Fatal(err)
 			}
 			strictSink := &rtspValidationSink{}
-			if err := transport.sendRTSPFrame(context.Background(), strictSink, frame, strictPacketizer, pkgrtp.NewSession(96, 90000), 0); err != nil {
-				b.Fatalf("RTSP production preflight: %v", err)
-			}
-			if err := strictSink.validate(benchmark.wantPackets, benchmark.wantFragmented); err != nil {
-				b.Fatal(err)
+				if sendErr := transport.sendRTSPFrame(context.Background(), strictSink, frame, strictPacketizer, pkgrtp.NewSession(96, 90000), 0); sendErr != nil {
+					b.Fatalf("RTSP production preflight: %v", sendErr)
+				}
+				if validateErr := strictSink.validate(benchmark.wantPackets, benchmark.wantFragmented); validateErr != nil {
+					b.Fatal(validateErr)
 			}
 
 			packetizer, err := pkgrtp.NewPacketizer(avframe.CodecH264)
@@ -117,8 +117,8 @@ func BenchmarkRTSPRelaySendFrameProduction(b *testing.B) {
 			b.StopTimer()
 			flushRelayBytes(ctx)
 
-			wantWrites := uint64(b.N) * benchmark.wantPackets * 2
-			if sink.writes != wantWrites || sink.wireBytes <= uint64(b.N)*benchmark.wantPackets*12 || sink.checksum == 0 {
+			wantWrites := uint64(b.N) * benchmark.wantPackets * 2                                                          // #nosec G115 -- benchmark counters are bounded by testing.B.
+			if sink.writes != wantWrites || sink.wireBytes <= uint64(b.N)*benchmark.wantPackets*12 || sink.checksum == 0 { // #nosec G115 -- benchmark counters are bounded by testing.B.
 				b.Fatalf("RTSP sink writes=%d bytes=%d checksum=%d, want %d bounded-writer calls", sink.writes, sink.wireBytes, sink.checksum, wantWrites)
 			}
 			if got := testutil.ToFloat64(metrics.bytesTotal.WithLabelValues(relayDirectionForward, "rtsp")); got != float64(sink.wireBytes) {
@@ -290,7 +290,7 @@ func (s *rtmpValidationSink) Write(data []byte) (int, error) {
 	if len(data) < 12 || data[0] != 6 {
 		return 0, fmt.Errorf("invalid RTMP fmt-0 chunk framing")
 	}
-	wantType := byte(rtmp.MsgAudio)
+		wantType := rtmp.MsgAudio
 	if s.frame.MediaType.IsVideo() {
 		wantType = rtmp.MsgVideo
 	}
@@ -428,7 +428,7 @@ func newRelayBenchmarkObservations(counter prometheus.Counter) []relayObservatio
 
 func benchmarkH264Frame(size int) *avframe.AVFrame {
 	payload := make([]byte, size)
-	binary.BigEndian.PutUint32(payload[:4], uint32(size-4))
+	binary.BigEndian.PutUint32(payload[:4], uint32(size-4)) // #nosec G115 -- benchmark fixture sizes are small positive constants.
 	payload[4] = 0x65
 	for index := 5; index < len(payload); index++ {
 		payload[index] = byte(index)

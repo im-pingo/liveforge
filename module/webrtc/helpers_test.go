@@ -672,8 +672,8 @@ func TestCreateWHEPTrackSenderReturnsRealAddTrackFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pc.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := pc.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	m := NewModule()
 	sender, err := m.createWHEPTrackSender(
@@ -717,8 +717,8 @@ func createH264PCMAReceiveOffer(t *testing.T) string {
 	}
 	defer clientPC.Close()
 	for _, kind := range []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo, webrtc.RTPCodecTypeAudio} {
-		if _, err := clientPC.AddTransceiverFromKind(kind, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
-			t.Fatal(err)
+		if _, transceiverErr := clientPC.AddTransceiverFromKind(kind, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); transceiverErr != nil {
+			t.Fatal(transceiverErr)
 		}
 	}
 	offer, err := clientPC.CreateOffer(nil)

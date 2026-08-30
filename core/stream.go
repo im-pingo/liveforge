@@ -770,25 +770,24 @@ func gopDurationExceeded(minDTS, maxDTS int64, limit time.Duration) bool {
 	if limit <= 0 || maxDTS < minDTS {
 		return false
 	}
-	return uint64(maxDTS)-uint64(minDTS) > uint64(limit/time.Millisecond)
+	return dtsSpanMillis(minDTS, maxDTS) > int64(limit/time.Millisecond)
 }
 
 func gopDurationAtLeast(minDTS, maxDTS int64, limit time.Duration) bool {
 	if limit <= 0 || maxDTS < minDTS {
 		return false
 	}
-	return uint64(maxDTS)-uint64(minDTS) >= uint64(limit/time.Millisecond)
+	return dtsSpanMillis(minDTS, maxDTS) >= int64(limit/time.Millisecond)
 }
 
 func dtsSpanMillis(minDTS, maxDTS int64) int64 {
 	if maxDTS < minDTS {
 		minDTS, maxDTS = maxDTS, minDTS
 	}
-	span := uint64(maxDTS) - uint64(minDTS)
-	if span > uint64(1<<63-1) {
-		return int64(1<<63 - 1)
+	if minDTS < 0 && maxDTS > (1<<63-1)+minDTS {
+		return 1<<63 - 1
 	}
-	return int64(span)
+	return maxDTS - minDTS
 }
 
 // trimGOPCacheLocked repairs cache entries after a policy update. It keeps a

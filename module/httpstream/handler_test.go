@@ -91,8 +91,8 @@ func TestModuleCloseTerminatesActiveHTTPSubscriber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
-		t.Fatal(err)
+	if publisherErr := stream.SetPublisher(dummyPublisher{}); publisherErr != nil {
+		t.Fatal(publisherErr)
 	}
 	m.registeredMu.Lock()
 	m.registered[stream.Key()] = stream.InstanceID()
@@ -1467,7 +1467,7 @@ func TestHandlerLLHLSInitEpochsRemainBoundToRetainedSegments(t *testing.T) {
 
 	publishEpoch := func(msn int, init []byte) string {
 		t.Helper()
-		part := &LLHLSPart{Index: 0, Duration: 1, Independent: true, Data: []byte{byte(msn)}}
+		part := &LLHLSPart{Index: 0, Duration: 1, Independent: true, Data: []byte{byte(msn)}} // #nosec G115 -- test playlist sequence numbers are small.
 		mgr.segmenter.callbacks.OnInit(init)
 		mgr.segmenter.callbacks.OnPart(part)
 		mgr.segmenter.callbacks.OnSegment(&LLHLSSegment{

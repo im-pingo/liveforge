@@ -4,6 +4,7 @@ package gb28181
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"strings"
@@ -20,7 +21,7 @@ import (
 )
 
 func TestGBOutboundTranscodedReplayTargetOverwriteDropsRetainedAudioAtLiveBoundary(t *testing.T) {
-	events, pauses := installGBOverwriteLogObserver(t, true)
+	events, pauses := installGBOverwriteLogObserver(t)
 	h := newGBDualOverwriteHarness(t, "gb28181/transcoded-replay-overwrite")
 	audio := util.NewRingBuffer[*avframe.AVFrame](2)
 	audioReader := audio.NewReaderAt(0)
@@ -105,7 +106,7 @@ func TestGBOutboundTranscodedReplayActiveTargetAudioEOFFails(t *testing.T) {
 }
 
 func TestGBOutboundTranscodedSourceOverwriteKeepsTargetAudioAndRecoversFreshVideo(t *testing.T) {
-	events, pauses := installGBOverwriteLogObserver(t, true)
+	events, pauses := installGBOverwriteLogObserver(t)
 	h := newGBDualOverwriteHarness(t, "gb28181/transcoded-source-overwrite")
 	source := util.NewRingBuffer[*avframe.AVFrame](2)
 	audio := util.NewRingBuffer[*avframe.AVFrame](16)
@@ -165,7 +166,7 @@ func TestGBOutboundTranscodedSourceOverwriteKeepsTargetAudioAndRecoversFreshVide
 }
 
 func TestGBOutboundTranscodedTargetAudioOverwriteKeepsDirectVideoAndPS(t *testing.T) {
-	events, pauses := installGBOverwriteLogObserver(t, true)
+	events, pauses := installGBOverwriteLogObserver(t)
 	h := newGBDualOverwriteHarness(t, "gb28181/transcoded-target-audio-overwrite")
 	source := util.NewRingBuffer[*avframe.AVFrame](16)
 	audio := util.NewRingBuffer[*avframe.AVFrame](2)
@@ -212,7 +213,7 @@ func TestGBOutboundTranscodedTargetAudioOverwriteKeepsDirectVideoAndPS(t *testin
 
 func TestGBOutboundTranscodedOverwritePurgesMatchingPendingHoldback(t *testing.T) {
 	t.Run("source_video", func(t *testing.T) {
-		events, pauses := installGBOverwriteLogObserver(t, true)
+		events, pauses := installGBOverwriteLogObserver(t)
 		h := newGBDualOverwriteHarness(t, "gb28181/pending-source-overwrite")
 		source := util.NewRingBuffer[*avframe.AVFrame](2)
 		audio := util.NewRingBuffer[*avframe.AVFrame](8)
@@ -278,7 +279,7 @@ func TestGBOutboundTranscodedOverwritePurgesMatchingPendingHoldback(t *testing.T
 	})
 
 	t.Run("target_audio", func(t *testing.T) {
-		events, pauses := installGBOverwriteLogObserver(t, true)
+		events, pauses := installGBOverwriteLogObserver(t)
 		h := newGBDualOverwriteHarness(t, "gb28181/pending-target-overwrite")
 		source := util.NewRingBuffer[*avframe.AVFrame](8)
 		audio := util.NewRingBuffer[*avframe.AVFrame](2)
@@ -340,7 +341,7 @@ func TestGBOutboundTranscodedOverwritePurgesMatchingPendingHoldback(t *testing.T
 
 func TestGBOutboundTranscodedControlPrecedesBothPendingMedia(t *testing.T) {
 	t.Run("source_overwrite", func(t *testing.T) {
-		events, pauses := installGBOverwriteLogObserver(t, true)
+		events, pauses := installGBOverwriteLogObserver(t)
 		h := newGBDualOverwriteHarness(t, "gb28181/both-pending-source-overwrite")
 		source := util.NewRingBuffer[*avframe.AVFrame](2)
 		audio := util.NewRingBuffer[*avframe.AVFrame](8)
@@ -373,7 +374,7 @@ func TestGBOutboundTranscodedControlPrecedesBothPendingMedia(t *testing.T) {
 	})
 
 	t.Run("target_audio_overwrite", func(t *testing.T) {
-		events, pauses := installGBOverwriteLogObserver(t, true)
+		events, pauses := installGBOverwriteLogObserver(t)
 		h := newGBDualOverwriteHarness(t, "gb28181/both-pending-target-overwrite")
 		source := util.NewRingBuffer[*avframe.AVFrame](8)
 		audio := util.NewRingBuffer[*avframe.AVFrame](2)
@@ -432,7 +433,7 @@ func TestGBOutboundTranscodedControlPrecedesBothPendingMedia(t *testing.T) {
 }
 
 func TestGBOutboundTranscodedTargetOverwritePreservesPendingVideoHoldbackDeadline(t *testing.T) {
-	events, pauses := installGBOverwriteLogObserver(t, true)
+	events, pauses := installGBOverwriteLogObserver(t)
 	h := newGBDualOverwriteHarness(t, "gb28181/target-overwrite-holdback-deadline")
 	source := util.NewRingBuffer[*avframe.AVFrame](8)
 	audio := util.NewRingBuffer[*avframe.AVFrame](2)
@@ -561,10 +562,10 @@ func TestGBOutboundSharedTranscodeProducerSourceOverwriteFailsAndReleasesOnce(t 
 	stream := newGBOverwriteStream(t, "gb28181/transcode-producer-overwrite", 2, avframe.CodecG711U)
 	snapshot := stream.StartupSnapshot()
 	for _, frame := range []*avframe.AVFrame{
-		gbOverwriteAudioCodec(avframe.CodecG711U, 0xa1, 0),
-		gbOverwriteAudioCodec(avframe.CodecG711U, 0xa2, 20),
-		gbOverwriteAudioCodec(avframe.CodecG711U, 0xa3, 40),
-		gbOverwriteAudioCodec(avframe.CodecG711U, 0xa4, 60),
+		gbOverwriteAudioCodec(0xa1, 0),
+		gbOverwriteAudioCodec(0xa2, 20),
+		gbOverwriteAudioCodec(0xa3, 40),
+		gbOverwriteAudioCodec(0xa4, 60),
 	} {
 		stream.WriteFrame(frame)
 	}
@@ -798,7 +799,9 @@ func newGBDualOverwriteHarness(t *testing.T, key string) *gbDualOverwriteHarness
 		done:    make(chan error, 1),
 	}
 	t.Cleanup(func() {
-		h.stop()
+		if err := h.stop(); err != nil && !strings.Contains(err.Error(), "target audio ended") {
+			t.Errorf("stop dual overwrite harness: %v", err)
+		}
 		_ = remoteRTP.Close()
 		_ = remoteRTCP.Close()
 		_ = sender.rtpConn.Close()
@@ -856,9 +859,9 @@ func (h *gbDualOverwriteHarness) finish(cancel bool) error {
 	return h.result
 }
 
-func gbOverwriteAudioCodec(codec avframe.CodecType, marker byte, dts int64) *avframe.AVFrame {
+func gbOverwriteAudioCodec(marker byte, dts int64) *avframe.AVFrame {
 	return avframe.NewAVFrame(
-		avframe.MediaTypeAudio, codec, avframe.FrameTypeInterframe,
+		avframe.MediaTypeAudio, avframe.CodecG711U, avframe.FrameTypeInterframe,
 		dts, dts, []byte{marker},
 	)
 }
@@ -871,7 +874,10 @@ func assertNoGBRTPPacket(t *testing.T, conn *net.UDPConn) {
 	buf := make([]byte, 2048)
 	if _, _, err := conn.ReadFromUDP(buf); err == nil {
 		t.Fatal("unexpected GB28181 RTP packet after terminal boundary")
-	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-		t.Fatalf("ReadFromUDP: %v", err)
+	} else {
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("ReadFromUDP: %v", err)
+		}
 	}
 }

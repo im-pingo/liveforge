@@ -278,14 +278,14 @@ func newDVRConnectionTestModule(t *testing.T, segmentData []byte) (*Module, *cor
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := session.Close(); err != nil {
-			t.Errorf("close session: %v", err)
+		if closeErr := session.Close(); closeErr != nil {
+			t.Errorf("close session: %v", closeErr)
 		}
 	})
 	filename := "seg_000000.ts"
 	segmentPath := filepath.Join(resolvePath(cfg.DVR.Path, stream.Key()), filename)
-	if err := os.WriteFile(segmentPath, segmentData, 0644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(segmentPath, segmentData, 0600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	info, err := os.Stat(segmentPath)
 	if err != nil {

@@ -1497,7 +1497,16 @@ func (r *whepFeedReaders) acceptTargetAudioEvent(event whepReaderEvent, ok bool)
 }
 
 func (r *whepFeedReaders) targetAudioTerminalCause() whepReaderTerminalCause {
-	return whepReaderTerminalCause(r.audioTerminal.Load())
+	switch r.audioTerminal.Load() {
+	case uint32(whepReaderTerminalEOF):
+		return whepReaderTerminalEOF
+	case uint32(whepReaderTerminalCanceled):
+		return whepReaderTerminalCanceled
+	case uint32(whepReaderTerminalGenerationEnded):
+		return whepReaderTerminalGenerationEnded
+	default:
+		return whepReaderTerminalNone
+	}
 }
 
 func whepReaderStopCause(done, generationDone <-chan struct{}) whepReaderTerminalCause {

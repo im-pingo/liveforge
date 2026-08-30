@@ -221,8 +221,8 @@ func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StreamHub().GetOrCreate("live/admitted/two"); err != nil {
-		t.Fatal(err)
+	if _, createErr := s.StreamHub().GetOrCreate("live/admitted/two"); createErr != nil {
+		t.Fatal(createErr)
 	}
 	collector := NewCollector(s)
 	barrier := newRegistryGatherBarrier()
@@ -247,8 +247,8 @@ func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathe
 	absentSelections := gatherConcurrentlyWithMutation(t, collector, barrier, registry, 8, func() error {
 		s.StreamHub().Remove("live/admitted/one")
 		for _, key := range laterKeys {
-			if _, err := s.StreamHub().GetOrCreate(key); err != nil {
-				return err
+			if _, createErr := s.StreamHub().GetOrCreate(key); createErr != nil {
+				return createErr
 			}
 		}
 		return nil
@@ -259,9 +259,9 @@ func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathe
 	}
 
 	reappearedSelections := gatherConcurrentlyWithMutation(t, collector, barrier, registry, 8, func() error {
-		recreated, err := s.StreamHub().GetOrCreate("live/admitted/one")
-		if err != nil {
-			return err
+		recreated, createErr := s.StreamHub().GetOrCreate("live/admitted/one")
+		if createErr != nil {
+			return createErr
 		}
 		if recreated == firstAdmitted {
 			return fmt.Errorf("same-key recreation reused the removed Stream instance")

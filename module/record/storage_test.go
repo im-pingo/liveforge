@@ -154,8 +154,8 @@ func TestLocalStorageListsAndPreservesRecordingWithTSSidecarLikeName(t *testing.
 		"record.ts.m3u8.orphan-101-3.failed",
 	}
 	for _, name := range ownedArtifacts {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("sidecar"), 0600); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(filepath.Join(dir, name), []byte("sidecar"), 0600); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
 
@@ -173,8 +173,8 @@ func TestLocalStorageListsAndPreservesRecordingWithTSSidecarLikeName(t *testing.
 		}
 	}
 
-	if err := storage.Delete(context.Background(), "live/cam/record.ts"); err != nil {
-		t.Fatal(err)
+	if deleteErr := storage.Delete(context.Background(), "live/cam/record.ts"); deleteErr != nil {
+		t.Fatal(deleteErr)
 	}
 	for _, name := range ownedArtifacts {
 		if _, statErr := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(statErr) {
@@ -203,8 +203,8 @@ func TestLocalStorageDeleteCleanupFailureLeavesPrimaryForRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := object.Write([]byte("primary")); err != nil {
-		t.Fatal(err)
+	if _, writeErr := object.Write([]byte("primary")); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	sidecar := object.(sidecarMediaFile)
 	segment, err := sidecar.CreateSidecar("record.ts.segment_00000.ts", 0600)
@@ -316,8 +316,8 @@ func TestLocalStorageDeleteRejectsOwnedNonRegularSidecarsBeforePrimary(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := object.Write([]byte("primary")); err != nil {
-				t.Fatal(err)
+			if _, writeErr := object.Write([]byte("primary")); writeErr != nil {
+				t.Fatal(writeErr)
 			}
 			sidecars := object.(sidecarMediaFile)
 			segment, err := sidecars.CreateSidecar("record.ts.segment_00000.ts", 0600)

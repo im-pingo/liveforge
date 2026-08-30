@@ -475,17 +475,17 @@ func (s *gbLabSession) startReceive(ctx context.Context) error {
 	if !source.stream.IsPublisherGeneration(source.snapshot.Generation) {
 		return errors.New("GB28181 outbound media source generation ended")
 	}
-	if _, err := s.register(sourceCtx, serverHost, serverPort); err != nil {
-		return err
+	if _, registerErr := s.register(sourceCtx, serverHost, serverPort); registerErr != nil {
+		return registerErr
 	}
 	// REGISTER proves the real device path. The GB handler records the source
 	// address, while a SIP endpoint may advertise a separate Contact address.
 	s.module.registry.Register(s.request.DeviceID, s.peerConn.LocalAddr().String(), "udp")
-	if err := s.sendKeepalive(sourceCtx, serverHost, serverPort); err != nil {
-		return err
+	if keepaliveErr := s.sendKeepalive(sourceCtx, serverHost, serverPort); keepaliveErr != nil {
+		return keepaliveErr
 	}
-	if err := s.sendCatalog(sourceCtx, serverHost, serverPort); err != nil {
-		return err
+	if catalogErr := s.sendCatalog(sourceCtx, serverHost, serverPort); catalogErr != nil {
+		return catalogErr
 	}
 	device, channel := s.module.registry.FindChannel(s.request.ChannelID)
 	if device == nil || channel == nil || device.DeviceID != s.request.DeviceID {

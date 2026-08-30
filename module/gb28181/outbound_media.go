@@ -464,7 +464,7 @@ func (s *outboundMediaSession) runTranscodedMedia(
 		if hasLastSentDTS && frame.DTS < lastSentDTS {
 			return nil
 		}
-		if ctx.Err() != nil || !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+		if gbOutboundMediaStopped(ctx, s.stream, s.snapshot.Generation) {
 			return nil
 		}
 		if reader == gbMediaReaderSource {
@@ -520,7 +520,6 @@ func (s *outboundMediaSession) runTranscodedMedia(
 			}
 			select {
 			case event = <-events:
-				haveEvent = true
 			case <-holdbackC:
 				deadline := holdbackDeadline
 				holdbackC = nil
@@ -659,7 +658,7 @@ func (s *outboundMediaSession) sendTranscodedReplay(
 	for {
 		result := readGBOutboundTargetAudio(ctx, audioReader)
 		if !result.OK {
-			if ctx.Err() != nil || !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+			if gbOutboundMediaStopped(ctx, s.stream, s.snapshot.Generation) {
 				return state, nil
 			}
 			return state, errors.New("GB28181 outbound target audio ended during replay")
@@ -702,16 +701,21 @@ func (s *outboundMediaSession) sendTranscodedReplay(
 }
 
 func (s *outboundMediaSession) sendTranscodedFrame(ctx context.Context, muxer *ps.Muxer, frame *avframe.AVFrame, kind string) error {
-	if ctx.Err() != nil || !s.stream.IsPublisherGeneration(s.snapshot.Generation) {
+	if gbOutboundMediaStopped(ctx, s.stream, s.snapshot.Generation) {
 		return nil
 	}
 	if err := s.sendFrame(muxer, frame); err != nil {
-		if ctx.Err() != nil {
+		if gbOutboundMediaStopped(ctx, s.stream, s.snapshot.Generation) {
 			return nil
 		}
 		return fmt.Errorf("GB28181 outbound media %s: %w", kind, err)
 	}
 	return nil
+}
+
+// Generation retirement and context cancellation are normal sender termination.
+func gbOutboundMediaStopped(ctx context.Context, stream *core.Stream, generation uint64) bool {
+	return ctx.Err() != nil || !stream.IsPublisherGeneration(generation)
 }
 
 func readGBOutboundTargetAudio(ctx context.Context, reader *util.RingReader[*avframe.AVFrame]) util.RingReadResult[*avframe.AVFrame] {
@@ -876,12 +880,12 @@ func (m *Module) prepareGBOutboundMedia(ctx context.Context, streamKey string) (
 	return gbOutboundMediaSource{stream: stream, snapshot: snapshot}, nil
 }
 
-func (m *Module) startOutboundMedia(ctx context.Context, device *Device, channelID, streamKey string) (*MediaSession, error) {
+func (m *Module) startOutboundMedia(ctx context.Context, device *Device, streamKey string) (*MediaSession, error) {
 	source, err := m.prepareGBOutboundMedia(ctx, streamKey)
 	if err != nil {
 		return nil, err
 	}
-	return m.startOutboundMediaFromSource(ctx, device, channelID, streamKey, source)
+	return m.startOutboundMediaFromSource(ctx, device, "channel", streamKey, source)
 }
 
 func (m *Module) startOutboundMediaFromSource(
@@ -929,8 +933,8 @@ func (m *Module) startOutboundMediaFromSource(
 		}
 	}()
 	sender.snapshot = snapshot
-	if err := sender.configureAudio(); err != nil {
-		return nil, err
+	if configureErr := sender.configureAudio(); configureErr != nil {
+		return nil, configureErr
 	}
 	if err := sender.admit(); err != nil {
 		return nil, fmt.Errorf("GB28181 outbound subscriber admission: %w", err)

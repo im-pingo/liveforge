@@ -78,8 +78,8 @@ func TestModulePublishAdmissionDoesNotMixPublisherIdentityAndReplacementSnapshot
 		id:   "publisher-a",
 		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
 	}
-	if err := stream.SetPublisher(publisherA); err != nil {
-		t.Fatal(err)
+	if publisherErr := stream.SetPublisher(publisherA); publisherErr != nil {
+		t.Fatal(publisherErr)
 	}
 	snapshotA := stream.StartupSnapshot()
 	eventA := &core.EventContext{
@@ -98,8 +98,8 @@ func TestModulePublishAdmissionDoesNotMixPublisherIdentityAndReplacementSnapshot
 	m.storage = storage
 	m.storePolicy(cfg.DVR)
 	t.Cleanup(func() {
-		if err := m.Close(); err != nil {
-			t.Errorf("close DVR module: %v", err)
+		if closeErr := m.Close(); closeErr != nil {
+			t.Errorf("close DVR module: %v", closeErr)
 		}
 	})
 	retained, err := newSessionWithStorage(stream.Key(), stream, snapshotA, cfg.DVR, nil, 0, &m.metrics, storage, nil)
@@ -109,8 +109,8 @@ func TestModulePublishAdmissionDoesNotMixPublisherIdentityAndReplacementSnapshot
 	const retainedProbe = "seg_000000.ts"
 	retainedData := []byte("retained-directory-owned-data")
 	retainedPath := filepath.Join(retained.dir.Path(), retainedProbe)
-	if err := os.WriteFile(retainedPath, retainedData, 0644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(retainedPath, retainedData, 0600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	retainedInfo, err := os.Stat(retainedPath)
 	if err != nil {
@@ -196,8 +196,8 @@ func TestModuleRejectsStalePublishAndClosesCandidateOwnedDirectory(t *testing.T)
 		t.Fatal(err)
 	}
 	publisherA := &lifecyclePublisher{id: "publisher-a", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
-	if err := stream.SetPublisher(publisherA); err != nil {
-		t.Fatal(err)
+	if publisherErr := stream.SetPublisher(publisherA); publisherErr != nil {
+		t.Fatal(publisherErr)
 	}
 	snapshotA := stream.StartupSnapshot()
 	eventA := &core.EventContext{
@@ -238,7 +238,7 @@ func TestModuleRejectsStalePublishAndClosesCandidateOwnedDirectory(t *testing.T)
 	t.Cleanup(func() { _ = candidateDir.Close() })
 	const candidateProbe = "candidate-owned-probe.ts"
 	candidateData := []byte("candidate-owned-data")
-	if err := os.WriteFile(filepath.Join(candidateDir.Path(), candidateProbe), candidateData, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(candidateDir.Path(), candidateProbe), candidateData, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := candidateDir.Stat(candidateProbe); err != nil {
@@ -556,8 +556,8 @@ func TestModuleStaleStreamInstanceStopDoesNotStopReplacementWithSamePublisherID(
 		t.Fatal(err)
 	}
 	oldPublisher := &lifecyclePublisher{id: "device-1"}
-	if err := oldStream.SetPublisher(oldPublisher); err != nil {
-		t.Fatal(err)
+	if publisherErr := oldStream.SetPublisher(oldPublisher); publisherErr != nil {
+		t.Fatal(publisherErr)
 	}
 	oldSnapshot := oldStream.StartupSnapshot()
 	oldCtx := &core.EventContext{
@@ -566,8 +566,8 @@ func TestModuleStaleStreamInstanceStopDoesNotStopReplacementWithSamePublisherID(
 		PublisherGeneration: oldSnapshot.Generation,
 		PublisherID:         oldSnapshot.PublisherID,
 	}
-	if err := m.onPublish(oldCtx); err != nil {
-		t.Fatal(err)
+	if publishErr := m.onPublish(oldCtx); publishErr != nil {
+		t.Fatal(publishErr)
 	}
 
 	server.StreamHub().Remove(streamKey)

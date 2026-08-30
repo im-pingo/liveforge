@@ -128,7 +128,7 @@ func TestWHEPFeedReadersPreserveIndependentReaderIdentity(t *testing.T) {
 
 	var sourceEvent, targetEvent whepReaderEvent
 	var sourceOK, targetOK bool
-	for !(sourceOK && targetOK) {
+	for !sourceOK || !targetOK {
 		if !readers.wait(done, generationDone) {
 			t.Fatal("reader wait stopped before both independent events arrived")
 		}

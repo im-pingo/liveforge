@@ -61,7 +61,7 @@ func hasEscapedPathSeparator(escapedPath string) bool {
 		hi, okHi := fromHex(escapedPath[i+1])
 		lo, okLo := fromHex(escapedPath[i+2])
 		if okHi && okLo {
-			decoded := byte(hi<<4 | lo)
+			decoded := hi<<4 | lo
 			if decoded == '/' || decoded == '\\' {
 				return true
 			}

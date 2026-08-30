@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -132,12 +133,12 @@ func (s *RedisSource) loadHash(ctx context.Context) (map[string]string, error) {
 		for _, field := range fields[start:end] {
 			valueCommands = append(valueCommands, valuePipe.HGet(ctx, s.hash, field))
 		}
-		if _, err := valuePipe.Exec(ctx); err != nil && err != redis.Nil {
+		if _, err := valuePipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 			return nil, fmt.Errorf("read redis hash fields: %w", err)
 		}
 		for i, field := range fields[start:end] {
 			value, err := valueCommands[i].Result()
-			if err == redis.Nil {
+			if errors.Is(err, redis.Nil) {
 				continue
 			}
 			if err != nil {
@@ -271,12 +272,12 @@ func (s *RedisSource) loadPrefix(ctx context.Context) (map[string]string, error)
 			for _, key := range keys[start:end] {
 				commands = append(commands, pipe.Get(ctx, key))
 			}
-			if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+			if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 				return nil, fmt.Errorf("read redis config keys: %w", err)
 			}
 			for i, key := range keys[start:end] {
 				value, err := commands[i].Result()
-				if err == redis.Nil {
+				if errors.Is(err, redis.Nil) {
 					continue
 				}
 				if err != nil {
@@ -336,7 +337,7 @@ func (s *RedisSource) readString(ctx context.Context, key string) (string, error
 		return "", fmt.Errorf("redis configuration value exceeds %d bytes", s.maxBytes)
 	}
 	value, err := s.client.Get(ctx, key).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return "", nil
 	}
 	if err != nil {

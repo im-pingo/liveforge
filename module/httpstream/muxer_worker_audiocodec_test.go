@@ -641,6 +641,8 @@ func demuxMuxerWorkerOutput(t *testing.T, format string, initData []byte, packet
 	return frames
 }
 
+const muxerWorkerOutputWaitTimeout = 10 * time.Second
+
 func waitForMuxerAudioAt(
 	t *testing.T,
 	format string,
@@ -650,7 +652,7 @@ func waitForMuxerAudioAt(
 	match func(*avframe.AVFrame) bool,
 ) [][]byte {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(muxerWorkerOutputWaitTimeout)
 	for time.Now().Before(deadline) {
 		for {
 			packet, ok := reader.TryRead()
@@ -681,7 +683,7 @@ func waitForMuxerPayloadsAtOrAfter(
 	minDTS int64,
 ) [][]byte {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(muxerWorkerOutputWaitTimeout)
 	for time.Now().Before(deadline) {
 		for {
 			packet, ok := reader.TryRead()

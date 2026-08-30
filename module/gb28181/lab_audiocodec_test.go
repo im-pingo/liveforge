@@ -19,14 +19,14 @@ func TestGBLabReceiveTranscodesOpusToG711A(t *testing.T) {
 		t.Fatalf("GetOrCreate receive stream: %v", err)
 	}
 	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 256))
-	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "gb-lab-opus-source", info: &avframe.MediaInfo{
+	if publisherErr := stream.SetPublisher(&gbOutboundTestPublisher{id: "gb-lab-opus-source", info: &avframe.MediaInfo{
 		VideoCodec:          avframe.CodecH264,
 		VideoSequenceHeader: labmedia.VideoFrame(0).Payload,
 		AudioCodec:          avframe.CodecOpus,
 		SampleRate:          48000,
 		Channels:            2,
-	}}); err != nil {
-		t.Fatalf("SetPublisher receive source: %v", err)
+	}}); publisherErr != nil {
+		t.Fatalf("SetPublisher receive source: %v", publisherErr)
 	}
 
 	encoder := audiocodec.NewFFmpegEncoder("libopus", 48000, 2)

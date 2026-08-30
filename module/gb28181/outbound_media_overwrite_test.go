@@ -75,7 +75,7 @@ func (h *gbOverwriteLogHandler) WithGroup(name string) slog.Handler {
 }
 
 func TestGBOutboundDirectSourceOverwriteRecoversFreshPSAtLatestHeaderAndIDR(t *testing.T) {
-	events, pauses := installGBOverwriteLogObserver(t, true)
+	events, pauses := installGBOverwriteLogObserver(t)
 	stream := newGBOverwriteStream(t, "gb28181/direct-source-overwrite", 2, avframe.CodecG711A)
 	stream.WriteFrame(gbOverwriteVideoHeader(0xa0, 0))
 	snapshot := stream.StartupSnapshot()
@@ -166,7 +166,7 @@ func TestGBOutboundDirectSourceOverwriteRecoversFreshPSAtLatestHeaderAndIDR(t *t
 }
 
 func TestGBOutboundDirectRepeatedOverwriteBeforeIDRClearsRecoveryEpoch(t *testing.T) {
-	events, pauses := installGBOverwriteLogObserver(t, true)
+	events, pauses := installGBOverwriteLogObserver(t)
 	stream := newGBOverwriteStream(t, "gb28181/direct-repeated-overwrite", 2, avframe.CodecG711A)
 	stream.WriteFrame(gbOverwriteVideoHeader(0xa0, 0))
 	snapshot := stream.StartupSnapshot()
@@ -233,13 +233,10 @@ func TestGBOutboundDirectRepeatedOverwriteBeforeIDRClearsRecoveryEpoch(t *testin
 	}
 }
 
-func installGBOverwriteLogObserver(t *testing.T, pause bool) (<-chan gbOverwriteLogEvent, <-chan chan struct{}) {
+func installGBOverwriteLogObserver(t *testing.T) (<-chan gbOverwriteLogEvent, <-chan chan struct{}) {
 	t.Helper()
 	events := make(chan gbOverwriteLogEvent, 16)
-	var pauses chan chan struct{}
-	if pause {
-		pauses = make(chan chan struct{}, 16)
-	}
+	pauses := make(chan chan struct{}, 16)
 	previous := slog.Default()
 	handler := &gbOverwriteLogHandler{
 		next:   slog.NewTextHandler(gbTestLogWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelWarn}),
@@ -356,8 +353,8 @@ func (c *gbPSCapture) readPackResult(timeout time.Duration) (gbCapturedPSPack, e
 			return gbCapturedPSPack{}, err
 		}
 		var packet pionrtp.Packet
-		if err := packet.Unmarshal(buf[:n]); err != nil {
-			return gbCapturedPSPack{}, err
+		if unmarshalErr := packet.Unmarshal(buf[:n]); unmarshalErr != nil {
+			return gbCapturedPSPack{}, unmarshalErr
 		}
 		if len(pack.raw) == 0 {
 			pack.timestamp = packet.Timestamp
@@ -380,7 +377,7 @@ func (c *gbPSCapture) sequenceNumbers() []uint16 {
 
 func assertGBPSPack(t *testing.T, pack gbCapturedPSPack, mediaType avframe.MediaType, marker byte, dts int64) {
 	t.Helper()
-	if pack.timestamp != uint32(dts*90) {
+	if pack.timestamp != uint32(dts*90) { // #nosec G115 -- test timestamps are bounded fixtures.
 		t.Fatalf("PS/RTP timestamp = %d, want unchanged DTS timestamp %d", pack.timestamp, dts*90)
 	}
 	if !bytes.Contains(pack.raw, []byte{marker}) {

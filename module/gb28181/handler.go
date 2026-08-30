@@ -3,6 +3,7 @@ package gb28181
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -251,7 +252,7 @@ func (h *handler) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		slog.Warn("publish lifecycle admission failed", "module", "gb28181", "session", session.ID, "error", lifecycleErr)
 		h.rollbackSession(session, !streamExisted)
 		status, reason := 500, "Internal Server Error"
-		if lifecycleErr == core.ErrAsyncBackpressure {
+		if errors.Is(lifecycleErr, core.ErrAsyncBackpressure) {
 			status, reason = 503, "Service Unavailable"
 		}
 		_ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil))

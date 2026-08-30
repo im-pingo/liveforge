@@ -31,7 +31,7 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(segmentPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0644); err != nil {
+	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0600); err != nil {
 		t.Fatal(err)
 	}
 	stream, err := server.StreamHub().GetOrCreate("live/camera")
@@ -140,7 +140,7 @@ func TestDVRMediaRoutesNestedStreamKey(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(segmentPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0644); err != nil {
+	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0600); err != nil {
 		t.Fatal(err)
 	}
 	stream, err := server.StreamHub().GetOrCreate(streamKey)
@@ -178,7 +178,7 @@ func TestDVRMediaRoutesEscapeReservedNestedStreamKeySegments(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(segmentPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0644); err != nil {
+	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0600); err != nil {
 		t.Fatal(err)
 	}
 	stream, err := server.StreamHub().GetOrCreate(streamKey)

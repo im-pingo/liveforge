@@ -220,10 +220,10 @@ func waitWHEPOverwriteSignal(t *testing.T, signal <-chan struct{}, message strin
 
 func whepOverwriteAVCC(nal []byte) []byte {
 	payload := make([]byte, 4+len(nal))
-	payload[0] = byte(len(nal) >> 24)
-	payload[1] = byte(len(nal) >> 16)
-	payload[2] = byte(len(nal) >> 8)
-	payload[3] = byte(len(nal))
+	payload[0] = byte(len(nal) >> 24) // #nosec G115 -- test NAL length is encoded as four explicit bytes.
+	payload[1] = byte(len(nal) >> 16) // #nosec G115 -- test NAL length is encoded as four explicit bytes.
+	payload[2] = byte(len(nal) >> 8)  // #nosec G115 -- test NAL length is encoded as four explicit bytes.
+	payload[3] = byte(len(nal))       // #nosec G115 -- test NAL length is encoded as four explicit bytes.
 	copy(payload[4:], nal)
 	return payload
 }

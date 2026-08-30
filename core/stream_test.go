@@ -350,7 +350,7 @@ func TestStreamRejectsPublisherIDReuseAfterInterveningGeneration(t *testing.T) {
 	if got := stableStats(); got != beforeStats {
 		t.Fatalf("rejected publisher ID reuse changed stable stats: before=%+v after=%+v", beforeStats, got)
 	}
-	if got := transcodeState(); !reflect.DeepEqual(got, beforeTranscode) {
+	if got := transcodeState(); got != beforeTranscode {
 		t.Fatalf("rejected publisher ID reuse changed transcode state: before=%+v after=%+v", beforeTranscode, got)
 	}
 
@@ -1430,13 +1430,13 @@ func TestStreamDestructionIsIrreversibleAgainstLatePublisherCleanup(t *testing.T
 				t.Errorf("state after late unconditional cleanup = %s, want destroying", got)
 			}
 
-			trySetPublisher := func(candidate Publisher) (err error, panicValue any) {
+			trySetPublisher := func(candidate Publisher) (panicValue any, err error) {
 				defer func() { panicValue = recover() }()
 				err = stream.SetPublisher(candidate)
-				return err, nil
+				return panicValue, err
 			}
 			nonEmpty := &testPublisher{id: "late-non-empty", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH265}}
-			if err, panicValue := trySetPublisher(nonEmpty); panicValue != nil {
+			if panicValue, err := trySetPublisher(nonEmpty); panicValue != nil {
 				t.Errorf("non-empty publisher reattach panicked: %v", panicValue)
 			} else if err == nil {
 				t.Error("non-empty publisher reattached after destruction")
@@ -1447,7 +1447,7 @@ func TestStreamDestructionIsIrreversibleAgainstLatePublisherCleanup(t *testing.T
 
 			stream.RemovePublisher()
 			emptyID := &testPublisher{info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
-			if err, panicValue := trySetPublisher(emptyID); panicValue != nil {
+			if panicValue, err := trySetPublisher(emptyID); panicValue != nil {
 				t.Errorf("empty-ID publisher reattach panicked: %v", panicValue)
 			} else if err == nil {
 				t.Error("empty-ID publisher reattached after destruction")

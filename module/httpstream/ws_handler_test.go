@@ -83,7 +83,7 @@ func TestWebSocketContinuousStreamOverwriteClosesTryAgainLater(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer conn.CloseNow()
+				defer func() { _ = conn.CloseNow() }()
 				if err := writeWebSocketStreamChunk(r.Context(), conn, established, httpStreamWriteTimeout); err != nil {
 					return
 				}
@@ -93,11 +93,14 @@ func TestWebSocketContinuousStreamOverwriteClosesTryAgainLater(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			conn, _, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+			conn, resp, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer conn.CloseNow()
+			defer func() { _ = conn.CloseNow() }()
 			messageType, data, err := conn.Read(ctx)
 			if err != nil || messageType != websocket.MessageBinary || string(data) != string(established) {
 				t.Fatalf("established WebSocket frame = (%v, %q, %v)", messageType, data, err)
@@ -133,7 +136,7 @@ func TestWebSocketCanceledContextWinsOverBufferedOverwrite(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		ctx, cancel := context.WithCancel(r.Context())
 		cancel()
 		serveWebSocketStreamReader(ctx, conn, "ts", "live/canceled-overwrite", reader)
@@ -142,11 +145,14 @@ func TestWebSocketCanceledContextWinsOverBufferedOverwrite(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+	conn, resp, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	_, _, err = conn.Read(ctx)
 	if err == nil {
 		t.Fatal("canceled WebSocket reader remained open")
@@ -168,7 +174,7 @@ func TestWebSocketCleanEndUsesNormalClosure(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		if err := writeWebSocketStreamChunk(r.Context(), conn, established, httpStreamWriteTimeout); err != nil {
 			return
 		}
@@ -178,11 +184,14 @@ func TestWebSocketCleanEndUsesNormalClosure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+	conn, resp, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	for _, want := range [][]byte{established, []byte("clean-packet")} {
 		messageType, data, readErr := conn.Read(ctx)
 		if readErr != nil || messageType != websocket.MessageBinary || string(data) != string(want) {
@@ -203,18 +212,21 @@ func TestWebSocketUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
-		t.Fatal(err)
+	if publisherErr := stream.SetPublisher(dummyPublisher{}); publisherErr != nil {
+		t.Fatal(publisherErr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	conn, resp, err := websocket.Dial(ctx, addr+"/ws/live/test.ts", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Errorf("expected 101, got %d", resp.StatusCode)
@@ -230,17 +242,20 @@ func TestModuleCloseTerminatesActiveWebSocketSubscriber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
-		t.Fatal(err)
+	if publisherErr := stream.SetPublisher(dummyPublisher{}); publisherErr != nil {
+		t.Fatal(publisherErr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, addr+"/ws/live/close-active-ws.ts", nil)
+	conn, resp, err := websocket.Dial(ctx, addr+"/ws/live/close-active-ws.ts", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	deadline := time.Now().Add(time.Second)
 	for srv.ConnectionCount() != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)

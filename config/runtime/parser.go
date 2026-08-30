@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,7 +40,7 @@ func parseDocument(data []byte, expandEnvironment, rejectUnknown bool) (*config.
 		err = decoder.Decode(cfg)
 		if err == nil {
 			var extra yaml.Node
-			if extraErr := decoder.Decode(&extra); extraErr != io.EOF {
+			if extraErr := decoder.Decode(&extra); !errors.Is(extraErr, io.EOF) {
 				if extraErr != nil {
 					err = extraErr
 				} else {

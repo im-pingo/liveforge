@@ -863,7 +863,7 @@ func TestGatewayRemoteBYEEndsOutboundDialogWithoutSendingBYE(t *testing.T) {
 
 func TestGatewayOutboundRTCPReverseLivenessBecomesNetworkLost(t *testing.T) {
 	gw, _, hub := newControlPlaneGateway(t, newTestGatewayConfig(t))
-	gw.rtpIdleTimeout = 40 * time.Millisecond
+	gw.rtpIdleTimeout = 200 * time.Millisecond
 	stream, _ := hub.GetOrCreate("live/rtcp-liveness")
 	publishTestAudio(t, stream, avframe.CodecG711A)
 	dialog := &fakeInviteDialog{done: make(chan struct{})}
@@ -888,6 +888,24 @@ func TestGatewayOutboundRTCPReverseLivenessBecomesNetworkLost(t *testing.T) {
 	report, err := (&rtcp.ReceiverReport{SSRC: 42}).Marshal()
 	if err != nil {
 		t.Fatalf("marshal RTCP receiver report: %v", err)
+	}
+	if _, err := rtcpConn.Write(report); err != nil {
+		t.Fatalf("write initial RTCP receiver report: %v", err)
+	}
+
+	firstReportDeadline := time.Now().Add(time.Second)
+	for {
+		observed, found := gw.Call(callID)
+		if !found {
+			t.Fatal("outbound call disappeared before receiving reverse RTCP")
+		}
+		if observed.RTCPPacketsRecv > 0 {
+			break
+		}
+		if time.Now().After(firstReportDeadline) {
+			t.Fatalf("reverse RTCP was not observed: %+v", observed)
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	keepAliveUntil := time.Now().Add(4 * gw.rtpIdleTimeout)

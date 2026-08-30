@@ -482,7 +482,7 @@ func newDirectOverwriteMuxerWorkerStream(t *testing.T) (*core.Stream, core.Strea
 func avccInterframePayload(marker []byte) []byte {
 	nal := append([]byte{0x41}, marker...)
 	payload := make([]byte, 4+len(nal))
-	binary.BigEndian.PutUint32(payload[:4], uint32(len(nal)))
+	binary.BigEndian.PutUint32(payload[:4], uint32(len(nal))) // #nosec G115 -- test NAL units are bounded fixtures.
 	copy(payload[4:], nal)
 	return payload
 }

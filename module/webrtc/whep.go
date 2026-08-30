@@ -206,10 +206,20 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		// For direct codec passthrough, use publisher's parameters.
 		if !audioNeedsTranscode {
 			if info.SampleRate > 0 {
-				clockRate = uint32(info.SampleRate)
+				if info.SampleRate > 1<<32-1 {
+					sess.Close()
+					http.Error(w, "source audio sample rate is out of range", http.StatusUnsupportedMediaType)
+					return
+				}
+				clockRate = uint32(info.SampleRate) // #nosec G115 -- range checked against RTP's uint32 clock rate.
 			}
 			if info.Channels > 0 {
-				channels = uint16(info.Channels)
+				if info.Channels > 1<<16-1 {
+					sess.Close()
+					http.Error(w, "source audio channel count is out of range", http.StatusUnsupportedMediaType)
+					return
+				}
+				channels = uint16(info.Channels) // #nosec G115 -- range checked against RTP's uint16 channel count.
 			}
 		}
 		audioSender, err = m.createWHEPTrackSender(pc,

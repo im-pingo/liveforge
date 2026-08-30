@@ -135,7 +135,7 @@ func serveWebSocketStreamReader(ctx context.Context, conn *websocket.Conn, forma
 	for {
 		result := reader.ReadResult()
 		if ctx.Err() != nil {
-			conn.CloseNow()
+			_ = conn.CloseNow()
 			return
 		}
 		if result.Overwritten > 0 {

@@ -232,7 +232,7 @@ func (d *terminalAttributionDecoder) SetExtradata([]byte) {}
 func (d *terminalAttributionDecoder) Decode([]byte) (*audiocodec.PCMFrame, error) {
 	d.calls++
 	return &audiocodec.PCMFrame{
-		Samples: []int16{int16(d.calls)}, SampleRate: 4000, Channels: 1,
+		Samples: []int16{int16(d.calls)}, SampleRate: 4000, Channels: 1, // #nosec G115 -- decoder call count is a bounded test fixture.
 	}, nil
 }
 func (d *terminalAttributionDecoder) SampleRate() int { return 4000 }
@@ -293,7 +293,7 @@ func (e *terminalAttributedEncoder) Encode(*audiocodec.PCMFrame) ([]byte, error)
 func (e *terminalAttributedEncoder) EncodeAttributed(pcm *audiocodec.PCMFrame, span audiocodec.SourceSpan) ([]audiocodec.AttributedPacket, error) {
 	e.encoded = append(e.encoded, append([]int16(nil), pcm.Samples...))
 	e.spans = append(e.spans, span)
-	return []audiocodec.AttributedPacket{{Payload: []byte{byte(0xa0 + len(e.encoded))}, SourceSpan: span}}, nil
+	return []audiocodec.AttributedPacket{{Payload: []byte{byte(0xa0 + len(e.encoded))}, SourceSpan: span}}, nil // #nosec G115 -- encoded fixture count stays below one byte.
 }
 
 func (e *terminalAttributedEncoder) Drain() ([][]byte, error) {
@@ -320,7 +320,7 @@ func (e *provenanceEncoder) Encode(*audiocodec.PCMFrame) ([]byte, error) {
 
 func (e *provenanceEncoder) EncodeAttributed(_ *audiocodec.PCMFrame, span audiocodec.SourceSpan) ([]audiocodec.AttributedPacket, error) {
 	e.spans = append(e.spans, span)
-	return []audiocodec.AttributedPacket{{Payload: []byte{byte(len(e.spans))}, SourceSpan: span}}, nil
+	return []audiocodec.AttributedPacket{{Payload: []byte{byte(len(e.spans))}, SourceSpan: span}}, nil // #nosec G115 -- provenance fixture count stays below one byte.
 }
 
 func (e *provenanceEncoder) SampleRate() int { return 8000 }
@@ -335,7 +335,7 @@ func (e *stereoProvenanceEncoder) Encode(*audiocodec.PCMFrame) ([]byte, error) {
 func (e *stereoProvenanceEncoder) EncodeAttributed(pcm *audiocodec.PCMFrame, span audiocodec.SourceSpan) ([]audiocodec.AttributedPacket, error) {
 	e.encoded = append(e.encoded, append([]int16(nil), pcm.Samples...))
 	e.spans = append(e.spans, span)
-	return []audiocodec.AttributedPacket{{Payload: []byte{byte(len(e.spans))}, SourceSpan: span}}, nil
+	return []audiocodec.AttributedPacket{{Payload: []byte{byte(len(e.spans))}, SourceSpan: span}}, nil // #nosec G115 -- provenance fixture count stays below one byte.
 }
 
 func (*stereoProvenanceEncoder) SampleRate() int { return 8000 }

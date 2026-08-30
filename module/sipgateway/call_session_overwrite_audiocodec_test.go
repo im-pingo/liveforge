@@ -4,6 +4,7 @@ package sipgateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -573,7 +574,10 @@ func assertNoSIPRTPPacket(t *testing.T, conn *net.UDPConn) {
 	buf := make([]byte, 2048)
 	if _, _, err := conn.ReadFromUDP(buf); err == nil {
 		t.Fatal("unexpected RTP packet after terminal generation replacement")
-	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-		t.Fatalf("ReadFromUDP: %v", err)
+	} else {
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("ReadFromUDP: %v", err)
+		}
 	}
 }

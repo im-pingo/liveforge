@@ -70,13 +70,6 @@ func (c *controlledSegmentInput) writeBurstAndRead(t *testing.T, frames ...*avfr
 	c.permit <- struct{}{}
 }
 
-func (c *controlledSegmentInput) closeAndRead(t *testing.T) {
-	t.Helper()
-	c.waitReady(t)
-	c.ring.Close()
-	c.permit <- struct{}{}
-}
-
 func (c *controlledSegmentInput) waitReady(t *testing.T) {
 	t.Helper()
 	select {

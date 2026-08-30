@@ -133,14 +133,14 @@ func (g *sipMediaPumpGroup) Add(delta int) {
 
 func (g *sipMediaPumpGroup) done(reader sipMediaReader) {
 	if g.joinCond == nil {
-		g.WaitGroup.Done()
+		g.Done()
 		return
 	}
 	g.joinMu.Lock()
 	if g.observer.exited != nil {
 		g.observer.exited(reader)
 	}
-	g.WaitGroup.Done()
+	g.Done()
 	g.active--
 	g.joinCond.Broadcast()
 	g.joinMu.Unlock()
