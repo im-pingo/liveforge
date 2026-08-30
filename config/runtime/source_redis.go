@@ -103,17 +103,19 @@ func (s *RedisSource) Load(ctx context.Context, previous Version) (Snapshot, err
 func (s *RedisSource) Close() error { return s.client.Close() }
 
 func (s *RedisSource) Write(ctx context.Context, data []byte) error {
-	if s.hash != "" {
-		if err := s.client.HSet(ctx, s.hash, "config.yaml", string(data)).Err(); err != nil {
-			return fmt.Errorf("write redis config hash: %w", err)
+	_, err := s.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		if s.hash != "" {
+			pipe.HSet(ctx, s.hash, "config.yaml", string(data))
+		} else {
+			pipe.Set(ctx, s.prefix+"config.yaml", data, 0)
 		}
-	} else if err := s.client.Set(ctx, s.prefix+"config.yaml", data, 0).Err(); err != nil {
-		return fmt.Errorf("write redis config key: %w", err)
-	}
-	if s.versionKey != "" {
-		if err := s.client.Incr(ctx, s.versionKey).Err(); err != nil {
-			return fmt.Errorf("write redis config version: %w", err)
+		if s.versionKey != "" {
+			pipe.Incr(ctx, s.versionKey)
 		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("write redis config transaction: %w", err)
 	}
 	return nil
 }

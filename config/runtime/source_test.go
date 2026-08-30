@@ -1,17 +1,22 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/redis/go-redis/v9"
@@ -59,6 +64,25 @@ func TestFileSourceWriteReplacesDocumentAtomically(t *testing.T) {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("file mode=%v err=%v", info.Mode().Perm(), err)
+	}
+}
+
+func TestFileSourceWriteUsesPrivateModeForNewDocument(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new-liveforge.yaml")
+	source, err := NewFileSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if err := source.Write(context.Background(), []byte("server:\n  name: new\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("new config mode=%#o, want %#o", got, 0o600)
 	}
 }
 
@@ -536,4 +560,162 @@ func TestFlattenedKeyValueDocumentSerializationIsDeterministic(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatalf("flattened documents differ:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
+}
+
+func TestFlattenedKeyValueDocumentsRejectDottedAndSlashedKeyCollisions(t *testing.T) {
+	values := map[string]string{
+		"server.name": "dotted",
+		"server/name": "slashed",
+	}
+	_, err := documentFromKeyValues(values)
+	if err == nil {
+		t.Fatal("expected dotted and slashed key collision")
+	}
+	if !strings.Contains(err.Error(), "server.name") || !strings.Contains(err.Error(), "server/name") {
+		t.Fatalf("collision error=%q, want both source keys", err)
+	}
+}
+
+func TestFlattenedKeyValueDocumentsRejectScalarAndNestedKeyCollisions(t *testing.T) {
+	_, err := documentFromKeyValues(map[string]string{
+		"server":      "scalar",
+		"server.name": "nested",
+	})
+	if err == nil {
+		t.Fatal("expected scalar and nested key collision")
+	}
+}
+
+func TestFlattenedKeyValueCollisionErrorsAreDeterministic(t *testing.T) {
+	_, err := documentFromKeyValues(map[string]string{
+		"server/name": "slashed",
+		"server.name": "dotted",
+	})
+	if err == nil {
+		t.Fatal("expected first collision")
+	}
+	_, secondErr := documentFromKeyValues(map[string]string{
+		"server.name": "dotted",
+		"server/name": "slashed",
+	})
+	if secondErr == nil {
+		t.Fatal("expected second collision")
+	}
+	if err.Error() != secondErr.Error() {
+		t.Fatalf("collision errors differ: %q vs %q", err, secondErr)
+	}
+}
+
+func TestRedisSourceWriteUsesAtomicDocumentAndVersionTransaction(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	commands := make(chan []string, 8)
+	serverErrors := make(chan error, 1)
+	go serveRedisTransactionTestServer(listener, commands, serverErrors)
+
+	client := redis.NewClient(&redis.Options{
+		Addr:             listener.Addr().String(),
+		Protocol:         2,
+		DisableIndentity: true,
+		Dialer: func(context.Context, string, string) (net.Conn, error) {
+			return net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+		},
+	})
+	source, err := NewRedisSource(RedisSourceOptions{Client: client, Hash: "config", VersionKey: "config:version"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if err := source.Write(context.Background(), []byte("server:\n  name: transaction\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for len(got) < 4 {
+		select {
+		case command := <-commands:
+			name := strings.ToUpper(command[0])
+			if name != "HELLO" {
+				got = append(got, name)
+			}
+		case err := <-serverErrors:
+			t.Fatal(err)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for Redis command %d", len(got)+1)
+		}
+	}
+	want := []string{"MULTI", "HSET", "INCR", "EXEC"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("Redis write commands=%v, want %v", got, want)
+	}
+}
+
+func serveRedisTransactionTestServer(listener net.Listener, commands chan<- []string, serverErrors chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		serverErrors <- err
+		return
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	for {
+		command, err := readRedisCommand(reader)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				select {
+				case serverErrors <- err:
+				default:
+				}
+			}
+			return
+		}
+		commands <- command
+		switch strings.ToUpper(command[0]) {
+		case "MULTI":
+			_, _ = io.WriteString(conn, "+OK\r\n")
+		case "HSET", "SET", "INCR":
+			_, _ = io.WriteString(conn, "+QUEUED\r\n")
+		case "EXEC":
+			_, _ = io.WriteString(conn, "*3\r\n:1\r\n:1\r\n:2\r\n")
+		default:
+			_, _ = io.WriteString(conn, "-ERR unexpected command\r\n")
+		}
+	}
+}
+
+func readRedisCommand(reader *bufio.Reader) ([]string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	if len(line) < 2 || line[0] != '*' {
+		return nil, fmt.Errorf("invalid Redis array header %q", line)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(line[1:]))
+	if err != nil {
+		return nil, err
+	}
+	command := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		if len(line) < 2 || line[0] != '$' {
+			return nil, fmt.Errorf("invalid Redis bulk header %q", line)
+		}
+		length, err := strconv.Atoi(strings.TrimSpace(line[1:]))
+		if err != nil {
+			return nil, err
+		}
+		value := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, value); err != nil {
+			return nil, err
+		}
+		command = append(command, string(value[:length]))
+	}
+	return command, nil
 }

@@ -522,6 +522,102 @@ func TestConsoleConfigBrowserRevokesWriteStateAfterRefreshFailure(t *testing.T) 
 	})
 }
 
+func TestConsoleConfigApplyDoesNotOverwriteNewerEditorRevisionWithStaleDesiredSnapshot(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Editor    string `json:"editor"`
+			ApplyBody string `json:"applyBody"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			sourceWritable = true;
+			var applyResolve;
+			var applyBody = "";
+			apiFetch = function(url, options) {
+				if (url === "/api/v1/server/config/apply") {
+					applyBody = options.body;
+					return new Promise(function(resolve) { applyResolve = resolve; });
+				}
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"file"});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:"server:\n  name: stale-desired\n", effective_document:"server:\n  name: active\n", writable:true, source_details:{kind:"file"}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1"});
+				return Promise.resolve({});
+			};
+			showModal = function(_title, _message, confirm) { pendingAction = confirm; };
+			var editor = document.getElementById("config-editor");
+			editor.value = "server:\n  name: submitted\n";
+			editor.dispatchEvent(new Event("input", {bubbles:true}));
+			applyConfigEditor();
+			var applyPromise = pendingAction();
+			editor.value = "server:\n  name: newer-local-edit\n";
+			editor.dispatchEvent(new Event("input", {bubbles:true}));
+			document.body.focus();
+			applyResolve({status:"written_and_refresh_scheduled"});
+			window.__configProbe = null;
+			applyPromise.then(function() {
+				window.__configProbe = {editor:editor.value, applyBody:applyBody};
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(50*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("exercise Apply/editor revision race: %v", err)
+		}
+		if !strings.Contains(probe.ApplyBody, "name: submitted") {
+			t.Fatalf("Apply body=%q, want submitted revision", probe.ApplyBody)
+		}
+		if !strings.Contains(probe.Editor, "name: newer-local-edit") {
+			t.Fatalf("editor=%q, newer local edit was overwritten by stale desired snapshot", probe.Editor)
+		}
+	})
+}
+
+func TestConsoleConfigApplyPreservesSubmittedEditorWhenDesiredSnapshotIsStale(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Editor    string `json:"editor"`
+			ApplyBody string `json:"applyBody"`
+		}
+		expression := `(function() {
+			managementRole = "admin";
+			sourceWritable = true;
+			var applyResolve;
+			var applyBody = "";
+			apiFetch = function(url, options) {
+				if (url === "/api/v1/server/config/apply") {
+					applyBody = options.body;
+					return new Promise(function(resolve) { applyResolve = resolve; });
+				}
+				if (url === "/api/v1/server/config") return Promise.resolve({enabled:true, source:"file"});
+				if (url === "/api/v1/server/config/document") return Promise.resolve({desired_document:"server:\n  name: stale-desired\n", effective_document:"server:\n  name: active\n", writable:true, source_details:{kind:"file"}});
+				if (url === "/api/v1/server/config/schema") return Promise.resolve({$id:"https://liveforge.dev/schema/v1"});
+				return Promise.resolve({});
+			};
+			showModal = function(_title, _message, confirm) { pendingAction = confirm; };
+			var editor = document.getElementById("config-editor");
+			editor.value = "server:\n  name: submitted\n";
+			editor.dispatchEvent(new Event("input", {bubbles:true}));
+			applyConfigEditor();
+			var applyPromise = pendingAction();
+			document.body.focus();
+			applyResolve({status:"written_and_refresh_scheduled"});
+			window.__configProbe = null;
+			applyPromise.then(function() {
+				window.__configProbe = {editor:editor.value, applyBody:applyBody};
+			});
+			return true;
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, nil), chromedp.Sleep(50*time.Millisecond), chromedp.Evaluate(`window.__configProbe`, &probe)); err != nil {
+			t.Fatalf("exercise Apply/stale desired race: %v", err)
+		}
+		if !strings.Contains(probe.ApplyBody, "name: submitted") {
+			t.Fatalf("Apply body=%q, want submitted document", probe.ApplyBody)
+		}
+		if !strings.Contains(probe.Editor, "name: submitted") {
+			t.Fatalf("editor=%q, submitted document was overwritten by stale desired snapshot", probe.Editor)
+		}
+	})
+}
+
 func TestConsoleStorageHidesRecordingPlaybackWhenDisabledAndKeepsFMP4Action(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var probe struct {

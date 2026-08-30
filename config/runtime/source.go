@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -35,11 +36,37 @@ func documentFromKeyValues(values map[string]string) ([]byte, error) {
 		}
 	}
 	root := make(map[string]any)
+	type flattenedValue struct {
+		key       string
+		value     string
+		parts     []string
+		canonical string
+	}
+	flattened := make([]flattenedValue, 0, len(values))
 	for key, value := range values {
 		parts := strings.FieldsFunc(strings.Trim(key, "./"), func(r rune) bool { return r == '.' || r == '/' })
 		if len(parts) == 0 {
 			continue
 		}
+		flattened = append(flattened, flattenedValue{key: key, value: value, parts: parts, canonical: strings.Join(parts, ".")})
+	}
+	sort.Slice(flattened, func(i, j int) bool {
+		if flattened[i].canonical != flattened[j].canonical {
+			return flattened[i].canonical < flattened[j].canonical
+		}
+		return flattened[i].key < flattened[j].key
+	})
+	for index := 1; index < len(flattened); index++ {
+		previous, current := flattened[index-1], flattened[index]
+		if previous.canonical == current.canonical {
+			return nil, fmt.Errorf("flattened configuration keys %q and %q collide at %q", previous.key, current.key, current.canonical)
+		}
+		if strings.HasPrefix(current.canonical, previous.canonical+".") {
+			return nil, fmt.Errorf("flattened configuration keys %q and %q collide at %q", previous.key, current.key, previous.canonical)
+		}
+	}
+	for _, item := range flattened {
+		parts, value := item.parts, item.value
 		current := root
 		for _, part := range parts[:len(parts)-1] {
 			next, ok := current[part].(map[string]any)

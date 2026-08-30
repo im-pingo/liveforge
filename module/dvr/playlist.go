@@ -3,6 +3,7 @@ package dvr
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 )
 
@@ -40,7 +41,7 @@ func GeneratePlaylistWithQuery(index *SegmentIndex, streamKey string, live bool,
 	for _, seg := range segments {
 		b.WriteString(fmt.Sprintf("#EXT-X-PROGRAM-DATE-TIME:%s\n", seg.StartTime.UTC().Format("2006-01-02T15:04:05.000Z")))
 		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration))
-		segmentURI := fmt.Sprintf("%s/%s", key, seg.Filename)
+		segmentURI := fmt.Sprintf("%s/%s", escapeDVRStreamKeyPath(key), seg.Filename)
 		if rawQuery != "" {
 			segmentURI += "?" + rawQuery
 		}
@@ -52,4 +53,12 @@ func GeneratePlaylistWithQuery(index *SegmentIndex, streamKey string, live bool,
 	}
 
 	return b.String()
+}
+
+func escapeDVRStreamKeyPath(streamKey string) string {
+	segments := strings.Split(streamKey, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }

@@ -50,7 +50,7 @@ func (s *FileSource) Write(ctx context.Context, data []byte) error {
 		return err
 	}
 	info, err := os.Stat(s.path)
-	mode := os.FileMode(0644)
+	mode := os.FileMode(0600)
 	if err == nil {
 		mode = info.Mode().Perm()
 	} else if !os.IsNotExist(err) {
