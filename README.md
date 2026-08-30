@@ -140,6 +140,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
 - **Prometheus metrics** — Server-level and per-stream gauges: connections, bitrate, FPS, GOP cache, subscribers by protocol
 - **Rate limiting** — Per-IP token bucket for connection flood protection
+- **HTTP connection timeouts** — API, WebRTC signaling, and metrics listeners bound header parsing to 5 seconds and idle keep-alive connections to 2 minutes; existing write deadlines remain unchanged
 - **Slow consumer protection** — EWMA-based lag detection with progressive frame dropping
 - **GCC congestion control** — Send-side bandwidth estimation for WebRTC WHEP with adaptive bitrate pacing
 - **Generation-bound startup** — SIP, GB28181, recording, DVR, and cluster egress capture one publisher snapshot, replay only the required current headers/GOP once, then continue from its live cursor. SIP inbound INVITEs run synchronous publish authorization before RTP allocation and emit matching start/stop lifecycle events after activation, so recording and DVR follow the call. Publisher replacement cancels old readers, pure-audio streams never replay retained history, and sequence-header-only recordings are failed rather than published as successful media

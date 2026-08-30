@@ -24,6 +24,11 @@
       "symptom": "Console default realtime WHEP may report No advancing media received while waiting for the next H.264 keyframe after LiveCursor",
       "automated_coverage": "Pion WHEP H.264 RTP and VP8 browser playback pass; current H.264 mode=live browser playback decodes, while real GB28181/SIP H.264 browser decode remains unverified",
       "do_not_close_on": ["SDP success", "ontrack callback"]
+    },
+    "ARCH-033": {
+      "status": "closed",
+      "contract": "The API, WebRTC signaling, and metrics HTTP servers set ReadHeaderTimeout to 5 seconds and IdleTimeout to 2 minutes; existing handlers and write-deadline behavior remain unchanged",
+      "verification": "go test ./module/api ./module/webrtc ./module/metrics -run '^TestHTTPServerTimeouts$' -count=1"
     }
   },
   "configuration": {

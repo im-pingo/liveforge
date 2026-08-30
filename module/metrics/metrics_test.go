@@ -78,6 +78,27 @@ func TestMetricsModuleStartStop(t *testing.T) {
 		t.Error("missing liveforge_server_uptime_seconds metric")
 	}
 }
+func TestHTTPServerTimeouts(t *testing.T) {
+	cfg := testConfig()
+	s := core.NewServer(cfg)
+	m := NewModule()
+	s.RegisterModule(m)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	defer s.Shutdown()
+
+	if got := m.httpSrv.ReadHeaderTimeout; got != 5*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want %v", got, 5*time.Second)
+	}
+	if got := m.httpSrv.IdleTimeout; got != 2*time.Minute {
+		t.Errorf("IdleTimeout = %v, want %v", got, 2*time.Minute)
+	}
+	if got := m.httpSrv.WriteTimeout; got != 0 {
+		t.Errorf("WriteTimeout = %v, want unchanged zero value", got)
+	}
+}
+
 
 func TestMetricsExposeRuntimeConfigHealth(t *testing.T) {
 	cfg := testConfig()

@@ -59,6 +59,12 @@
 | ARCH-016 | `DeviceRegistry.Stop` 和 `ratelimit.Limiter.Close` 非幂等 | 对应模块的 `Stop`/`Close` | 重复 shutdown 或失败回滚可能 panic/重复 close |
 | ARCH-017 | WHEP feed loop 的媒体错误和首帧门控状态没有统一的可观测状态模型 | `module/webrtc/whep_feed.go`、`track_sender.go` | 浏览器只能看到笼统的 watchdog 错误，诊断依赖猜测 |
 
+### 已关闭的 ARCH-033 HTTP server timeout contract
+
+API、WebRTC 信令和 metrics HTTP server 统一设置 `ReadHeaderTimeout=5s` 与
+`IdleTimeout=2m`；现有 handler/media write deadline 和行为保持不变，且未新增
+server-level `WriteTimeout`。
+
 ### 已关闭的 GB28181 生命周期与端口问题
 
 - 设备入站 INVITE 在最终 2xx 前完成异步 publish-start 接纳；背压返回非 2xx，并回滚 publisher、session、新建 stream、RTP/RTCP socket 和端口，不发送无对应 start 的 publish-stop。

@@ -116,6 +116,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | Storage recording availability and unified fMP4 playback | `module/record/record_test.go`, `module/api/recording_test.go`, and `RecordingStatusResponse` contract |
 | Config document/schema/validate/apply and five runtime sources | `module/api/config_api_test.go`, `config/runtime/source_test.go`, and `docs/recipes/runtime-config-sources.md` |
 | SIP/GB28181 fast self-tests and persistent provider labs | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, `module/sipgateway/lab_test.go`, `module/gb28181/lab_test.go`, and `docs/recipes/protocol-test-lab.md` |
+| ARCH-033 unified HTTP header and idle timeouts | `module/api`, `module/webrtc`, and `module/metrics` `TestHTTPServerTimeouts`; `docs/recipes/auth-and-tls.md` |
 
 ## Operations Documentation
 

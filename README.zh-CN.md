@@ -142,6 +142,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
 - **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
 - **限流** — IP 级令牌桶，防止连接洪泛
+- **HTTP 连接超时** — API、WebRTC 信令和 metrics 监听器将请求头解析限制为 5 秒，将空闲 keep-alive 连接限制为 2 分钟；现有写入 deadline 保持不变
 - **慢消费者保护** — 基于 EWMA 的延迟检测，渐进式丢帧
 - **GCC 拥塞控制** — WebRTC WHEP 发送端带宽估计，自适应码率
 - **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。SIP inbound INVITE 会在分配 RTP 端口前执行同步发布鉴权，激活后发送匹配的 start/stop 生命周期事件，因此录制和 DVR 能跟随并收尾 SIP 会话。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体

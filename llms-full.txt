@@ -10,6 +10,8 @@ For a source-oriented Chinese architecture walkthrough, see [docs/architecture.z
 
 The current review record, including performance bottlenecks, lifecycle and resource risks, functional boundaries, and the open Console WHEP regression, is [docs/TECHNICAL-RISKS.md](docs/TECHNICAL-RISKS.md). The WHEP regression is not closed by SDP success or an `ontrack` callback: the browser must receive a decodable frame and an advancing media clock.
 
+The API, WebRTC signaling, and metrics HTTP servers use the same transport bounds: `ReadHeaderTimeout` is 5 seconds and `IdleTimeout` is 2 minutes. These bounds protect slow header parsing and idle keep-alive connections; existing handler and media write deadlines remain unchanged, and no server-level `WriteTimeout` is added by this policy.
+
 Startup readiness requires a sequence header only for H.264, H.265, and AAC.
 AV1, VP8, VP9, Opus, MP3, G.711, G.722, and G.729 can start from the publisher
 declaration and their in-band media or protocol-negotiated parameters. A

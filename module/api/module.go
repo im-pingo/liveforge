@@ -59,18 +59,22 @@ func (m *Module) Init(s *core.Server) error {
 		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
 	}
 	m.rateCfg = cfg.Limits.RateLimit
-	m.httpSrv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.limiterMu.RLock()
-		limiter := m.limiter
-		m.limiterMu.RUnlock()
-		if limiter != nil && !limiter.AllowRequest(r) {
-			m.security.rateLimitDenials.Add(1)
-			m.auditRateLimitDenial(r)
-			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})}
+	m.httpSrv = &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			m.limiterMu.RLock()
+			limiter := m.limiter
+			m.limiterMu.RUnlock()
+			if limiter != nil && !limiter.AllowRequest(r) {
+				m.security.rateLimitDenials.Add(1)
+				m.auditRateLimitDenial(r)
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			handler.ServeHTTP(w, r)
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 
 	proto := "http"
 	if s.HasTLS() && (cfg.API.TLS == nil || *cfg.API.TLS) {

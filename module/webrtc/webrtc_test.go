@@ -63,6 +63,20 @@ func TestModuleInitAndClose(t *testing.T) {
 	}
 }
 
+func TestHTTPServerTimeouts(t *testing.T) {
+	m, _ := newTestModule(t)
+
+	if got := m.httpSrv.ReadHeaderTimeout; got != 5*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want %v", got, 5*time.Second)
+	}
+	if got := m.httpSrv.IdleTimeout; got != 2*time.Minute {
+		t.Errorf("IdleTimeout = %v, want %v", got, 2*time.Minute)
+	}
+	if got := m.httpSrv.WriteTimeout; got != 0 {
+		t.Errorf("WriteTimeout = %v, want unchanged zero value", got)
+	}
+}
+
 func TestCORSHeaders(t *testing.T) {
 	m, _ := newTestModule(t)
 

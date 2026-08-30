@@ -43,6 +43,12 @@ auth:
     token: {secret: "${SUBSCRIBE_JWT_SECRET}", algorithm: HS256}
 ```
 
+The API, WebRTC signaling, and metrics HTTP listeners use fixed transport
+guards: `ReadHeaderTimeout` is 5 seconds and `IdleTimeout` is 2 minutes. This
+limits slow header parsing and idle keep-alive connections without replacing
+the existing handler or media write deadlines; no server-level `WriteTimeout`
+is added by this policy.
+
 Global TLS files/mode, `api.listen`, `api.tls`, `auth.enabled`, and audit capacity require restart. Named management tokens, the legacy management bearer, console credentials/role, and publish/subscribe rule details are hot-reloadable.
 
 The deprecated management token path is `auth.api.bearer_token`. Move it to `api.auth.bearer_token`. Normalization uses the deprecated value only when the current path is empty; if both exist, `api.auth.bearer_token` wins. They do not create two active credentials. New deployments should prefer named `api.auth.tokens` for attribution and least privilege.
