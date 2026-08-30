@@ -38,7 +38,7 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := newSessionWithStorage("live/camera", stream, module.Policy(), nil, 0, &module.metrics, module.storage, nil, false)
+	session, err := newSessionWithStorage("live/camera", stream, stream.StartupSnapshot(), module.Policy(), nil, 0, &module.metrics, module.storage, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,6 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 		"/dvr/live/camera%2fescape.m3u8",
 		"/dvr/live/camera/segment.ts",
 		"/dvr/live/camera/seg_000001.ts/extra",
-		"/dvr/live/camera/segments/seg_000001.ts",
 		"/dvr/live/camera/%2e%2e%2fseg_000001.ts",
 	} {
 		response := getDVRRoute(t, client, baseURL+requestPath)
@@ -128,6 +127,84 @@ func TestDVRMediaRoutesRealServer(t *testing.T) {
 	}
 	if got := authorizationCalls.Load(); got != 0 {
 		t.Fatalf("malformed routes reached authorization %d time(s)", got)
+	}
+}
+
+func TestDVRMediaRoutesNestedStreamKey(t *testing.T) {
+	server, module, stop := startDVRRouteServer(t)
+	defer stop()
+
+	streamKey := "live/zone/camera"
+	segmentBody := "nested-dvr-route-segment"
+	segmentPath := filepath.Join(resolvePath(module.Policy().Path, streamKey), "seg_000001.ts")
+	if err := os.MkdirAll(filepath.Dir(segmentPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := server.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := newSessionWithStorage(streamKey, stream, stream.StartupSnapshot(), module.Policy(), nil, 0, &module.metrics, module.storage, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.finish()
+	module.mu.Lock()
+	module.sessions[streamKey] = session
+	module.mu.Unlock()
+
+	baseURL := "http://" + module.listener.Addr().String()
+	client := &http.Client{Timeout: time.Second}
+	playlist := getDVRRoute(t, client, baseURL+"/dvr/live/zone/camera.m3u8")
+	if playlist.status != http.StatusOK || !strings.Contains(playlist.body, "zone/camera/seg_000001.ts") {
+		t.Fatalf("nested playlist status=%d body=%q", playlist.status, playlist.body)
+	}
+	segment := getDVRRoute(t, client, baseURL+"/dvr/live/zone/camera/seg_000001.ts")
+	if segment.status != http.StatusOK || segment.body != segmentBody {
+		t.Fatalf("nested segment status=%d body=%q", segment.status, segment.body)
+	}
+}
+
+func TestDVRMediaRoutesEscapeReservedNestedStreamKeySegments(t *testing.T) {
+	server, module, stop := startDVRRouteServer(t)
+	defer stop()
+
+	streamKey := "live/zone/cam?variant#one%raw"
+	segmentBody := "reserved-nested-dvr-route-segment"
+	segmentPath := filepath.Join(resolvePath(module.Policy().Path, streamKey), "seg_000001.ts")
+	if err := os.MkdirAll(filepath.Dir(segmentPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(segmentPath, []byte(segmentBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := server.StreamHub().GetOrCreate(streamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := newSessionWithStorage(streamKey, stream, stream.StartupSnapshot(), module.Policy(), nil, 0, &module.metrics, module.storage, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.finish()
+	module.mu.Lock()
+	module.sessions[streamKey] = session
+	module.mu.Unlock()
+
+	baseURL := "http://" + module.listener.Addr().String()
+	client := &http.Client{Timeout: time.Second}
+	escapedKey := "live/zone/cam%3Fvariant%23one%25raw"
+	playlist := getDVRRoute(t, client, baseURL+"/dvr/"+escapedKey+".m3u8")
+	wantURI := "zone/cam%3Fvariant%23one%25raw/seg_000001.ts"
+	if playlist.status != http.StatusOK || !strings.Contains(playlist.body, wantURI) {
+		t.Fatalf("reserved nested playlist status=%d body=%q, want URI %q", playlist.status, playlist.body, wantURI)
+	}
+	segment := getDVRRoute(t, client, baseURL+"/dvr/"+escapedKey+"/seg_000001.ts")
+	if segment.status != http.StatusOK || segment.body != segmentBody {
+		t.Fatalf("reserved nested segment status=%d body=%q", segment.status, segment.body)
 	}
 }
 

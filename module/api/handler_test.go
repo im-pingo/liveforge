@@ -14,6 +14,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/module/dvr"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
@@ -41,6 +42,8 @@ func newTestConfig() *config.Config {
 		Stream: config.StreamConfig{
 			GOPCache:           true,
 			GOPCacheNum:        1,
+			GOPCacheMaxFrames:  config.DefaultGOPCacheMaxFrames,
+			GOPCacheMaxBytes:   32 * 1024 * 1024,
 			RingBufferSize:     256,
 			IdleTimeout:        5 * time.Second,
 			NoPublisherTimeout: 3 * time.Second,
@@ -355,6 +358,9 @@ func TestHandleServerInfo(t *testing.T) {
 	if info.Version == "" {
 		t.Error("expected non-empty version")
 	}
+	if info.Capabilities.AudioTranscoding {
+		t.Error("audio transcoding capability must be false when it is disabled")
+	}
 	if got := info.Endpoints["dvr"]; got != "127.0.0.1:8070" {
 		t.Errorf("dvr endpoint=%q", got)
 	}
@@ -380,6 +386,70 @@ func TestHandleServerInfoUsesBoundEndpoint(t *testing.T) {
 	}
 	if got := info.Endpoints["http"]; got != "127.0.0.1:18080" {
 		t.Fatalf("http endpoint = %q, want bound endpoint", got)
+	}
+}
+
+func TestHandleServerInfoUsesBoundDVRListener(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.DVR.Enabled = true
+	cfg.DVR.Listen = "127.0.0.1:0"
+	cfg.DVR.Path = t.TempDir() + "/{stream_key}"
+	server := core.NewServer(cfg)
+	dvrModule := dvr.NewModule()
+	server.RegisterModule(dvrModule)
+	if err := server.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Shutdown)
+
+	h := NewHandlers(server)
+	response := httptest.NewRecorder()
+	h.handleServerInfo(response, httptest.NewRequest(http.MethodGet, "/api/v1/server/info", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var info struct {
+		Endpoints map[string]string `json:"endpoints"`
+	}
+	if err := json.Unmarshal(decodeAPIData(t, response.Body.Bytes()), &info); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := info.Endpoints["dvr"]
+	if endpoint == "" || strings.HasSuffix(endpoint, ":0") {
+		t.Fatalf("dvr endpoint = %q, want the bound non-zero listener port", endpoint)
+	}
+	if _, port, err := net.SplitHostPort(endpoint); err != nil || port == "0" {
+		t.Fatalf("dvr endpoint = %q, want a host:port with a non-zero port", endpoint)
+	}
+}
+
+func TestHandleServerInfoReportsDVRTLScheme(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.TLS.Auto = true
+	cfg.DVR.Enabled = true
+	cfg.DVR.Listen = "127.0.0.1:0"
+	cfg.DVR.Path = t.TempDir() + "/{stream_key}"
+	server := core.NewServer(cfg)
+	server.RegisterModule(dvr.NewModule())
+	if err := server.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Shutdown)
+
+	h := NewHandlers(server)
+	response := httptest.NewRecorder()
+	h.handleServerInfo(response, httptest.NewRequest(http.MethodGet, "/api/v1/server/info", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var info struct {
+		EndpointSchemes map[string]string `json:"endpoint_schemes"`
+	}
+	if err := json.Unmarshal(decodeAPIData(t, response.Body.Bytes()), &info); err != nil {
+		t.Fatal(err)
+	}
+	if got := info.EndpointSchemes["dvr"]; got != "https" {
+		t.Fatalf("dvr endpoint scheme = %q, want https", got)
 	}
 }
 

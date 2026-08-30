@@ -42,6 +42,8 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 
 - **多协议推流** — RTMP、RTSP（TCP + UDP，兼容符合会话条件的独立音视频轨 SETUP）、SRT、WebRTC WHIP、GB28181，兼容 OBS、FFmpeg、GStreamer 及浏览器
 - **多协议拉流** — RTMP、RTSP、SRT、WebRTC WHEP、HLS、LL-HLS、DASH、HTTP-FLV、HTTP-TS、FMP4、WebSocket
+- **连续 HTTP 流完整性** — HTTP-FLV、HTTP-TS、FMP4 及其 WebSocket 输出在 ring overwrite 时立即终止，不会发送保留的 gap 后数据来跨越媒体断点
+- **分片 overwrite 处理** — HLS 和 LL-HLS 丢弃未完成媒体，按需重新打开刷新后的直接/转码音频源，并以一次 discontinuity 从 live 位置恢复（视频等待关键帧，纯音频立即恢复）；LL-HLS 已保留的 fMP4 媒体继续引用匹配且不可变的版本化 init，DASH 则保留已完成的单 Period 媒体并退休受影响 manager
 - **SRT** — 安全可靠传输，AES 加密，低延迟 MPEG-TS 传输（纯 Go 实现 `datarhei/gosrt`）
 - **WebRTC** — WHIP/WHEP（SDP offer 上限 1 MiB）、ICE Lite、GCC 发送端带宽估计、浏览器推流
 - **编解码** — H.264、H.265/HEVC、VP8、VP9、AV1、AAC、Opus、G.711（μ-law/A-law）、MP3
@@ -106,11 +108,13 @@ go run ./tools/gb28181-sim \
 - **HTTP 调度器** — 通过外部 HTTP 回调动态解析目标节点，或使用静态目标列表
 - **拓扑模式** — 单层（Origin-Edge）、多边缘（Origin-Multi-Edge）、三级级联（Origin-Center-Edge）
 - **重试与容错** — 可配置重试次数、间隔和退避
-- **转发热路径** — Relay 和 WHEP reader 使用独立阻塞等待；RTMP 转推复用 FLV 编码缓冲区，RTSP interleaved 使用向量写入，relay 字节指标首包即时提交、后续批量更新，降低逐帧开销
+- **转发热路径** — Relay reader 使用独立阻塞等待；WHEP 为 source 和 target-audio reader 各使用一个 condition-backed pump，使 readiness 与原子读取不会并发竞争；RTMP 转推复用 FLV 编码缓冲区，RTSP interleaved 使用向量写入，relay 字节指标首包即时提交、后续批量更新，降低逐帧开销
 
 > 详见 [Wiki: 集群部署](../../wiki/Cluster-Deployment-zh)。
 
 可用以下命令测量转发热路径：`go test -bench='BenchmarkRingReader|BenchmarkRTMPConn' -benchmem ./pkg/util ./module/cluster`。基准结果取决于运行机器，不代表固定容量保证。
+
+可用 `go test -run '^$' -bench 'BenchmarkStreamIngressProduction|BenchmarkRTMPRelaySendMediaFrameProduction|BenchmarkRTSPRelaySendFrameProduction|BenchmarkRelayObservationAccounting' -benchmem -count=3 ./core ./module/cluster` 测量更接近生产路径的回归基准，其中包括稳定 publisher 校验、Stream ring/GOP 写入、完整 RTMP FLV/chunk framing、RTSP H.264 packetizer/RTP/interleaved framing 和有界 relay 字节统计。在 Apple M1 Pro、Go 1.26.0 上，三次结果为：稳定 Stream ingress 65.86-67.28 ns/op（29 B/op，0 allocs/op），RTMP H.264 155.1-155.6 ns/op（24 B/op，3 allocs/op），RTMP AAC 73.60-73.76 ns/op（21 B/op，3 allocs/op），RTSP 单 NAL H.264 1.825-1.833 us/op（4,044 B/op，9 allocs/op），RTSP 三包 FU-A H.264 4.593-4.605 us/op（9,892 B/op，23 allocs/op）。Stream 使用共享只读 payload 的预分配 64 秒单调时间戳、25 fps H.264/50 fps G.711A 帧池，零 subscriber，关闭 bitrate limit，保留 2 个 GOP，单 GOP 上限 300 帧，ring 为 4,096 项。RTMP 使用固定时间戳媒体帧和 payload 字节统计，RTSP 使用固定时间戳 RTP 输入和 framed-byte 统计；两种 egress 都终止于有界内存 writer，不包含 socket write、TCP writev、deadline 和内核/网络 syscall。独立 accounting 的 ns/op 还排除了生产 context lookup，主要用于 allocation 回归。该 fixture 与更窄的旧 `BenchmarkStreamWriteFrame` 微基准不可直接比较，也不代表订阅数、并发或部署容量。
 
 ### LL-HLS（低延迟 HLS）
 
@@ -123,29 +127,35 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 - **fMP4 分片解析** — 可解析由多个 `moof`/`mdat` fragment 拼接成的完整媒体分片，不会丢弃前面的 fragment
 - **fMP4 AAC 时间** — 未显式提供 AAC 采样率和声道数时从 AudioSpecificConfig 推导，并复用解析出的采样率作为媒体 timescale，保持 DTS 间隔稳定
 - **兼容旧播放器** — 无 LL-HLS 支持的播放器自动降级为缓冲分片模式
-- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；HLS、LL-HLS 和 DASH 分段器会等待当前 publisher generation 的必要序列头，并从同一个启动快照绑定序列头、回放帧和实时游标。Hls.js 的初始清单等待一个完整分段但不重复公告其 part。等待上限覆盖配置的完整分段目标加一个 part（下限 10 秒、上限 30 秒）；若仍无完整分段则返回 503，而不是只包含 part 的清单。后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新。HLS、LL-HLS 和 DASH 清单会逐段转义流键，DASH URL 属性同时进行 XML 转义，媒体分片路由可保留任意深度的有效流键
+- **关键帧对齐启动** — GOP 缓存与实时帧保持连续；HLS、LL-HLS 和 DASH 分段器会等待当前 publisher generation 的必要序列头，并从同一个启动快照绑定序列头、回放帧和实时游标。Hls.js 的初始清单等待一个完整分段但不重复公告其 part。等待上限覆盖配置的完整分段目标加一个 part（下限 10 秒、上限 30 秒）；若仍无完整分段则返回 503，而不是只包含 part 的清单。后续阻塞刷新保留最近已完成 part 的身份并继续消费新的低延迟 part；DASH 同样在一个完整分段后启动、采用一个 fragment 的直播延迟，且 MPD 最迟每两秒刷新。清单和分片只在真正写响应前启动 write deadline，等待首段不会提前消耗写窗口。HLS、LL-HLS 和 DASH 清单会逐段转义流键，DASH URL 属性同时进行 XML 转义，媒体分片路由可保留任意深度的有效流键
+- **generation 安全完成** — Publisher stop 会先从新请求查找中移除匹配的 HLS、DASH 或 LL-HLS manager，但 manager 会继续排空该 generation 捕获的结束游标之前已经接纳的全部帧，并且只完成一次。替代 publisher 使用不同 manager，不会把新旧 generation 帧写入对方输出。LL-HLS 阻塞刷新也会在 manager 停止时退出；HTTP 模块关闭会强制停止并等待 active 和 draining manager worker
 
 ### 管理与运维
 
 - **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
-- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；fMP4 仅直接写入 AAC，启用可选 `audiocodec`/FFmpeg 构建时会将 G.711、Opus、MP3 等非 AAC 音频转为 AAC，未启用时过滤音频并保留可播放的纯视频输出；转码录制停止时会先排空停止边界前已经提交的源帧再完成文件；DVR TS 同样会将目标不支持的音频统一转换；支持分段、存储健康、下载/Range/在线预览/删除管理、精确完整 ID 操作路由、清理失败后可重试且最后删除主文件、零字节会话保护和时移状态
-- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流；接收模式会在发送信令前等待当前 publisher generation 的必要序列头，已知不支持的音频编码会立即拒绝。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式先校验 H.264 加 G.711A，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
+- **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；每个轮转录像文件都会保留已声明轨道和最新 codec 初始化，并让每条轨道从文件内零时间轴开始，确保文件可独立解析；TS 会在首个媒体 PES 前写入 PAT/PMT，经典 MP4 按音视频各自时钟计算 duration、对超出 version-0 表示范围的时间字段做饱和而不回绕、对负 B 帧合成偏移使用有符号 `ctts` version 1，并使用可扩展 AAC ESDS 长度编码；fMP4 仅直接写入 AAC，启用可选 `audiocodec`/FFmpeg 构建时会将 G.711、Opus、MP3 等非 AAC 音频转为 AAC，未启用时过滤音频并保留可播放的纯视频输出；转码录制停止时会先排空停止边界前已经提交的源帧再完成文件，publisher generation 结束时还会先排空重采样滤波器保留的样本，再用静音补齐最后一个不完整 PCM 帧，并在 Record/DVR 输出关闭前仅一次排空编码器延迟包；DVR TS 同样会将目标不支持的音频统一转换；支持分段、存储健康、下载/Range/在线预览/删除管理、精确完整 ID 操作路由、清理失败后可重试且最后删除主文件、零字节会话保护和时移状态。录制在线预览/下载会在打开媒体前占用全局连接配额，并设置 10 秒写期限。
+- **录制/DVR 状态与路由** — 只有 `completed` 录像可以下载或在线播放；`active` 和 `failed` 状态统一返回 JSON `409`，不会返回媒体字节。录制格式为 `flv`、`fmp4`、`mp4`、`ts` 和 `hls`（`hls` 按 TS 存储），`max_size` 只接受空值/零值或带 `B`/`KB`/`MB`/`GB` 的十进制字节数。纯音频 DVR 在 publisher 仍在线时按音频 DTS 达到分段时长立即发布分片。DVR 嵌套流键保留 `/` 层级，拒绝编码分隔符和点段，并对每个流键段独立转义 `?`、`#`、`%`；`/api/v1/server/info` 返回已绑定的非零 DVR 端口及实际 HTTP/TLS scheme。
+- **本地协议实验室** — SIP 和 GB28181 页面可在不依赖其他平台或设备的情况下运行一次性及持久假设备检查。SIP 使用独立的 H.264 与 PCMA/PCMU RTP/RTCP 轨道，接收模式不会改写源流；接收模式会在发送信令前等待当前 publisher generation 的必要序列头，并把所选 PCMA/PCMU 作为真实出站目标 codec。源 codec 不同时，带标签且具备能力的运行时使用 generation 绑定的共享音频转码 reader，H.264 仍从原始 live cursor 读取；不支持的转换会立即拒绝。GB28181 发布模式注册一个可监听的假设备，并经过 LiveForge 正常的服务端主动点播及真实 RTP/RTCP 接收路径；接收模式要求 H.264 加直接 G.711A，或带标签运行时可转换为 G.711A 的音频；转码音频使用独立且绑定 generation 的 reader，H.264 保持直接读取，并在模块自己的 PS/RTP/RTCP 出站会话激活前同步接纳源流订阅者。订阅者上限拒绝会让启动同步失败；后续媒体发送失败会把 Lab 转为 `failed` 并释放信令及媒体资源。无外部依赖的 160x90 动态测试图以 25fps 运行、每秒一个 IDR，并生成可听的 20ms 音频帧。持久 GB28181 会话会按 `gb28181.keepalive.timeout` 的约三分之一持续发送 Keepalive。两者共用 SIP 监听端口时，H.264 加 PCMA/PCMU RTP offer 交给 SIP Gateway，PS/90000 offer 交给 GB28181
+- **协议实验室接纳上限** — `sip.gateway.max_lab_sessions` 和 `gb28181.max_lab_sessions` 分别限制持久实验室的活跃会话；默认值为 16，终态历史不占用上限，非正值使用默认值，达到上限时会在分配 socket 或媒体资源前返回 HTTP 429
 - **SIP RTP 端口所有权** — Gateway 媒体端口会跳过外部占用并在 SDP 协商期间保持 socket 已绑定；Lab 假端点同时避开 Gateway 配置的 RTP 范围
-- **SIP 出站退役** — 请求的 PCMA/PCMU 转换使用独立且绑定 publisher generation 的音频 reader。每个就绪的转码帧都会在发送 RTP 前立即复查 generation；publisher 退役会释放转码 reader、订阅者和已绑定 socket，回收 RTP/RTCP 端口对，并在并发触发其他清理时仍只发送一个 BYE
-- **GB28181 生命周期与 RTP 端口所有权** — 设备入站 INVITE 会在最终 2xx 响应前完成 publish-start 接纳；发生背压时返回非 2xx，并回收 publisher、session、新建 stream、socket 和端口，且不会发送无对应 start 的 publish-stop。Receive Lab 与一键自测在保留端口对时实际绑定 RTP/RTCP 两个 socket，跳过外部占用并只释放一次；已接受的直播/回放 dialog 在回滚和正常关闭中共享唯一的 ACK/BYE/close 所有者
+- **SIP 出站退役** — 请求的 PCMA/PCMU 转换使用独立且绑定 publisher generation 的音频 reader。每个就绪帧会先完成 packetize，再在终态 send gate 下进行最终发送准入，同时复查取消状态和当前 publisher generation。终态清理先关闭准入和自有 socket，在不持有 lifecycle 或 admission 锁时等待已准入发送退出，之后才发布终态与回调；publisher 退役会释放转码 reader 和订阅者、回收 RTP/RTCP 端口对，并在并发触发其他清理时仍只发送一个 BYE
+- **SIP overwrite 恢复** — SIP 出站会丢弃跨越媒体断点的保留帧，并且只推进发生 overwrite 的 source 或 target-audio reader。source 断点不会中断有效转码音频，直接 H.264 会等待同一 generation 的最新序列头和 IDR；target-audio 断点不会中断直接视频，音频会从 live 位置恢复。generation 仍活跃时 target-audio EOF 会让呼叫以 `network_lost` 失败，双 reader 父循环会在返回前取消并等待两个媒体 pump 退出
 - **协议实验室流键** — SIP 和 GB28181 接受最长 256 字节的可打印 ASCII 流键；以 `/` 分隔的每一段都不能为空，也不能是 `.` 或 `..`。GB28181 发布仅对 loopback 模拟器使用请求中的流键，真实设备仍使用 `{stream_prefix}/{channel_id}`
 - **GB28181 PS 兼容性** — PS 出站会把内部 AVCC/HVCC 视频样本转换为 Annex-B，保证真实 GB28181 接收端能解码视频
+- **GB28181 覆盖恢复** — PS/RTP 出站会在发送待发媒体前串行处理源与转码音频 control result，丢弃被覆盖值和 gap 前待发媒体，只推进发生覆盖的 reader，并保持未受影响媒体连续。源 gap 会在不重置 RTP 序列号的前提下创建新 PS 状态，等到 gap 后最新序列头加 IDR 才恢复 H.264；转码音频 gap 则保留干净的视频和 PS 状态，也不会重置其原有的 20ms holdback deadline
 - **实验室诊断** — Manager 保留全部活跃会话和最新 16 条终态记录。失败会话的有界 `last_error` 会先移除 SIP 凭据与 bearer token；会话视图展示接收端 RTCP 及独立音视频计数。播放路径会逐段转义流键，并按实际绑定监听器生成 RTMP/RTSP 绝对地址；Console 的 Lab Preview 直接使用这些返回路径
 - **启动回滚** — 监听器或模块初始化失败时保留并报告原始错误，只关闭已经尝试初始化的模块，不会在回滚尚未初始化的后续模块时 panic
 - **通知** — HTTP Webhook（HMAC-SHA256 签名）和 WebSocket 实时事件
-- **Prometheus 监控** — 服务器级和流级指标：连接数、码率、帧率、GOP 缓存、各协议订阅者数
-- **限流** — IP 级令牌桶，防止连接洪泛
+- **Prometheus 监控** — 启用模块后始终提供服务器级指标，流级码率、帧率、GOP 和订阅者 label 默认关闭。未配置 allowlist 时，数量上限是单个 Collector 整个生命周期的 cardinality 预算：活跃流键按创建顺序接纳，流消失后仅保留标量键且槽位不因 churn 复用。精确 allowlist 定义唯一可选流键，上限仍约束每次抓取。`stream_detail_limit: 0` 会关闭流级 series；负数配置无效并会被拒绝。需要查看当前流请使用管理 API，需要固定 Prometheus label 请配置精确 allowlist
+- **限流** — IP 级令牌桶，防止连接洪泛；可信代理链从右向左解析，攻击者控制的 XFF 左侧前缀不能切换限流桶
 - **HTTP 连接超时** — API、WebRTC 信令和 metrics 监听器将请求头解析限制为 5 秒，将空闲 keep-alive 连接限制为 2 分钟；现有写入 deadline 保持不变
 - **慢消费者保护** — 基于 EWMA 的延迟检测，渐进式丢帧
 - **GCC 拥塞控制** — WebRTC WHEP 发送端带宽估计，自适应码率
-- **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。SIP inbound INVITE 会在分配 RTP 端口前执行同步发布鉴权，激活后发送匹配的 start/stop 生命周期事件，因此录制和 DVR 能跟随并收尾 SIP 会话。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体
+- **按 generation 绑定起播** — SIP、GB28181、录制、DVR 和集群出站使用同一个 publisher 原子快照，只在协议需要时重放当前 headers/GOP 一次，再从 live cursor 接续。DVR 会将已校验快照贯穿保留索引/存储恢复，并在安装 session 前再次检查 generation；设置期间发生替代时会丢弃候选 session。DVR shutdown 会在等待 setup 所有权之前启动绝对 drain deadline，因此阻塞的 setup 不能延长配置的关闭边界。SIP inbound INVITE 会在分配 RTP 端口前执行同步发布鉴权，激活后发送匹配的 start/stop 生命周期事件，因此录制和 DVR 能跟随并收尾 SIP 会话。publisher 替换会取消旧 reader，纯音频不会重放保留历史，只有 sequence header 的录制会失败而不会发布为成功媒体
+- **Publisher 所有权隔离** — 每个非空 publisher ID 在一个 `Stream` 对象生命周期内只能创建一个 generation。即使中间出现 B，再次使用 A 也会在任何流状态变化前被拒绝，因此 A 的延迟帧、活动和清理回调不能影响当前 owner；新创建的 `Stream` 拥有独立的 identity 生命周期。流一旦开始销毁，延迟清理不能把它恢复为可挂接状态，也不能重开已关闭的 ring
+- **GOP 上限热更新** — 收紧帧数、时长或字节上限会保留所有启用上限共同允许的最短关键帧起始可播放前缀，并可能立即封存；时长按观测到的 DTS 最小值与最大值之间的完整无序跨度计算，不重排媒体。启用 GOP 缓存时至少要保留一个正的帧数或字节硬上限，零只禁用对应上限。放宽后只有当前保留 GOP 能接纳后续交错音视频帧，旧 GOP 保持裁剪，已省略帧不会恢复，下一个关键帧会开始新的完整 GOP
 
 ## 架构
 
@@ -262,9 +272,11 @@ ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish
 **WebRTC（浏览器）：**
 打开 `http://localhost:8090/console`，点击 **"+ WebRTC Publish"**，选择摄像头/麦克风后开始推流。
 
-当浏览器和操作系统提供 H.265 WebRTC 编码器时，控制台可以推送 H.265/HEVC 视频和 Opus 音频。WHIP 会把音频和视频 RTP 映射到同一个会话时间线，HLS/DASH/FLV/TS 使用从缓存 GOP 源游标开始的组合转码 reader，让目标音频历史和实时视频连续进入输出，避免首帧冻结和重复缓存视频。FMP4 预览在共享 muxer 启动时建立接近零的时间线并保留 B 帧的有符号合成偏移，晚加入的订阅从自身首个缓冲时间戳开始播放。WHEP Live 回放原子缓存 GOP 后，从与快照匹配的 ring 游标继续读取源视频，并通过独立 reader 获取转码后的目标音频。WebRTC 转码 worker 等待新帧时不会消费源播放唤醒信号，因此即使源音频暂停，视频节奏也能保持稳定。带 `audiocodec` 标签的构建是完整跨协议配置，验收步骤见 [WHIP H.265 + Opus 播放验证](docs/recipes/whip-h265-opus-playback.md)。
+当浏览器和操作系统提供 H.265 WebRTC 编码器时，控制台可以推送 H.265/HEVC 视频和 Opus 音频。WHIP 会把音频和视频 RTP 映射到同一个会话时间线，HLS/DASH/FLV/TS 使用从缓存 GOP 源游标开始的组合转码 reader，让目标音频历史和实时视频连续进入输出，避免首帧冻结和重复缓存视频。FMP4 预览在共享 muxer 启动时建立接近零的时间线并保留 B 帧的有符号合成偏移，晚加入的订阅从自身首个缓冲时间戳开始播放。对于 G.711 源，只有当 `GET /api/v1/server/info` 报告当前进程已配置且实际具备两种 G.711 到 AAC 的转码能力时，控制台才会在 FMP4 SourceBuffer 中声明 AAC；便携构建仍使用纯视频声明。WHEP Live 回放原子缓存 GOP 后，从与快照匹配的 ring 游标继续读取源视频，并通过独立 reader 获取转码后的目标音频。WebRTC 转码 worker 等待新帧时不会消费源播放唤醒信号，因此即使源音频暂停，视频节奏也能保持稳定。带 `audiocodec` 标签的构建是完整跨协议配置，验收步骤见 [WHIP H.265 + Opus 播放验证](docs/recipes/whip-h265-opus-playback.md)。
 
-当前已确认一个待关闭问题：控制台默认的 realtime WHEP 在 `LiveCursor` 之后等待下一个 H.264 关键帧，长 GOP 可能超过 8 秒 watchdog，从而显示 `No advancing media received (check codec support and keyframes)`。WHEP Live 和当前 H.264 浏览器路径可以正常解码，但默认行为、写入错误诊断以及真实 GB28181/SIP H.264 浏览器覆盖仍需补齐。详见[技术风险记录](docs/TECHNICAL-RISKS.md)；SDP 协商成功或触发 `ontrack` 都不能单独证明已经播放。
+控制台默认的 WHEP 预览使用带缓存的 live 启动路径，正常 H.264 GOP 不必等待 snapshot 之后的 IDR。协议实验室分别返回 `whep`/`whep_live`（`mode=live`）和 `whep_realtime`（`mode=realtime`）路径。源中存在且 offer 实际请求的每条音视频轨都必须成功协商：不支持的请求 codec 返回 415，内部建轨失败返回 500，不能静默只保留另一条轨；端口为 0 或方向不接收的 m-line 仍视为有意省略。接收方向优先使用媒体级属性，否则继承会话级属性；codec 只与该 m-line 实际列出的 payload 的精确 `rtpmap` 名称匹配。显式 realtime 模式会显示可区分的“等待关键帧”状态；即使混合流音频已推进，只要视频仍在首个 IDR 前丢弃非关键帧，就不会误报 `media_stalled`。播放期间，WHEP 会把源 reader 或转码音频 reader 的覆盖事件绑定到各自的原子读取结果，丢弃覆盖后的保留帧，并且只把受影响的 reader 推进到 live。每个 reader 的 readiness、原子读取和 live 推进都由同一个 condition-backed pump 独占；关闭时先取消并等待两个 pump，再且仅一次释放转码音频所有权。源 reader 覆盖时，已建立的音频继续推进，视频回到 `waiting_keyframe`，重置 pacing/DTS/PTS 状态，并从同一 generation 的最新参数集加关键帧恢复；纯音频从下一帧 live 音频继续。目标音频 reader 覆盖不会扰动干净的视频；期望的目标音频在 active generation 中 EOF 时会以 `target_audio_failed` 终止，而不是静默降级为纯视频。`GET /webrtc/session/{sessionId}/status` 提供期望媒体种类、首个成功样本时间和固定的 `first_media_wait_ms`、每种媒体最后推进时间、generation、游标、媒体计数、真实 RTP 包/字节、收到的 RTCP 包和有界 sample-write 错误。dropped 只统计已协商轨；会话关闭会在保存终态前捕获一次最终的单调 transport 计数。所有请求轨都推进后才能进入 `playing`；启动后任一期望媒体连续 8 秒没有推进会进入可恢复的 `media_stalled`，所有过期媒体重新推进后才恢复；Console 使用服务端时间只列出实际过期的媒体种类。每次真实状态迁移只写一条结构化日志，包含 generation、游标、模式、前后状态以及存在时的有界错误；每次覆盖另写一条有界 warning，包含 reader 身份、精确覆盖计数和恢复动作。Feed 终止会自动关闭并释放会话，最多 64 条终态仍可读取两分钟。带标签的 Chromium 矩阵会验证 SIP 发布到 GB28181 接收加 WHEP、GB28181 发布到 SIP 接收加 WHEP，以及 WHIP H.264/Opus 发布到 SIP 与 GB28181 接收加 WHEP。验收要求预期解码尺寸、媒体时间、视频/音频 RTP 和解码帧计数持续推进、ICE 已连接且服务端 RTP/RTCP 状态未 stalled；设置 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s` 可按秒延长检查，但不代表部署容量结论。详见[技术风险记录](docs/TECHNICAL-RISKS.md)；SDP 协商成功或触发 `ontrack` 都不能单独证明已经播放。
+
+WHEP 状态还提供 `source_overwrites`，表示恢复期间 source ring 丢失的 position 数。它不会计入 `dropped_video` 或 `dropped_audio`，因为混合源 ring 无法把每个丢失 position 可靠归类到单一媒体类型；直接音频 pacing 会在同一恢复边界重置，转码后的 target-audio pacing 保持独立。
 
 **GB28181：**
 将 IP 摄像头的 SIP 服务器指向 `localhost:5060`，或使用内置模拟器：
@@ -315,6 +327,7 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 - SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；两者都支持无需外部平台的持久 H.264 加 G.711 模拟设备发布/接收，会话显示分轨 RTP/RTCP/PS 计数，停止时清理资源，并可通过已启用的其他输出协议预览
 
 DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发异步订阅生命周期事件。
+有限的 DVR 播放列表和分片响应使用 10 秒服务端写入上限。每个已接纳的成功、错误、取消或超时请求都只释放一个全局连接槽位；Range 请求和 `ServeContent` 元数据保持不变。
 录制预览复用已认证的管理 API 会话；DVR 预览使用带非凭据 CORS 的独立 `dvr.listen` HLS 监听器，因此仍执行订阅鉴权，控制台不会持久化或拼接 bearer token。
 
 ## 配置
@@ -344,14 +357,16 @@ LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读�
 | `metrics` | Prometheus 监控端点（默认 `:9090`） |
 | `limits` | 全局连接数、流数、订阅者数限制 |
 | `tls` | TLS 证书和密钥配置 |
-| `stream` | GOP 缓存、环形缓冲区、空闲超时、慢消费者、反馈；Simulcast 字段仍延期 |
+| `stream` | GOP 缓存及单 GOP 帧数/时长/字节上限、环形缓冲区、空闲超时、慢消费者、反馈；Simulcast 字段仍延期 |
 | `runtime` | 后台配置刷新源：文件、HTTP/HTTPS、Consul 或 Redis |
 
-支持环境变量展开：`${API_TOKEN}`、`${AUTH_JWT_SECRET}`。
+受信任的 bootstrap/runtime source 加载支持 `${API_TOKEN}`、`${AUTH_JWT_SECRET}` 等环境变量展开。面向 viewer 的 Config Validate 绝不会展开服务端进程环境变量，而是按字面值处理引用，只接受一个 YAML/JSON 文档，并拒绝 root 或 nested typed field 中的未知键。Config Apply 和受信任的 runtime source 加载仍允许 typed runtime struct 未映射的 source 字段。
 
 ### 运行时配置刷新
 
-进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。源加载、Config Apply 写入和关闭操作会串行执行；Apply 会等待数据源写入完成后返回 202，再异步执行解析、模块应用和发布。扁平化 Consul/Redis 叶子值只会推断安全的布尔值、null、规范十进制整数以及有限的十进制/指数浮点数；前导零标识符、时长、越界数值和类似 YAML 的字符串仍保持字符串。Config 页面展示完整的版本化 JSON Schema，并保留 source 原始 desired YAML，包括注释和 typed runtime struct 未映射的字段。脱敏文档会保留集合形状：不透明的结构化敏感值仅保留 `id`、`name`、`username`、`channel_id`、`device_id` 等明确的稳定标识字段；标量 URL/address 值及适用的标量 URL 列表仅保留安全的公开 URL 标识；其他结构化值保持不透明；严格校验的裸 IP 和 `host:port` 地址保持可见；占位符恢复存在歧义时会拒绝写入。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 以及 Config Validate/Apply 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
+进程启动时只读取一次 bootstrap 配置文件，之后由后台管理器定期读取选定的 `runtime.source`，解析、校验后以原子快照发布。业务读取配置只做内存中的原子读取，不会触发文件/网络 I/O，也不会等待刷新。源加载、Config Apply 写入和关闭操作会串行执行；Apply 会等待数据源写入完成后返回 202，并返回 `status: written_and_refresh_scheduled`，再异步执行解析、模块应用和发布。扁平化 Consul/Redis 叶子值只会推断安全的布尔值、null、规范十进制整数以及有限的十进制/指数浮点数；前导零标识符、时长、越界数值和类似 YAML 的字符串仍保持字符串。点号/斜杠扁平路径会先规范化并排序；重复路径以及标量/容器前缀冲突会以确定性的错误 fail closed。Config 页面展示完整的版本化 JSON Schema，并保留 source 原始 desired YAML，包括注释和 typed runtime struct 未映射的字段。脱敏文档会保留集合形状：不透明的结构化敏感值仅保留 `id`、`name`、`username`、`channel_id`、`device_id` 等明确的稳定标识字段；有效的 absolute hierarchical URL scalar 即使位于名称不符合 URL heuristic 的未映射字段中，也会按 value 识别，保留安全的 scheme/host/port 标识，同时把所有非 root path 替换为稳定的不透明 digest marker，并移除 userinfo/query/fragment。URL-shaped key 继续执行 TURN/opaque、malformed/hostless fail-closed 和 plain-address 规则；该 key policy 之外的普通 string、duration、ID 和 bare host/address 保持不变；占位符恢复存在歧义时会拒绝写入。配置源失败时继续使用最后一次有效快照。HTTP 源要求 `runtime.source` 的 `http` 或 `https` 与 URL 协议一致，禁止所有重定向，且 ETag/Last-Modified 仅在文档被接受后推进；`X-Config-Version` 是独立的版本元数据。Consul KV GET 和 PUT 同样拒绝重定向且不会向目标发出请求，因此绝不会转发 `X-Consul-Token`。`SIGHUP` 和 `POST /api/v1/server/config/refresh` 只会异步调度刷新。监听地址、模块开关、TLS、端口范围等变更会标记为需要重启，不会对运行中的监听器做部分切换。状态 API 和 Prometheus 会暴露接受、拒绝、应用失败、回调失败、回调合并丢弃和待重启状态。文件、HTTP、HTTPS、Consul、Redis 以及 Config Validate/Apply 示例见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
+
+文件 Apply 创建新目标时使用私有权限 `0600`，替换已存在文件时保留原有权限位。Redis Apply 会在一个 `MULTI/EXEC` 事务中写入文档并递增可选的 version key，事务或 EXEC 错误会返回给调用方而不会虚报成功。刷新接口成功返回 `202` 和 `status: scheduled`；Apply 成功返回 `202` 和 `status: written_and_refresh_scheduled`。Console 使用单调递增的编辑版本号，Apply 之后返回的过期 desired 快照不能覆盖更新后的本地编辑文本。
 
 运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
 

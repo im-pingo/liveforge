@@ -113,6 +113,9 @@ type LocalStorage struct {
 }
 
 func newStorageForConfig(cfg config.RecordConfig) (*LocalStorage, string, error) {
+	if err := config.ValidateRecordConfig(cfg); err != nil {
+		return nil, "", err
+	}
 	pattern := cfg.Path
 	if pattern == "" {
 		ext := "flv"

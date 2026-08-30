@@ -35,6 +35,13 @@ func strictDVRMediaRoutes(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// URL.Path is already unescaped by net/http. Reject encoded path
+		// separators before the decoded path can turn one route segment into
+		// another stream key or resource component.
+		if hasEscapedPathSeparator(r.URL.EscapedPath()) {
+			http.NotFound(w, r)
+			return
+		}
 
 		remainder := strings.TrimPrefix(requestPath, "/dvr/")
 		app, resource, hasResource := strings.Cut(remainder, "/")
@@ -46,7 +53,46 @@ func strictDVRMediaRoutes(next http.Handler) http.Handler {
 	})
 }
 
+func hasEscapedPathSeparator(escapedPath string) bool {
+	for i := 0; i+2 < len(escapedPath); i++ {
+		if escapedPath[i] != '%' {
+			continue
+		}
+		hi, okHi := fromHex(escapedPath[i+1])
+		lo, okLo := fromHex(escapedPath[i+2])
+		if okHi && okLo {
+			decoded := byte(hi<<4 | lo)
+			if decoded == '/' || decoded == '\\' {
+				return true
+			}
+		}
+		i += 2
+	}
+	return false
+}
+
+func fromHex(value byte) (byte, bool) {
+	switch {
+	case '0' <= value && value <= '9':
+		return value - '0', true
+	case 'a' <= value && value <= 'f':
+		return value - 'a' + 10, true
+	case 'A' <= value && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
 func (m *Module) handleMedia(w http.ResponseWriter, r *http.Request) {
+	if m.server != nil && !m.server.AcquireConn() {
+		http.Error(w, "max connections reached", http.StatusServiceUnavailable)
+		return
+	}
+	if m.server != nil {
+		defer m.server.ReleaseConn()
+	}
+
 	app := r.PathValue("app")
 	resource := r.PathValue("resource")
 	if !validMediaPathPart(app) {
@@ -54,14 +100,19 @@ func (m *Module) handleMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if key, ok := strings.CutSuffix(resource, ".m3u8"); ok && validMediaPathPart(key) {
+	if key, ok := strings.CutSuffix(resource, ".m3u8"); ok && validMediaKey(key) {
 		r.SetPathValue("key", key)
 		m.handlePlaylist(w, r)
 		return
 	}
 
-	key, filename, ok := strings.Cut(resource, "/")
-	if !ok || !validMediaPathPart(key) || strings.Contains(filename, "/") || parseSeqNum(filename) < 0 {
+	separator := strings.LastIndexByte(resource, '/')
+	if separator <= 0 || separator == len(resource)-1 {
+		http.NotFound(w, r)
+		return
+	}
+	key, filename := resource[:separator], resource[separator+1:]
+	if !validMediaKey(key) || strings.ContainsAny(filename, "/\\") || parseSeqNum(filename) < 0 {
 		http.NotFound(w, r)
 		return
 	}
@@ -72,6 +123,18 @@ func (m *Module) handleMedia(w http.ResponseWriter, r *http.Request) {
 
 func validMediaPathPart(value string) bool {
 	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, "/\\")
+}
+
+func validMediaKey(value string) bool {
+	if value == "" || strings.ContainsAny(value, "\\") {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if !validMediaPathPart(part) {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Module) handlePlaylist(w http.ResponseWriter, r *http.Request) {

@@ -98,6 +98,7 @@ func TestOpenAPIIncludesMiddlewareResponseStatuses(t *testing.T) {
 		{method: "POST", path: "/webrtc/whep/{streamKey}", want: []string{"201", "400", "401", "404", "413", "415", "429", "500", "503"}},
 		{method: "OPTIONS", path: "/webrtc/whip/{streamKey}", want: []string{"204", "429"}},
 		{method: "OPTIONS", path: "/webrtc/whep/{streamKey}", want: []string{"204", "429"}},
+		{method: "GET", path: "/webrtc/session/{sessionId}/status", want: []string{"200", "404", "409", "429"}},
 		{method: "OPTIONS", path: "/webrtc/session/{sessionId}", want: []string{"204", "429"}},
 	}
 
@@ -116,6 +117,51 @@ func TestOpenAPIIncludesMiddlewareResponseStatuses(t *testing.T) {
 				t.Fatalf("response statuses = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOpenAPIApplyStatusMatchesRuntimeResponse(t *testing.T) {
+	doc := loadOpenAPIContract(t)
+	operation := doc.Paths["/api/v1/server/config/apply"].operation("POST")
+	if operation == nil {
+		t.Fatal("config Apply operation is not documented")
+	}
+	response, ok := operation.Responses["202"].(map[string]any)
+	if !ok {
+		t.Fatalf("config Apply 202 response=%#v", operation.Responses["202"])
+	}
+	content, ok := response["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("config Apply 202 content=%#v", response["content"])
+	}
+	jsonContent, ok := content["application/json"].(map[string]any)
+	if !ok {
+		t.Fatalf("config Apply JSON content=%#v", content["application/json"])
+	}
+	schema, ok := jsonContent["schema"].(map[string]any)
+	if !ok || schema["$ref"] != "#/components/schemas/ConfigApplyResponse" {
+		t.Fatalf("config Apply 202 schema=%#v, want ConfigApplyResponse", jsonContent["schema"])
+	}
+	if got := doc.Components.Schemas["ConfigApplyResponse"]; got == nil {
+		t.Fatal("ConfigApplyResponse schema is missing")
+	}
+}
+
+func TestOpenAPIRecordingMediaDocumentsNotReadyResponse(t *testing.T) {
+	doc := loadOpenAPIContract(t)
+	for _, path := range []string{
+		"/api/v1/recordings/{recordingPath}",
+		"/api/v1/recordings/{recordingPath}/download",
+		"/api/v1/recordings/{recordingPath}/play",
+	} {
+		operation := doc.Paths[path].operation("GET")
+		if operation == nil {
+			t.Fatalf("%s GET operation is not documented", path)
+		}
+		response, ok := operation.Responses["409"].(map[string]any)
+		if !ok || response["$ref"] != "#/components/responses/RecordingNotReady" {
+			t.Fatalf("%s GET 409 response = %#v, want RecordingNotReady reference", path, operation.Responses["409"])
+		}
 	}
 }
 
@@ -142,6 +188,26 @@ func TestOpenAPIGBLabErrorsUseManagementEnvelopes(t *testing.T) {
 		if got := response["$ref"]; got != test.want {
 			t.Errorf("%s %s response %s ref = %v, want %s", test.method, test.path, test.status, got, test.want)
 		}
+	}
+}
+
+func TestOpenAPIProtocolLabCapacityUsesDistinct429Contract(t *testing.T) {
+	doc := loadOpenAPIContract(t)
+	for _, path := range []string{
+		"/api/v1/sipgateway/lab/sessions",
+		"/api/v1/gb28181/lab/sessions",
+	} {
+		operation := doc.Paths[path].operation("POST")
+		if operation == nil {
+			t.Fatalf("%s POST is not documented", path)
+		}
+		response, ok := operation.Responses["429"].(map[string]any)
+		if !ok || response["$ref"] != "#/components/responses/ProtocolLabCapacity" {
+			t.Fatalf("%s POST 429 response = %#v, want ProtocolLabCapacity reference", path, operation.Responses["429"])
+		}
+	}
+	if got := doc.Components.Schemas["ApiError"]; got == nil {
+		t.Fatal("ApiError schema is missing")
 	}
 }
 

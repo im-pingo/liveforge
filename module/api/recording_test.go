@@ -21,10 +21,21 @@ type recordingReadSeekCloser struct{ *bytes.Reader }
 
 func (recordingReadSeekCloser) Close() error { return nil }
 
+type recordingDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *recordingDeadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
 type recordingProviderStub struct {
 	items   []record.RecordingInfo
 	content []byte
 	deleted string
+	opened  int
 }
 
 func (*recordingProviderStub) Name() string                   { return "record" }
@@ -43,11 +54,120 @@ func (m *recordingProviderStub) Recording(_ context.Context, id string) (record.
 	return record.RecordingInfo{}, record.ErrRecordingNotFound
 }
 func (m *recordingProviderStub) OpenRecording(ctx context.Context, id string) (record.ReadSeekCloser, record.RecordingInfo, error) {
+	m.opened++
 	info, err := m.Recording(ctx, id)
 	if err != nil {
 		return nil, record.RecordingInfo{}, err
 	}
 	return recordingReadSeekCloser{bytes.NewReader(m.content)}, info, nil
+}
+
+func TestRecordingMediaRejectsBeforeOpenWhenGlobalConnectionLimitIsFull(t *testing.T) {
+	for _, action := range []string{"play", "download"} {
+		t.Run(action, func(t *testing.T) {
+			cfg := newTestConfig()
+			cfg.Limits.MaxConnections = 1
+			server := core.NewServer(cfg)
+			provider := &recordingProviderStub{
+				items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "fmp4", State: record.RecordingCompleted}},
+				content: []byte("recording-data"),
+			}
+			server.RegisterModule(provider)
+			if !server.AcquireConn() {
+				t.Fatal("failed to occupy the only global connection slot")
+			}
+			defer server.ReleaseConn()
+
+			h := NewHandlers(server)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/recordings/live/cam.mp4?action="+action, nil)
+			req.SetPathValue("id", "live/cam.mp4")
+			response := httptest.NewRecorder()
+			if action == "play" {
+				h.handleRecordingPlay(response, req)
+			} else {
+				h.handleRecordingDownload(response, req)
+			}
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+			}
+			if provider.opened != 0 {
+				t.Fatalf("OpenRecording calls = %d, want 0", provider.opened)
+			}
+			if got := server.ConnectionCount(); got != 1 {
+				t.Fatalf("connection count = %d, want occupied count 1", got)
+			}
+		})
+	}
+}
+
+func TestRecordingMediaSetsWriteDeadlineAndReleasesConnectionSlot(t *testing.T) {
+	for _, action := range []string{"play", "download"} {
+		t.Run(action, func(t *testing.T) {
+			server := core.NewServer(newTestConfig())
+			provider := &recordingProviderStub{
+				items:   []record.RecordingInfo{{ID: "live/cam.mp4", Format: "fmp4", State: record.RecordingCompleted}},
+				content: []byte("recording-data"),
+			}
+			server.RegisterModule(provider)
+			if !server.AcquireConn() {
+				t.Fatal("failed to occupy baseline global connection slot")
+			}
+			defer server.ReleaseConn()
+
+			h := NewHandlers(server)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/recordings/live/cam.mp4?action="+action, nil)
+			req.SetPathValue("id", "live/cam.mp4")
+			response := &recordingDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			started := time.Now()
+			if action == "play" {
+				h.handleRecordingPlay(response, req)
+			} else {
+				h.handleRecordingDownload(response, req)
+			}
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+			}
+			if len(response.deadlines) != 1 {
+				t.Fatalf("write deadlines = %v, want exactly one", response.deadlines)
+			}
+			if got := response.deadlines[0]; got.Before(started.Add(9*time.Second)) || got.After(started.Add(11*time.Second)) {
+				t.Fatalf("write deadline = %v, want about 10s after start", got)
+			}
+			if provider.opened != 1 {
+				t.Fatalf("OpenRecording calls = %d, want 1", provider.opened)
+			}
+			if got := server.ConnectionCount(); got != 1 {
+				t.Fatalf("connection count = %d, want baseline count 1", got)
+			}
+		})
+	}
+}
+
+func TestRecordingDownloadRejectsFailedRecordingWithoutMedia(t *testing.T) {
+	server := core.NewServer(newTestConfig())
+	provider := &recordingProviderStub{
+		items:   []record.RecordingInfo{{ID: "live/failed.mp4", Format: "fmp4", State: record.RecordingFailed, Error: "disk full"}},
+		content: []byte("failed-media-must-not-be-served"),
+	}
+	server.RegisterModule(provider)
+	h := NewHandlers(server)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recordings/live/failed.mp4?action=download", nil)
+	request.SetPathValue("id", "live/failed.mp4")
+	response := httptest.NewRecorder()
+	h.handleRecordingDownload(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusConflict, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "failed-media-must-not-be-served") {
+		t.Fatalf("failed recording download returned media body: %s", response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("content type = %q, want JSON error", got)
+	}
 }
 func (m *recordingProviderStub) DeleteRecording(_ context.Context, id string) error {
 	if _, err := m.Recording(context.Background(), id); err != nil {

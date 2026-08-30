@@ -498,6 +498,42 @@ func TestStorageTemplateDefaultsToMP4WhenFormatIsUnset(t *testing.T) {
 	}
 }
 
+func TestNewFileWriterValidatesFormatAndMaxSize(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  config.RecordConfig
+	}{
+		{name: "format", cfg: config.RecordConfig{Format: "webm"}},
+		{name: "max size", cfg: config.RecordConfig{Format: "flv", Segment: config.SegmentConfig{MaxSize: "1.5MB"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if _, err := NewFileWriter("live/invalid", test.cfg); err == nil {
+				t.Fatal("NewFileWriter accepted invalid recording configuration")
+			}
+		})
+	}
+}
+
+func TestHLSRecordFormatUsesTSStorageSemantics(t *testing.T) {
+	storage, template, err := newStorageForConfig(config.RecordConfig{Format: "hls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if filepath.Ext(template) != ".ts" {
+		t.Fatalf("hls recording template = %q, want .ts", template)
+	}
+	w, err := newFileWriterWithStorage("live/hls-alias", config.RecordConfig{Format: "hls"}, storage, "live/hls-alias.ts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if got := w.Format(); got != "ts" {
+		t.Fatalf("hls writer format = %q, want canonical ts", got)
+	}
+}
+
 func TestLocalStorageRecoversCrashPartialWithoutOverwritingFailure(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "live/cam")

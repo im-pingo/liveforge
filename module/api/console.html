@@ -1280,6 +1280,8 @@ select:focus-visible {
 <script src="/console/static/dash.all.min.js"></script>
 <script>
 var endpoints = {};
+var endpointSchemes = {};
+var serverCapabilities = {};
 var currentPlayer = null;
 var currentPC = null;
 var currentMSEAbort = null;
@@ -1290,6 +1292,7 @@ var currentHls = null;
 var currentDash = null;
 var currentVideoEventCleanup = null;
 var playerGeneration = 0;
+var whepStatusPoll = null;
 var streamMedia = Object.create(null);
 var recordingFormats = Object.create(null);
 var statsInterval = null;
@@ -1297,6 +1300,7 @@ var statsPrev = null;
 var statsVisible = false;
 var managementRole = "viewer";
 var sourceWritable = false;
+var configEditorRevision = 0;
 var activeTab = "streams";
 var activeViewController = null;
 var activeViewInterval = null;
@@ -1740,6 +1744,7 @@ function renderStatsOverlay(v, a) {
 /* --- Player logic --- */
 function destroyCurrentPlayer() {
   playerGeneration++;
+  if (whepStatusPoll) { clearTimeout(whepStatusPoll); whepStatusPoll = null; }
   stopStatsOverlay();
   if (currentVideoEventCleanup) {
     try { currentVideoEventCleanup(); } catch(e) {}
@@ -1939,7 +1944,11 @@ function monitorPlayableMedia(mediaElement, generation, label, streamKey, expect
   var startupTimeoutID = setTimeout(function() {
     if (!isCurrentPlayer(generation)) return;
     if (!playbackConfirmed) {
-      setPlayerStatus("No advancing media received (check codec support and keyframes)", "error");
+      if (label === "WebRTC/WHEP") {
+        setPlayerStatus("WebRTC is still waiting for a decodable keyframe", "");
+      } else {
+        setPlayerStatus("No advancing media received (check codec support and keyframes)", "error");
+      }
     }
   }, 8000);
 
@@ -2121,6 +2130,10 @@ function fmp4MimeCandidates(streamKey) {
   };
   var video = videoCodecs[videoCodec] || "";
   var audio = audioCodecs[audioCodec] || "";
+  if (!audio && serverCapabilities.audio_transcoding &&
+      (audioCodec === "g711a" || audioCodec === "g711u" || audioCodec === "pcma" || audioCodec === "pcmu")) {
+    audio = audioCodecs.aac;
+  }
   if (video && audio) return ['video/mp4; codecs="' + video + ', ' + audio + '"'];
   if (video) return ['video/mp4; codecs="' + video + '"'];
   if (audio) return ['audio/mp4; codecs="' + audio + '"'];
@@ -2398,12 +2411,34 @@ function playDASH(streamKey, playbackPath) {
   });
 }
 
+function whepStalledMediaKinds(feed) {
+  var reference = Date.parse(feed.updated_at || "");
+  if (!isFinite(reference)) reference = Date.now();
+  var staleBefore = reference - 8000;
+  var kinds = [];
+  function isStale(expected, value) {
+    if (!expected) return false;
+    var timestamp = Date.parse(value || "");
+    return !isFinite(timestamp) || timestamp <= staleBefore;
+  }
+  if (isStale(feed.expected_video, feed.last_video_at)) kinds.push("video");
+  if (isStale(feed.expected_audio, feed.last_audio_at)) kinds.push("audio");
+  return kinds;
+}
+
 function playWHEP(streamKey, mode, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
   var proto = location.protocol === "https:" ? "https://" : "http://";
-  var fallbackPath = "/webrtc/whep/" + encodedStreamPath(streamKey) + "?mode=" + (mode || "realtime");
+  var fallbackPath = "/webrtc/whep/" + encodedStreamPath(streamKey) + "?mode=" + (mode || "live");
   var url = endpointURL(proto.slice(0, -2), endpoints.webrtc, playbackPath || fallbackPath);
+  var requestedMode = mode || "live";
+  var modePattern = /([?&])mode=[^&]*/;
+  if (modePattern.test(url)) {
+    url = url.replace(modePattern, "$1mode=" + encodeURIComponent(requestedMode));
+  } else {
+    url += (url.indexOf("?") >= 0 ? "&" : "?") + "mode=" + encodeURIComponent(requestedMode);
+  }
   setPlayerURL(url);
   setPlayerStatus("Negotiating WebRTC...");
 
@@ -2490,9 +2525,40 @@ function playWHEP(streamKey, mode, playbackPath) {
     if (resp.status !== 201) {
       return resp.text().then(function(t) { throw new Error("WHEP " + resp.status + ": " + t); });
     }
-    return resp.text();
-  }).then(function(sdp) {
-    return pc.setRemoteDescription({ type: "answer", sdp: sdp });
+    var location = resp.headers.get("Location") || "";
+    return resp.text().then(function(sdp) { return { sdp: sdp, location: location }; });
+  }).then(function(answer) {
+    return pc.setRemoteDescription({ type: "answer", sdp: answer.sdp }).then(function() {
+      if (!answer.location || !isCurrentPlayer(generation)) return;
+      var statusURL = new URL(answer.location + "/status", url).toString();
+      function pollStatus() {
+        if (!isCurrentPlayer(generation)) return;
+        fetch(statusURL).then(function(resp) {
+          if (!resp.ok) return null;
+          return resp.json();
+        }).then(function(data) {
+          if (!data || !isCurrentPlayer(generation)) return;
+          var feed = data.feed || {};
+          if (feed.state === "waiting_keyframe") {
+            setPlayerStatus("WebRTC connected, waiting for a keyframe...", "");
+          } else if (feed.state === "sample_write_failed") {
+            setPlayerStatus("WebRTC media send failed: " + (feed.last_error || "unknown error"), "error");
+          } else if (feed.state === "codec_mismatch") {
+            setPlayerStatus("WebRTC codec mismatch: " + (feed.last_error || "unsupported codec"), "error");
+          } else if (feed.state === "generation_ended") {
+            setPlayerStatus("WebRTC publisher generation ended", "error");
+          } else if (feed.state === "no_media_input") {
+            setPlayerStatus("WebRTC has no media input", "error");
+          } else if (feed.state === "media_stalled") {
+            var staleKinds = whepStalledMediaKinds(feed);
+            setPlayerStatus("WebRTC media stalled" + (staleKinds.length ? " (" + staleKinds.join("/") + ")" : ""), "error");
+          }
+        }).catch(function() {}).then(function() {
+          if (isCurrentPlayer(generation)) whepStatusPoll = setTimeout(pollStatus, 500);
+        });
+      }
+      pollStatus();
+    });
   }).then(function() {
     if (!isCurrentPlayer(generation)) return;
     setPlayerStatus(receivedTrack ? "WebRTC connected, waiting for first decoded frame..." : "WebRTC connected, waiting for media...");
@@ -2516,8 +2582,8 @@ function prefersWHEP(videoCodec) {
 
 function addWHEPProtocols(protocols, playback) {
   if (!endpoints.webrtc) return;
-  protocols.push({ id: "whep-realtime", label: "WebRTC", fn: function(k) { playWHEP(k, "realtime", playerPlaybackPath(playback, "whep", "")); } });
-  protocols.push({ id: "whep-live", label: "WebRTC-Live", fn: function(k) { playWHEP(k, "live", playerPlaybackPath(playback, "whep_live", "")); } });
+  protocols.push({ id: "whep-live", label: "WebRTC", fn: function(k) { playWHEP(k, "live", playerPlaybackPath(playback, "whep_live", playerPlaybackPath(playback, "whep", ""))); } });
+  protocols.push({ id: "whep-realtime", label: "WebRTC-Realtime", fn: function(k) { playWHEP(k, "realtime", playerPlaybackPath(playback, "whep_realtime", "")); } });
 }
 
 function addHTTPProtocols(protocols, playback) {
@@ -2626,7 +2692,9 @@ function refreshServerInfo(signal) {
       if (!data) return;
       document.getElementById("server-version").textContent = "v" + (data.version || "?");
       document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
-      if (data.endpoints) endpoints = data.endpoints;
+	  if (data.endpoints) endpoints = data.endpoints;
+	  if (data.endpoint_schemes) endpointSchemes = data.endpoint_schemes;
+	  serverCapabilities = data.capabilities || {};
       if (data.modules) updateGB28181Tab(data.modules);
       updatePublishButton();
     })
@@ -3224,8 +3292,11 @@ function renderEmptyTable(tbodyID, emptyID, rows) {
   document.getElementById(emptyID).style.display = rows ? "none" : "block";
 }
 
-function refreshRuntimeConfig(signal) {
+function refreshRuntimeConfig(signal, options) {
   clearManagementError("config");
+  options = options || {};
+  var editorRevision = options.preserveRevision === undefined ? configEditorRevision : options.preserveRevision;
+  var editor = document.getElementById("config-editor");
   return Promise.all([
     apiFetch("/api/v1/server/config", { signal: signal }),
     apiFetch("/api/v1/server/config/document", { signal: signal }),
@@ -3251,9 +3322,10 @@ function refreshRuntimeConfig(signal) {
     document.getElementById("config-pending").innerHTML = pending.length
       ? pending.map(function(path) { return '<span class="ops-chip">' + esc(path) + "</span>"; }).join("")
       : '<span class="ops-field-label">None</span>';
-    var editor = document.getElementById("config-editor");
-    if (document.activeElement !== editor) {
-      editor.value = documentData.desired_document || documentData.effective_document || JSON.stringify(documentData.desired || documentData.effective || {}, null, 2);
+    if (configEditorRevision === editorRevision && document.activeElement !== editor) {
+      editor.value = options.preserveRevision === editorRevision
+        ? options.preserveDocument
+        : (documentData.desired_document || documentData.effective_document || JSON.stringify(documentData.desired || documentData.effective || {}, null, 2));
     }
     sourceWritable = !!documentData.writable;
     document.getElementById("config-source-writable").textContent = documentData.writable ? "Writable source" : "Read-only source";
@@ -3289,13 +3361,16 @@ function applyConfigEditor() {
   if (!sourceWritable || !canManage("operator")) return Promise.resolve();
   showModal("Apply configuration", "Write the complete configuration document and schedule a refresh?", function() {
     if (!sourceWritable || !canManage("operator")) return Promise.resolve();
+    var editor = document.getElementById("config-editor");
+    var submittedDocument = editor.value;
+    var submittedRevision = configEditorRevision;
     return apiFetch("/api/v1/server/config/apply", {
       method: "POST",
       headers: {"Content-Type": "application/yaml"},
-      body: document.getElementById("config-editor").value
+      body: submittedDocument
     }).then(function() {
       showToast("Configuration written; refresh scheduled");
-      return refreshRuntimeConfig();
+      return refreshRuntimeConfig(undefined, {preserveRevision: submittedRevision, preserveDocument: submittedDocument});
     }).catch(function(err) { showManagementError("config", err); });
   });
 }
@@ -3683,7 +3758,8 @@ function dvrMediaURL(streamKey) {
   var pathValue = String(streamKey || "").split("/").map(encodeURIComponent).join("/");
   var host = hostFromListen(endpoints.dvr);
   if (host.indexOf(":") >= 0 && host.charAt(0) !== "[") host = "[" + host + "]";
-  return location.protocol + "//" + host + ":" + port + "/dvr/" + pathValue + ".m3u8";
+  var scheme = endpointSchemes.dvr === "https" ? "https:" : endpointSchemes.dvr === "http" ? "http:" : location.protocol;
+  return scheme + "//" + host + ":" + port + "/dvr/" + pathValue + ".m3u8";
 }
 
 function playDVR(streamKey) {
@@ -4224,6 +4300,7 @@ function showToast(msg) {
 /* === Init === */
 document.getElementById("config-validate").addEventListener("click", validateConfigEditor);
 document.getElementById("config-apply").addEventListener("click", applyConfigEditor);
+document.getElementById("config-editor").addEventListener("input", function() { configEditorRevision++; });
 document.getElementById("sip-self-test").addEventListener("click", runSIPSelfTest);
 document.getElementById("gb-self-test").addEventListener("click", runGB28181SelfTest);
 applyManagementPermissions();
