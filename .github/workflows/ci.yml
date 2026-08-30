@@ -48,7 +48,10 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
-          only-new-issues: true
+          # The GitHub PR diff API rejects reviews larger than 20,000 lines.
+          # Keep the new-code gate independent of that API limit.
+          args: >-
+            --new-from-rev=${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD^' }}
 
   test:
     name: Test

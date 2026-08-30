@@ -333,7 +333,9 @@ http_stream:
     container: "ts"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -361,7 +363,9 @@ http_stream:
   listen: ":8080"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -407,7 +411,9 @@ http_stream:
     container: "mpegts"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -424,7 +430,9 @@ http_stream:
     container: "mpeg-ts"
 `
 	tmpFile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(tmpFile, []byte(yaml), 0644)
+	if err := os.WriteFile(tmpFile, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := Load(tmpFile)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -505,7 +513,9 @@ func TestLoadConfigInvalidPath(t *testing.T) {
 
 func TestLoadConfigInvalidYAML(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "bad.yaml")
-	os.WriteFile(tmpFile, []byte("{{invalid yaml"), 0644)
+	if err := os.WriteFile(tmpFile, []byte("{{invalid yaml"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	_, err := Load(tmpFile)
 	if err == nil {
 		t.Error("expected error for invalid YAML")

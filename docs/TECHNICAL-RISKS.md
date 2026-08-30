@@ -13,7 +13,7 @@
 - **已确认的数据流**：控制台和协议 lab 的默认 WHEP 请求现在使用 `mode=live`；显式 `mode=realtime` 仍从 `startup.LiveCursor` 创建 reader，并在 `gotKeyframe` 变为 true 前丢弃所有视频非关键帧。
 - **已确认断点**：如果 `LiveCursor` 位于最近一个关键帧之后，而输入源下一个 IDR 间隔较长、没有继续发送 IDR，或输入源不响应 PLI，则 feed loop 会持续读取并丢弃视频，浏览器在 watchdog 窗口内收不到可解码的首个视频访问单元。`mode=live` 会先发送快照中的 GOP，因此可作为对照组。
 - **第二个断点（已修复）**：`whep_feed.go` 中 `video.WriteSample`/`audio.WriteSample` 错误现在进入 WHEP feed 状态和结构化日志；每次真实迁移包含 generation、cursor、mode、前后状态和有界错误，同状态逐帧更新不重复记录；`GET /webrtc/session/{sessionId}/status` 可读取首媒体时间、固定等待毫秒数和有界诊断。
-- **测试证据**：当前 Pion WHEP H.264 RTP、GCC、AAC->Opus、H.264+PCMA，以及 VP8 headless Chrome 测试通过。默认 Console/lab 路径已切到 `mode=live`，显式 `mode=realtime` 仍会在后续 IDR 到来前处于 `waiting_keyframe`；状态 endpoint 已覆盖 generation/cursor/error 读取。新增真实 H.264 Annex-B fixture -> AVCC -> WHEP -> Chromium 回归，已验证 320x180 解码尺寸、ICE connected、无 media error 且 currentTime 连续推进。2026-08-28 独立端口验收进一步验证 SIP 与 GB28181 假设备生成的 H.264 均在 Console WHEP 中得到 160x90、`readyState=4`、无 media error 且 `currentTime` 连续推进。
+- **测试证据**：当前 Pion WHEP H.264 RTP、GCC、AAC->Opus、H.264+PCMA，以及 VP8 headless Chrome 测试通过。默认 Console/lab 路径已切到 `mode=live`，显式 `mode=realtime` 仍会在后续 IDR 到来前处于 `waiting_keyframe`；状态 endpoint 已覆盖 generation/cursor/error 读取。新增真实 H.264 Annex-B fixture -> AVCC -> WHEP -> Chromium 回归在浏览器 offer 宣告 H.264 时验证 320x180 解码尺寸、ICE connected、无 media error 且 currentTime 连续推进；不具备 H.264 接收能力的 Chromium 环境会明确 skip，而不是把服务端正确的 415 判为产品故障。2026-08-28 独立端口验收进一步验证 SIP 与 GB28181 假设备生成的 H.264 均在 Console WHEP 中得到 160x90、`readyState=4`、无 media error 且 `currentTime` 连续推进。
 - **剩余验证**：显式 `mode=realtime`、稀疏关键帧和无 GOP cache 的状态区分回归已保留；2026-08-30 的 60 秒统一矩阵 soak 已通过，但更长时长、背压和并发容量仍需独立运行，不能由正确性矩阵替代。
 - **验收标准**：默认 Console WHEP 必须在 8 秒内收到可解码视频帧并推进 `currentTime`；首帧前允许等待关键帧，但不能因正常的 GOP 间隔先显示误导性的失败状态，也不能静默丢包或永久等待；显式 realtime 模式若无法及时获得关键帧，必须展示可区分的等待/无关键帧状态；失败时服务端日志必须指出是无关键帧、编码不匹配还是样本写入错误。
 
@@ -21,7 +21,7 @@
 
 - **等级**：P1，状态为 `SIP/GB28181/WHIP 统一自动化矩阵已实现并通过短时 soak`。
 - 统一 Chromium 矩阵覆盖 SIP publish -> GB28181 receive + WHEP、GB28181 publish -> SIP receive + WHEP、WHIP H.264/Opus publish -> SIP receive + GB28181 receive + WHEP。它校验真实解码尺寸、媒体时钟、音视频 RTP/解码帧、RTCP、ICE 和服务端非 stalled 状态。
-- `LIVEFORGE_PROTOCOL_MATRIX_SOAK` 可逐秒扩展推进检查；2026-08-29 已通过 15 秒/场景的自动化运行。Chrome 缺失时测试会 skip，默认 soak 为零，因此 CI 必须具备 Chromium 并显式启用 soak 才能把它当作发布门禁。该矩阵证明协议正确性，不证明并发会话、长时背压或部署容量。
+- `LIVEFORGE_PROTOCOL_MATRIX_SOAK` 可逐秒扩展推进检查；2026-08-29 已通过 15 秒/场景的自动化运行。Chrome 缺失或 Chromium offer 不具备 H.264 接收能力时测试会明确 skip，默认 soak 为零，因此需要具备 Chromium/H.264 才能把浏览器矩阵当作发布门禁；Pion 协商覆盖仍是强制路径。该矩阵证明协议正确性，不证明并发会话、长时背压或部署容量。
 
 ## 性能风险处置状态
 
@@ -109,7 +109,7 @@
 | FUNC-001 | WebRTC simulcast layer selection 和 automatic layer pausing 未实现 | `stream.simulcast.*` 明确标记 deferred/unsupported，不得宣传为已支持 |
 | FUNC-002 | 未使用 `audiocodec`/FFmpeg 时，非 AAC 录制和部分输出可能过滤音频并保留纯视频 | 保持可播放视频输出，并在 UI/文档标明构建前提 |
 | FUNC-003 | SIP 主要覆盖 H.264 + PCMA/PCMU，GB28181 主要覆盖 H.264 + G.711A | 协议实验室和 API 应对不支持 codec fail closed，并展示原因 |
-| FUNC-004 | SIP/GB28181/WHIP 已形成统一 Chromium 正确性矩阵，但 Chrome 可缺席且默认不 soak | 发布门禁必须提供 Chromium 并显式运行长时 soak；不能把短时矩阵当作容量证明 |
+| FUNC-004 | SIP/GB28181/WHIP 已形成统一 Chromium 正确性矩阵，但 Chromium 可缺席或不提供 H.264 接收能力且默认不 soak | 发布门禁必须提供带 H.264 接收能力的 Chromium 并显式运行长时 soak；不能把环境 skip 或短时矩阵当作容量证明 |
 | FUNC-005 | G.711A 源已实测 HTTP-FLV/WS-FLV/HTTP-TS/fMP4/HLS/DASH/WHEP；矩阵覆盖 SIP/GB28181/WHIP H.264 和 PCMA/PCMU/G.711A/Opus 的关键转换，其他 codec 组合仍未穷举 | 继续扩展 capability matrix，尤其是 AAC/H.265 和无 FFmpeg fallback |
 
 ## `audioCache` 删除后的设计记录

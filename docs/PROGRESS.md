@@ -13,7 +13,7 @@ Previously identified incomplete or unclosed runtime features are implemented an
 ## Review Items
 
 - **WEBRTC-001 (P0)**: Closed. The default Console and protocol-lab WHEP path uses atomic `mode=live` GOP startup; explicit realtime mode retains its waiting-keyframe semantics, while feed status and bounded diagnostics distinguish waiting, codec mismatch, write failure, generation end, and media stall.
-- **WEBRTC-002 (P1)**: Closed for the supported matrix. Chromium coverage verifies real H.264/VP8 playback, SIP/GB28181/WHIP cross-protocol paths, decoded dimensions, advancing media time, RTP/RTCP counters, and non-stalled server status. Long-duration and high-concurrency capacity remain separate operational work.
+- **WEBRTC-002 (P1)**: Closed for the supported matrix. Chromium coverage verifies real H.264/VP8 playback when the browser advertises H.264, SIP/GB28181/WHIP cross-protocol paths, decoded dimensions, advancing media time, RTP/RTCP counters, and non-stalled server status; browsers without H.264 receive an explicit environment skip, while Pion negotiation coverage remains required. Long-duration and high-concurrency capacity remain separate operational work.
 - Performance, lifecycle, resource, security, and functional-boundary findings are recorded with source locations in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md). They are not silently treated as completed work.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.

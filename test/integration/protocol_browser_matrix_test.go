@@ -236,6 +236,7 @@ type matrixBrowserProbe struct {
 	ICE             string  `json:"ice"`
 	ConnectError    string  `json:"connectError"`
 	Stage           string  `json:"stage"`
+	H264Supported   *bool   `json:"h264Supported"`
 	SessionLocation string  `json:"sessionLocation"`
 	VideoPackets    uint64  `json:"videoPackets"`
 	AudioPackets    uint64  `json:"audioPackets"`
@@ -327,6 +328,9 @@ func waitForMatrixBrowserProbe(t *testing.T, browser context.Context, accept fun
 		err := chromedp.Run(probeCtx, chromedp.Evaluate(`window.__probeMatrix()`, &probe))
 		cancel()
 		if err == nil {
+			if probe.H264Supported != nil && !*probe.H264Supported {
+				t.Skip("headless Chrome does not advertise H.264 WebRTC receive support")
+			}
 			if probe.ConnectError != "" {
 				t.Fatalf("WHEP browser connection failed at %s: %s", probe.Stage, probe.ConnectError)
 			}
@@ -398,6 +402,7 @@ let pc = null;
 let media = new MediaStream();
 let latest = {videoPackets:0,audioPackets:0,framesDecoded:0};
 window.__matrixStage = 'idle';
+window.__matrixH264Supported = null;
 async function connectMatrix() {
   window.__matrixStage = 'creating_pc';
   pc = new RTCPeerConnection();
@@ -408,6 +413,8 @@ async function connectMatrix() {
   pc.addTransceiver('audio', {direction:'recvonly'});
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  window.__matrixH264Supported = /a=rtpmap:\d+ H264\/90000/i.test(pc.localDescription.sdp);
+  if (!window.__matrixH264Supported) throw new Error('browser offer does not advertise H.264');
   window.__matrixStage = 'gathering';
   await new Promise(resolve => {
     if (pc.iceGatheringState === 'complete') { resolve(); return; }
@@ -442,6 +449,7 @@ window.__probeMatrix = () => ({
   currentTime:video.currentTime, error:video.error ? String(video.error.code) : '',
   ice:window.__matrixICE || '', connectError:window.__matrixError || '',
   stage:window.__matrixStage || '', sessionLocation:window.__matrixSession || '',
+  h264Supported:window.__matrixH264Supported,
   videoPackets:latest.videoPackets, audioPackets:latest.audioPackets, framesDecoded:latest.framesDecoded
 });
 </script></body></html>`

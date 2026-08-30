@@ -412,6 +412,7 @@ func TestWHEPH264BrowserDecode(t *testing.T) {
 		ICE        string  `json:"ice"`
 		ConnectErr string  `json:"connectError"`
 		Stage      string  `json:"stage"`
+		H264       *bool   `json:"h264Supported"`
 	}
 	var previousCurrent float64
 	var clockAdvanced bool
@@ -425,6 +426,9 @@ func TestWHEPH264BrowserDecode(t *testing.T) {
 			continue
 		}
 		if probe.ConnectErr != "" {
+			if probe.H264 != nil && !*probe.H264 {
+				t.Skip("headless Chrome does not advertise H.264 WebRTC receive support")
+			}
 			t.Fatalf("H.264 browser connection failed: %s (ICE=%s stage=%s)", probe.ConnectErr, probe.ICE, probe.Stage)
 		}
 		if probe.Current > previousCurrent+0.05 {
@@ -459,6 +463,8 @@ async function connect() {
   const offer = await pc.createOffer();
   window.__h264Stage = 'setting_local';
   await pc.setLocalDescription(offer);
+  window.__h264Supported = /a=rtpmap:\d+ H264\/90000/i.test(pc.localDescription.sdp);
+  if (!window.__h264Supported) throw new Error('browser offer does not advertise H.264');
   window.__h264Stage = 'gathering';
   await new Promise(resolve => {
     if (pc.iceGatheringState === 'complete') { resolve(); return; }
@@ -481,10 +487,11 @@ window.__probeH264 = () => ({
 		width: video.videoWidth,
   height: video.videoHeight,
   currentTime: video.currentTime,
-		error: video.error ? String(video.error.code) : '',
-	ice: window.__h264ICE || '',
-		connectError: window.__h264Error || '',
-		stage: window.__h264Stage || ''
+	  error: video.error ? String(video.error.code) : '',
+  ice: window.__h264ICE || '',
+  connectError: window.__h264Error || '',
+  stage: window.__h264Stage || '',
+  h264Supported: typeof window.__h264Supported === 'boolean' ? window.__h264Supported : null
 });
 window.__connectH264 = () => connect().catch(error => { window.__h264Error = String(error); });
 </script></body></html>`

@@ -307,8 +307,11 @@ GB28181 publish to SIP receive plus WHEP, and WHIP H.264/Opus publish to both
 SIP and GB28181 receive plus WHEP. It requires expected decoded dimensions,
 connected ICE, no browser media error, increasing video/audio RTP and decoded
 frame counters, an advancing media clock, and WHEP server RTP/RTCP state that
-never enters `media_stalled`. The soak duration is a correctness soak; it is not
-evidence of leak freedom, concurrency capacity, or deployment capacity.
+never enters `media_stalled`. The browser checks run when Chromium advertises
+H.264 receive support; otherwise the test reports an environment skip, while
+Pion negotiation tests remain mandatory. The soak duration is a correctness
+soak; it is not evidence of leak freedom, concurrency capacity, or deployment
+capacity.
 
 The self-tests bind their configured RTP/RTCP pair plus ephemeral localhost UDP
 sockets and release every pair before returning. They do not write recordings

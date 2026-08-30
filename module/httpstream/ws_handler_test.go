@@ -285,7 +285,10 @@ func TestWebSocketInvalidFormat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err := websocket.Dial(ctx, addr+"/ws/live/test.mkv", nil)
+	_, resp, err := websocket.Dial(ctx, addr+"/ws/live/test.mkv", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err == nil {
 		t.Fatal("expected error for unsupported format")
 	}
@@ -297,7 +300,10 @@ func TestWebSocketStreamNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err := websocket.Dial(ctx, addr+"/ws/live/nonexist.flv", nil)
+	_, resp, err := websocket.Dial(ctx, addr+"/ws/live/nonexist.flv", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err == nil {
 		t.Fatal("expected error for missing stream")
 	}
@@ -333,7 +339,10 @@ func TestWebSocketBinaryFrames(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(ctx, addr+"/ws/live/frames.ts", nil)
+	conn, resp, err := websocket.Dial(ctx, addr+"/ws/live/frames.ts", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
 	}
@@ -360,7 +369,10 @@ func TestWebSocketInvalidPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err := websocket.Dial(ctx, addr+"/ws/badpath", nil)
+	_, resp, err := websocket.Dial(ctx, addr+"/ws/badpath", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err == nil {
 		t.Fatal("expected error for invalid path")
 	}

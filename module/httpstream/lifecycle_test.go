@@ -154,7 +154,10 @@ func TestWebSocketSubscriberLifecycleSerializesBlockedStartBeforeStop(t *testing
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, addr+"/ws/live/lifecycle.ts", nil)
+	conn, resp, err := websocket.Dial(ctx, addr+"/ws/live/lifecycle.ts", nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
 	}
