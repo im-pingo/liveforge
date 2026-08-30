@@ -136,16 +136,29 @@ func (r *RTPReceiver) runRTP() error {
 			continue
 		}
 
+		// Unmarshal into an owned datagram. ReadFromUDP reuses buf on the next
+		// iteration, while reorder may retain packets for several arrivals.
+		data := append([]byte(nil), buf[:n]...)
 		var pkt pionrtp.Packet
-		if err := pkt.Unmarshal(buf[:n]); err != nil {
+		if err := pkt.Unmarshal(data); err != nil {
 			continue
 		}
 
 		// Feed through reorder buffer
-		r.reorder.push(&pkt, func(p *pionrtp.Packet) {
+		r.reorder.push(ownRTPPacket(&pkt), func(p *pionrtp.Packet) {
 			r.publisher.FeedRTP(p)
 		})
 	}
+}
+
+func ownRTPPacket(pkt *pionrtp.Packet) *pionrtp.Packet {
+	if pkt == nil {
+		return nil
+	}
+	owned := *pkt
+	owned.CSRC = append([]uint32(nil), pkt.CSRC...)
+	owned.Payload = append([]byte(nil), pkt.Payload...)
+	return &owned
 }
 
 func (r *RTPReceiver) runRTCP() error {

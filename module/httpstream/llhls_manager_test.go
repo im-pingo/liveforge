@@ -1,8 +1,10 @@
 package httpstream
 
 import (
+	"bytes"
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,155 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 )
+
+func TestLLHLSVideoOverwriteAbandonsMSNAndWakesBlockedReload(t *testing.T) {
+	stream := newVideoStreamWithoutGOPCache(t)
+	mgr := NewLLHLSManager(stream.Key(), "/live/llhls-overwrite", 0.1, 1, 8, "ts")
+	input := newControlledSegmentInput(2, false)
+	mgr.segmenter.inputFactory = input.factory
+	mgr.segmenter.beforeLiveRead = input.beforeRead(mgr.segmenter.done)
+	mgr.blockingReloadHold = 30 * time.Second
+
+	done := make(chan struct{})
+	go func() {
+		mgr.Run(stream)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		mgr.Stop()
+		input.ring.Close()
+		<-done
+	})
+
+	frame := func(frameType avframe.FrameType, dts int64, marker byte) *avframe.AVFrame {
+		nalType := byte(0x41)
+		if frameType.IsKeyframe() {
+			nalType = 0x65
+		}
+		return avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, frameType,
+			dts, dts, []byte{0, 0, 0, 2, nalType, marker},
+		)
+	}
+
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 0, 0x10))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 200, 0x11))
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 1000, 0x20))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 1200, 0x21))
+	input.waitReady(t)
+
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	mgr.beforeBlockingWait = func() { waitOnce.Do(func() { close(waiting) }) }
+	reloadDone := make(chan string, 1)
+	go func() {
+		playlist, _ := mgr.GeneratePlaylist(context.Background(), 1, 99, false)
+		reloadDone <- playlist
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("LL-HLS blocking reload did not enter its condition wait")
+	}
+
+	for _, overwriteFrame := range []*avframe.AVFrame{
+		frame(avframe.FrameTypeInterframe, 1300, 0x31),
+		frame(avframe.FrameTypeInterframe, 1400, 0x32),
+		frame(avframe.FrameTypeInterframe, 1500, 0x33),
+		frame(avframe.FrameTypeInterframe, 1600, 0x34),
+	} {
+		input.ring.Write(overwriteFrame)
+	}
+	input.permit <- struct{}{}
+	input.waitReady(t)
+
+	mgr.mu.Lock()
+	currentMSN := mgr.currentMSN
+	currentPartCount := len(mgr.currentParts)
+	mgr.mu.Unlock()
+	if currentMSN != 2 || currentPartCount != 0 {
+		mgr.Stop()
+		select {
+		case <-reloadDone:
+		case <-time.After(time.Second):
+		}
+		t.Fatalf("LL-HLS abandoned state = MSN %d with %d parts, want MSN 2 with no parts", currentMSN, currentPartCount)
+	}
+	if prior, ok := mgr.GetFullSegment(0); !ok || len(prior) == 0 {
+		t.Fatal("completed pre-gap LL-HLS segment was not retained")
+	}
+	select {
+	case <-reloadDone:
+	case <-time.After(time.Second):
+		t.Fatal("LL-HLS overwrite did not broadcast the abandoned MSN to blocked reloads")
+	}
+	if _, ok := mgr.GetPartialSegment(1, 0); ok {
+		t.Fatal("abandoned LL-HLS part URL remained available")
+	}
+
+	// A second overwrite before any recovery media must restart recovery without
+	// abandoning another empty MSN.
+	for _, overwriteFrame := range []*avframe.AVFrame{
+		frame(avframe.FrameTypeInterframe, 1700, 0x41),
+		frame(avframe.FrameTypeInterframe, 1800, 0x42),
+		frame(avframe.FrameTypeInterframe, 1900, 0x43),
+		frame(avframe.FrameTypeInterframe, 1950, 0x44),
+	} {
+		input.ring.Write(overwriteFrame)
+	}
+	input.permit <- struct{}{}
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 1975, 0x45))
+	input.writeAndRead(t, frame(avframe.FrameTypeKeyframe, 2000, 0x50))
+	input.writeAndRead(t, frame(avframe.FrameTypeInterframe, 2200, 0x51))
+	input.waitReady(t)
+
+	mgr.mu.Lock()
+	currentMSN = mgr.currentMSN
+	mgr.mu.Unlock()
+	if currentMSN != 2 {
+		t.Fatalf("repeated pre-recovery overwrite advanced MSN to %d, want 2", currentMSN)
+	}
+	recoveredPart, ok := mgr.GetPartialSegment(2, 0)
+	if !ok {
+		t.Fatal("first recovered LL-HLS part is unavailable")
+	}
+	mgr.mu.Lock()
+	part := mgr.currentParts[0]
+	mgr.mu.Unlock()
+	if !part.Independent {
+		t.Fatal("first recovered LL-HLS part is not independent")
+	}
+	for _, marker := range []byte{0x20, 0x21, 0x31, 0x32, 0x33, 0x34, 0x41, 0x42, 0x43, 0x44, 0x45} {
+		if bytes.Contains(recoveredPart, []byte{0x41, marker}) || bytes.Contains(recoveredPart, []byte{0x65, marker}) {
+			t.Fatalf("recovered LL-HLS part retained abandoned/interframe marker %#x", marker)
+		}
+	}
+	full, err := mgr.GeneratePlaylist(context.Background(), -1, -1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta, err := mgr.GeneratePlaylist(context.Background(), -1, -1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOrder := "#EXT-X-DISCONTINUITY\n#EXT-X-PART:"
+	for name, playlist := range map[string]string{"full": full, "delta": delta} {
+		if strings.Count(playlist, "#EXT-X-DISCONTINUITY\n") != 1 || !strings.Contains(playlist, wantOrder) {
+			t.Fatalf("%s LL-HLS playlist discontinuity ordering is wrong:\n%s", name, playlist)
+		}
+	}
+}
+
+type waitEnteredLocker struct {
+	sync.Locker
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (l *waitEnteredLocker) Unlock() {
+	l.once.Do(func() { close(l.entered) })
+	l.Locker.Unlock()
+}
 
 func TestLLHLSManager_HasContent(t *testing.T) {
 	m := NewLLHLSManager("test/stream", "/test/stream", 0.2, 1.0, 4, "fmp4")
@@ -187,6 +338,69 @@ func TestLLHLSManager_BlockingPlaylist(t *testing.T) {
 	}
 }
 
+func TestLLHLSManagerStopUnblocksBlockingReloadAndOwningModuleClose(t *testing.T) {
+	mgr := NewLLHLSManager("live/shutdown-reload", "/live/shutdown-reload", 0.2, 1.0, 4, "fmp4")
+	mgr.mu.Lock()
+	mgr.segments = []*LLHLSSegment{{
+		MSN:      0,
+		Duration: 1,
+		Parts: []*LLHLSPart{{
+			Index: 0, Duration: 0.2, Independent: true, Data: []byte("completed-part"),
+		}},
+	}}
+	mgr.currentMSN = 1
+	mgr.mu.Unlock()
+
+	waitEntered := make(chan struct{})
+	mgr.cond = sync.NewCond(&waitEnteredLocker{Locker: &mgr.mu, entered: waitEntered})
+
+	module := NewModule()
+	module.llhlsManagers[mgr.streamKey] = mgr
+	if !module.beginHandler() {
+		t.Fatal("owning module rejected blocking reload before shutdown")
+	}
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	defer cancelWait()
+	playlistDone := make(chan string, 1)
+	go func() {
+		defer module.handlerWG.Done()
+		playlist, _ := mgr.GeneratePlaylist(waitCtx, 2, 0, false)
+		playlistDone <- playlist
+	}()
+
+	select {
+	case <-waitEntered:
+	case <-time.After(time.Second):
+		t.Fatal("blocking reload did not enter its condition wait")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- module.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		cancelWait()
+		mgr.mu.Lock()
+		mgr.cond.Broadcast()
+		mgr.mu.Unlock()
+		<-closeDone
+		t.Fatal("HTTP module close remained blocked after stopping a subsequent LL-HLS reload")
+	}
+
+	select {
+	case playlist := <-playlistDone:
+		if playlist == "" {
+			t.Fatal("stopped blocking reload returned an empty playlist")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("LL-HLS blocking reload remained blocked after its manager stopped")
+	}
+}
+
 func TestLLHLSManager_BlockingPlaylistTimeout(t *testing.T) {
 	m := NewLLHLSManager("test/stream", "/test/stream", 0.2, 1.0, 4, "fmp4")
 
@@ -202,6 +416,28 @@ func TestLLHLSManager_BlockingPlaylistTimeout(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("should have timed out quickly, took %v", elapsed)
+	}
+}
+
+func TestLLHLSManagerBlockingPlaylistServerHoldWakesBackgroundContext(t *testing.T) {
+	m := NewLLHLSManager("test/server-hold", "/test/server-hold", 0.2, 1.0, 1, "fmp4")
+	m.blockingReloadHold = 20 * time.Millisecond
+	done := make(chan struct{})
+	started := time.Now()
+	go func() {
+		_, _ = m.GeneratePlaylist(context.Background(), 99, 0, false)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
+			t.Fatalf("blocking playlist returned before the server hold elapsed: %v", elapsed)
+		}
+	case <-time.After(500 * time.Millisecond):
+		m.Stop()
+		<-done
+		t.Fatal("blocking playlist did not wake when the server hold deadline elapsed")
 	}
 }
 

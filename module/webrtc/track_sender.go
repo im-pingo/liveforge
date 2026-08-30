@@ -13,8 +13,9 @@ import (
 // TrackSenderStats holds cumulative RTCP statistics for a track.
 // All fields are updated atomically from the RTCP goroutine.
 type TrackSenderStats struct {
-	PLICount  atomic.Uint64 // total PLI/FIR requests received
-	NACKCount atomic.Uint64 // total NACK packets received (may be 0 if pion interceptor consumes them)
+	PLICount            atomic.Uint64 // total PLI/FIR requests received
+	NACKCount           atomic.Uint64 // total NACK packets received (may be 0 if pion interceptor consumes them)
+	RTCPPacketsReceived atomic.Uint64 // total RTCP packets delivered to this sender
 
 	// From ReceiverReport
 	PacketsLost    atomic.Int64  // cumulative packets lost reported by receiver
@@ -54,12 +55,12 @@ type TrackSender struct {
 	sessionID        string
 	track            *webrtc.TrackLocalStaticSample
 	sender           *webrtc.RTPSender
-	mu               sync.Mutex                                // serializes WriteSample calls across goroutines
-	needsKeyframe    atomic.Bool                               // set by RTCP loop on PLI/FIR, cleared by feed loop on keyframe
-	onPLI            func()                                    // called on PLI or FIR (for logging/stats only)
-	onNACK           func(nack *rtcp.TransportLayerNack)       // called on NACK
-	onReceiverReport func(report *rtcp.ReceiverReport)         // called on ReceiverReport
-	onREMB           func(bitrate uint64, ssrcs []uint32)      // called on REMB
+	mu               sync.Mutex                           // serializes WriteSample calls across goroutines
+	needsKeyframe    atomic.Bool                          // set by RTCP loop on PLI/FIR, cleared by feed loop on keyframe
+	onPLI            func()                               // called on PLI or FIR (for logging/stats only)
+	onNACK           func(nack *rtcp.TransportLayerNack)  // called on NACK
+	onReceiverReport func(report *rtcp.ReceiverReport)    // called on ReceiverReport
+	onREMB           func(bitrate uint64, ssrcs []uint32) // called on REMB
 	Stats            TrackSenderStats
 }
 
@@ -87,6 +88,12 @@ func (ts *TrackSender) SetPLIHandler(fn func()) {
 // should skip inter-frames until the next keyframe.
 func (ts *TrackSender) NeedsKeyframe() bool {
 	return ts.needsKeyframe.Load()
+}
+
+// RequestKeyframe enters the same local keyframe gate used for PLI/FIR.
+// The feed loop will discard interframes until it sends a keyframe.
+func (ts *TrackSender) RequestKeyframe() {
+	ts.needsKeyframe.Store(true)
 }
 
 // ClearNeedsKeyframe resets the flag after the feed loop has sent a keyframe.
@@ -144,6 +151,7 @@ func (ts *TrackSender) rtcpLoop() {
 			return
 		}
 		for _, pkt := range pkts {
+			ts.Stats.RTCPPacketsReceived.Add(1)
 			switch p := pkt.(type) {
 			case *rtcp.PictureLossIndication:
 				ts.Stats.PLICount.Add(1)

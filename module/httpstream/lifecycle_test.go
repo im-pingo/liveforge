@@ -84,6 +84,12 @@ func (h *blockedSubscribeHooks) assertOrderedStableID(t *testing.T) {
 	if stop.SubscriberID != start.SubscriberID {
 		t.Errorf("subscribe stop ID = %q, want start ID %q", stop.SubscriberID, start.SubscriberID)
 	}
+	if start.StreamInstanceID == 0 || start.PublisherGeneration == 0 || start.PublisherID == "" {
+		t.Errorf("subscribe start omitted publisher identity: %+v", start)
+	}
+	if stop.StreamInstanceID != start.StreamInstanceID || stop.PublisherGeneration != start.PublisherGeneration || stop.PublisherID != start.PublisherID {
+		t.Errorf("subscribe stop publisher identity = %+v, want %+v", stop, start)
+	}
 }
 
 func TestHTTPSubscriberLifecycleSerializesBlockedStartBeforeStop(t *testing.T) {
@@ -96,7 +102,7 @@ func TestHTTPSubscriberLifecycleSerializesBlockedStartBeforeStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.registeredMu.Lock()
-	m.registered[stream] = true
+	m.registered[stream.Key()] = stream.InstanceID()
 	m.registeredMu.Unlock()
 	stream.MuxerManager().RegisterMuxerStart("ts", func(inst *core.MuxerInstance, _ *core.Stream) {
 		inst.Buffer.Close()
@@ -139,7 +145,7 @@ func TestWebSocketSubscriberLifecycleSerializesBlockedStartBeforeStop(t *testing
 		t.Fatal(err)
 	}
 	m.registeredMu.Lock()
-	m.registered[stream] = true
+	m.registered[stream.Key()] = stream.InstanceID()
 	m.registeredMu.Unlock()
 	stream.MuxerManager().RegisterMuxerStart("ts", func(inst *core.MuxerInstance, _ *core.Stream) {
 		inst.Buffer.Close()

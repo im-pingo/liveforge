@@ -265,6 +265,7 @@ func expandH264Frames(source []h264AccessUnit, totalFrames int, frameDurMs int64
 		dts := int64(i) * frameDurMs
 		result[i] = avframe.AVFrame{
 			MediaType: avframe.MediaTypeVideo,
+			Codec:     avframe.CodecH264,
 			FrameType: ft,
 			Payload:   src.avccPayload,
 			DTS:       dts,

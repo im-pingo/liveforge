@@ -14,7 +14,7 @@
 - **已确认断点**：如果 `LiveCursor` 位于最近一个关键帧之后，而输入源下一个 IDR 间隔较长、没有继续发送 IDR，或输入源不响应 PLI，则 feed loop 会持续读取并丢弃视频，浏览器在 watchdog 窗口内收不到可解码的首个视频访问单元。`mode=live` 会先发送快照中的 GOP，因此可作为对照组。
 - **第二个断点（已修复）**：`whep_feed.go` 中 `video.WriteSample`/`audio.WriteSample` 错误现在进入 WHEP feed 状态和结构化日志；每次真实迁移包含 generation、cursor、mode、前后状态和有界错误，同状态逐帧更新不重复记录；`GET /webrtc/session/{sessionId}/status` 可读取首媒体时间、固定等待毫秒数和有界诊断。
 - **测试证据**：当前 Pion WHEP H.264 RTP、GCC、AAC->Opus、H.264+PCMA，以及 VP8 headless Chrome 测试通过。默认 Console/lab 路径已切到 `mode=live`，显式 `mode=realtime` 仍会在后续 IDR 到来前处于 `waiting_keyframe`；状态 endpoint 已覆盖 generation/cursor/error 读取。新增真实 H.264 Annex-B fixture -> AVCC -> WHEP -> Chromium 回归，已验证 320x180 解码尺寸、ICE connected、无 media error 且 currentTime 连续推进。2026-08-28 独立端口验收进一步验证 SIP 与 GB28181 假设备生成的 H.264 均在 Console WHEP 中得到 160x90、`readyState=4`、无 media error 且 `currentTime` 连续推进。
-- **剩余验证**：继续保留显式 `mode=realtime`、稀疏关键帧和无 GOP cache 的状态区分回归；统一矩阵的长期 soak 和并发容量仍需独立运行，不能由短时正确性矩阵替代。
+- **剩余验证**：显式 `mode=realtime`、稀疏关键帧和无 GOP cache 的状态区分回归已保留；2026-08-30 的 60 秒统一矩阵 soak 已通过，但更长时长、背压和并发容量仍需独立运行，不能由正确性矩阵替代。
 - **验收标准**：默认 Console WHEP 必须在 8 秒内收到可解码视频帧并推进 `currentTime`；首帧前允许等待关键帧，但不能因正常的 GOP 间隔先显示误导性的失败状态，也不能静默丢包或永久等待；显式 realtime 模式若无法及时获得关键帧，必须展示可区分的等待/无关键帧状态；失败时服务端日志必须指出是无关键帧、编码不匹配还是样本写入错误。
 
 ### WEBRTC-002：真实 H.264 浏览器覆盖
@@ -72,15 +72,15 @@
 | ARCH-028 | 已关闭 | GOP 帧数、时长和字节上限热更新会从保留前缀清除并重新计算当前 seal；收紧保持关键帧开头的可播放前缀，放宽只接纳后续交错帧，不恢复已省略或裁剪历史，下一个关键帧开始完整新 GOP |
 | ARCH-029 | 已关闭 | `Destroying` 是 Stream 的不可逆终态；显式关闭、idle/no-publisher timeout 和策略触发销毁后的延迟 publisher 清理不能恢复 `NoPublisher`，不能挂接非空或空 ID publisher，也不会重复销毁通知或重开 ring |
 | ARCH-030 | 已关闭 | 共享转码输出使用携带 source-ring `SourceSpan` 的内部 envelope；snapshot reader 以 reader-local `SourceCursor` floor 按 `Begin >= floor` 过滤同 epoch 历史，跨 floor packet 也丢弃；track 按值保留最近 8 个 epoch 的目标序列头，lagging bridge 在首个可接受 payload 前只补发相同 epoch 的头，匹配头已超出边界时丢弃 AAC payload 而不把 miss 视为满足；直接帧保持原指针/载荷，decode/resample/PCM 聚合/encode/drain 保留有效保守归因 |
-| ARCH-031 | P1，未关闭 | 共享转码 producer 已通过原子 read result 在 source overwrite 时丢弃事件所带保留帧、禁止 clean tail 并以精确 skip count 终止该 generation track，内部 output bridge overwrite 也只关闭该 reader；连续 HTTP-FLV/HTTP-TS/fMP4 与 HTTP/WebSocket 输出均 fail closed。HLS/LL-HLS 已丢弃 partial/retained media、推进 live cursor、刷新同 generation 容器状态；刷新后的音频计划若在直接源与共享转码源间变化，会一次关闭/释放旧 reader 并从 live cursor 打开新 reader，LL-HLS 也会按刷新后的 topology 重置视频关键帧 gate。视频等待关键帧、纯音频直接恢复，并只对首个恢复 segment/part 标记 discontinuity；LL-HLS 还会一次性放弃 MSN、清除已公布 part 并唤醒 blocking reload，已公告的 fMP4 media 各自保留匹配且不可变的 init epoch，旧版本 URL 保留到对应 media 被窗口淘汰。DASH 保留已完成的单 Period init/timeline，丢弃当前 batch 后退休 manager；active-generation transformed EOF 不再 clean flush。SIP 出站现在独立保留 source 与 target-audio 的原子 overwrite 事件，丢弃保留帧并只推进受影响 reader；source overwrite 继续有效转码音频并让直接 H.264 等待同 generation 最新序列头加 IDR，target-audio overwrite 则保持直接视频连续并从 live 恢复音频。最终 RTP 准入在终态 send gate 下复查取消状态和当前 generation；终态先关闭准入和自有 socket，不持有 lifecycle/admission 锁等待已准入发送退出，之后才发布状态与回调。active-generation target-audio EOF 以 `network_lost` 终止呼叫，双 reader 父循环会取消并等待两个 pump 后才返回。GB28181 出站也保留 source/target-audio reader identity 和精确 overwrite 数，丢弃 retained 值及受影响的 20ms holdback，只推进发生覆盖的 reader；wait-only pump 仅排队 reader readiness，merge 串行执行原子 read 并在待发媒体前优先排空 control，因此已经观察到的 source overwrite、target-audio overwrite 或 active target EOF 不能再被 gap 前 RTP 越过。source overwrite 清除待发视频并创建新 PS muxer，同时保留 SSRC/RTP sequence、继续有效目标音频，直到同 generation gap 后最新 sequence header 加 IDR 才恢复视频。target-audio overwrite 仅清除待发目标音频，保持干净的源视频与 PS 状态，并保留该视频原有的 holdback deadline；active-generation target-audio EOF 会在待发 RTP 前失败，所有终态都会取消并等待两个 pump。WHEP 为 source/target-audio 各自保留独立的 condition-backed pump，由同一个 pump 串行执行 readiness、原子读取和 live 推进；source overwrite 保留原 generation 与已建立音频，重置视频 pacing/DTS/PTS 并通过 TrackSender gate 等待同 generation 最新参数集加关键帧，target-audio overwrite 不扰动干净视频，active target-audio EOF 立即进入 `target_audio_failed`，关闭会取消并等待两个 pump 后再 release-once。RTMP、RTSP、SRT、cluster、Record、DVR 仍需各自处理，因此本项保持未关闭 |
+| ARCH-031 | 已关闭 | 共享转码、连续 HTTP/WebSocket、HLS/LL-HLS、DASH、SIP、GB28181、WHEP、RTMP、RTSP、SRT、cluster、Record 和 DVR 均已使用 generation-aware reader 与 fail-closed overwrite 处理；各协议丢弃 retained post-gap media，视频等待同代参数集加关键帧，纯音频按 live media 恢复，终态不 clean flush。验证覆盖 focused/race 测试、协议实验室与带浏览器的跨协议矩阵。 |
 | ARCH-032 | 已关闭 | GOP duration admission/热更新使用溢出安全的无序 min/max DTS span，保留插入顺序并在越界前封存；启用 GOP 时至少要求正的帧数或字节硬上限，直接构造缺失硬上限时使用 300 帧防御默认，避免等 DTS 帧导致无界增长 |
 | ARCH-033 | 已关闭 | API、WebRTC 和 metrics HTTP server 统一配置 `ReadHeaderTimeout=5s`、`IdleTimeout=2m`，慢 header 在限流前有界、空闲 keep-alive 连接不会长期占用资源；现有 handler/media write deadline 和行为保持不变，三模块 focused tests 已验证 |
-| ARCH-034 | P2，未关闭 | EventBus 非 lifecycle 异步事件按 hook 启动无界 goroutine；Alive 与通知 WebSocket 缺少统一 queue/admission/pressure 指标 |
-| ARCH-035 | P2，未关闭 | file 和 Redis 配置源没有统一 document/materialization 字节上限；`os.ReadFile`、Redis hash/prefix 全量读取可能造成无界内存和命令批量 |
-| ARCH-036 | P2，未关闭 | SIP egress 将 packetize 错误、空输出和部分 marshal 错误当作成功，调用保持 active 且没有 `last_error`/drop 观测 |
-| ARCH-037 | P3，未关闭 | SIP/GB28181 Lab manager 的 active session 没有显式 admission ceiling；底层端口/呼叫限制只能间接约束资源 |
+| ARCH-034 | 已关闭 | EventBus lifecycle lane 使用有界队列和 admission；Alive 与通知 WebSocket 使用有界发送队列，并暴露 dropped/pressure 计数，避免每个异步事件无限创建 goroutine |
+| ARCH-035 | 已关闭 | file、HTTP/HTTPS、Consul 和 Redis source 统一使用默认 4 MiB 上限；网络/file 在解析前受限，Redis hash/prefix 使用长度预检和有界批量 materialization |
+| ARCH-036 | 已关闭 | SIP 出站在最终发送前 fail closed 处理 packetize、空输出、nil packet、marshal、UDP write 和 short write 错误，并将有界错误保存在 call status 的 `last_error` |
+| ARCH-037 | 已关闭 | SIP Gateway 与 GB28181 Protocol Lab 使用显式 active-session ceiling，超限在资源分配和信令前拒绝；终态记录保留有界，停止与清理幂等 |
 
-## Config、Storage 与 Record 待关闭项
+## Config、Storage 与 Record 已验证项
 
 | ID | 等级/状态 | 当前问题 |
 | --- | --- | --- |
@@ -120,8 +120,8 @@
 
 ## 后续验证顺序
 
-1. 先关闭剩余的 ARCH-031 媒体正确性 P1，再处理 Config/Storage/Record 的 P1。
-2. 关闭 ARCH-032..ARCH-037 和 Config/Storage 的 P2/P3，并补齐 source、OpenAPI/schema 和 Console 状态。
+1. 对已关闭的 ARCH-031 媒体正确性路径继续安排长时、背压和高并发容量验证；这类测试不能由短时正确性回归替代。
+2. 持续检查 Simulcast 层选择这一明确功能边界，并在实现前保持 schema、Console 和 release 文档中的 deferred 标识。
 3. 显式运行 60 秒统一协议 soak，再对 PERF-001/PERF-003/PERF-004/PERF-005/PERF-006 做多 publisher/多 subscriber 长时容量测试；微基准和短时矩阵都不能替代容量测试。
 
 ## 当前验证记录
@@ -140,3 +140,5 @@
 - `go test ./module/sipgateway -count=5 -timeout=120s`：通过；覆盖外部占用 pair 跳过、SDP 前 socket 绑定、Lab 范围避让和失败清理顺序。
 - 2026-08-28 Apple M1 Pro 微基准：Stream write 54.8-55.0ns/0 alloc；Ring TryRead 37.6-37.7ns/0 alloc；Ring immediate context read 40.1-40.5ns/0 alloc；GB28181 outbound 6.43-6.62us/1880 B/6 alloc；SIP outbound 4.49-4.57us/264 B/3 alloc。结果仅用于同机相对回归。
 - 2026-08-29 Apple M1 Pro Prometheus Collector fixture（128 个活跃流，detail limit 32，3 次运行）：首次接纳 gather 为 157.5-158.1us、约 179.6KB/2822 alloc；接纳满后的 steady gather 为 134.9-136.9us、约 164.6KB/2667 alloc。结果只描述该真实 Collector gather/admission fixture 的分配与延迟，不是容量结论。
+- 2026-08-30 fresh verification：`go test ./...`、重点模块 race、`CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...`、agent-doc/schema/diff 检查全部通过；ring reader 为约 40-50ns/0 alloc，核心生产写入为 67.93-71.27ns/0 alloc，RTMP egress 为约 75-164ns/3 alloc，RTSP egress 为约 1.8-5.1us/9-23 alloc，relay accounting 为约 6.3-31.8ns/0 alloc。数字仅作为本机回归基线，不是部署容量承诺。
+- 2026-08-30 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s go test -tags audiocodec -race ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1 -timeout=8m -v` 通过；三个 SIP/GB28181/WHIP 跨协议 Chromium 场景各自保持约 60 秒媒体推进，WHEP 进入 `playing`，并在结束时完成 SIP、GB28181、WHIP/WHEP 清理。当前本地 Console 页面 smoke 检查也显示正确的 Workspace/Operations/System 分组、完整 Config 文档/schema、两类协议 Lab 入口，浏览器日志无 error/warning。

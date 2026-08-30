@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -32,6 +33,22 @@ func TestRingBufferWriteRead(t *testing.T) {
 	}
 }
 
+func TestRingBufferInvalidCapacityFallsBackToOne(t *testing.T) {
+	for _, size := range []int{0, -1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			rb := NewRingBuffer[int](size)
+			rb.Write(42)
+			reader := rb.NewReader()
+			if got, ok := reader.TryRead(); !ok || got != 42 {
+				t.Fatalf("capacity %d read = (%d, %v), want (42, true)", size, got, ok)
+			}
+			if reader.Lag() != 0 {
+				t.Fatalf("capacity %d lag = %v, want zero", size, reader.Lag())
+			}
+		})
+	}
+}
+
 func TestRingBufferOverflow(t *testing.T) {
 	rb := NewRingBuffer[int](4)
 	// Write 6 items into size-4 buffer — oldest 2 should be overwritten
@@ -43,6 +60,362 @@ func TestRingBufferOverflow(t *testing.T) {
 	val, ok := reader.Read()
 	if !ok || val != 2 {
 		t.Errorf("expected (2, true), got (%v, %v)", val, ok)
+	}
+}
+
+func TestRingReaderReadReportsOverwriteAtomically(t *testing.T) {
+	t.Run("retry-accumulation", func(t *testing.T) {
+		rb := NewRingBuffer[int](2)
+		reader := rb.NewReaderAt(0)
+		for _, value := range []int{10, 20, 30, 40} {
+			rb.Write(value)
+		}
+
+		firstSlotAttempt := make(chan struct{})
+		resumeRead := make(chan struct{})
+		hookCalls := 0
+		rb.testHooks = &ringBufferTestHooks{
+			beforeReadSlotLock: func() {
+				hookCalls++
+				if hookCalls == 1 {
+					close(firstSlotAttempt)
+					<-resumeRead
+				}
+			},
+		}
+
+		result := make(chan RingReadResult[int], 1)
+		go func() {
+			result <- reader.TryReadResult()
+		}()
+
+		select {
+		case <-firstSlotAttempt:
+		case <-time.After(time.Second):
+			t.Fatal("TryReadResult did not reach the first slot acquisition boundary")
+		}
+		rb.Write(50)
+		rb.Write(60)
+		close(resumeRead)
+
+		var got RingReadResult[int]
+		select {
+		case got = <-result:
+		case <-time.After(time.Second):
+			t.Fatal("TryReadResult did not complete after retry release")
+		}
+		if hookCalls != 2 {
+			t.Fatalf("slot acquisition attempts = %d, want 2", hookCalls)
+		}
+		if !got.OK || got.Value != 50 || got.Overwritten != 4 {
+			t.Fatalf("TryReadResult = %+v, want {Value:50 OK:true Overwritten:4}", got)
+		}
+
+		got = reader.TryReadResult()
+		if !got.OK || got.Value != 60 || got.Overwritten != 0 {
+			t.Fatalf("next TryReadResult = %+v, want {Value:60 OK:true Overwritten:0}", got)
+		}
+	})
+
+	t.Run("blocking", func(t *testing.T) {
+		rb := NewRingBuffer[int](2)
+		reader := rb.NewReaderAt(0)
+		for _, value := range []int{10, 20, 30, 40} {
+			rb.Write(value)
+		}
+
+		got := reader.ReadResult()
+		if !got.OK || got.Value != 30 || got.Overwritten != 2 {
+			t.Fatalf("ReadResult = %+v, want {Value:30 OK:true Overwritten:2}", got)
+		}
+
+		got = reader.ReadResult()
+		if !got.OK || got.Value != 40 || got.Overwritten != 0 {
+			t.Fatalf("next ReadResult = %+v, want {Value:40 OK:true Overwritten:0}", got)
+		}
+	})
+
+	t.Run("context", func(t *testing.T) {
+		rb := NewRingBuffer[int](2)
+		reader := rb.NewReaderAt(0)
+		for _, value := range []int{10, 20, 30, 40} {
+			rb.Write(value)
+		}
+
+		got := reader.ReadResultContext(context.Background())
+		if !got.OK || got.Value != 30 || got.Overwritten != 2 {
+			t.Fatalf("ReadResultContext = %+v, want {Value:30 OK:true Overwritten:2}", got)
+		}
+
+		got = reader.ReadResultContext(context.Background())
+		if !got.OK || got.Value != 40 || got.Overwritten != 0 {
+			t.Fatalf("next ReadResultContext = %+v, want {Value:40 OK:true Overwritten:0}", got)
+		}
+	})
+}
+
+func TestRingReaderLegacySkippedCompatibility(t *testing.T) {
+	legacyReads := []struct {
+		name string
+		read func(*RingReader[int]) (int, bool)
+	}{
+		{name: "TryRead", read: func(reader *RingReader[int]) (int, bool) {
+			return reader.TryRead()
+		}},
+		{name: "Read", read: func(reader *RingReader[int]) (int, bool) {
+			return reader.Read()
+		}},
+		{name: "ReadContext", read: func(reader *RingReader[int]) (int, bool) {
+			return reader.ReadContext(context.Background())
+		}},
+	}
+
+	for _, test := range legacyReads {
+		t.Run(test.name, func(t *testing.T) {
+			rb := NewRingBuffer[int](2)
+			reader := rb.NewReaderAt(0)
+			for _, value := range []int{10, 20, 30, 40} {
+				rb.Write(value)
+			}
+
+			value, ok := test.read(reader)
+			if !ok || value != 30 {
+				t.Fatalf("first legacy read = (%d, %v), want (30, true)", value, ok)
+			}
+			if skipped := reader.Skipped(); skipped != 2 {
+				t.Fatalf("Skipped after overwrite = %d, want 2", skipped)
+			}
+
+			value, ok = test.read(reader)
+			if !ok || value != 40 {
+				t.Fatalf("next legacy read = (%d, %v), want (40, true)", value, ok)
+			}
+			if skipped := reader.Skipped(); skipped != 0 {
+				t.Fatalf("Skipped after continuous read = %d, want 0", skipped)
+			}
+		})
+	}
+
+	t.Run("pre-cancel-preserves-nonzero", func(t *testing.T) {
+		rb := NewRingBuffer[int](2)
+		reader := rb.NewReaderAt(0)
+		for _, value := range []int{10, 20, 30, 40} {
+			rb.Write(value)
+		}
+		if value, ok := reader.TryRead(); !ok || value != 30 {
+			t.Fatalf("seed TryRead = (%d, %v), want (30, true)", value, ok)
+		}
+		if skipped := reader.Skipped(); skipped != 2 {
+			t.Fatalf("seed Skipped = %d, want 2", skipped)
+		}
+		cursor := reader.ReadCursor()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, ok := reader.ReadContext(ctx); ok {
+			t.Fatal("pre-cancelled ReadContext returned a value")
+		}
+		if skipped := reader.Skipped(); skipped != 2 {
+			t.Fatalf("Skipped after pre-cancelled read = %d, want preserved value 2", skipped)
+		}
+		if got := reader.ReadCursor(); got != cursor {
+			t.Fatalf("cursor after pre-cancelled read = %d, want %d", got, cursor)
+		}
+	})
+}
+
+func TestRingReaderSkippedConcurrentObserver(t *testing.T) {
+	rb := NewRingBuffer[int](1)
+	reader := rb.NewReaderAt(0)
+	rb.Write(0)
+	rb.Write(1)
+	if _, ok := reader.TryRead(); !ok || reader.Skipped() != 1 {
+		t.Fatal("failed to seed a nonzero compatibility skip")
+	}
+
+	const iterations = 2000
+	start := make(chan struct{})
+	readDone := make(chan bool, 1)
+	observeDone := make(chan int64, 1)
+	go func() {
+		<-start
+		for i := range iterations {
+			rb.Write(i*2 + 2)
+			rb.Write(i*2 + 3)
+			if _, ok := reader.TryRead(); !ok {
+				readDone <- false
+				return
+			}
+		}
+		readDone <- true
+	}()
+	go func() {
+		<-start
+		var observed int64
+		for range iterations {
+			observed += reader.Skipped()
+		}
+		observeDone <- observed
+	}()
+	close(start)
+
+	select {
+	case ok := <-readDone:
+		if !ok {
+			t.Fatal("legacy reader unexpectedly ran out of data")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy reader did not complete")
+	}
+	select {
+	case observed := <-observeDone:
+		if observed <= 0 {
+			t.Fatalf("concurrent observer sum = %d, want positive", observed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Skipped observer did not complete")
+	}
+}
+
+func TestRingReaderAdvanceToLivePreservesLaterWrites(t *testing.T) {
+	rb := NewRingBuffer[int](4)
+	reader := rb.NewReaderAt(0)
+	for _, value := range []int{10, 20, 30} {
+		rb.Write(value)
+	}
+
+	captured := make(chan struct{})
+	resumeAdvance := make(chan struct{})
+	writeSlotLockAttempted := make(chan bool, 1)
+	rb.testHooks = &ringBufferTestHooks{
+		afterAdvanceCapture: func() {
+			close(captured)
+			<-resumeAdvance
+		},
+		writeSlotLockAttempted: func(contended bool) {
+			writeSlotLockAttempted <- contended
+		},
+	}
+	advanceDone := make(chan int64, 1)
+	go func() {
+		advanceDone <- reader.AdvanceToLive()
+	}()
+
+	select {
+	case <-captured:
+	case <-time.After(time.Second):
+		t.Fatal("AdvanceToLive did not reach the capture boundary")
+	}
+
+	writerDone := make(chan struct{})
+	go func() {
+		rb.Write(40)
+		close(writerDone)
+	}()
+
+	var writerContended bool
+	select {
+	case writerContended = <-writeSlotLockAttempted:
+	case <-time.After(time.Second):
+		close(resumeAdvance)
+		cleanupTimer := time.NewTimer(time.Second)
+		defer cleanupTimer.Stop()
+		for advanceDone != nil || writerDone != nil {
+			select {
+			case <-advanceDone:
+				advanceDone = nil
+			case <-writerDone:
+				writerDone = nil
+			case <-cleanupTimer.C:
+				t.Fatal("writer did not attempt the slot lock at the capture boundary; cleanup did not complete")
+			}
+		}
+		t.Fatal("writer did not attempt the slot lock at the capture boundary")
+	}
+	close(resumeAdvance)
+
+	var discarded int64
+	select {
+	case discarded = <-advanceDone:
+	case <-time.After(time.Second):
+		t.Fatal("AdvanceToLive did not complete after capture release")
+	}
+	if discarded != 3 {
+		t.Fatalf("AdvanceToLive discarded = %d, want captured count 3", discarded)
+	}
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not complete after AdvanceToLive released the slot lock")
+	}
+	if !writerContended {
+		t.Fatal("writer slot lock attempt did not contend with AdvanceToLive capture")
+	}
+	got := reader.TryReadResult()
+	if !got.OK || got.Value != 40 || got.Overwritten != 0 {
+		t.Fatalf("TryReadResult after later write = %+v, want {Value:40 OK:true Overwritten:0}", got)
+	}
+}
+
+func TestRingReaderReadResultContextCancellationDoesNotAdvance(t *testing.T) {
+	rb := NewRingBuffer[int](2)
+	reader := rb.NewReaderAt(0)
+	for _, value := range []int{10, 20, 30} {
+		rb.Write(value)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got := reader.ReadResultContext(ctx)
+	if got.OK || got.Value != 0 || got.Overwritten != 0 {
+		t.Fatalf("cancelled ReadResultContext = %+v, want zero unavailable result", got)
+	}
+	if cursor := reader.ReadCursor(); cursor != 0 {
+		t.Fatalf("reader cursor after cancellation = %d, want 0", cursor)
+	}
+	if skipped := reader.Skipped(); skipped != 0 {
+		t.Fatalf("Skipped after cancellation = %d, want 0", skipped)
+	}
+}
+
+func TestRingReaderReadResultEmptyAndClosed(t *testing.T) {
+	rb := NewRingBuffer[int](2)
+	reader := rb.NewReader()
+
+	if got := reader.TryReadResult(); got.OK || got.Value != 0 || got.Overwritten != 0 {
+		t.Fatalf("empty TryReadResult = %+v, want zero unavailable result", got)
+	}
+	rb.Close()
+	if got := reader.ReadResult(); got.OK || got.Value != 0 || got.Overwritten != 0 {
+		t.Fatalf("closed ReadResult = %+v, want zero unavailable result", got)
+	}
+}
+
+func TestRingReaderReadResultAllocations(t *testing.T) {
+	rb := NewRingBuffer[int](8)
+	reader := rb.NewReader()
+	value := 0
+	allocs := testing.AllocsPerRun(1000, func() {
+		value++
+		rb.Write(value)
+		if got := reader.TryReadResult(); !got.OK {
+			t.Fatal("TryReadResult returned no value")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("TryReadResult allocations = %v, want 0", allocs)
+	}
+
+	ctx := context.Background()
+	allocs = testing.AllocsPerRun(1000, func() {
+		value++
+		rb.Write(value)
+		if got := reader.ReadResultContext(ctx); !got.OK {
+			t.Fatal("ReadResultContext returned no value")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("ReadResultContext immediate allocations = %v, want 0", allocs)
 	}
 }
 
@@ -342,6 +715,19 @@ func BenchmarkRingReaderTryRead(b *testing.B) {
 	}
 }
 
+func BenchmarkRingReaderTryReadResult(b *testing.B) {
+	rb := NewRingBuffer[int](1024)
+	reader := rb.NewReader()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rb.Write(i)
+		if result := reader.TryReadResult(); !result.OK {
+			b.Fatal("TryReadResult returned no frame")
+		}
+	}
+}
+
 func BenchmarkRingReaderReadContextImmediate(b *testing.B) {
 	rb := NewRingBuffer[int](1024)
 	reader := rb.NewReader()
@@ -352,6 +738,20 @@ func BenchmarkRingReaderReadContextImmediate(b *testing.B) {
 		rb.Write(i)
 		if _, ok := reader.ReadContext(ctx); !ok {
 			b.Fatal("ReadContext returned no frame")
+		}
+	}
+}
+
+func BenchmarkRingReaderReadContextImmediateResult(b *testing.B) {
+	rb := NewRingBuffer[int](1024)
+	reader := rb.NewReader()
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rb.Write(i)
+		if result := reader.ReadResultContext(ctx); !result.OK {
+			b.Fatal("ReadResultContext returned no frame")
 		}
 	}
 }

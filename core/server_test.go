@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -388,6 +389,53 @@ func TestServerConnectionTrackingUnlimited(t *testing.T) {
 	}
 }
 
+func TestServerConnectionLimitIsAtomicUnderConcurrency(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Limits.MaxConnections = 4
+	s := NewServer(cfg)
+
+	const callers = 128
+	start := make(chan struct{})
+	results := make(chan bool, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- s.AcquireConn()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	acquired := 0
+	for ok := range results {
+		if ok {
+			acquired++
+		}
+	}
+	if acquired != cfg.Limits.MaxConnections {
+		t.Fatalf("acquired %d connections, want exactly %d", acquired, cfg.Limits.MaxConnections)
+	}
+	if got := s.ConnectionCount(); got != int64(acquired) {
+		t.Fatalf("connection count = %d, want %d", got, acquired)
+	}
+	for range acquired {
+		s.ReleaseConn()
+	}
+}
+
+func TestServerReleaseConnDoesNotUnderflow(t *testing.T) {
+	s := NewServer(&config.Config{})
+	s.ReleaseConn()
+	s.ReleaseConn()
+	if got := s.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count = %d after releasing without acquire, want 0", got)
+	}
+}
+
 func TestTLSConfigConfigured(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -550,4 +598,88 @@ func TestServerUpdateConfigSnapshotReturnsReloadFailure(t *testing.T) {
 	if pending := s.PendingRestartChanges(); len(pending) != 0 {
 		t.Fatalf("rejected pending restart paths were published: %v", pending)
 	}
+}
+
+type shutdownDispatchModule struct {
+	bus     *EventBus
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *shutdownDispatchModule) Name() string { return "shutdown-dispatch" }
+func (m *shutdownDispatchModule) Init(server *Server) error {
+	m.bus = server.GetEventBus()
+	return nil
+}
+func (m *shutdownDispatchModule) Hooks() []HookRegistration {
+	return []HookRegistration{{
+		Event: EventStreamAlive,
+		Mode:  HookAsync,
+		Handler: func(*EventContext) error {
+			close(m.entered)
+			<-m.release
+			return nil
+		},
+	}}
+}
+func (m *shutdownDispatchModule) Close() error {
+	return m.bus.EmitAsync(EventStreamAlive, &EventContext{StreamKey: "live/shutdown"})
+}
+
+func TestServerShutdownDrainsAcceptedAsyncHooks(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Server.DrainTimeout = time.Second
+	server := NewServer(cfg)
+	module := &shutdownDispatchModule{entered: make(chan struct{}), release: make(chan struct{})}
+	server.RegisterModule(module)
+	if err := server.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		server.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-module.entered:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown hook did not start")
+	}
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned before accepted async hook completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(module.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after async hook completed")
+	}
+}
+
+func TestServerShutdownDrainTimeoutIsBounded(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Server.DrainTimeout = 25 * time.Millisecond
+	server := NewServer(cfg)
+	module := &shutdownDispatchModule{entered: make(chan struct{}), release: make(chan struct{})}
+	server.RegisterModule(module)
+	if err := server.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	server.Shutdown()
+	elapsed := time.Since(started)
+	close(module.release)
+	if elapsed < 20*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("Shutdown elapsed = %s, want bounded drain timeout", elapsed)
+	}
+}
+
+func TestServerShutdownIsIdempotent(t *testing.T) {
+	server := NewServer(config.Defaults())
+	server.Shutdown()
+	server.Shutdown()
 }

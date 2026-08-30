@@ -29,7 +29,12 @@ func redactErrorURL(raw string) string {
 		return "REDACTED_URL" + trailing
 	}
 	parsed.User = nil
+	if parsed.Path != "" && parsed.Path != "/" {
+		parsed.Path = "/REDACTED"
+		parsed.RawPath = ""
+	}
 	parsed.RawQuery = "__liveforge_redacted__=1"
+	parsed.ForceQuery = false
 	parsed.Fragment = ""
 	return parsed.String() + trailing
 }

@@ -416,33 +416,37 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 	sub.audioUDP = audioUDP
 	sub.videoMulticast = videoMcast
 	sub.audioMulticast = audioMcast
-	if err := sessionSnapshot.Stream.AddSubscriber("rtsp"); err != nil {
+	releaseSubscriber, err := sessionSnapshot.Stream.AddSubscriberForGeneration("rtsp", startup.Generation)
+	if err != nil {
 		slog.Warn("subscriber limit reached", "module", "rtsp", "session", sessionSnapshot.ID, "error", err)
 		sub.Close()
 		return
 	}
 	if !session.SetSubscriber(sub) {
-		sessionSnapshot.Stream.RemoveSubscriber("rtsp")
+		releaseSubscriber()
 		sub.Close()
 		return
 	}
-	if !session.startSubscribeLifecycle(func() {
-		m.server.GetEventBus().EmitAsync(core.EventSubscribe, &core.EventContext{
-			StreamKey:    sessionSnapshot.StreamKey,
-			SubscriberID: sessionSnapshot.ID,
-			Protocol:     "rtsp",
-			RemoteAddr:   sessionSnapshot.RemoteAddr,
+	if !session.startSubscribeLifecycle(func() error {
+		return m.server.GetEventBus().EmitAsync(core.EventSubscribe, &core.EventContext{
+			StreamKey:           sessionSnapshot.StreamKey,
+			StreamInstanceID:    startup.StreamInstanceID,
+			PublisherGeneration: startup.Generation,
+			PublisherID:         startup.PublisherID,
+			SubscriberID:        sessionSnapshot.ID,
+			Protocol:            "rtsp",
+			RemoteAddr:          sessionSnapshot.RemoteAddr,
 		})
 	}) {
 		session.ClearSubscriber(sub)
-		sessionSnapshot.Stream.RemoveSubscriber("rtsp")
+		releaseSubscriber()
 		sub.Close()
 		return
 	}
 
 	defer func() {
 		sub.Close()
-		sessionSnapshot.Stream.RemoveSubscriber("rtsp")
+		releaseSubscriber()
 		session.ClearSubscriber(sub)
 	}()
 
@@ -475,9 +479,18 @@ func (m *Module) runSubscriberLoop(conn net.Conn, session *RTSPSession) {
 		filter.Close()
 	}()
 	for {
-		frame, ok := filter.NextFrame()
-		if !ok {
+		result := filter.NextFrameResult()
+		if result.Overwritten > 0 {
+			ringReader.AdvanceToLive()
+			slog.Warn("rtsp subscriber source reader overwritten", "module", "rtsp", "session", sessionSnapshot.ID, "overwritten", result.Overwritten)
 			return
+		}
+		if !result.OK {
+			return
+		}
+		frame := result.Frame
+		if frame == nil {
+			continue
 		}
 		if !sessionSnapshot.Stream.IsPublisherGeneration(startup.Generation) {
 			return
@@ -596,20 +609,29 @@ func (m *Module) cleanupSession(session *RTSPSession) bool {
 	}
 	m.mu.Unlock()
 	if snapshot.Published && snapshot.Publisher != nil {
-		m.server.GetEventBus().EmitAsync(core.EventPublishStop, &core.EventContext{
-			StreamKey:   snapshot.StreamKey,
-			PublisherID: snapshot.Publisher.ID(),
-			Protocol:    "rtsp",
-			RemoteAddr:  snapshot.RemoteAddr,
-		})
+		if err := m.server.GetEventBus().EmitAsync(core.EventPublishStop, &core.EventContext{
+			StreamKey:           snapshot.StreamKey,
+			StreamInstanceID:    snapshot.Startup.StreamInstanceID,
+			PublisherGeneration: snapshot.Startup.Generation,
+			PublisherID:         snapshot.Publisher.ID(),
+			Protocol:            "rtsp",
+			RemoteAddr:          snapshot.RemoteAddr,
+		}); err != nil {
+			slog.Error("publisher terminal lifecycle admission failed", "module", "rtsp", "stream", snapshot.StreamKey, "error", err)
+		}
 	}
 	if snapshot.Subscribed {
-		m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &core.EventContext{
-			StreamKey:    snapshot.StreamKey,
-			SubscriberID: snapshot.ID,
-			Protocol:     "rtsp",
-			RemoteAddr:   snapshot.RemoteAddr,
-		})
+		if err := m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &core.EventContext{
+			StreamKey:           snapshot.StreamKey,
+			StreamInstanceID:    snapshot.Startup.StreamInstanceID,
+			PublisherGeneration: snapshot.Startup.Generation,
+			PublisherID:         snapshot.Startup.PublisherID,
+			SubscriberID:        snapshot.ID,
+			Protocol:            "rtsp",
+			RemoteAddr:          snapshot.RemoteAddr,
+		}); err != nil {
+			slog.Error("subscriber terminal lifecycle admission failed", "module", "rtsp", "stream", snapshot.StreamKey, "error", err)
+		}
 	}
 	return true
 }

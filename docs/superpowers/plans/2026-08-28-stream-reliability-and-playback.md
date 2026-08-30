@@ -39,13 +39,13 @@
 - `Session` exposes a concurrency-safe diagnostic snapshot for the Console/API path without exposing mutable internals.
 - The Console uses `mode=live` for its default preview and renders explicit waiting/error states from the returned session status.
 
-- [ ] **Step 1: Write failing tests** for realtime waiting-keyframe diagnostics, live cached-keyframe startup, empty-cache behavior, source generation termination, H.264 Annex-B output, and propagated `WriteSample` failure.
-- [ ] **Step 2: Run focused WebRTC tests** with `go test ./module/webrtc -run 'WHEP|whep' -count=1 -v`; confirm each new regression test fails for the expected missing state/error behavior.
-- [ ] **Step 3: Implement the status model and make feed writes return structured errors**; preserve audio-only live-cursor behavior and the existing single GOP cache.
-- [ ] **Step 4: Change only the Console default to `mode=live`**, keep explicit realtime semantics, and render waiting-keyframe versus terminal failure distinctly.
-- [ ] **Step 5: Run focused tests and the browser H.264 test**; inspect SDP codec, dimensions, advancing `currentTime`, RTP counts, and media errors.
-- [ ] **Step 6: Update WebRTC/OpenAPI/recipe/AI-facing documentation** for the status fields and default mode, then run the agent-doc checks.
-- [ ] **Step 7: Commit** with `git -c user.name='im-pingo' -c user.email='cczjp89@gmail.com' commit` after verification.
+- [x] **Step 1: Write failing tests** for realtime waiting-keyframe diagnostics, live cached-keyframe startup, empty-cache behavior, source generation termination, H.264 Annex-B output, and propagated `WriteSample` failure.
+- [x] **Step 2: Run focused WebRTC tests** with `go test ./module/webrtc -run 'WHEP|whep' -count=1 -v`; confirm each new regression test fails for the expected missing state/error behavior.
+- [x] **Step 3: Implement the status model and make feed writes return structured errors**; preserve audio-only live-cursor behavior and the existing single GOP cache.
+- [x] **Step 4: Change only the Console default to `mode=live`**, keep explicit realtime semantics, and render waiting-keyframe versus terminal failure distinctly.
+- [x] **Step 5: Run focused tests and the browser H.264 test**; inspect SDP codec, dimensions, advancing `currentTime`, RTP counts, and media errors.
+- [x] **Step 6: Update WebRTC/OpenAPI/recipe/AI-facing documentation** for the status fields and default mode, then run the agent-doc checks.
+- [x] **Step 7: Commit** with `git -c user.name='im-pingo' -c user.email='cczjp89@gmail.com' commit` after verification.
 
 ### Task 2: Core cache bounds and generation-safe consumers
 
@@ -68,13 +68,13 @@
 - Cleanup APIs take `streamKey` and optional publisher generation/identity and never remove a newer generation.
 - `NewRingBuffer` is safe for direct zero/negative-capacity callers while config validation remains fail-closed.
 
-- [ ] **Step 1: Add failing tests** for each GOP bound, zero/negative ring capacity, stale destroy after republish, and historical HTTP stream registry cleanup.
-- [ ] **Step 2: Run `go test ./core ./pkg/util ./module/httpstream -run 'GOP|Ring|Destroy|Republish' -count=1`** and record the expected failures.
-- [ ] **Step 3: Implement bounded cache eviction and ring constructor protection** without changing interleaved audio ownership.
-- [ ] **Step 4: Replace pointer-retaining HTTP registration and make manager cleanup generation-aware**; make publisher timeout remove idle streams only when the generation still matches.
-- [ ] **Step 5: Run package tests, `go test -race ./core ./pkg/util ./module/httpstream`, and targeted allocation benchmarks.
-- [ ] **Step 6: Update schema, config recipe, manifest and llms docs** with defaults and memory-bound semantics.
-- [ ] **Step 7: Commit** the independently verified core reliability phase as `im-pingo`.
+- [x] **Step 1: Add failing tests** for each GOP bound, zero/negative ring capacity, stale destroy after republish, and historical HTTP stream registry cleanup.
+- [x] **Step 2: Run `go test ./core ./pkg/util ./module/httpstream -run 'GOP|Ring|Destroy|Republish' -count=1`** and record the expected failures.
+- [x] **Step 3: Implement bounded cache eviction and ring constructor protection** without changing interleaved audio ownership.
+- [x] **Step 4: Replace pointer-retaining HTTP registration and make manager cleanup generation-aware**; make publisher timeout remove idle streams only when the generation still matches.
+- [x] **Step 5: Run package tests, `go test -race ./core ./pkg/util ./module/httpstream`, and targeted allocation benchmarks.
+- [x] **Step 6: Update schema, config recipe, manifest and llms docs** with defaults and memory-bound semantics.
+- [x] **Step 7: Commit** the independently verified core reliability phase as `im-pingo`.
 
 ### Task 3: Strict connection, RTP ownership, and shutdown
 
@@ -99,13 +99,13 @@
 - Forwarded client IP is accepted only through an explicit trusted-proxy policy.
 - All stream responses observe request cancellation and bounded write/header deadlines.
 
-- [ ] **Step 1: Add failing concurrency, buffer-aliasing, snapshot-race, double-close, trusted-proxy, and cancellation tests.**
-- [ ] **Step 2: Run focused tests with `-race` and confirm the regressions reproduce.**
-- [ ] **Step 3: Implement CAS connection admission, DVR release-once, owned RTP payloads, immutable registry snapshots, and idempotent close.**
-- [ ] **Step 4: Replace cancellable streaming sleeps and add bounded HTTP deadlines without changing valid playlist contents.
-- [ ] **Step 5: Run `go test -race ./core ./module/dvr ./module/gb28181 ./module/httpstream ./pkg/ratelimit` and inspect goroutine/resource cleanup.
-- [ ] **Step 6: Update security/operations docs and manifest entries for trusted proxies, connection coverage, and shutdown guarantees.
-- [ ] **Step 7: Commit** with the required `im-pingo` author.
+- [x] **Step 1: Add failing concurrency, buffer-aliasing, snapshot-race, double-close, trusted-proxy, and cancellation tests.**
+- [x] **Step 2: Run focused tests with `-race` and confirm the regressions reproduce.**
+- [x] **Step 3: Implement CAS connection admission, DVR release-once, owned RTP payloads, immutable registry snapshots, and idempotent close.**
+- [x] **Step 4: Replace cancellable streaming sleeps and add bounded HTTP deadlines without changing valid playlist contents.**
+- [x] **Step 5: Run `go test -race ./core ./module/dvr ./module/gb28181 ./module/httpstream ./pkg/ratelimit` and inspect goroutine/resource cleanup.**
+- [x] **Step 6: Update security/operations docs and manifest entries for trusted proxies, connection coverage, and shutdown guarantees.**
+- [x] **Step 7: Commit** with the required `im-pingo` author.
 
 ### Task 4: Hot-path and configuration-source hardening
 
@@ -126,12 +126,12 @@
 - Runtime source reads/writes retain serialization and immutable snapshots, but unchanged versions do not repeat full application work.
 - Configuration redaction covers URL userinfo and error values; metrics expose bounded labels or a documented opt-in stream detail mode.
 
-- [ ] **Step 1: Add failing behavior tests** for URL/userinfo redaction, unchanged refresh, publisher identity hot path, and bounded metric labels.
-- [ ] **Step 2: Add baseline benchmarks** for `WriteFrame`, ring readers, RTMP/RTSP/RTP output and config refresh; capture before numbers.
-- [ ] **Step 3: Implement one optimization at a time**, running its focused tests after each change; preserve packet timing and byte counts.
-- [ ] **Step 4: Run race tests and benchmarks** with `go test -bench='BenchmarkRingReader|BenchmarkRTMPConn' -benchmem ./pkg/util ./module/cluster` plus focused new benchmarks.
-- [ ] **Step 5: Update configuration/security/metrics docs** and record measured limits without claiming unmeasured capacity.
-- [ ] **Step 6: Commit** with the required `im-pingo` author.
+- [x] **Step 1: Add failing behavior tests** for URL/userinfo redaction, unchanged refresh, publisher identity hot path, and bounded metric labels.
+- [x] **Step 2: Add baseline benchmarks** for `WriteFrame`, ring readers, RTMP/RTSP/RTP output and config refresh; capture before numbers.
+- [x] **Step 3: Implement one optimization at a time**, running its focused tests after each change; preserve packet timing and byte counts.
+- [x] **Step 4: Run race tests and benchmarks** with `go test -bench='BenchmarkRingReader|BenchmarkRTMPConn' -benchmem ./pkg/util ./module/cluster` plus focused new benchmarks.
+- [x] **Step 5: Update configuration/security/metrics docs** and record measured limits without claiming unmeasured capacity.
+- [x] **Step 6: Commit** with the required `im-pingo` author.
 
 ### Task 5: Console, protocol matrix, and release verification
 
@@ -161,11 +161,11 @@
 - Protocol lab responses expose separate source/target stream, codec, audio/video/RTCP counters, generation and cross-protocol playback links.
 - Storage distinguishes disabled record module, empty/incomplete output, complete playable recording, and DVR availability.
 
-- [ ] **Step 1: Add failing DOM/API contract tests** for navigation groups, all config fields/source kinds, redaction, lab counters/links, and disabled storage.
-- [ ] **Step 2: Run focused API tests and browser smoke checks** to verify the failures represent missing behavior.
-- [ ] **Step 3: Implement the smallest UI/data changes** and keep labels tied to actual API capability states.
-- [ ] **Step 4: Run local SIP/GB28181 publish and receive labs**, then test WHEP, HTTP-FLV/TS/fMP4, HLS/DASH and recording playback where codecs allow it.
-- [ ] **Step 5: Run the complete verification matrix:**
+- [x] **Step 1: Add failing DOM/API contract tests** for navigation groups, all config fields/source kinds, redaction, lab counters/links, and disabled storage.
+- [x] **Step 2: Run focused API tests and browser smoke checks** to verify the failures represent missing behavior.
+- [x] **Step 3: Implement the smallest UI/data changes** and keep labels tied to actual API capability states.
+- [x] **Step 4: Run local SIP/GB28181 publish and receive labs**, then test WHEP, HTTP-FLV/TS/fMP4, HLS/DASH and recording playback where codecs allow it.
+- [x] **Step 5: Run the complete verification matrix:**
 
 ```bash
 go test ./...
@@ -177,5 +177,5 @@ git diff --check
 jq empty agent-manifest.json
 ```
 
-- [ ] **Step 6: Review the final diff against the spec and risk table**, run `git status`, and verify no recordings, secrets, binaries or generated profiles are staged.
-- [ ] **Step 7: Commit** only after all commands above have fresh successful output, then push/merge only when CI is green.
+- [x] **Step 6: Review the final diff against the spec and risk table**, run `git status`, and verify no recordings, secrets, binaries or generated profiles are staged.
+- [x] **Step 7: Commit** only after all commands above have fresh successful output, then push/merge only when CI is green.

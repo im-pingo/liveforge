@@ -633,6 +633,36 @@ func TestEventBusAsyncHook(t *testing.T) {
 	}
 }
 
+func TestEventBusBoundsNonLifecycleAsyncDispatch(t *testing.T) {
+	bus := NewEventBus()
+	release := make(chan struct{})
+	bus.Register(HookRegistration{
+		Event: EventStreamAlive,
+		Mode:  HookAsync,
+		Handler: func(*EventContext) error {
+			<-release
+			return nil
+		},
+	})
+	ctx := &EventContext{StreamKey: "live/async-capacity"}
+	for i := 0; i < maxAsyncDispatches; i++ {
+		if err := bus.EmitAsync(EventStreamAlive, ctx); err != nil {
+			t.Fatalf("async admission %d: %v", i, err)
+		}
+	}
+	if err := bus.EmitAsync(EventStreamAlive, ctx); !errors.Is(err, ErrAsyncBackpressure) {
+		t.Fatalf("over-capacity async admission = %v, want %v", err, ErrAsyncBackpressure)
+	}
+	stats := bus.AsyncStats()
+	if stats.InFlight != maxAsyncDispatches || stats.Capacity != maxAsyncDispatches {
+		t.Fatalf("async pressure stats = %+v, want in-flight/capacity %d", stats, maxAsyncDispatches)
+	}
+	close(release)
+	if err := bus.Drain(context.Background()); err != nil {
+		t.Fatalf("drain after releasing async hooks: %v", err)
+	}
+}
+
 func TestEventBusSeparatesSyncAuthorizationFromAsyncLifecycle(t *testing.T) {
 	bus := NewEventBus()
 	actionStarted := false

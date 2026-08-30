@@ -357,6 +357,65 @@ func TestSessionStaleHistoryStartsAtCurrentGeneration(t *testing.T) {
 	}
 }
 
+func TestSessionDrainsFramesWrittenAfterSnapshotWhenPublisherGenerationEnds(t *testing.T) {
+	dir := t.TempDir()
+	stream := core.NewStream("live/dvr-generation-tail", config.StreamConfig{
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 32,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	defer stream.Close()
+	pub := &dvrStaleHistoryPublisher{id: "generation-tail", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := stream.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, dvrTestAVCConfig(),
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 4, 0x65, 0x11, 0x22, 0x33},
+	))
+
+	session, err := NewSession("live/dvr-generation-tail", stream, config.DVRConfig{
+		Path: filepath.Join(dir, "{stream_key}"),
+	}, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	tailMarker := []byte{0xde, 0xad, 0xbe, 0xef}
+	tailPayload := append([]byte{0, 0, 0, 5, 0x41}, tailMarker...)
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+		33, 33, tailPayload,
+	))
+	stream.RemovePublisherIf(pub)
+	session.Run()
+
+	segments := session.Index().Segments()
+	if len(segments) != 1 {
+		t.Fatalf("segments after generation tail drain = %d, want 1", len(segments))
+	}
+	data, err := os.ReadFile(segments[0].DiskPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTail := false
+	demuxer := ts.NewDemuxer(func(frame *avframe.AVFrame) {
+		if frame.MediaType.IsVideo() && bytes.Contains(frame.Payload, tailMarker) {
+			gotTail = true
+		}
+	})
+	demuxer.Feed(data)
+	demuxer.Flush()
+	if !gotTail {
+		t.Fatalf("DVR segment omitted generation tail marker %x", tailMarker)
+	}
+}
+
 func TestDVRWaitsForLateVideoHeaderBeforeInitializingMuxer(t *testing.T) {
 	dir := t.TempDir()
 	stream := core.NewStream("live/dvr-late-header", config.StreamConfig{

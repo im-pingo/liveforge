@@ -2,6 +2,7 @@ package rtsp
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,23 @@ import (
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
+
+func TestRTSPSessionLifecycleRejectsAdmissionError(t *testing.T) {
+	session := NewRTSPSession("session", "live/admission")
+	session.Publisher = &RTSPPublisher{}
+	session.Subscriber = &RTSPSubscriber{}
+	rejected := errors.New("admission rejected")
+	if session.startPublishLifecycle(func() error { return rejected }) {
+		t.Fatal("publish lifecycle started after admission error")
+	}
+	if session.startSubscribeLifecycle(func() error { return rejected }) {
+		t.Fatal("subscribe lifecycle started after admission error")
+	}
+	published, subscribed := session.lifecycleStarted()
+	if published || subscribed {
+		t.Fatalf("failed lifecycle state = published:%t subscribed:%t", published, subscribed)
+	}
+}
 
 func TestRTSPPublishLifecycleStopWaitsForBlockedStart(t *testing.T) {
 	m, server := newShutdownTestModule(t, time.Second)
@@ -164,6 +182,12 @@ func TestRTSPSubscribeLifecycleStopWaitsForBlockedStart(t *testing.T) {
 	stop := receiveRTSPLifecycle(t, stopRan, "subscribe stop")
 	if stop.SubscriberID != start.SubscriberID {
 		t.Fatalf("RTSP subscriber generation = %q then %q", start.SubscriberID, stop.SubscriberID)
+	}
+	if start.StreamInstanceID == 0 || start.PublisherGeneration == 0 || start.PublisherID == "" {
+		t.Fatalf("RTSP subscribe start omitted publisher identity: %+v", start)
+	}
+	if stop.StreamInstanceID != start.StreamInstanceID || stop.PublisherGeneration != start.PublisherGeneration || stop.PublisherID != start.PublisherID {
+		t.Fatalf("RTSP subscribe stop publisher identity = %+v, want %+v", stop, start)
 	}
 	stream.WriteFrame(&avframe.AVFrame{MediaType: avframe.MediaTypeVideo, FrameType: avframe.FrameTypeKeyframe, Payload: []byte{0x65}})
 }

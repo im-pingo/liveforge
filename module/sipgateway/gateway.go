@@ -106,7 +106,7 @@ func NewGateway(cfg config.SIPGatewayConfig, sipSvc sipmod.SIPService, hub *core
 		pending:        make(map[string]struct{}),
 		rtpIdleTimeout: 30 * time.Second,
 	}
-	gw.labs = newLabManager(gw)
+	gw.labs = newLabManagerWithLimit(gw, cfg.MaxLabSessions)
 	gw.sendInvite = func(ctx context.Context, req *sip.Request) (inviteDialog, error) {
 		return sipSvc.SendInvite(ctx, req)
 	}
@@ -259,6 +259,11 @@ func (gw *Gateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(resp)
 		return
 	}
+	cs.mu.RLock()
+	startup := cs.startupSnapshot
+	cs.mu.RUnlock()
+	publishCtx.StreamInstanceID = startup.StreamInstanceID
+	publishCtx.PublisherGeneration = startup.Generation
 	var lifecycleErr error
 	if !cs.startPublishLifecycle(func() error {
 		lifecycleErr = gw.eventBus.EmitAsync(core.EventPublish, publishCtx)
@@ -966,11 +971,16 @@ func (gw *Gateway) finishSession(session *CallSession, state CallState, err erro
 			stream.RemovePublisherIf(currentPublisher)
 		}
 		if session.publishLifecycleStarted() {
+			session.mu.RLock()
+			startup := session.startupSnapshot
+			session.mu.RUnlock()
 			if eventErr := gw.eventBus.EmitAsync(core.EventPublishStop, &core.EventContext{
-				StreamKey:   session.streamKey,
-				PublisherID: publisher.ID(),
-				Protocol:    "sip",
-				RemoteAddr:  session.snapshot().RemoteAddress,
+				StreamKey:           session.streamKey,
+				StreamInstanceID:    startup.StreamInstanceID,
+				PublisherGeneration: startup.Generation,
+				PublisherID:         publisher.ID(),
+				Protocol:            "sip",
+				RemoteAddr:          session.snapshot().RemoteAddress,
 			}); eventErr != nil {
 				slog.Warn("failed to enqueue publish stop lifecycle event", "module", "sipgateway", "call", session.callID, "error", eventErr)
 			}

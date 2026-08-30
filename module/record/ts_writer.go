@@ -21,6 +21,11 @@ type tsFrameWriter struct {
 	audioSeq   []byte
 	videoCodec avframe.CodecType
 	audioCodec avframe.CodecType
+	videoBase  int64
+	audioBase  int64
+	videoSet   bool
+	audioSet   bool
+
 	sidecars    sidecarMediaFile
 	sidecarBase string
 	segmentFile sidecarWriteObject
@@ -76,6 +81,23 @@ func (w *tsFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 		}
 	}
 
+	normalized := *frame
+	if frame.MediaType.IsVideo() {
+		if !w.videoSet {
+			w.videoBase = frame.DTS
+			w.videoSet = true
+		}
+		normalized.DTS -= w.videoBase
+		normalized.PTS -= w.videoBase
+	} else if frame.MediaType.IsAudio() {
+		if !w.audioSet {
+			w.audioBase = frame.DTS
+			w.audioSet = true
+		}
+		normalized.DTS -= w.audioBase
+		normalized.PTS -= w.audioBase
+	}
+
 	// Start new segment on keyframe or if no segment is open
 	if w.segmentFile == nil || (frame.MediaType.IsVideo() && frame.FrameType.IsKeyframe() && w.shouldSplit()) {
 		if err := w.closeSegment(); err != nil {
@@ -86,7 +108,7 @@ func (w *tsFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 		}
 	}
 
-	data := w.muxer.WriteFrame(frame)
+	data := w.muxer.WriteFrame(&normalized)
 	if data != nil {
 		if _, err := f.Write(data); err != nil {
 			return fmt.Errorf("write primary TS recording: %w", err)
@@ -97,9 +119,9 @@ func (w *tsFrameWriter) writeFrame(f mediaFile, frame *avframe.AVFrame) error {
 	}
 
 	if w.segStartTS < 0 {
-		w.segStartTS = frame.DTS
+		w.segStartTS = normalized.DTS
 	}
-	w.lastDTS = frame.DTS
+	w.lastDTS = normalized.DTS
 
 	return nil
 }

@@ -148,7 +148,10 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 
 	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(relayCtx)
+		frame, ok, readErr := core.ReadFrameContext(relayCtx, reader)
+		if readErr != nil {
+			return fmt.Errorf("source ring continuity lost: %w", readErr)
+		}
 		if !ok {
 			return nil
 		}
@@ -247,10 +250,7 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 	defer stopCancelWatch()
 	markRelayConnected(ctx)
 
-	pub := &originPublisher{
-		id:   fmt.Sprintf("gb-pull-%s", stream.Key()),
-		info: &avframe.MediaInfo{},
-	}
+	pub := newOriginPublisher("gb-pull", stream.Key(), &avframe.MediaInfo{})
 	if err := stream.SetPublisher(pub); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
@@ -402,10 +402,7 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 	}
 	defer conn.Close()
 
-	pub := &originPublisher{
-		id:   fmt.Sprintf("gb-push-%s", stream.Key()),
-		info: &avframe.MediaInfo{},
-	}
+	pub := newOriginPublisher("gb-push", stream.Key(), &avframe.MediaInfo{})
 	if err := stream.SetPublisher(pub); err != nil {
 		slog.Error("gb push set publisher failed", "module", "cluster", "error", err)
 		return
@@ -495,7 +492,10 @@ func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupS
 
 	reader := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)
 	for {
-		frame, ok := reader.ReadContext(ctx)
+		frame, ok, readErr := core.ReadFrameContext(ctx, reader)
+		if readErr != nil {
+			return fmt.Errorf("source ring continuity lost: %w", readErr)
+		}
 		if !ok {
 			return nil
 		}

@@ -102,14 +102,18 @@ func (s *RTSPSession) MarkPublished() bool {
 	return true
 }
 
-func (s *RTSPSession) startPublishLifecycle(emit func()) bool {
+func (s *RTSPSession) startPublishLifecycle(emit func() error) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.State == StateClosed || s.Publisher == nil {
 		return false
 	}
+	if emit != nil {
+		if err := emit(); err != nil {
+			return false
+		}
+	}
 	s.published = true
-	emit()
 	return true
 }
 
@@ -123,14 +127,18 @@ func (s *RTSPSession) MarkSubscribed() bool {
 	return true
 }
 
-func (s *RTSPSession) startSubscribeLifecycle(emit func()) bool {
+func (s *RTSPSession) startSubscribeLifecycle(emit func() error) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.State == StateClosed || s.Subscriber == nil {
 		return false
 	}
+	if emit != nil {
+		if err := emit(); err != nil {
+			return false
+		}
+	}
 	s.subscribed = true
-	emit()
 	return true
 }
 
@@ -239,6 +247,7 @@ func (s *RTSPSession) SetPublisher(mediaInfo *avframe.MediaInfo, stream *core.St
 	s.MediaInfo = mediaInfo
 	s.Stream = stream
 	s.Publisher = publisher
+	s.Startup = stream.StartupSnapshot()
 	return true
 }
 

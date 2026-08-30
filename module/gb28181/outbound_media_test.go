@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/muxer/ps"
 	"github.com/im-pingo/liveforge/pkg/portalloc"
+	"github.com/im-pingo/liveforge/pkg/util"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
 )
@@ -374,6 +376,295 @@ func TestGBOutboundSenderReportsArePeriodicAndCountPayloadOctets(t *testing.T) {
 	}
 	if got := sender.rtcpPackets.Load(); got < 2 {
 		t.Fatalf("sender reports sent = %d, want at least 2", got)
+	}
+}
+
+func TestGBOutboundTranscodedHistoryKeepsSharedRTPTimestampsMonotonic(t *testing.T) {
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 16}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/transcoded-timeline")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecOpus,
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+
+	sender, err := newOutboundMediaSession(stream, 0, 0)
+	if err != nil {
+		t.Fatalf("newOutboundMediaSession: %v", err)
+	}
+	defer sender.close()
+	sender.snapshot = stream.StartupSnapshot()
+	sender.snapshot.VideoSequenceHeader = nil
+	sender.snapshot.AudioSequenceHeader = nil
+	sender.snapshot.ReplayFrames = []*avframe.AVFrame{
+		labmedia.VideoFrame(0),
+		labmedia.VideoFrame(360),
+	}
+
+	targetAudio := util.NewRingBuffer[*avframe.AVFrame](8)
+	for _, dts := range []int64{0, 180, 360} {
+		targetAudio.Write(labmedia.G711Frame(avframe.CodecG711A, dts))
+	}
+	sender.audio = targetAudio.NewReader()
+
+	remoteRTP, remoteRTCP, err := listenGBLabUDPPair()
+	if err != nil {
+		t.Fatalf("listen remote media pair: %v", err)
+	}
+	defer remoteRTP.Close()
+	defer remoteRTCP.Close()
+	if err := sender.setRemote(remoteRTP.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("setRemote: %v", err)
+	}
+	sender.start()
+
+	var timestamps []uint32
+	for range 5 {
+		timestamp, _, _ := readGBRTPFrame(t, remoteRTP)
+		timestamps = append(timestamps, timestamp)
+	}
+	want := []uint32{0, 0, 180 * 90, 360 * 90, 360 * 90}
+	if !slices.Equal(timestamps, want) {
+		t.Fatalf("shared PS/RTP timestamps = %v, want monotonic A/V timeline %v", timestamps, want)
+	}
+}
+
+func TestGBOutboundTranscodedLiveVideoAdvancesWhileAudioIsPaused(t *testing.T) {
+	const ringCapacity = 4
+	h := newGBTranscodedLiveHarness(t, ringCapacity)
+
+	const videoFrames = ringCapacity + 3
+	var want []uint32
+	for index := 1; index <= videoFrames; index++ {
+		dts := int64(index * 100)
+		h.stream.WriteFrame(labmedia.VideoFrame(dts))
+		paceGBTranscodedLiveReader(h.sourceReader, int64(index))
+		want = append(want, uint32(dts*90))
+	}
+
+	var got []uint32
+	for range videoFrames {
+		timestamp, _, _ := readGBRTPFrame(t, h.remoteRTP)
+		got = append(got, timestamp)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("sparse live video RTP timestamps = %v, want every paced source frame %v", got, want)
+	}
+	if cursor := h.sourceReader.ReadCursor(); cursor != videoFrames {
+		t.Fatalf("sparse live source reader cursor = %d, want %d without ring overwrite", cursor, videoFrames)
+	}
+
+	// A resumed frame behind emitted video is objectively stale and must not
+	// move the shared RTP timeline backward. Current audio still advances.
+	h.targetAudio.Write(labmedia.G711Frame(avframe.CodecG711A, 200))
+	h.targetAudio.Write(labmedia.G711Frame(avframe.CodecG711A, 800))
+	timestamp, _, _ := readGBRTPFrame(t, h.remoteRTP)
+	got = append(got, timestamp)
+	want = append(want, 800*90)
+
+	h.stream.WriteFrame(labmedia.VideoFrame(900))
+	timestamp, _, _ = readGBRTPFrame(t, h.remoteRTP)
+	got = append(got, timestamp)
+	want = append(want, 900*90)
+	if !slices.Equal(got, want) {
+		t.Fatalf("sparse live resumed RTP timestamps = %v, want stale audio dropped and current media %v", got, want)
+	}
+}
+
+func TestGBOutboundTranscodedLiveInterleaveToleratesShortTrackLatency(t *testing.T) {
+	h := newGBTranscodedLiveHarness(t, 8)
+	const ordinaryTargetLatency = 5 * time.Millisecond
+
+	for index := 1; index <= 3; index++ {
+		dts := int64(index * 100)
+		video := labmedia.VideoFrame(dts)
+		audio := labmedia.G711Frame(avframe.CodecG711A, dts)
+		if index%2 == 0 {
+			h.targetAudio.Write(audio)
+			time.Sleep(ordinaryTargetLatency)
+			h.stream.WriteFrame(video)
+		} else {
+			h.stream.WriteFrame(video)
+			time.Sleep(ordinaryTargetLatency)
+			h.targetAudio.Write(audio)
+		}
+	}
+
+	var got []uint32
+	for range 6 {
+		timestamp, _, _ := readGBRTPFrame(t, h.remoteRTP)
+		got = append(got, timestamp)
+	}
+	want := []uint32{100 * 90, 100 * 90, 200 * 90, 200 * 90, 300 * 90, 300 * 90}
+	if !slices.Equal(got, want) {
+		t.Fatalf("normally interleaved live RTP timestamps = %v, want both tracks preserved %v", got, want)
+	}
+	wantCounts := gbMediaFrameCounts{video: 3, audio: 3}
+	gotCounts, terminal := waitGBTranscodedLiveAccounting(h.done, func() gbMediaFrameCounts {
+		return gbMediaFrameCounts{
+			video: h.sender.videoFrames.Load(),
+			audio: h.sender.audioFrames.Load(),
+		}
+	}, wantCounts, time.Second)
+	if terminal {
+		t.Fatalf("normally interleaved live merge ended at %+v before 3/3 accounting: %v", gotCounts, h.runErr())
+	}
+	if gotCounts != wantCounts {
+		t.Fatalf("normally interleaved live frames = %+v, want %+v before timeout", gotCounts, wantCounts)
+	}
+}
+
+func TestGBTranscodedLiveAccountingWaitsPastTransientReceiverObservation(t *testing.T) {
+	sender := &outboundMediaSession{}
+	sender.videoFrames.Store(3)
+	sender.audioFrames.Store(2)
+	loads := 0
+	got, terminal := waitGBTranscodedLiveAccounting(make(chan struct{}), func() gbMediaFrameCounts {
+		loads++
+		counts := gbMediaFrameCounts{
+			video: sender.videoFrames.Load(),
+			audio: sender.audioFrames.Load(),
+		}
+		if loads == 1 {
+			sender.audioFrames.Add(1)
+		}
+		return counts
+	}, gbMediaFrameCounts{video: 3, audio: 3}, time.Second)
+	if terminal || got != (gbMediaFrameCounts{video: 3, audio: 3}) {
+		t.Fatalf("accounting wait = %+v terminal=%t, want completed 3/3", got, terminal)
+	}
+	if loads < 2 {
+		t.Fatalf("accounting loads = %d, want retry after transient 3/2 observation", loads)
+	}
+}
+
+func TestGBTranscodedLiveAccountingReportsTerminalBeforeFinalCount(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	want := gbMediaFrameCounts{video: 3, audio: 3}
+	got, terminal := waitGBTranscodedLiveAccounting(done, func() gbMediaFrameCounts {
+		return gbMediaFrameCounts{video: 3, audio: 2}
+	}, want, time.Second)
+	if !terminal || got != (gbMediaFrameCounts{video: 3, audio: 2}) {
+		t.Fatalf("terminal accounting = %+v terminal=%t, want terminal 3/2", got, terminal)
+	}
+}
+
+type gbMediaFrameCounts struct {
+	video uint64
+	audio uint64
+}
+
+func waitGBTranscodedLiveAccounting(
+	done <-chan struct{},
+	load func() gbMediaFrameCounts,
+	want gbMediaFrameCounts,
+	timeout time.Duration,
+) (gbMediaFrameCounts, bool) {
+	ticker := time.NewTicker(100 * time.Microsecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		if got := load(); got == want {
+			return got, false
+		}
+		select {
+		case <-done:
+			return load(), true
+		case <-ticker.C:
+		case <-timer.C:
+			return load(), false
+		}
+	}
+}
+
+type gbTranscodedLiveHarness struct {
+	stream       *core.Stream
+	sender       *outboundMediaSession
+	remoteRTP    *net.UDPConn
+	sourceReader *util.RingReader[*avframe.AVFrame]
+	targetAudio  *util.RingBuffer[*avframe.AVFrame]
+	done         <-chan struct{}
+	runErr       func() error
+}
+
+func newGBTranscodedLiveHarness(t *testing.T, ringCapacity int) *gbTranscodedLiveHarness {
+	t.Helper()
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: ringCapacity}, config.LimitsConfig{}, core.NewEventBus())
+	stream, err := hub.GetOrCreate("gb28181/transcoded-live")
+	if err != nil {
+		t.Fatalf("GetOrCreate stream: %v", err)
+	}
+	if err := stream.SetPublisher(&gbOutboundTestPublisher{id: "publisher-a", info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+		AudioCodec: avframe.CodecOpus,
+	}}); err != nil {
+		t.Fatalf("SetPublisher: %v", err)
+	}
+
+	sender, err := newOutboundMediaSession(stream, 0, 0)
+	if err != nil {
+		t.Fatalf("newOutboundMediaSession: %v", err)
+	}
+	sender.snapshot = stream.StartupSnapshot()
+	remoteRTP, remoteRTCP, err := listenGBLabUDPPair()
+	if err != nil {
+		sender.close()
+		t.Fatalf("listen remote media pair: %v", err)
+	}
+	if err := sender.setRemote(remoteRTP.LocalAddr().(*net.UDPAddr)); err != nil {
+		remoteRTP.Close()
+		remoteRTCP.Close()
+		sender.close()
+		t.Fatalf("setRemote: %v", err)
+	}
+
+	sourceReader := stream.RingBuffer().NewReaderAt(sender.snapshot.LiveCursor)
+	targetAudio := util.NewRingBuffer[*avframe.AVFrame](ringCapacity)
+	audioReader := targetAudio.NewReader()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = sender.runTranscodedMedia(ctx, ps.NewMuxer(), nil, sourceReader, audioReader)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		sourceReader.Close()
+		audioReader.Close()
+		select {
+		case <-done:
+			if runErr != nil {
+				t.Errorf("runTranscodedMedia cleanup: %v", runErr)
+			}
+		case <-time.After(time.Second):
+			t.Error("runTranscodedMedia did not stop after cancellation")
+		}
+		remoteRTP.Close()
+		remoteRTCP.Close()
+		sender.close()
+	})
+	return &gbTranscodedLiveHarness{
+		stream:       stream,
+		sender:       sender,
+		remoteRTP:    remoteRTP,
+		sourceReader: sourceReader,
+		targetAudio:  targetAudio,
+		done:         done,
+		runErr:       func() error { return runErr },
+	}
+}
+
+func paceGBTranscodedLiveReader(reader *util.RingReader[*avframe.AVFrame], wantCursor int64) {
+	deadline := time.Now().Add(10 * time.Millisecond)
+	for reader.ReadCursor() < wantCursor && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Microsecond)
 	}
 }
 

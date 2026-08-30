@@ -19,6 +19,7 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	mediarp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/pkg/sdp"
 	"github.com/pion/rtcp"
 	pionrtp "github.com/pion/rtp/v2"
@@ -1006,4 +1007,78 @@ func TestCallSessionRejectsUnknownPacketizerAndDepacketizerCodec(t *testing.T) {
 	if _, err := session.newDepacketizer().depacketize(packet); !errors.Is(err, ErrCodecMismatch) {
 		t.Fatalf("unknown depacketizer error = %v, want ErrCodecMismatch", err)
 	}
+}
+
+func TestSIPSendFrameFailsClosedOnPacketizeAndEmptyOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		packetize func(*avframe.AVFrame, int) ([]*pionrtp.Packet, error)
+		wantError string
+	}{
+		{
+			name: "packetize error",
+			packetize: func(*avframe.AVFrame, int) ([]*pionrtp.Packet, error) {
+				return nil, errors.New("packetizer rejected media")
+			},
+			wantError: "SIP packetization: packetizer rejected media",
+		},
+		{
+			name: "empty output",
+			packetize: func(*avframe.AVFrame, int) ([]*pionrtp.Packet, error) {
+				return nil, nil
+			},
+			wantError: "SIP packetization produced no packets",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			call := newCallSession("egress-"+tt.name, "live/egress", negotiatedCodec{
+				Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA",
+			}, "outbound", 0, 0)
+			call.state = CallStateActive
+			packetizer := functionPacketizer{fn: tt.packetize}
+			if call.sendFrame(&avframe.AVFrame{MediaType: avframe.MediaTypeAudio, Codec: avframe.CodecG711A, Payload: []byte{1}}, packetizer, nil, nil, nil, nil, nil) {
+				t.Fatal("sendFrame accepted failed egress")
+			}
+			snapshot := call.snapshot()
+			if snapshot.State != CallStateNetworkLost {
+				t.Fatalf("state = %q, want %q", snapshot.State, CallStateNetworkLost)
+			}
+			if !strings.Contains(snapshot.LastError, tt.wantError) {
+				t.Fatalf("last_error = %q, want %q", snapshot.LastError, tt.wantError)
+			}
+			if snapshot.RTPFramesDropped != 1 {
+				t.Fatalf("rtp_frames_dropped = %d, want 1", snapshot.RTPFramesDropped)
+			}
+		})
+	}
+}
+
+func TestSIPSendFrameFailsClosedOnNilPacket(t *testing.T) {
+	call := newCallSession("egress-nil-packet", "live/egress", negotiatedCodec{
+		Codec: avframe.CodecG711A, PT: 8, ClockRate: 8000, EncodingName: "PCMA",
+	}, "outbound", 0, 0)
+	call.state = CallStateActive
+	packetizer := functionPacketizer{fn: func(*avframe.AVFrame, int) ([]*pionrtp.Packet, error) {
+		return []*pionrtp.Packet{nil}, nil
+	}}
+	if call.sendFrame(&avframe.AVFrame{MediaType: avframe.MediaTypeAudio, Codec: avframe.CodecG711A, Payload: []byte{1}}, packetizer, mediarp.NewSession(8, 8000), nil, nil, nil, nil) {
+		t.Fatal("sendFrame accepted nil RTP packet")
+	}
+	snapshot := call.snapshot()
+	if snapshot.State != CallStateNetworkLost || !strings.Contains(snapshot.LastError, "SIP packetization returned nil packet 0") {
+		t.Fatalf("snapshot = %+v, want terminal nil-packet error", snapshot)
+	}
+	if snapshot.RTPFramesDropped != 1 {
+		t.Fatalf("rtp_frames_dropped = %d, want 1", snapshot.RTPFramesDropped)
+	}
+}
+
+type functionPacketizer struct {
+	fn func(*avframe.AVFrame, int) ([]*pionrtp.Packet, error)
+}
+
+func (p functionPacketizer) Packetize(frame *avframe.AVFrame, mtu int) ([]*pionrtp.Packet, error) {
+	return p.fn(frame, mtu)
 }

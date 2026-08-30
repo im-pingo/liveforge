@@ -276,7 +276,7 @@ func TestSharedMuxersSwitchFromDirectAACToTransformedAudio(t *testing.T) {
 			// source codec. The live and transformed readers share an unbuffered
 			// delivery channel, so writing both epochs back-to-back would let
 			// scheduler timing discard an initial direct frame.
-			packets = waitForMuxerPayloads(t, format, initData, reader, packets, directAAC)
+			packets = waitForMuxerPayloadsAtOrAfter(t, format, initData, reader, packets, directAAC, 0)
 			writeG711MuxerFrames(stream, 1000, 20, 0xff)
 			stream.WriteFrame(avframe.NewAVFrame(
 				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
@@ -423,7 +423,7 @@ func TestSharedMuxerWorkersReturnToTransformedAudioPerCodecEpoch(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 8))
+	core.SetTranscodeManagerForTest(stream, core.NewTranscodeManager(stream, audiocodec.Global(), 64))
 	stream.WriteFrame(avframe.NewAVFrame(
 		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
 		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
@@ -433,9 +433,9 @@ func TestSharedMuxerWorkersReturnToTransformedAudioPerCodecEpoch(t *testing.T) {
 		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
 	))
 
-	// Keep a peer reader open and age the generated startup header out of the
-	// small transform ring. This isolates the reverse-owner mutation from the
-	// separate generated-header provenance regression above.
+	// Keep a peer reader open so all workers share one producer. This ownership
+	// regression deliberately leaves headroom for retained history plus the AAC
+	// header; overwrite termination is covered by the dedicated worker tests.
 	keeper, releaseKeeper, err := stream.TranscodeManager().GetOrCreateAudioReaderAtFromHistory(
 		avframe.CodecAAC, stream.StartupSnapshot(),
 	)
@@ -518,7 +518,7 @@ func TestSharedMuxerWorkersReturnToTransformedAudioPerCodecEpoch(t *testing.T) {
 		1500, 1500, []byte{0, 0, 0, 2, 0x41, 0x15},
 	))
 	for _, worker := range workers {
-		worker.packets = waitForMuxerPayloads(t, worker.format, worker.initData, worker.reader, worker.packets, directAAC)
+		worker.packets = waitForMuxerPayloadsAtOrAfter(t, worker.format, worker.initData, worker.reader, worker.packets, directAAC, 1000)
 	}
 
 	for i := range 20 {
@@ -671,13 +671,14 @@ func waitForMuxerAudioAt(
 	return nil
 }
 
-func waitForMuxerPayloads(
+func waitForMuxerPayloadsAtOrAfter(
 	t *testing.T,
 	format string,
 	initData []byte,
 	reader *core.SharedBufferReader,
 	packets [][]byte,
 	wantPayloads [][]byte,
+	minDTS int64,
 ) [][]byte {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -691,7 +692,8 @@ func waitForMuxerPayloads(
 		}
 		seen := make(map[string]int, len(wantPayloads))
 		for _, frame := range demuxMuxerWorkerOutput(t, format, initData, packets) {
-			if frame != nil && frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader {
+			if frame != nil && frame.MediaType.IsAudio() &&
+				frame.FrameType != avframe.FrameTypeSequenceHeader && frame.DTS >= minDTS {
 				seen[string(frame.Payload)]++
 			}
 		}
@@ -707,7 +709,7 @@ func waitForMuxerPayloads(
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("%s muxer did not emit all direct AAC payloads exactly once", format)
+	t.Fatalf("%s muxer did not emit all direct AAC payloads exactly once at or after DTS %d", format, minDTS)
 	return nil
 }
 
@@ -794,7 +796,9 @@ func assertBidirectionalMuxerAudio(t *testing.T, frames []*avframe.AVFrame, dire
 				postReverseAudio++
 				postReverseDTS[frame.DTS]++
 			}
-			directCounts[string(frame.Payload)]++
+			if frame.DTS >= 1000 && frame.DTS < 2000 {
+				directCounts[string(frame.Payload)]++
+			}
 		}
 		if frame.MediaType.IsVideo() && frame.DTS == 2500 {
 			postReverseVideo++

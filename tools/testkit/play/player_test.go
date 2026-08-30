@@ -14,6 +14,23 @@ import (
 	"github.com/im-pingo/liveforge/tools/testkit/testutil"
 )
 
+type videoOnlyTestSource struct {
+	source.Source
+}
+
+func (s videoOnlyTestSource) NextFrame() (*avframe.AVFrame, error) {
+	for {
+		frame, err := s.Source.NextFrame()
+		if err != nil || frame.MediaType.IsVideo() {
+			return frame, err
+		}
+	}
+}
+
+func (s videoOnlyTestSource) MediaInfo() *source.MediaInfo {
+	return &source.MediaInfo{VideoCodec: s.Source.MediaInfo().VideoCodec}
+}
+
 func TestNewPlayer_SRT(t *testing.T) {
 	p, err := NewPlayer("srt")
 	if err != nil {
@@ -350,6 +367,7 @@ func TestSRTPlay(t *testing.T) {
 		_, err := pusher.Push(pushCtx, src, push.PushConfig{
 			Protocol: "rtmp",
 			Target:   pushURL,
+			Realtime: true,
 		})
 		pushDone <- err
 	}()
@@ -415,7 +433,7 @@ func TestWHEPPlay(t *testing.T) {
 	srv := testutil.StartTestServer(t, testutil.WithRTMP(), testutil.WithWebRTC(), testutil.WithAPI())
 
 	// Push via RTMP in background so there is a stream for WHEP to subscribe to.
-	src := source.NewFLVSourceLoop(0)
+	src := videoOnlyTestSource{Source: source.NewFLVSourceLoop(0)}
 	pusher, err := push.NewPusher("rtmp")
 	if err != nil {
 		t.Fatalf("NewPusher: %v", err)
@@ -430,10 +448,12 @@ func TestWHEPPlay(t *testing.T) {
 		_, err := pusher.Push(pushCtx, src, push.PushConfig{
 			Protocol: "rtmp",
 			Target:   pushURL,
+			Realtime: true,
 		})
 		pushDone <- err
 	}()
 
+	// Wait until the live subscriber can start from both required media kinds.
 	readyTimer := time.NewTimer(10 * time.Second)
 	defer readyTimer.Stop()
 	readyTicker := time.NewTicker(10 * time.Millisecond)
@@ -479,10 +499,8 @@ func TestWHEPPlay(t *testing.T) {
 	if rpt.Video.FrameCount == 0 {
 		t.Error("no video frames received")
 	}
-	// Audio may not be present: server only supports Opus but source is AAC.
-	// Log the result instead of failing.
-	if rpt.Audio.FrameCount == 0 {
-		t.Log("note: no audio frames received (expected: server supports Opus but source is AAC)")
+	if rpt.Audio.FrameCount != 0 {
+		t.Errorf("audio frames received from video-only fixture: %d", rpt.Audio.FrameCount)
 	}
 
 	t.Logf("WHEP play report: video=%d frames, audio=%d frames, duration=%dms",
@@ -528,12 +546,25 @@ func TestHTTPFLVPlay(t *testing.T) {
 		_, err := pusher.Push(pushCtx, src, push.PushConfig{
 			Protocol: "rtmp",
 			Target:   pushURL,
+			Realtime: true,
 		})
 		pushDone <- err
 	}()
 
-	// Wait for stream to be established.
-	time.Sleep(1 * time.Second)
+	// Wait until the live subscriber can start from both required media kinds.
+	readyTimer := time.NewTimer(10 * time.Second)
+	defer readyTimer.Stop()
+	readyTicker := time.NewTicker(10 * time.Millisecond)
+	defer readyTicker.Stop()
+	for !srv.StreamHasVideoGOP("live/test") || !srv.StreamHasAudio("live/test", avframe.CodecAAC) {
+		select {
+		case err := <-pushDone:
+			t.Fatalf("RTMP pusher stopped before HTTP-FLV media was ready: %v", err)
+		case <-readyTimer.C:
+			t.Fatal("timed out waiting for RTMP audio/video before HTTP-FLV playback")
+		case <-readyTicker.C:
+		}
+	}
 
 	// Play via HTTP-FLV.
 	player, err := NewPlayer("httpflv")
@@ -728,12 +759,24 @@ func TestWSFLVPlay(t *testing.T) {
 		_, err := pusher.Push(pushCtx, src, push.PushConfig{
 			Protocol: "rtmp",
 			Target:   pushURL,
+			Realtime: true,
 		})
 		pushDone <- err
 	}()
 
-	// Wait for stream to be established.
-	time.Sleep(1 * time.Second)
+	readyTimer := time.NewTimer(10 * time.Second)
+	defer readyTimer.Stop()
+	readyTicker := time.NewTicker(10 * time.Millisecond)
+	defer readyTicker.Stop()
+	for !srv.StreamHasVideoGOP("live/test") || !srv.StreamHasAudio("live/test", avframe.CodecAAC) {
+		select {
+		case err := <-pushDone:
+			t.Fatalf("RTMP pusher stopped before WS-FLV media was ready: %v", err)
+		case <-readyTimer.C:
+			t.Fatal("timed out waiting for RTMP audio/video before WS-FLV playback")
+		case <-readyTicker.C:
+		}
+	}
 
 	// Play via WS-FLV.
 	player, err := NewPlayer("wsflv")

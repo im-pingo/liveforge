@@ -23,20 +23,32 @@ import (
 	pionrtp "github.com/pion/rtp/v2"
 )
 
-const sipLabTerminalHistoryLimit = 16
+const (
+	sipLabTerminalHistoryLimit = 16
+	defaultSIPLabMaxSessions   = 16
+)
 
 type labManager struct {
-	mu         sync.RWMutex
-	gateway    *Gateway
-	sessions   map[string]*sipLabSession
-	identities map[string]string
+	mu          sync.RWMutex
+	gateway     *Gateway
+	sessions    map[string]*sipLabSession
+	identities  map[string]string
+	maxSessions int
 }
 
 func newLabManager(gateway *Gateway) *labManager {
+	return newLabManagerWithLimit(gateway, defaultSIPLabMaxSessions)
+}
+
+func newLabManagerWithLimit(gateway *Gateway, maxSessions int) *labManager {
+	if maxSessions <= 0 {
+		maxSessions = defaultSIPLabMaxSessions
+	}
 	return &labManager{
-		gateway:    gateway,
-		sessions:   make(map[string]*sipLabSession),
-		identities: make(map[string]string),
+		gateway:     gateway,
+		sessions:    make(map[string]*sipLabSession),
+		identities:  make(map[string]string),
+		maxSessions: maxSessions,
 	}
 }
 
@@ -54,6 +66,10 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 	}
 	identity := request.DeviceID
 	m.mu.Lock()
+	if m.activeSessionsLocked() >= m.maxSessions {
+		m.mu.Unlock()
+		return LabSessionSnapshot{}, ErrLabCapacity
+	}
 	if existingID, ok := m.identities[identity]; ok {
 		existing := m.sessions[existingID]
 		if existing != nil && existing.isReserved() {
@@ -82,6 +98,16 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 		go m.watchCall(session, call)
 	}
 	return session.snapshot(), nil
+}
+
+func (m *labManager) activeSessionsLocked() int {
+	active := 0
+	for _, session := range m.sessions {
+		if session != nil && session.isReserved() {
+			active++
+		}
+	}
+	return active
 }
 
 func (m *labManager) watchCall(session *sipLabSession, call *CallSession) {

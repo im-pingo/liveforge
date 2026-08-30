@@ -12,10 +12,10 @@ import (
 // (typically the audio sample rate, e.g. 44100). Pass 0 to fall back to raw ms values.
 // Returns the concatenated moof+mdat bytes.
 func BuildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTimescale uint32) []byte {
-	return buildMediaSegment(frames, sequenceNumber, audioTimescale, 0)
+	return buildMediaSegment(frames, sequenceNumber, audioTimescale, 0, 0, 0)
 }
 
-func buildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTimescale uint32, videoEndDTS int64) []byte {
+func buildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTimescale uint32, videoEndDTS, videoBaseDTS, audioBaseDTS int64) []byte {
 	if len(frames) == 0 {
 		return nil
 	}
@@ -80,12 +80,12 @@ func buildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTi
 
 	// Video traf
 	if len(videoFrames) > 0 {
-		writeTraf(&moof, videoTrackID, videoFrames, timescaleVideo, videoEndDTS)
+		writeTraf(&moof, videoTrackID, videoFrames, timescaleVideo, videoEndDTS, videoBaseDTS)
 	}
 
 	// Audio traf — timescale must match the audio mdhd timescale (sample rate).
 	if len(audioFrames) > 0 {
-		writeTraf(&moof, audioTrackID, audioFrames, audioTimescale, 0)
+		writeTraf(&moof, audioTrackID, audioFrames, audioTimescale, 0, audioBaseDTS)
 	}
 
 	moofBytes := moof.Bytes()
@@ -117,7 +117,7 @@ func buildMediaSegment(frames []*avframe.AVFrame, sequenceNumber uint32, audioTi
 	return buf.Bytes()
 }
 
-func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, timescale uint32, endDTS int64) {
+func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, timescale uint32, endDTS, baseDTS int64) {
 	var traf bytes.Buffer
 
 	// tfhd: track ID + default flags
@@ -128,11 +128,12 @@ func writeTraf(w *bytes.Buffer, trackID uint32, frames []*avframe.AVFrame, times
 
 	// tfdt: base media decode time
 	if len(frames) > 0 {
-		var dts int64
+		dts := frames[0].DTS - baseDTS
+		if dts < 0 {
+			dts = 0
+		}
 		if timescale > 0 {
-			dts = frames[0].DTS * int64(timescale) / 1000
-		} else {
-			dts = frames[0].DTS
+			dts = dts * int64(timescale) / 1000
 		}
 		tfdt := make([]byte, 8)
 		binary.BigEndian.PutUint64(tfdt, uint64(dts))

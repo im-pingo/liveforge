@@ -45,6 +45,21 @@ func TestFileSourceReturnsDocumentAndModificationMetadata(t *testing.T) {
 	}
 }
 
+func TestFileSourceLoadRejectsDocumentOverConfiguredLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  name: oversized\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := NewFileSourceWithOptions(FileSourceOptions{Path: path, MaxBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if _, err := source.Load(context.Background(), Version{}); err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") {
+		t.Fatalf("oversized file load error = %v, want configured byte-limit error", err)
+	}
+}
+
 func TestFileSourceWriteReplacesDocumentAtomically(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "liveforge.yaml")
 	if err := os.WriteFile(path, []byte("server:\n  name: old\n"), 0o600); err != nil {
@@ -430,6 +445,58 @@ func TestConsulSourceWriteUsesCompleteConfigKey(t *testing.T) {
 	}
 }
 
+func TestConsulSourceLoadRejectsRedirectWithoutForwardingToken(t *testing.T) {
+	targetRequests := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests <- r.Header.Get("X-Consul-Token")
+		_, _ = fmt.Fprint(w, `[]`)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	source, err := NewConsulSource(ConsulSourceOptions{Address: redirect.URL, Prefix: "liveforge", Token: "consul-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Load(context.Background(), Version{}); err == nil {
+		t.Fatal("Consul load followed redirect")
+	}
+	select {
+	case token := <-targetRequests:
+		t.Fatalf("redirect target received X-Consul-Token %q", token)
+	default:
+	}
+}
+
+func TestConsulSourceWriteRejectsRedirectWithoutForwardingToken(t *testing.T) {
+	targetRequests := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests <- r.Header.Get("X-Consul-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	source, err := NewConsulSource(ConsulSourceOptions{Address: redirect.URL, Prefix: "liveforge", Token: "consul-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Write(context.Background(), []byte("server:\n  name: consul\n")); err == nil {
+		t.Fatal("Consul write followed redirect")
+	}
+	select {
+	case token := <-targetRequests:
+		t.Fatalf("redirect target received X-Consul-Token %q", token)
+	default:
+	}
+}
+
 func TestRedisSourceBuildsNestedDocumentFromKeys(t *testing.T) {
 	doc, err := documentFromKeyValues(map[string]string{
 		"server.name":         "redis",
@@ -452,6 +519,155 @@ func TestRedisSourceBuildsNestedDocumentFromKeys(t *testing.T) {
 	}
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRedisHashSourceFallsBackWhenHScanNoValuesIsUnavailable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverErrors := make(chan error, 1)
+	go serveRedisHashFallbackTestServer(listener, serverErrors)
+
+	client := redis.NewClient(&redis.Options{
+		Addr:             listener.Addr().String(),
+		Protocol:         2,
+		DisableIndentity: true,
+		Dialer: func(context.Context, string, string) (net.Conn, error) {
+			return net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+		},
+	})
+	source, err := NewRedisSource(RedisSourceOptions{Client: client, Hash: "config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	snapshot, err := source.Load(context.Background(), Version{})
+	if err != nil {
+		t.Fatalf("load Redis hash with legacy HSCAN support: %v", err)
+	}
+	select {
+	case err := <-serverErrors:
+		t.Fatal(err)
+	default:
+	}
+	cfg, err := ParseDocument(snapshot.Data)
+	if err != nil {
+		t.Fatalf("parse Redis hash document: %v\n%s", err, snapshot.Data)
+	}
+	if cfg.Server.Name != "redis-legacy" || !cfg.HTTP.Enabled {
+		t.Fatalf("Redis hash config = %+v, want flattened server.name and http_stream.enabled", cfg)
+	}
+}
+
+func serveRedisHashFallbackTestServer(listener net.Listener, serverErrors chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		serverErrors <- err
+		return
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	values := map[string]string{
+		"server.name":         "redis-legacy",
+		"http_stream.enabled": "true",
+	}
+	for {
+		command, err := readRedisCommand(reader)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				select {
+				case serverErrors <- err:
+				default:
+				}
+			}
+			return
+		}
+		if len(command) == 0 {
+			continue
+		}
+		switch strings.ToUpper(command[0]) {
+		case "HELLO":
+			_, _ = io.WriteString(conn, "*4\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:2\r\n")
+		case "CLIENT":
+			_, _ = io.WriteString(conn, "+OK\r\n")
+		case "HEXISTS":
+			_, _ = io.WriteString(conn, ":0\r\n")
+		case "HSCAN":
+			_, _ = io.WriteString(conn, "-ERR unknown command 'HSCAN'\r\n")
+		case "HKEYS":
+			_, _ = io.WriteString(conn, "*2\r\n$11\r\nserver.name\r\n$19\r\nhttp_stream.enabled\r\n")
+		case "HSTRLEN":
+			value, ok := values[command[2]]
+			if !ok {
+				_, _ = io.WriteString(conn, ":0\r\n")
+				continue
+			}
+			_, _ = fmt.Fprintf(conn, ":%d\r\n", len(value))
+		case "HGET":
+			value, ok := values[command[2]]
+			if !ok {
+				_, _ = io.WriteString(conn, "$-1\r\n")
+				continue
+			}
+			_, _ = fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(value), value)
+		default:
+			select {
+			case serverErrors <- fmt.Errorf("unexpected Redis command %q", command[0]):
+			default:
+			}
+			_, _ = io.WriteString(conn, "-ERR unexpected command\r\n")
+			return
+		}
+	}
+}
+
+func TestRedisSourceRejectsOversizedCompleteConfigValue(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go serveRedisBoundedStringTestServer(listener, []byte("server:\n  name: oversized\n"))
+
+	client := redis.NewClient(&redis.Options{Addr: listener.Addr().String(), Protocol: 2, DisableIndentity: true})
+	source, err := NewRedisSource(RedisSourceOptions{Client: client, Prefix: "liveforge:", MaxBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	if _, err := source.Load(context.Background(), Version{}); err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") {
+		t.Fatalf("oversized Redis load error = %v, want configured byte-limit error", err)
+	}
+}
+
+func serveRedisBoundedStringTestServer(listener net.Listener, value []byte) {
+	conn, err := listener.Accept()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	for {
+		command, err := readRedisCommand(reader)
+		if err != nil {
+			return
+		}
+		switch strings.ToUpper(command[0]) {
+		case "HELLO":
+			_, _ = io.WriteString(conn, "*2\r\n$6\r\nserver\r\n$5\r\nredis\r\n")
+		case "EXISTS":
+			_, _ = io.WriteString(conn, ":1\r\n")
+		case "STRLEN":
+			_, _ = fmt.Fprintf(conn, ":%d\r\n", len(value))
+		case "GET":
+			_, _ = fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(value), value)
+		default:
+			_, _ = io.WriteString(conn, "+OK\r\n")
+		}
 	}
 }
 
@@ -559,6 +775,15 @@ func TestFlattenedKeyValueDocumentSerializationIsDeterministic(t *testing.T) {
 	}
 	if !bytes.Equal(first, second) {
 		t.Fatalf("flattened documents differ:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+func TestFlattenedKeyValueDocumentRejectsMaterializedSizeOverLimit(t *testing.T) {
+	_, err := documentFromKeyValuesWithLimit(map[string]string{
+		"server.name": "materialized-size-limit",
+	}, 8)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") {
+		t.Fatalf("materialized document error = %v, want configured byte-limit error", err)
 	}
 }
 

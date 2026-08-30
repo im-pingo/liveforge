@@ -8,11 +8,20 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/im-pingo/liveforge/config"
 )
 
 var (
 	canonicalDecimalInteger = regexp.MustCompile(`^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$`)
 	canonicalDecimalFloat   = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)$`)
+)
+
+const (
+	// DefaultSourceMaxBytes bounds one complete configuration document when a
+	// source does not provide an explicit limit.
+	DefaultSourceMaxBytes int64 = config.DefaultRuntimeSourceMaxBytes
+	maxSourceEntries            = 65536
 )
 
 func requireURL(raw, field string) (*url.URL, error) {
@@ -27,15 +36,26 @@ func requireURL(raw, field string) (*url.URL, error) {
 }
 
 func documentFromKeyValues(values map[string]string) ([]byte, error) {
+	return documentFromKeyValuesWithLimit(values, DefaultSourceMaxBytes)
+}
+
+func documentFromKeyValuesWithLimit(values map[string]string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultSourceMaxBytes
+	}
 	if len(values) == 0 {
 		return nil, fmt.Errorf("configuration key snapshot is empty")
 	}
 	for _, key := range []string{"config", "config.yaml", "config.yml", "config.json"} {
 		if value, ok := values[key]; ok {
+			if int64(len(value)) > maxBytes {
+				return nil, fmt.Errorf("configuration document exceeds %d bytes", maxBytes)
+			}
 			return []byte(value), nil
 		}
 	}
 	root := make(map[string]any)
+	var materializedBytes int64
 	type flattenedValue struct {
 		key       string
 		value     string
@@ -67,6 +87,10 @@ func documentFromKeyValues(values map[string]string) ([]byte, error) {
 	}
 	for _, item := range flattened {
 		parts, value := item.parts, item.value
+		materializedBytes += int64(len(item.key) + len(value))
+		if materializedBytes > maxBytes {
+			return nil, fmt.Errorf("configuration materialization exceeds %d bytes", maxBytes)
+		}
 		current := root
 		for _, part := range parts[:len(parts)-1] {
 			next, ok := current[part].(map[string]any)
@@ -78,7 +102,14 @@ func documentFromKeyValues(values map[string]string) ([]byte, error) {
 		}
 		current[parts[len(parts)-1]] = parseScalar(value)
 	}
-	return marshalDeterministic(root)
+	data, err := marshalDeterministic(root)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("configuration document exceeds %d bytes", maxBytes)
+	}
+	return data, nil
 }
 
 func parseScalar(value string) any {

@@ -337,7 +337,13 @@ func (m *Manager) Refresh(ctx context.Context) error {
 // ValidateDocument parses and validates a complete source document without
 // changing the active snapshot or the backing source.
 func ValidateDocument(data []byte) (*config.Config, error) {
-	return ParseDocument(data)
+	return parseDocument(data, false, false)
+}
+
+// ValidateKnownDocument validates an untrusted candidate without expanding
+// process environment variables and rejects fields outside the typed contract.
+func ValidateKnownDocument(data []byte) (*config.Config, error) {
+	return parseDocument(data, false, true)
 }
 
 // Write validates and persists a complete configuration document when the

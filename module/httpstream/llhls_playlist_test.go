@@ -97,6 +97,35 @@ func TestLLHLSPlaylistGenerate_DeltaUpdate(t *testing.T) {
 	}
 }
 
+func TestLLHLSPlaylistOverwriteDiscontinuitySurvivesFullAndDelta(t *testing.T) {
+	p := NewLLHLSPlaylist(0.2, 1.0, "/live/overwrite", "fmp4")
+	segments := make([]*LLHLSSegment, 4)
+	for i := range segments {
+		segments[i] = &LLHLSSegment{
+			MSN:      i,
+			Duration: 1,
+			Parts:    []*LLHLSPart{{Index: 0, Duration: 0.2, Independent: true}},
+		}
+	}
+	segments[2].Discontinuity = true
+	segments[2].Parts[0].Discontinuity = true
+
+	full := p.Generate(segments, nil, 4, false, false)
+	delta := p.Generate(segments, nil, 4, true, false)
+	for name, playlist := range map[string]string{"full": full, "delta": delta} {
+		if strings.Count(playlist, "#EXT-X-DISCONTINUITY\n") != 1 ||
+			!strings.Contains(playlist, "#EXT-X-DISCONTINUITY\n#EXTINF:1.000,\n/live/overwrite/2.m4s") {
+			t.Fatalf("%s playlist lost or duplicated recovered discontinuity:\n%s", name, playlist)
+		}
+	}
+
+	segments[1].Discontinuity = true
+	delta = p.Generate(segments, nil, 4, true, false)
+	if !strings.Contains(delta, "#EXT-X-DISCONTINUITY-SEQUENCE:1\n") {
+		t.Fatalf("delta playlist did not preserve skipped discontinuity state:\n%s", delta)
+	}
+}
+
 func TestLLHLSPlaylistGenerate_EmptySegments(t *testing.T) {
 	p := NewLLHLSPlaylist(0.2, 6.0, "/live/test", "fmp4")
 
@@ -144,6 +173,25 @@ func TestLLHLSManagerVersionsInitSegmentURL(t *testing.T) {
 	}
 	if !strings.Contains(playlist, `init.mp4?v=`) {
 		t.Fatal("LL-HLS playlist init URL is not versioned")
+	}
+}
+
+func TestLLHLSOverwriteInitVersionChangesOnlyWithInitBytes(t *testing.T) {
+	mgr := NewLLHLSManager("live/version-recovery", "/live/version-recovery", 0.2, 1.0, 5, "fmp4")
+	mgr.segmenter.callbacks.OnInit([]byte("stable init"))
+	mgr.mu.Lock()
+	first := mgr.playlist.initVersion
+	mgr.mu.Unlock()
+	mgr.segmenter.callbacks.OnInit([]byte("stable init"))
+	mgr.mu.Lock()
+	unchanged := mgr.playlist.initVersion
+	mgr.mu.Unlock()
+	mgr.segmenter.callbacks.OnInit([]byte("changed init"))
+	mgr.mu.Lock()
+	changed := mgr.playlist.initVersion
+	mgr.mu.Unlock()
+	if first == "" || unchanged != first || changed == first {
+		t.Fatalf("LL-HLS init versions first/unchanged/changed = %q/%q/%q", first, unchanged, changed)
 	}
 }
 

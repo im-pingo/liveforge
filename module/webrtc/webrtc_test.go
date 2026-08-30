@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -210,25 +212,33 @@ func TestSessionStore(t *testing.T) {
 
 // testPCPair creates a connected sender/receiver PeerConnection pair with a
 // video track. Returns the TrackSender, receiver PC, media SSRC, and cleanup func.
-func testPCPair(t *testing.T) (*TrackSender, *webrtc.PeerConnection, uint32) {
+func testPCPair(t *testing.T) (*TrackSender, *webrtc.PeerConnection, *webrtc.PeerConnection, *rtpPeerStats, uint32) {
 	t.Helper()
 
 	me := &webrtc.MediaEngine{}
 	if err := me.RegisterDefaultCodecs(); err != nil {
 		t.Fatal(err)
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+	ir := &interceptor.Registry{}
+	rtpStatsFactory := newRTPStatsInterceptorFactory()
+	ir.Add(rtpStatsFactory)
+	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
+		t.Fatal(err)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir))
 
 	senderPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	rtpStats := <-rtpStatsFactory.created
 	t.Cleanup(func() { senderPC.Close() })
 
 	receiverPC, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	<-rtpStatsFactory.created
 	t.Cleanup(func() { receiverPC.Close() })
 
 	track, err := webrtc.NewTrackLocalStaticSample(
@@ -302,7 +312,7 @@ func testPCPair(t *testing.T) (*TrackSender, *webrtc.PeerConnection, uint32) {
 		t.Skip("could not determine SSRC")
 	}
 
-	return ts, receiverPC, mediaSSRC
+	return ts, receiverPC, senderPC, rtpStats, mediaSSRC
 }
 
 // waitForCondition polls until cond returns true or timeout expires.
@@ -321,7 +331,7 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, msg
 // TestTrackSenderPLIHandler verifies that TrackSender dispatches PLI/FIR
 // RTCP packets to the registered handler, independent of protocol code.
 func TestTrackSenderPLIHandler(t *testing.T) {
-	ts, receiverPC, mediaSSRC := testPCPair(t)
+	ts, receiverPC, _, _, mediaSSRC := testPCPair(t)
 
 	var pliCount atomic.Int32
 	ts.SetPLIHandler(func() { pliCount.Add(1) })
@@ -344,7 +354,7 @@ func TestTrackSenderPLIHandler(t *testing.T) {
 
 // TestTrackSenderStats verifies that ReceiverReport updates Stats fields.
 func TestTrackSenderStats(t *testing.T) {
-	ts, receiverPC, mediaSSRC := testPCPair(t)
+	ts, receiverPC, _, _, mediaSSRC := testPCPair(t)
 
 	var rrReceived atomic.Int32
 	ts.SetReceiverReportHandler(func(report *rtcp.ReceiverReport) {
@@ -388,7 +398,7 @@ func TestTrackSenderStats(t *testing.T) {
 // TestTrackSenderWriteSampleSerialization verifies that concurrent WriteSample
 // calls are serialized by the mutex, preventing interleaved RTP packets.
 func TestTrackSenderWriteSampleSerialization(t *testing.T) {
-	ts, _, _ := testPCPair(t)
+	ts, _, _, _, _ := testPCPair(t)
 
 	// Send a sample to initialize the packetizer.
 	_ = ts.WriteSample(media.Sample{
@@ -426,7 +436,7 @@ func TestTrackSenderWriteSampleSerialization(t *testing.T) {
 // This ensures the signal/flag approach works: RTCP goroutine signals, feed
 // loop resyncs — no media is written from the RTCP goroutine.
 func TestTrackSenderNeedsKeyframeFlag(t *testing.T) {
-	ts, receiverPC, mediaSSRC := testPCPair(t)
+	ts, receiverPC, _, _, mediaSSRC := testPCPair(t)
 
 	ts.Start()
 
@@ -459,7 +469,7 @@ func TestTrackSenderNeedsKeyframeFlag(t *testing.T) {
 // goroutine just sets a flag. This test ensures no regression to the old
 // sendKeyframeFromGOP approach.
 func TestTrackSenderPLIDoesNotWriteMedia(t *testing.T) {
-	ts, receiverPC, mediaSSRC := testPCPair(t)
+	ts, receiverPC, _, _, mediaSSRC := testPCPair(t)
 
 	// Set a PLI handler that only increments a counter (no media writes).
 	var pliCalled atomic.Int32
@@ -604,6 +614,115 @@ func TestOfferSupportsCodec(t *testing.T) {
 			got := offerSupportsCodec(&parsed, tt.media, tt.mime)
 			if got != tt.want {
 				t.Errorf("offerSupportsCodec(%s, %s) = %v, want %v", tt.media, tt.mime, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOfferSupportsCodecRequiresExactRTPMapName(t *testing.T) {
+	offer := sdp.SessionDescription{MediaDescriptions: []*sdp.MediaDescription{{
+		MediaName: sdp.MediaName{
+			Media:   "video",
+			Port:    sdp.RangedPort{Value: 9},
+			Protos:  []string{"UDP", "TLS", "RTP", "SAVPF"},
+			Formats: []string{"96"},
+		},
+		Attributes: []sdp.Attribute{{Key: "rtpmap", Value: "96 XH264/90000"}},
+	}}}
+
+	if offerSupportsCodec(&offer, "video", webrtc.MimeTypeH264) {
+		t.Fatal("non-H264 RTP map name matched H264 by substring")
+	}
+}
+
+func TestOfferSupportsCodecRequiresPayloadListedByMediaLine(t *testing.T) {
+	offer := sdp.SessionDescription{MediaDescriptions: []*sdp.MediaDescription{{
+		MediaName: sdp.MediaName{
+			Media:   "video",
+			Port:    sdp.RangedPort{Value: 9},
+			Protos:  []string{"UDP", "TLS", "RTP", "SAVPF"},
+			Formats: []string{"96"},
+		},
+		Attributes: []sdp.Attribute{{Key: "rtpmap", Value: "97 H264/90000"}},
+	}}}
+
+	if offerSupportsCodec(&offer, "video", webrtc.MimeTypeH264) {
+		t.Fatal("RTP map payload omitted from the media line matched H264")
+	}
+}
+
+func TestOfferRequestsOnlyReceivingMediaDescriptions(t *testing.T) {
+	tests := []struct {
+		name             string
+		port             int
+		sessionDirection string
+		mediaDirection   string
+		want             bool
+	}{
+		{name: "default sendrecv", port: 9, want: true},
+		{name: "media recvonly", port: 9, mediaDirection: "recvonly", want: true},
+		{name: "zero port", want: false},
+		{name: "media inactive", port: 9, mediaDirection: "inactive", want: false},
+		{name: "media sendonly", port: 9, mediaDirection: "sendonly", want: false},
+		{name: "session inactive", port: 9, sessionDirection: "inactive", want: false},
+		{name: "session sendonly", port: 9, sessionDirection: "sendonly", want: false},
+		{name: "media overrides session", port: 9, sessionDirection: "sendonly", mediaDirection: "recvonly", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			offer := sdp.SessionDescription{}
+			if test.sessionDirection != "" {
+				offer.Attributes = append(offer.Attributes, sdp.Attribute{Key: test.sessionDirection})
+			}
+			description := &sdp.MediaDescription{MediaName: sdp.MediaName{
+				Media:   "video",
+				Port:    sdp.RangedPort{Value: test.port},
+				Protos:  []string{"UDP", "TLS", "RTP", "SAVPF"},
+				Formats: []string{"96"},
+			}}
+			if test.mediaDirection != "" {
+				description.Attributes = append(description.Attributes, sdp.Attribute{Key: test.mediaDirection})
+			}
+			offer.MediaDescriptions = []*sdp.MediaDescription{description}
+			if got := offerRequestsMedia(&offer, "video"); got != test.want {
+				t.Fatalf("offerRequestsMedia() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSelectWHEPAudioCodecHonorsOffer(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        avframe.CodecType
+		offerCodecs   []string
+		canTranscode  bool
+		want          avframe.CodecType
+		wantTranscode bool
+	}{
+		{name: "direct PCMA", source: avframe.CodecG711A, offerCodecs: []string{"PCMA"}, want: avframe.CodecG711A},
+		{name: "PCMA to Opus", source: avframe.CodecG711A, offerCodecs: []string{"opus"}, canTranscode: true, want: avframe.CodecOpus, wantTranscode: true},
+		{name: "AAC to Opus", source: avframe.CodecAAC, offerCodecs: []string{"opus"}, canTranscode: true, want: avframe.CodecOpus, wantTranscode: true},
+		{name: "unsupported source", source: avframe.CodecG711A, offerCodecs: []string{"opus"}},
+		{name: "unsupported offer", source: avframe.CodecG711A, offerCodecs: []string{"PCMU"}, canTranscode: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var offer sdp.SessionDescription
+			payloads := make([]string, 0, len(tt.offerCodecs))
+			attributes := make([]sdp.Attribute, 0, len(tt.offerCodecs))
+			for index, codec := range tt.offerCodecs {
+				payloadType := fmt.Sprint(96 + index)
+				payloads = append(payloads, payloadType)
+				attributes = append(attributes, sdp.Attribute{Key: "rtpmap", Value: payloadType + " " + codec + "/48000/2"})
+			}
+			offer.MediaDescriptions = []*sdp.MediaDescription{{
+				MediaName:  sdp.MediaName{Media: "audio", Port: sdp.RangedPort{Value: 9}, Protos: []string{"UDP", "TLS", "RTP", "SAVPF"}, Formats: payloads},
+				Attributes: attributes,
+			}}
+			got, transcode := selectWHEPAudioCodec(&offer, tt.source, tt.canTranscode)
+			if got != tt.want || transcode != tt.wantTranscode {
+				t.Fatalf("selectWHEPAudioCodec() = (%v, %v), want (%v, %v)", got, transcode, tt.want, tt.wantTranscode)
 			}
 		})
 	}

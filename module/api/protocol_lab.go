@@ -21,18 +21,19 @@ type gb28181LabProvider interface {
 }
 
 type protocolLabPlayback struct {
-	StreamKey  string `json:"stream_key"`
-	Available  bool   `json:"available"`
-	RTMP       string `json:"rtmp,omitempty"`
-	RTSP       string `json:"rtsp,omitempty"`
-	HTTPFLV    string `json:"http_flv,omitempty"`
-	WSFLV      string `json:"ws_flv,omitempty"`
-	HTTPMPEGTS string `json:"http_ts,omitempty"`
-	FMP4       string `json:"fmp4,omitempty"`
-	HLS        string `json:"hls,omitempty"`
-	DASH       string `json:"dash,omitempty"`
-	WHEP       string `json:"whep,omitempty"`
-	WHEPLive   string `json:"whep_live,omitempty"`
+	StreamKey    string `json:"stream_key"`
+	Available    bool   `json:"available"`
+	RTMP         string `json:"rtmp,omitempty"`
+	RTSP         string `json:"rtsp,omitempty"`
+	HTTPFLV      string `json:"http_flv,omitempty"`
+	WSFLV        string `json:"ws_flv,omitempty"`
+	HTTPMPEGTS   string `json:"http_ts,omitempty"`
+	FMP4         string `json:"fmp4,omitempty"`
+	HLS          string `json:"hls,omitempty"`
+	DASH         string `json:"dash,omitempty"`
+	WHEP         string `json:"whep,omitempty"`
+	WHEPLive     string `json:"whep_live,omitempty"`
+	WHEPRealtime string `json:"whep_realtime,omitempty"`
 }
 
 type protocolLabSessionView struct {
@@ -187,8 +188,9 @@ func (h *Handlers) labPlayback(r *http.Request, streamKey string) protocolLabPla
 		playback.DASH = "/" + escapedKey + ".mpd"
 	}
 	if cfg := h.server.Config(); cfg.WebRTC.Enabled {
-		playback.WHEP = "/webrtc/whep/" + escapedKey + "?mode=realtime"
+		playback.WHEP = "/webrtc/whep/" + escapedKey + "?mode=live"
 		playback.WHEPLive = "/webrtc/whep/" + escapedKey + "?mode=live"
+		playback.WHEPRealtime = "/webrtc/whep/" + escapedKey + "?mode=realtime"
 	}
 	return playback
 }
@@ -254,6 +256,8 @@ func writeSIPLabError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, sipgateway.ErrLabDuplicateIdentity):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, sipgateway.ErrLabCapacity):
+		writeError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, sipgateway.ErrLabSessionNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, sipgateway.ErrGatewayDisabled), errors.Is(err, sipgateway.ErrGatewayClosed), errors.Is(err, sipgateway.ErrLabManagerUnimplemented):
@@ -269,6 +273,8 @@ func writeGBLabError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, gb28181.ErrLabDuplicateIdentity):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, gb28181.ErrLabCapacity):
+		writeError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, gb28181.ErrLabSessionNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, gb28181.ErrLabManagerUnimplemented):

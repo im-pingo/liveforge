@@ -224,6 +224,22 @@ func TestPublisherIDIncludesConnectionIdentity(t *testing.T) {
 	}
 }
 
+func TestNewPublisherIDsRemainUniqueWhenSocketIDsRepeat(t *testing.T) {
+	bus := core.NewEventBus()
+	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 256}, config.LimitsConfig{}, bus)
+	conn := &subscriberLifecycleConn{
+		streamID:     "publish:/live/reconnect",
+		socketID:     100,
+		peerSocketID: 200,
+	}
+
+	first := NewPublisher(conn, "live/reconnect", hub, bus)
+	second := NewPublisher(conn, "live/reconnect", hub, bus)
+	if first.ID() == second.ID() {
+		t.Fatalf("publisher IDs reused after socket identity reuse: %q", first.ID())
+	}
+}
+
 func TestNewSubscriber(t *testing.T) {
 	bus := core.NewEventBus()
 	hub := core.NewStreamHub(config.StreamConfig{RingBufferSize: 256}, config.LimitsConfig{}, bus)

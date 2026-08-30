@@ -1,6 +1,8 @@
 package rtmp
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -11,6 +13,106 @@ import (
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
+
+func TestRTMPPublisherAdmissionFailureRollsBackPublisher(t *testing.T) {
+	hub, bus := newTestHub()
+	streamKey := "live/admission"
+	publisherID := fmt.Sprintf("rtmp-pub-%s-%d", streamKey, publisherSequence.Load()+1)
+	release := saturateRTMPPublishLifecycle(t, bus, &core.EventContext{StreamKey: streamKey, PublisherID: publisherID})
+	defer release()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	go func() { _, _ = io.Copy(io.Discard, clientConn) }()
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
+	handler.app = "live"
+	if err := handler.onPublish([]any{"publish", float64(0), nil, "admission"}); !errors.Is(err, core.ErrAsyncBackpressure) {
+		t.Fatalf("onPublish() error = %v, want EventBus backpressure", err)
+	}
+	if handler.isPublisher || handler.publisher != nil {
+		t.Fatal("handler retained publisher state after lifecycle admission failure")
+	}
+	if stream, ok := hub.Find(streamKey); ok && stream.Publisher() != nil {
+		t.Fatal("stream retained publisher after lifecycle admission failure")
+	}
+}
+
+func TestRTMPPublisherCleanupEmitsStopOnceAfterStreamRemovedFromHub(t *testing.T) {
+	hub, bus := newTestHub()
+	starts := make(chan *core.EventContext, 1)
+	stops := make(chan *core.EventContext, 2)
+	bus.Register(core.HookRegistration{Event: core.EventPublish, Mode: core.HookAsync, Handler: func(ctx *core.EventContext) error {
+		starts <- ctx
+		return nil
+	}})
+	bus.Register(core.HookRegistration{Event: core.EventPublishStop, Mode: core.HookAsync, Handler: func(ctx *core.EventContext) error {
+		stops <- ctx
+		return nil
+	}})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	go func() { _, _ = io.Copy(io.Discard, clientConn) }()
+	handler := NewHandler(serverConn, hub, bus, 4096, nil)
+	handler.app = "live"
+	if err := handler.onPublish([]any{"publish", float64(0), nil, "removed"}); err != nil {
+		t.Fatal(err)
+	}
+	var start *core.EventContext
+	select {
+	case start = <-starts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RTMP publish start did not run")
+	}
+
+	hub.Remove("live/removed")
+	handler.cleanup()
+	handler.cleanup()
+	var stop *core.EventContext
+	select {
+	case stop = <-stops:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RTMP publish stop did not run after Hub removal")
+	}
+	if stop.StreamInstanceID != start.StreamInstanceID || stop.PublisherGeneration != start.PublisherGeneration || stop.PublisherID != start.PublisherID {
+		t.Fatalf("RTMP stop identity = %+v, want start identity %+v", stop, start)
+	}
+	select {
+	case duplicate := <-stops:
+		t.Fatalf("duplicate RTMP publish stop: %+v", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func saturateRTMPPublishLifecycle(t *testing.T, bus *core.EventBus, ctx *core.EventContext) func() {
+	t.Helper()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	bus.Register(core.HookRegistration{Event: core.EventPublish, Mode: core.HookAsync, Consumer: "rtmp-admission-test", Handler: func(*core.EventContext) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	}})
+	bus.Register(core.HookRegistration{Event: core.EventPublishStop, Mode: core.HookAsync, Consumer: "rtmp-admission-test", Handler: func(*core.EventContext) error { return nil }})
+	if err := bus.EmitAsync(core.EventPublish, ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	for attempts := 0; ; attempts++ {
+		err := bus.EmitAsync(core.EventPublish, ctx)
+		if errors.Is(err, core.ErrAsyncBackpressure) {
+			break
+		}
+		if err != nil || attempts > 32 {
+			t.Fatalf("saturate lifecycle lane: attempts=%d error=%v", attempts, err)
+		}
+	}
+	var releaseOnce sync.Once
+	return func() { releaseOnce.Do(func() { close(release) }) }
+}
 
 type lifecyclePublisher struct{}
 
@@ -99,6 +201,12 @@ func TestRTMPSubscriberLifecycleSerializesBlockedStartBeforeStop(t *testing.T) {
 	}
 	if stop.SubscriberID != start.SubscriberID {
 		t.Errorf("RTMP subscribe stop ID = %q, want %q", stop.SubscriberID, start.SubscriberID)
+	}
+	if start.StreamInstanceID == 0 || start.PublisherGeneration == 0 || start.PublisherID == "" {
+		t.Errorf("RTMP subscribe start omitted publisher identity: %+v", start)
+	}
+	if stop.StreamInstanceID != start.StreamInstanceID || stop.PublisherGeneration != start.PublisherGeneration || stop.PublisherID != start.PublisherID {
+		t.Errorf("RTMP subscribe stop publisher identity = %+v, want %+v", stop, start)
 	}
 	if got := authorizations.Load(); got != 1 {
 		t.Errorf("RTMP authorization calls = %d, want 1", got)

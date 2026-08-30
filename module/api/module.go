@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +57,7 @@ func (m *Module) Init(s *core.Server) error {
 
 	var handler http.Handler = buildSecurityHandler(mux, s, m.audit, &m.security)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
-		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		m.limiter = ratelimit.NewWithTrustedProxies(rl.Rate, rl.Burst, rl.TrustedProxies)
 	}
 	m.rateCfg = cfg.Limits.RateLimit
 	m.httpSrv = &http.Server{
@@ -142,10 +143,10 @@ func (m *Module) OnReload(s *core.Server) error {
 	previous := m.rateCfg
 	m.rateCfg = rl
 	m.limiterMu.Unlock()
-	if previous != rl {
+	if !reflect.DeepEqual(previous, rl) {
 		var next *ratelimit.Limiter
 		if rl.Enabled && rl.Rate > 0 {
-			next = ratelimit.New(rl.Rate, rl.Burst)
+			next = ratelimit.NewWithTrustedProxies(rl.Rate, rl.Burst, rl.TrustedProxies)
 		}
 		m.limiterMu.Lock()
 		old := m.limiter

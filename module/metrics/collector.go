@@ -1,13 +1,23 @@
 package metrics
 
 import (
+	"sort"
+	"sync"
+
 	"github.com/im-pingo/liveforge/core"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Collector implements prometheus.Collector and gathers LiveForge metrics.
 type Collector struct {
-	server *core.Server
+	server                *core.Server
+	streamDetail          bool
+	streamDetailLimit     int
+	streamDetailAllowlist []string
+	// Admitted scalar keys persist for the Collector lifetime; streams do not.
+	streamDetailMu       sync.Mutex
+	streamDetailAdmitted map[string]struct{}
+	streamDetailKeys     []string
 
 	// Server-level gauges
 	streamCount     *prometheus.Desc
@@ -37,8 +47,23 @@ type Collector struct {
 // NewCollector creates a Collector that scrapes metrics from the server.
 func NewCollector(s *core.Server) *Collector {
 	ns := "liveforge"
+	metricsConfig := s.Config().Metrics
+	allowlistSet := make(map[string]struct{}, len(metricsConfig.StreamDetailAllowlist))
+	for _, key := range metricsConfig.StreamDetailAllowlist {
+		if key != "" {
+			allowlistSet[key] = struct{}{}
+		}
+	}
+	allowlist := make([]string, 0, len(allowlistSet))
+	for key := range allowlistSet {
+		allowlist = append(allowlist, key)
+	}
+	sort.Strings(allowlist)
 	return &Collector{
-		server: s,
+		server:                s,
+		streamDetail:          metricsConfig.StreamDetail,
+		streamDetailLimit:     metricsConfig.StreamDetailLimit,
+		streamDetailAllowlist: allowlist,
 
 		streamCount: prometheus.NewDesc(
 			prometheus.BuildFQName(ns, "server", "streams_active"),
@@ -187,13 +212,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
-	// Per-stream metrics
-	for _, key := range hub.Keys() {
-		stream, ok := hub.Find(key)
-		if !ok || stream.State() == core.StreamStateDestroying {
-			continue
-		}
-
+	if !c.streamDetail || c.streamDetailLimit <= 0 {
+		return
+	}
+	streams := c.detailStreams(hub)
+	// Per-stream metrics are opt-in, deterministic, and bounded.
+	for _, stream := range streams {
+		key := stream.Key()
 		stats := stream.Stats()
 		ch <- prometheus.MustNewConstMetric(c.streamBytesIn, prometheus.CounterValue, float64(stats.BytesIn), key)
 		ch <- prometheus.MustNewConstMetric(c.streamVideoFrames, prometheus.CounterValue, float64(stats.VideoFrames), key)
@@ -213,4 +238,56 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.streamSubscribers, prometheus.GaugeValue, float64(count), key, proto)
 		}
 	}
+}
+
+func (c *Collector) detailStreams(hub *core.StreamHub) []*core.Stream {
+	if len(c.streamDetailAllowlist) > 0 {
+		capacity := min(c.streamDetailLimit, len(c.streamDetailAllowlist))
+		streams := make([]*core.Stream, 0, capacity)
+		for _, key := range c.streamDetailAllowlist {
+			stream, ok := hub.Find(key)
+			if !ok || stream.State() == core.StreamStateDestroying {
+				continue
+			}
+			streams = append(streams, stream)
+			if len(streams) == c.streamDetailLimit {
+				break
+			}
+		}
+		return streams
+	}
+
+	c.streamDetailMu.Lock()
+	defer c.streamDetailMu.Unlock()
+	if c.streamDetailAdmitted == nil {
+		c.streamDetailAdmitted = make(map[string]struct{})
+	}
+
+	if len(c.streamDetailKeys) < c.streamDetailLimit {
+		for _, stream := range hub.StableStreams(c.streamDetailLimit) {
+			key := stream.Key()
+			if _, exists := c.streamDetailAdmitted[key]; exists {
+				continue
+			}
+			current, active := hub.Find(key)
+			if !active || current != stream || current.State() == core.StreamStateDestroying {
+				continue
+			}
+			c.streamDetailAdmitted[key] = struct{}{}
+			c.streamDetailKeys = append(c.streamDetailKeys, key)
+			if len(c.streamDetailKeys) == c.streamDetailLimit {
+				break
+			}
+		}
+	}
+
+	streams := make([]*core.Stream, 0, len(c.streamDetailKeys))
+	for _, key := range c.streamDetailKeys {
+		stream, active := hub.Find(key)
+		if !active || stream.State() == core.StreamStateDestroying {
+			continue
+		}
+		streams = append(streams, stream)
+	}
+	return streams
 }

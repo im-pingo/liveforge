@@ -24,6 +24,8 @@ var (
 	ErrLabInvalidRequest = errors.New("GB28181 lab request is invalid")
 	// ErrLabDuplicateIdentity indicates that a lab identity is already active.
 	ErrLabDuplicateIdentity = errors.New("GB28181 lab identity is already active")
+	// ErrLabCapacity indicates that the configured active lab ceiling was reached.
+	ErrLabCapacity = errors.New("GB28181 maximum active lab sessions reached")
 	// ErrLabSessionNotFound indicates that a lab session does not exist.
 	ErrLabSessionNotFound = errors.New("GB28181 lab session not found")
 	// ErrLabManagerUnimplemented indicates that a standalone manager has no transport to attach to.

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,9 @@ type Module struct {
 	server               *core.Server
 	api                  *webrtc.API
 	sessions             sync.Map // sessionID -> *Session
+	statusMu             sync.Mutex
+	statusTombstones     map[string]sessionStatusTombstone
+	statusTombstoneOrder []string
 	listener             net.Listener
 	httpSrv              *http.Server
 	limiter              *ratelimit.Limiter
@@ -32,9 +36,12 @@ type Module struct {
 	admissionMu          sync.Mutex
 	closing              bool
 	setupWG              sync.WaitGroup
+	peerConnectionMu     sync.Mutex
 	latestBWE            chan cc.BandwidthEstimator
+	rtpStats             *rtpStatsInterceptorFactory
 	nextInitialBitrate   int64 // per-session override, set before NewPeerConnection
 	nextInitialBitrateMu sync.Mutex
+	whepTrackFactory     whepTrackFactory
 }
 
 // NewModule creates a new WebRTC module.
@@ -94,6 +101,8 @@ func (m *Module) Init(s *core.Server) error {
 	// Outgoing chain: App → defaults → TWCC hdr ext (sets ext on header)
 	//   → GCC pacer (queues; on drain reads ext via OnSent) → network
 	ir := &interceptor.Registry{}
+	m.rtpStats = newRTPStatsInterceptorFactory()
+	ir.Add(m.rtpStats)
 
 	// Register GCC congestion control interceptor FIRST if enabled.
 	// GCC's LeakyBucketPacer queues RTP packets and drains at the
@@ -167,11 +176,12 @@ func (m *Module) Init(s *core.Server) error {
 	mux.HandleFunc("POST /webrtc/whep/{path...}", m.handleWHEP)
 	mux.HandleFunc("DELETE /webrtc/session/{id}", m.handleDelete)
 	mux.HandleFunc("PATCH /webrtc/session/{id}", m.handlePatch)
+	mux.HandleFunc("GET /webrtc/session/{id}/status", m.handleStatus)
 	mux.HandleFunc("OPTIONS /{path...}", m.handleOptions)
 
 	handler := corsMiddleware(mux)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
-		m.limiter = ratelimit.New(rl.Rate, rl.Burst)
+		m.limiter = ratelimit.NewWithTrustedProxies(rl.Rate, rl.Burst, rl.TrustedProxies)
 	}
 	m.rateCfg = cfg.Limits.RateLimit
 	m.httpSrv = &http.Server{
@@ -215,14 +225,14 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 func (m *Module) OnReload(s *core.Server) error {
 	rl := s.Config().Limits.RateLimit
 	m.limiterMu.RLock()
-	unchanged := m.rateCfg == rl
+	unchanged := reflect.DeepEqual(m.rateCfg, rl)
 	m.limiterMu.RUnlock()
 	if unchanged {
 		return nil
 	}
 	var next *ratelimit.Limiter
 	if rl.Enabled && rl.Rate > 0 {
-		next = ratelimit.New(rl.Rate, rl.Burst)
+		next = ratelimit.NewWithTrustedProxies(rl.Rate, rl.Burst, rl.TrustedProxies)
 	}
 	m.limiterMu.Lock()
 	old := m.limiter
@@ -293,6 +303,38 @@ func (m *Module) isClosing() bool {
 	return m.closing
 }
 
+func (m *Module) newPeerConnection(configuration webrtc.Configuration, initialBitrate int64) (*webrtc.PeerConnection, *rtpPeerStats, cc.BandwidthEstimator, error) {
+	m.peerConnectionMu.Lock()
+	defer m.peerConnectionMu.Unlock()
+
+	if initialBitrate > 0 {
+		m.nextInitialBitrateMu.Lock()
+		m.nextInitialBitrate = initialBitrate
+		m.nextInitialBitrateMu.Unlock()
+	}
+	pc, err := m.api.NewPeerConnection(configuration)
+	var transportStats *rtpPeerStats
+	select {
+	case transportStats = <-m.rtpStats.created:
+	default:
+	}
+	var bwe cc.BandwidthEstimator
+	if m.latestBWE != nil {
+		select {
+		case bwe = <-m.latestBWE:
+		default:
+		}
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if transportStats == nil {
+		_ = pc.Close()
+		return nil, nil, nil, fmt.Errorf("webrtc: RTP transport statistics unavailable")
+	}
+	return pc, transportStats, bwe, nil
+}
+
 // Addr returns the listener address (useful for tests).
 func (m *Module) Addr() net.Addr {
 	if m.listener != nil {
@@ -317,6 +359,9 @@ func (m *Module) storeSession(s *Session) bool {
 // removeSession removes a session from the session map.
 func (m *Module) removeSession(s *Session) {
 	m.sessions.Delete(s.id)
+	if status, ok := s.statusResponse(); ok {
+		m.storeStatusTombstone(status)
+	}
 }
 
 // findSession looks up a session by ID.

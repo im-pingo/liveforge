@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -695,6 +696,108 @@ func TestConsoleAudioOnlyPlaybackUsesWHEP(t *testing.T) {
 			t.Errorf("audio-only playback contract is missing %q", contract)
 		}
 	}
+}
+
+func TestConsoleUsesLiveWHEPAsDefaultAndKeepsRealtimeOption(t *testing.T) {
+
+	_, script := consoleDocument(t)
+	start := strings.Index(script, "function addWHEPProtocols")
+	if start < 0 {
+		t.Fatal("addWHEPProtocols is missing")
+	}
+	end := strings.Index(script[start:], "function addHTTPProtocols")
+	if end < 0 {
+		t.Fatal("addWHEPProtocols boundary is missing")
+	}
+	block := script[start : start+end]
+	live := strings.Index(block, `id: "whep-live"`)
+	realtime := strings.Index(block, `id: "whep-realtime"`)
+	if live < 0 || realtime < 0 {
+		t.Fatalf("WHEP tabs missing from addWHEPProtocols: %q", block)
+	}
+	if live > realtime {
+		t.Fatalf("default WHEP tab is not live-first: live=%d realtime=%d", live, realtime)
+	}
+	if !strings.Contains(block, `playWHEP(k, "live"`) {
+		t.Fatal("default WHEP tab does not call live mode")
+	}
+	if !strings.Contains(block, `playWHEP(k, "realtime"`) {
+		t.Fatal("realtime WHEP diagnostic tab was removed")
+	}
+}
+
+func TestConsoleWHEPTabsUseDistinctPlaybackMetadata(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var calls []struct {
+			Mode string `json:"mode"`
+			Path string `json:"path"`
+		}
+		expression := `(function() {
+			var original = playWHEP;
+			var captured = [];
+			try {
+				playWHEP = function(_streamKey, mode, path) { captured.push({mode:mode, path:path}); };
+				endpoints.webrtc = location.host;
+				var protocols = [];
+				addWHEPProtocols(protocols, {
+					whep:"/webrtc/whep/live/camera?mode=live",
+					whep_live:"/webrtc/whep/live/camera?mode=live&source=explicit-live",
+					whep_realtime:"/webrtc/whep/live/camera?mode=realtime&source=explicit-realtime"
+				});
+				protocols[0].fn("live/camera");
+				protocols[1].fn("live/camera");
+				return captured;
+			} finally {
+				playWHEP = original;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &calls)); err != nil {
+			t.Fatalf("exercise WHEP protocol metadata: %v", err)
+		}
+		if len(calls) != 2 {
+			t.Fatalf("WHEP play calls = %#v, want live and realtime", calls)
+		}
+		if calls[0].Mode != "live" || calls[0].Path != "/webrtc/whep/live/camera?mode=live&source=explicit-live" {
+			t.Fatalf("live WHEP call = %#v", calls[0])
+		}
+		if calls[1].Mode != "realtime" || calls[1].Path != "/webrtc/whep/live/camera?mode=realtime&source=explicit-realtime" {
+			t.Fatalf("realtime WHEP call = %#v", calls[1])
+		}
+	})
+}
+
+func TestConsoleWHEPStalledStatusNamesOnlyStaleExpectedMedia(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var got [][]string
+		expression := `[
+			whepStalledMediaKinds({
+				expected_video:true,
+				expected_audio:true,
+				updated_at:"2026-08-29T08:00:10Z",
+				last_video_at:"2026-08-29T08:00:01Z",
+				last_audio_at:"2026-08-29T08:00:09Z"
+			}),
+			whepStalledMediaKinds({
+				expected_video:true,
+				expected_audio:true,
+				updated_at:"2026-08-29T08:00:10Z",
+				last_video_at:"2026-08-29T08:00:09Z"
+			}),
+			whepStalledMediaKinds({
+				expected_video:false,
+				expected_audio:true,
+				updated_at:"2026-08-29T08:00:10Z",
+				last_audio_at:"2026-08-29T08:00:01Z"
+			})
+		]`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &got)); err != nil {
+			t.Fatalf("evaluate WHEP stalled media diagnostics: %v", err)
+		}
+		want := [][]string{{"video"}, {"audio"}, {"audio"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("stalled media kinds = %#v, want %#v", got, want)
+		}
+	})
 }
 
 func TestConsoleWHEPVideoAutoplayFallbackKeepsAudioControl(t *testing.T) {

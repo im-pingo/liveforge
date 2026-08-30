@@ -7,22 +7,30 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 )
 
+const wsClientQueueDepth = 64
+
 // WSSender manages WebSocket notification clients.
 type WSSender struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
+	dropped atomic.Uint64
 }
 
 type wsClient struct {
-	conn   *websocket.Conn
-	events map[string]bool // nil means all events
-	ctx    context.Context
-	cancel context.CancelFunc
+	conn      *websocket.Conn
+	events    map[string]bool // nil means all events
+	ctx       context.Context
+	cancel    context.CancelFunc
+	send      chan []byte
+	done      chan struct{}
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 // NewWSSender creates a new WebSocket notification sender.
@@ -51,11 +59,14 @@ func (s *WSSender) Send(p *NotifyPayload) {
 		if c.events != nil && !c.events[p.Event] {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
-		err := c.conn.Write(ctx, websocket.MessageText, data)
-		cancel()
-		if err != nil {
-			s.removeClient(c)
+		if c.closed.Load() {
+			continue
+		}
+		select {
+		case c.send <- data:
+		default:
+			s.dropped.Add(1)
+			slog.Warn("ws client queue full, dropping event", "module", "notify", "event", p.Event, "stream", p.StreamKey)
 		}
 	}
 }
@@ -80,6 +91,8 @@ func (s *WSSender) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		events: events,
 		ctx:    ctx,
 		cancel: cancel,
+		send:   make(chan []byte, wsClientQueueDepth),
+		done:   make(chan struct{}),
 	}
 
 	s.mu.Lock()
@@ -87,6 +100,7 @@ func (s *WSSender) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	slog.Info("ws client connected", "module", "notify", "events", events)
+	go s.writeLoop(c)
 
 	// Block until the client disconnects or context is cancelled.
 	// Read loop detects close frames.
@@ -118,8 +132,7 @@ func (s *WSSender) Close() {
 	s.mu.Unlock()
 
 	for _, c := range clients {
-		c.cancel()
-		c.conn.Close(websocket.StatusGoingAway, "server shutdown")
+		s.closeClient(c, websocket.StatusGoingAway, "server shutdown")
 	}
 }
 
@@ -130,10 +143,44 @@ func (s *WSSender) removeClient(c *wsClient) {
 	s.mu.Unlock()
 
 	if ok {
-		c.cancel()
-		c.conn.Close(websocket.StatusNormalClosure, "")
+		s.closeClient(c, websocket.StatusNormalClosure, "")
 		slog.Info("ws client disconnected", "module", "notify")
 	}
+}
+
+func (s *WSSender) writeLoop(c *wsClient) {
+	for {
+		select {
+		case data := <-c.send:
+			ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+			err := c.conn.Write(ctx, websocket.MessageText, data)
+			cancel()
+			if err != nil {
+				s.removeClient(c)
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+func (s *WSSender) closeClient(c *wsClient, status websocket.StatusCode, reason string) {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		close(c.done)
+		c.cancel()
+		_ = c.conn.Close(status, reason)
+	})
+}
+
+// Dropped returns the number of notification messages rejected by full client
+// queues since the sender was created.
+func (s *WSSender) Dropped() uint64 {
+	return s.dropped.Load()
 }
 
 // parseEventFilter parses a comma-separated event filter string.

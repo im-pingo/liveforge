@@ -84,7 +84,7 @@ func TestConfigAndProtocolReadAccessUsesViewerRBAC(t *testing.T) {
 	}
 }
 
-func TestHandleConfigApplyWritesFileAndPreservesRedactedSecrets(t *testing.T) {
+func TestHandleConfigApplyWritesFileAndPreservesRedactedSecretsAndUnmappedFields(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.API.Auth.BearerToken = "api-secret"
 	cfg.API.Console.Username = "admin"
@@ -94,6 +94,7 @@ func TestHandleConfigApplyWritesFileAndPreservesRedactedSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	document = append(document, []byte("custom_runtime_field: retained\n")...)
 	path := filepath.Join(t.TempDir(), "liveforge.yaml")
 	if err := os.WriteFile(path, document, 0o600); err != nil {
 		t.Fatal(err)
@@ -148,6 +149,9 @@ func TestHandleConfigApplyWritesFileAndPreservesRedactedSecrets(t *testing.T) {
 	}
 	if parsed.Server.Name != "edited" || parsed.API.Auth.BearerToken != "api-secret" || parsed.API.Console.Password != "console-secret" {
 		t.Fatalf("written config lost edits or secrets: server=%q bearer=%q password=%q", parsed.Server.Name, parsed.API.Auth.BearerToken, parsed.API.Console.Password)
+	}
+	if !strings.Contains(string(written), "custom_runtime_field: retained") {
+		t.Fatalf("written config dropped unmapped desired-source field:\n%s", written)
 	}
 }
 
@@ -367,6 +371,129 @@ func TestConfigDocumentPreservesRawSourceFieldsAndComments(t *testing.T) {
 	}
 }
 
+func TestHandleConfigDocumentRedactsUnmappedHierarchicalURLValues(t *testing.T) {
+	const sourceDocument = `server:
+  name: liveforge
+primary: https://hooks.slack.com/services/T111/B111/scalar-path-token
+mirrors:
+  - https://hooks.slack.com/services/T222/B222/sequence-path-token
+ordinary:
+  - 30s
+  - camera-001
+  - relay.example.test:443
+  - 239.0.0.1
+  - turn:relay.example.test:3478?transport=udp
+`
+	h, server := newTestHandlers(t)
+	manager, err := configruntime.NewManager(configruntime.Options{
+		Source:  &rawDocumentSource{document: []byte(sourceDocument)},
+		Initial: nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server.SetConfigManager(manager)
+
+	w := httptest.NewRecorder()
+	h.handleConfigDocument(w, httptest.NewRequest(http.MethodGet, "/api/v1/server/config/document", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var response struct {
+		Desired     map[string]any `json:"desired"`
+		DesiredText string         `json:"desired_document"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	desiredJSON, err := json.Marshal(response.Desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, surface := range []struct {
+		name string
+		text string
+	}{
+		{name: "decoded desired", text: string(desiredJSON)},
+		{name: "desired_document", text: response.DesiredText},
+	} {
+		t.Run(surface.name, func(t *testing.T) {
+			for _, secret := range []string{"T111", "B111", "scalar-path-token", "T222", "B222", "sequence-path-token"} {
+				if strings.Contains(surface.text, secret) {
+					t.Errorf("management response leaked unmapped URL path credential %q: %s", secret, surface.text)
+				}
+			}
+			if !strings.Contains(surface.text, "hooks.slack.com") || !strings.Contains(surface.text, redactedURLPathPrefix) {
+				t.Errorf("management response lost safe URL host or digest marker: %s", surface.text)
+			}
+			for _, ordinary := range []string{"30s", "camera-001", "relay.example.test:443", "239.0.0.1", "turn:relay.example.test:3478?transport=udp"} {
+				if !strings.Contains(surface.text, ordinary) {
+					t.Errorf("management response changed ordinary value %q: %s", ordinary, surface.text)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleConfigDocumentRehashesLiteralRedactedPathMarker(t *testing.T) {
+	//nolint:gosec // Intentional fake URL credentials verify management-response redaction.
+	const sourceURL = "https://literal-user:literal-password@hooks.slack.com:8443/__liveforge_redacted_path__/0123456789abcdef0123456789abcdef?token=literal-query#literal-fragment"
+	const redactedURL = "https://REDACTED@hooks.slack.com:8443/__liveforge_redacted_path__/3b08eb10aa25a39ac0cf6bf776391a6b?__liveforge_redacted__=1"
+	const sourceDocument = "server:\n  name: liveforge\nprimary: " + sourceURL + "\n"
+	h, server := newTestHandlers(t)
+	manager, err := configruntime.NewManager(configruntime.Options{
+		Source:  &rawDocumentSource{document: []byte(sourceDocument)},
+		Initial: nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server.SetConfigManager(manager)
+
+	w := httptest.NewRecorder()
+	h.handleConfigDocument(w, httptest.NewRequest(http.MethodGet, "/api/v1/server/config/document", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var response struct {
+		Desired     map[string]any `json:"desired"`
+		DesiredText string         `json:"desired_document"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	var desiredDocument map[string]any
+	if err := yaml.Unmarshal([]byte(response.DesiredText), &desiredDocument); err != nil {
+		t.Fatal(err)
+	}
+	for _, surface := range []struct {
+		name  string
+		value any
+	}{
+		{name: "decoded desired", value: response.Desired["primary"]},
+		{name: "desired_document", value: desiredDocument["primary"]},
+	} {
+		t.Run(surface.name, func(t *testing.T) {
+			if surface.value != redactedURL {
+				t.Fatalf("management response URL = %q, want source-path digest %q", surface.value, redactedURL)
+			}
+			if strings.Contains(surface.value.(string), "/__liveforge_redacted_path__/0123456789abcdef0123456789abcdef") {
+				t.Fatalf("management response leaked literal marker-shaped source path: %q", surface.value)
+			}
+		})
+	}
+}
+
 func TestHandleConfigValidateAcceptsDocumentContentTypes(t *testing.T) {
 	h, _ := newTestHandlers(t)
 	for name, contentType := range map[string]string{
@@ -386,6 +513,75 @@ func TestHandleConfigValidateAcceptsDocumentContentTypes(t *testing.T) {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestHandleConfigValidateDoesNotExpandProcessEnvironment(t *testing.T) {
+	const processSecret = "viewer-must-not-read-this-process-secret"
+	t.Setenv("LIVEFORGE_VALIDATE_PROCESS_SECRET", processSecret)
+	h, _ := newTestHandlers(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/server/config/validate", strings.NewReader("server:\n  name: \"${LIVEFORGE_VALIDATE_PROCESS_SECRET}\"\n"))
+	req.Header.Set("Content-Type", "application/yaml")
+	w := httptest.NewRecorder()
+
+	h.handleConfigValidate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), processSecret) {
+		t.Fatalf("validate response disclosed process environment value: %s", w.Body.String())
+	}
+	data := decodeAPIData(t, w.Body.Bytes())
+	var response struct {
+		Config map[string]any `json:"config"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Config["server"].(map[string]any)["name"]; got != "${LIVEFORGE_VALIDATE_PROCESS_SECRET}" {
+		t.Fatalf("validated server.name=%q, want literal environment reference", got)
+	}
+}
+
+func TestHandleConfigValidateRejectsUnknownKeys(t *testing.T) {
+	h, _ := newTestHandlers(t)
+	tests := []struct {
+		name     string
+		document string
+		field    string
+	}{
+		{name: "top level", document: "servre:\n  name: typo\n", field: "servre"},
+		{name: "nested", document: "server:\n  naem: typo\n", field: "naem"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/server/config/validate", strings.NewReader(test.document))
+			req.Header.Set("Content-Type", "application/yaml")
+			w := httptest.NewRecorder()
+
+			h.handleConfigValidate(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), test.field) {
+				t.Fatalf("unknown-field error did not identify %q: %s", test.field, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleConfigValidateRejectsSecondYAMLDocument(t *testing.T) {
+	h, _ := newTestHandlers(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/server/config/validate", strings.NewReader("server:\n  name: liveforge\n---\nmalicious_or_unknown:\n  value: ignored\n"))
+	req.Header.Set("Content-Type", "application/yaml")
+	w := httptest.NewRecorder()
+
+	h.handleConfigValidate(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -415,16 +611,134 @@ func TestEmbeddedConfigSchemaMatchesRepository(t *testing.T) {
 
 func TestRedactedSourceDetailsRemoveURLCredentials(t *testing.T) {
 	details := redactedSourceDetails(config.RuntimeConfig{
+		File:   config.RuntimeFileSourceConfig{MaxBytes: 11},
 		HTTP:   config.RuntimeHTTPSourceConfig{URL: "https://user:password@config.example.test/live.yaml?token=secret"},
 		Consul: config.RuntimeConsulSourceConfig{Address: "http://token:secret@consul.example.test:8500?auth=secret"},
+		Redis:  config.RuntimeRedisSourceConfig{MaxBytes: 13},
 	})
 	httpDetails := details["http"].(map[string]any)
 	consulDetails := details["consul"].(map[string]any)
-	if got := httpDetails["url"]; got != "https://config.example.test/live.yaml" {
-		t.Fatalf("redacted HTTP URL = %q", got)
+	if got := details["file"].(map[string]any)["max_bytes"]; got != int64(11) {
+		t.Fatalf("redacted file max_bytes = %v, want 11", got)
+	}
+	if got := details["redis"].(map[string]any)["max_bytes"]; got != int64(13) {
+		t.Fatalf("redacted Redis max_bytes = %v, want 13", got)
+	}
+	if got := httpDetails["url"].(string); !strings.Contains(got, "config.example.test") ||
+		!strings.Contains(got, redactedURLPathPrefix) || strings.Contains(got, "live.yaml") {
+		t.Fatalf("redacted HTTP URL = %q, want visible host and opaque path", got)
 	}
 	if got := consulDetails["address"]; got != "http://consul.example.test:8500" {
 		t.Fatalf("redacted Consul address = %q", got)
+	}
+}
+
+func TestConfigSecretRedactionCoversAPIKeyAndSchemaSecretFields(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal(embeddedConfigSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	secretProperties := make(map[string]struct{})
+	var collect func(map[string]any)
+	collect = func(node map[string]any) {
+		if properties, ok := node["properties"].(map[string]any); ok {
+			for name, raw := range properties {
+				child, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				if secret, _ := child["x-liveforge-secret"].(bool); secret {
+					secretProperties[name] = struct{}{}
+				}
+				collect(child)
+			}
+		}
+		if definitions, ok := node["$defs"].(map[string]any); ok {
+			for _, raw := range definitions {
+				if child, ok := raw.(map[string]any); ok {
+					collect(child)
+				}
+			}
+		}
+		if items, ok := node["items"].(map[string]any); ok {
+			collect(items)
+		}
+	}
+	collect(schema)
+	for key := range secretProperties {
+		if !isSensitiveConfigKey(key) {
+			t.Errorf("schema x-liveforge-secret property %q is not classified as sensitive", key)
+		}
+	}
+	if !isSensitiveConfigKey("api_key") {
+		t.Error("api_key is not classified as sensitive")
+	}
+
+	const sourceDocument = `tls:
+  cert_file: /etc/liveforge/public-cert.pem
+  key_file: /etc/liveforge/private-key-material.pem
+custom_service:
+  api_key: custom-api-key-material
+`
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"private-key-material", "custom-api-key-material"} {
+		if strings.Contains(string(redacted), secret) {
+			t.Fatalf("redacted document leaked %q: %s", secret, redacted)
+		}
+	}
+	restored, err := preserveRedactedSecretsWithDocument(redacted, config.Defaults(), []byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"private-key-material", "custom-api-key-material"} {
+		if !strings.Contains(string(restored), secret) {
+			t.Fatalf("restored document lost %q: %s", secret, restored)
+		}
+	}
+}
+
+func TestConfigURLPathCredentialsAreOpaqueAndRestoreByStableIdentity(t *testing.T) {
+	const sourceDocument = `custom_callback_urls:
+  - https://hooks.slack.com/services/T111/B111/first-path-token
+  - https://hooks.slack.com/services/T222/B222/second-path-token
+`
+	redacted, err := redactedConfigDocument([]byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactedText := string(redacted)
+	for _, secret := range []string{"T111", "B111", "first-path-token", "T222", "B222", "second-path-token"} {
+		if strings.Contains(redactedText, secret) {
+			t.Fatalf("redacted document leaked URL path credential %q: %s", secret, redacted)
+		}
+	}
+	if !strings.Contains(redactedText, "hooks.slack.com") {
+		t.Fatalf("redacted document lost safe URL host: %s", redacted)
+	}
+
+	var candidate map[string]any
+	if err := yaml.Unmarshal(redacted, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	reverseConfigSequence(t, candidate, "custom_callback_urls")
+	candidateDocument, err := yaml.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := preserveRedactedSecretsWithDocument(candidateDocument, config.Defaults(), []byte(sourceDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(restored, &document); err != nil {
+		t.Fatal(err)
+	}
+	urls := document["custom_callback_urls"].([]any)
+	if len(urls) != 2 || urls[0] != "https://hooks.slack.com/services/T222/B222/second-path-token" || urls[1] != "https://hooks.slack.com/services/T111/B111/first-path-token" {
+		t.Fatalf("restored reordered path-token URLs = %#v", urls)
 	}
 }
 
@@ -916,8 +1230,16 @@ func TestPreserveRedactedURLKeepsEditedLocationAndRestoresOnlySecretComponents(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	edited := strings.ReplaceAll(string(redacted), "old.example.test/old.yaml", "new.example.test/new.yaml")
-	restored, err := preserveRedactedSecretsWithDocument([]byte(edited), config.Defaults(), []byte(currentDocument))
+	var edited map[string]any
+	if err := yaml.Unmarshal(redacted, &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited["runtime"].(map[string]any)["http"].(map[string]any)["url"] = "https://REDACTED@new.example.test/new.yaml?__liveforge_redacted__=1"
+	editedDocument, err := yaml.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := preserveRedactedSecretsWithDocument(editedDocument, config.Defaults(), []byte(currentDocument))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,6 +1374,121 @@ func TestPreserveRedactedURLSequenceMatchesReorderedPublicIdentity(t *testing.T)
 	}
 }
 
+func TestPreserveRedactedUnmappedURLSequenceUsesStableValueIdentity(t *testing.T) {
+	const currentDocument = `mirrors:
+  - https://first-user:first-password@hooks.slack.com/services/T111/B111/first-path-token?token=first-query#first-fragment
+  - https://second-user:second-password@hooks.slack.com/services/T222/B222/second-path-token?token=second-query#second-fragment
+`
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"first-user", "first-password", "T111", "B111", "first-path-token", "first-query", "second-user", "second-password", "T222", "B222", "second-path-token", "second-query"} {
+		if strings.Contains(string(redacted), secret) {
+			t.Errorf("redacted unmapped URL sequence leaked %q: %s", secret, redacted)
+		}
+	}
+
+	t.Run("reordered", func(t *testing.T) {
+		var candidate map[string]any
+		if err := yaml.Unmarshal(redacted, &candidate); err != nil {
+			t.Fatal(err)
+		}
+		reverseConfigSequence(t, candidate, "mirrors")
+		candidateDocument, err := yaml.Marshal(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := preserveRedactedSecretsWithDocument(candidateDocument, config.Defaults(), []byte(currentDocument))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := yaml.Unmarshal(restored, &document); err != nil {
+			t.Fatal(err)
+		}
+		urls := document["mirrors"].([]any)
+		wantFirst := "https://second-user:second-password@hooks.slack.com/services/T222/B222/second-path-token?token=second-query#second-fragment"
+		wantSecond := "https://first-user:first-password@hooks.slack.com/services/T111/B111/first-path-token?token=first-query#first-fragment"
+		if len(urls) != 2 || urls[0] != wantFirst || urls[1] != wantSecond {
+			t.Fatalf("restored reordered unmapped URLs = %#v, want [%q %q]", urls, wantFirst, wantSecond)
+		}
+	})
+
+	t.Run("edited identity", func(t *testing.T) {
+		var candidate map[string]any
+		if err := yaml.Unmarshal(redacted, &candidate); err != nil {
+			t.Fatal(err)
+		}
+		urls := candidate["mirrors"].([]any)
+		urls[0] = strings.Replace(urls[0].(string), "hooks.slack.com", "edited.example.test", 1)
+		candidateDocument, err := yaml.Marshal(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restored, err := preserveRedactedSecretsWithDocument(candidateDocument, config.Defaults(), []byte(currentDocument)); err == nil {
+			t.Fatalf("edited unmapped URL identity received a source credential: %s", restored)
+		}
+	})
+
+	t.Run("ambiguous identity", func(t *testing.T) {
+		const ambiguousDocument = `mirrors:
+  - https://first-user:first-password@hooks.slack.com/services/SHARED/PATH/token?token=first-query
+  - https://second-user:second-password@hooks.slack.com/services/SHARED/PATH/token?token=second-query
+`
+		ambiguous, err := redactedConfigDocument([]byte(ambiguousDocument))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restored, err := preserveRedactedSecretsWithDocument(ambiguous, config.Defaults(), []byte(ambiguousDocument)); err == nil {
+			t.Fatalf("ambiguous unmapped URL identities were restored by position: %s", restored)
+		}
+	})
+}
+
+func TestPreserveRedactedURLRoundTripsLiteralPathMarker(t *testing.T) {
+	//nolint:gosec // Intentional fake URL credentials verify placeholder restoration.
+	const sourceURL = "https://source-user:source-password@hooks.slack.com/__liveforge_redacted_path__/0123456789abcdef0123456789abcdef?token=source-query#source-fragment"
+	const redactedURL = "https://REDACTED@hooks.slack.com/__liveforge_redacted_path__/3b08eb10aa25a39ac0cf6bf776391a6b?__liveforge_redacted__=1"
+	const currentDocument = "primary: " + sourceURL + "\n"
+	redacted, err := redactedConfigDocument([]byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate map[string]any
+	if err := yaml.Unmarshal(redacted, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	if candidate["primary"] != redactedURL {
+		t.Fatalf("redacted URL = %q, want source-path digest %q", candidate["primary"], redactedURL)
+	}
+
+	restored, err := preserveRedactedSecretsWithDocument(redacted, config.Defaults(), []byte(currentDocument))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(restored, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document["primary"] != sourceURL {
+		t.Fatalf("restored URL = %q, want exact source URL %q", document["primary"], sourceURL)
+	}
+}
+
+func TestPreserveRedactedURLRejectsLiteralMarkerCandidateWithoutMatchingSourceDigest(t *testing.T) {
+	//nolint:gosec // Intentional fake URL credentials verify fail-closed restoration.
+	const currentDocument = "primary: https://source-user:source-password@hooks.slack.com/__liveforge_redacted_path__/0123456789abcdef0123456789abcdef?token=source-query#source-fragment\n"
+	const candidateDocument = "primary: https://hooks.slack.com/__liveforge_redacted_path__/0123456789abcdef0123456789abcdef\n"
+	restored, err := preserveRedactedSecretsWithDocument([]byte(candidateDocument), config.Defaults(), []byte(currentDocument))
+	if err == nil {
+		t.Fatalf("marker-looking candidate bypassed source-path identity matching: %s", restored)
+	}
+	if restored != nil {
+		t.Fatalf("failed restoration returned a document containing source credentials: %s", restored)
+	}
+}
+
 func TestPreserveRedactedSecretsRejectsAmbiguousCollectionIdentity(t *testing.T) {
 	const currentDocument = `notify:
   http:
@@ -1161,11 +1598,11 @@ func assertStructuredURLValuesOpaque(t *testing.T, document map[string]any) {
 		t.Fatalf("heterogeneous scalar URL value = %#v", callbacks[1])
 	}
 	publicURL := credentials["public_url"].(string)
-	if !strings.Contains(publicURL, "public.example.test/hook") || !isRedactedConfigURL(publicURL) {
+	if !strings.Contains(publicURL, "public.example.test") || strings.Contains(publicURL, "/hook") || !isRedactedConfigURL(publicURL) {
 		t.Fatalf("scalar public_url lost safe identity: %q", publicURL)
 	}
 	publicURLs := credentials["public_urls"].([]any)
-	if len(publicURLs) != 1 || !strings.Contains(publicURLs[0].(string), "list.example.test/hook") || !isRedactedConfigURL(publicURLs[0].(string)) {
+	if len(publicURLs) != 1 || !strings.Contains(publicURLs[0].(string), "list.example.test") || strings.Contains(publicURLs[0].(string), "/hook") || !isRedactedConfigURL(publicURLs[0].(string)) {
 		t.Fatalf("scalar public_urls lost safe identity: %#v", publicURLs)
 	}
 }

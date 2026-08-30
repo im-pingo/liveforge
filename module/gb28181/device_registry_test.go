@@ -154,3 +154,37 @@ func TestRegistryAll(t *testing.T) {
 		t.Errorf("All() len = %d, want 2", len(all))
 	}
 }
+
+func TestRegistryReturnsImmutableSnapshots(t *testing.T) {
+	r := NewDeviceRegistry(180*time.Second, "")
+	defer r.Stop()
+	r.Register("device", "127.0.0.1:5060", "udp")
+	r.UpdateChannels("device", map[string]*Channel{
+		"channel": {ChannelID: "channel", Name: "original"},
+	})
+
+	got := r.Get("device")
+	got.Status = DeviceStatusOffline
+	got.Channels["channel"].Name = "mutated"
+	got.Channels["injected"] = &Channel{ChannelID: "injected"}
+
+	fresh := r.Get("device")
+	if fresh.Status != DeviceStatusOnline {
+		t.Fatalf("registry status was mutated through snapshot: %v", fresh.Status)
+	}
+	if fresh.Channels["channel"].Name != "original" || len(fresh.Channels) != 1 {
+		t.Fatalf("registry channels were mutated through snapshot: %+v", fresh.Channels)
+	}
+
+	all := r.All()
+	all[0].Channels["channel"].Name = "mutated again"
+	if r.Get("device").Channels["channel"].Name != "original" {
+		t.Fatal("All returned mutable channel state")
+	}
+}
+
+func TestRegistryStopIsIdempotent(t *testing.T) {
+	r := NewDeviceRegistry(time.Second, "")
+	r.Stop()
+	r.Stop()
+}

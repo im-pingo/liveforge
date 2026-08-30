@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,16 +29,442 @@ func (inertConfigSource) Close() error { return nil }
 func testConfig() *config.Config {
 	return &config.Config{
 		Stream: config.StreamConfig{
-			GOPCache:       true,
-			GOPCacheNum:    1,
-			RingBufferSize: 1024,
+			GOPCache:          true,
+			GOPCacheNum:       1,
+			GOPCacheMaxFrames: config.DefaultGOPCacheMaxFrames,
+			GOPCacheMaxBytes:  32 * 1024 * 1024,
+			RingBufferSize:    1024,
 		},
 		Metrics: config.MetricsConfig{
-			Enabled: true,
-			Listen:  "127.0.0.1:0", // random loopback port
-			Path:    "/metrics",
+			Enabled:           true,
+			Listen:            "127.0.0.1:0", // random loopback port
+			Path:              "/metrics",
+			StreamDetail:      true,
+			StreamDetailLimit: 100,
 		},
 	}
+}
+
+func TestMetricsStreamDetailIsDisabledByDefault(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetail = false
+	s := core.NewServer(cfg)
+	for _, key := range []string{"live/one", "live/two"} {
+		if _, err := s.StreamHub().GetOrCreate(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(NewCollector(s))
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "stream_key" {
+					t.Fatalf("default metrics exposed unbounded stream label in %s", family.GetName())
+				}
+			}
+		}
+	}
+}
+
+func TestMetricsStreamDetailCollectorDefensivelyHidesLabelsForNonPositiveDirectConfig(t *testing.T) {
+	for _, limit := range []int{0, -1} {
+		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Metrics.StreamDetailLimit = limit
+			s := core.NewServer(cfg)
+			if _, err := s.StreamHub().GetOrCreate("live/hidden"); err != nil {
+				t.Fatal(err)
+			}
+			registry := prometheus.NewRegistry()
+			registry.MustRegister(NewCollector(s))
+			keys, err := gatherStreamKeys(registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(keys) != 0 {
+				t.Fatalf("stream detail labels = %v, want none", sortedKeys(keys))
+			}
+		})
+	}
+}
+
+func TestMetricsStreamDetailAllowlistIsDeduplicatedSortedAndExact(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetail = true
+	cfg.Metrics.StreamDetailLimit = 2
+	cfg.Metrics.StreamDetailAllowlist = []string{"live/z", "live/b", "live/a", "live/a"}
+	s := core.NewServer(cfg)
+	var firstA *core.Stream
+	for _, key := range []string{"live/z", "live/a", "live/b", "live/not-allowed"} {
+		stream, err := s.StreamHub().GetOrCreate(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key == "live/a" {
+			firstA = stream
+		}
+	}
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(NewCollector(s))
+	for range 3 {
+		keys, err := gatherSelectedStreamKeys(registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireStreamSelection(t, keys, []string{"live/a", "live/b"}, cfg.Metrics.StreamDetailLimit)
+	}
+
+	s.StreamHub().Remove("live/a")
+	for range 3 {
+		keys, err := gatherSelectedStreamKeys(registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireStreamSelection(t, keys, []string{"live/b", "live/z"}, cfg.Metrics.StreamDetailLimit)
+	}
+
+	recreatedA, err := s.StreamHub().GetOrCreate("live/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recreatedA == firstA {
+		t.Fatal("same-key recreation reused the removed Stream instance")
+	}
+	for range 3 {
+		keys, err := gatherSelectedStreamKeys(registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireStreamSelection(t, keys, []string{"live/a", "live/b"}, cfg.Metrics.StreamDetailLimit)
+	}
+}
+
+func TestMetricsStreamDetailUsesBoundedStableHubOrder(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetailLimit = 2
+	s := core.NewServer(cfg)
+	for _, key := range []string{"live/z", "live/a", "live/m"} {
+		if _, err := s.StreamHub().GetOrCreate(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(NewCollector(s))
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make(map[string]struct{})
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "stream_key" {
+					keys[label.GetValue()] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, key := range []string{"live/z", "live/a"} {
+		if _, ok := keys[key]; !ok {
+			t.Fatalf("stable stream detail labels = %v, missing %q", keys, key)
+		}
+	}
+	if _, ok := keys["live/m"]; ok {
+		t.Fatalf("stable stream detail labels exceeded limit: %v", keys)
+	}
+}
+
+func TestMetricsStreamDetailLimitBoundsLifetimeLabelsAcrossChurn(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetailLimit = 1
+	s := core.NewServer(cfg)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(NewCollector(s))
+
+	lifetimeKeys := make(map[string]struct{})
+	for _, key := range []string{"live/first", "live/second", "live/third"} {
+		if _, err := s.StreamHub().GetOrCreate(key); err != nil {
+			t.Fatal(err)
+		}
+
+		gatherKeys, err := gatherStreamKeys(registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for gatherKey := range gatherKeys {
+			lifetimeKeys[gatherKey] = struct{}{}
+		}
+		if len(gatherKeys) > cfg.Metrics.StreamDetailLimit {
+			t.Fatalf("gather stream detail labels = %v, want at most %d", sortedKeys(gatherKeys), cfg.Metrics.StreamDetailLimit)
+		}
+		s.StreamHub().Remove(key)
+	}
+
+	if len(lifetimeKeys) > cfg.Metrics.StreamDetailLimit {
+		t.Fatalf("lifetime stream detail labels = %v, want at most %d", sortedKeys(lifetimeKeys), cfg.Metrics.StreamDetailLimit)
+	}
+}
+
+func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathers(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetailLimit = 2
+	s := core.NewServer(cfg)
+	firstAdmitted, err := s.StreamHub().GetOrCreate("live/admitted/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StreamHub().GetOrCreate("live/admitted/two"); err != nil {
+		t.Fatal(err)
+	}
+	collector := NewCollector(s)
+	barrier := newRegistryGatherBarrier()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector, barrier)
+
+	lifetimeKeys := make(map[string]struct{})
+	recordSelection := func(keys []string) {
+		for _, key := range keys {
+			lifetimeKeys[key] = struct{}{}
+		}
+	}
+
+	initial, err := gatherSelectedStreamKeys(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireStreamSelection(t, initial, []string{"live/admitted/one", "live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
+	recordSelection(initial)
+
+	laterKeys := []string{"live/later/one", "live/later/two", "live/later/three", "live/later/four", "live/later/five"}
+	absentSelections := gatherConcurrentlyWithMutation(t, collector, barrier, registry, 8, func() error {
+		s.StreamHub().Remove("live/admitted/one")
+		for _, key := range laterKeys {
+			if _, err := s.StreamHub().GetOrCreate(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	for _, selection := range absentSelections {
+		requireStreamSelection(t, selection, []string{"live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
+		recordSelection(selection)
+	}
+
+	reappearedSelections := gatherConcurrentlyWithMutation(t, collector, barrier, registry, 8, func() error {
+		recreated, err := s.StreamHub().GetOrCreate("live/admitted/one")
+		if err != nil {
+			return err
+		}
+		if recreated == firstAdmitted {
+			return fmt.Errorf("same-key recreation reused the removed Stream instance")
+		}
+		return nil
+	})
+	for _, selection := range reappearedSelections {
+		requireStreamSelection(t, selection, []string{"live/admitted/one", "live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
+		recordSelection(selection)
+	}
+
+	finalSelection, err := gatherSelectedStreamKeys(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireStreamSelection(t, finalSelection, []string{"live/admitted/one", "live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
+	recordSelection(finalSelection)
+
+	if got := sortedKeys(lifetimeKeys); !slices.Equal(got, []string{"live/admitted/one", "live/admitted/two"}) {
+		t.Fatalf("lifetime stream detail labels = %v, want only the two admitted keys", got)
+	}
+	for _, key := range laterKeys {
+		if _, exposed := lifetimeKeys[key]; exposed {
+			t.Fatalf("later key %q entered lifetime stream detail labels: %v", key, sortedKeys(lifetimeKeys))
+		}
+	}
+}
+
+type streamGatherResult struct {
+	keys []string
+	err  error
+}
+
+type registryGatherBarrier struct {
+	desc *prometheus.Desc
+	mu   sync.RWMutex
+
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func newRegistryGatherBarrier() *registryGatherBarrier {
+	return &registryGatherBarrier{
+		desc: prometheus.NewDesc("liveforge_test_gather_barrier", "Test-only gather synchronization.", nil, nil),
+	}
+}
+
+func (b *registryGatherBarrier) Describe(ch chan<- *prometheus.Desc) { ch <- b.desc }
+
+func (b *registryGatherBarrier) Collect(ch chan<- prometheus.Metric) {
+	b.mu.RLock()
+	entered, release := b.entered, b.release
+	b.mu.RUnlock()
+	if entered != nil {
+		entered <- struct{}{}
+		<-release
+	}
+	ch <- prometheus.MustNewConstMetric(b.desc, prometheus.GaugeValue, 1)
+}
+
+func (b *registryGatherBarrier) begin(entered chan<- struct{}, release <-chan struct{}) {
+	b.mu.Lock()
+	b.entered = entered
+	b.release = release
+	b.mu.Unlock()
+}
+
+func (b *registryGatherBarrier) end() {
+	b.mu.Lock()
+	b.entered = nil
+	b.release = nil
+	b.mu.Unlock()
+}
+
+func gatherConcurrentlyWithMutation(
+	t *testing.T,
+	collector *Collector,
+	barrier *registryGatherBarrier,
+	registry *prometheus.Registry,
+	gatherCount int,
+	mutate func() error,
+) [][]string {
+	t.Helper()
+
+	// Keep detail admission blocked, and use a registered collector as an
+	// explicit signal that every real Registry.Gather is in flight.
+	collector.streamDetailMu.Lock()
+	gatherStart := make(chan struct{})
+	gatherEntered := make(chan struct{}, gatherCount)
+	gatherRelease := make(chan struct{})
+	barrier.begin(gatherEntered, gatherRelease)
+	results := make(chan streamGatherResult, gatherCount)
+	var wait sync.WaitGroup
+	for range gatherCount {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-gatherStart
+			keys, err := gatherSelectedStreamKeys(registry)
+			results <- streamGatherResult{keys: keys, err: err}
+		}()
+	}
+	close(gatherStart)
+	for range gatherCount {
+		<-gatherEntered
+	}
+
+	mutationDone := make(chan error, 1)
+	go func() { mutationDone <- mutate() }()
+	mutationErr := <-mutationDone
+	collector.streamDetailMu.Unlock()
+	close(gatherRelease)
+	wait.Wait()
+	barrier.end()
+	close(results)
+	if mutationErr != nil {
+		t.Fatal(mutationErr)
+	}
+
+	selections := make([][]string, 0, gatherCount)
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		selections = append(selections, result.keys)
+	}
+	return selections
+}
+
+func gatherSelectedStreamKeys(registry *prometheus.Registry) ([]string, error) {
+	families, err := registry.Gather()
+	if err != nil {
+		return nil, err
+	}
+	for _, family := range families {
+		if family.GetName() != "liveforge_stream_bytes_in_total" {
+			continue
+		}
+		keys := make([]string, 0, len(family.GetMetric()))
+		seen := make(map[string]struct{}, len(family.GetMetric()))
+		for _, metric := range family.GetMetric() {
+			key := ""
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "stream_key" {
+					key = label.GetValue()
+					break
+				}
+			}
+			if key == "" {
+				return nil, fmt.Errorf("stream bytes metric is missing stream_key")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return nil, fmt.Errorf("stream bytes metric contains duplicate stream_key %q", key)
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		return keys, nil
+	}
+	return nil, nil
+}
+
+func requireStreamSelection(t *testing.T, got, want []string, limit int) {
+	t.Helper()
+	if len(got) > limit {
+		t.Fatalf("stream detail labels = %v, want at most %d", got, limit)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] == got[i-1] {
+			t.Fatalf("stream detail labels contain duplicate key %q: %v", got[i], got)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("stream detail labels = %v, want %v", got, want)
+	}
+}
+
+func gatherStreamKeys(registry *prometheus.Registry) (map[string]struct{}, error) {
+	families, err := registry.Gather()
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]struct{})
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "stream_key" {
+					keys[label.GetValue()] = struct{}{}
+				}
+			}
+		}
+	}
+	return keys, nil
+}
+
+func sortedKeys(keys map[string]struct{}) []string {
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func TestMetricsModuleStartStop(t *testing.T) {
@@ -78,6 +507,7 @@ func TestMetricsModuleStartStop(t *testing.T) {
 		t.Error("missing liveforge_server_uptime_seconds metric")
 	}
 }
+
 func TestHTTPServerTimeouts(t *testing.T) {
 	cfg := testConfig()
 	s := core.NewServer(cfg)
@@ -98,7 +528,6 @@ func TestHTTPServerTimeouts(t *testing.T) {
 		t.Errorf("WriteTimeout = %v, want unchanged zero value", got)
 	}
 }
-
 
 func TestMetricsExposeRuntimeConfigHealth(t *testing.T) {
 	cfg := testConfig()

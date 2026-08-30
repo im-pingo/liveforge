@@ -4,8 +4,10 @@ package testutil
 
 import (
 	"net"
+	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
@@ -16,8 +18,10 @@ import (
 	"github.com/im-pingo/liveforge/module/rtmp"
 	"github.com/im-pingo/liveforge/module/rtsp"
 	sipmod "github.com/im-pingo/liveforge/module/sip"
+	sipgwmod "github.com/im-pingo/liveforge/module/sipgateway"
 	"github.com/im-pingo/liveforge/module/srt"
 	"github.com/im-pingo/liveforge/module/webrtc"
+	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
 // Option configures the test server's Config before startup.
@@ -108,6 +112,13 @@ func WithAuth(secret string) Option {
 	}
 }
 
+// WithAudioCodec enables the optional audio transcoding path for test streams.
+func WithAudioCodec() Option {
+	return func(c *config.Config) {
+		c.AudioCodec.Enabled = true
+	}
+}
+
 // WithSIP enables the SIP module on an auto-allocated UDP port.
 func WithSIP() Option {
 	return func(c *config.Config) {
@@ -125,9 +136,22 @@ func WithGB28181() Option {
 	return func(c *config.Config) {
 		c.GB28181.Enabled = true
 		c.GB28181.StreamPrefix = "gb28181"
-		// Allocate a dynamic base port, clamped to avoid overflow.
-		base := allocUDPPortPair()
-		c.GB28181.RTPPortRange = []int{base, base + 100}
+		c.GB28181.Keepalive.Timeout = time.Minute
+		c.GB28181.RTPPortRange = allocUDPPortRange(8,
+			addressPortRange(c.SIP.Listen), c.SIP.Gateway.RTPPortRange)
+	}
+}
+
+// WithSIPGateway enables the SIP gateway and its persistent loopback lab.
+// Requires WithSIP() to be used as well.
+func WithSIPGateway() Option {
+	return func(c *config.Config) {
+		c.SIP.Gateway.Enabled = true
+		c.SIP.Gateway.StreamPrefix = "sip"
+		c.SIP.Gateway.Codecs = []string{"PCMA", "PCMU"}
+		c.SIP.Gateway.MaxCalls = 8
+		c.SIP.Gateway.RTPPortRange = allocUDPPortRange(8,
+			addressPortRange(c.SIP.Listen), c.GB28181.RTPPortRange)
 	}
 }
 
@@ -152,6 +176,9 @@ func StartTestServer(t *testing.T, opts ...Option) *TestServer {
 	}
 
 	s := core.NewServer(cfg)
+	if cfg.AudioCodec.Enabled {
+		s.StreamHub().SetAudioCodecEnabled(true)
+	}
 
 	// Register modules based on what the options enabled.
 	// Order matters: modules that register API handlers (e.g. GB28181) must
@@ -187,6 +214,12 @@ func StartTestServer(t *testing.T, opts ...Option) *TestServer {
 			t.Fatal("WithGB28181 requires WithSIP")
 		}
 		s.RegisterModule(gb28181mod.NewModule(sipModule.Service()))
+	}
+	if cfg.SIP.Gateway.Enabled {
+		if sipModule == nil {
+			t.Fatal("WithSIPGateway requires WithSIP")
+		}
+		s.RegisterModule(sipgwmod.NewModule(sipModule.Service()))
 	}
 
 	// API module must be registered last so cross-module handlers are available.
@@ -267,11 +300,28 @@ func (ts *TestServer) Config() *config.Config {
 	return ts.cfg
 }
 
+// ModuleByName returns a registered module for integration tests that exercise
+// the module's exported control-plane contract.
+func (ts *TestServer) ModuleByName(name string) core.Module {
+	return ts.server.ModuleByName(name)
+}
+
 // StreamHasVideoGOP reports whether a published stream has a decodable video
 // start point available for playback integration tests.
 func (ts *TestServer) StreamHasVideoGOP(streamKey string) bool {
 	stream, ok := ts.server.StreamHub().Find(streamKey)
 	return ok && stream.Publisher() != nil && stream.GOPCacheDetail().VideoFrames > 0
+}
+
+// StreamHasAudio reports whether the active publisher declares codec and at
+// least one audio frame has reached the shared stream hub.
+func (ts *TestServer) StreamHasAudio(streamKey string, codec avframe.CodecType) bool {
+	stream, ok := ts.server.StreamHub().Find(streamKey)
+	if !ok || stream.Publisher() == nil {
+		return false
+	}
+	info := stream.Publisher().MediaInfo()
+	return info != nil && info.AudioCodec == codec && stream.Stats().AudioFrames > 0
 }
 
 // Shutdown stops the server. It is safe to call multiple times; only the first
@@ -327,18 +377,54 @@ func allocUDPAddr() string {
 // allocUDPPortPair allocates a free even-numbered UDP port suitable as the
 // base of an RTP port range. The result is clamped so that base+100 stays
 // within the valid port space.
-func allocUDPPortPair() int {
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+func allocUDPPortRange(pairCount int, excluded ...[]int) []int {
+	const (
+		minimumPort = 35000
+		maximumPort = 59999
+	)
+	portCount := pairCount * 2
+	loopback := net.ParseIP("127.0.0.1")
+	for start := minimumPort; start+portCount-1 <= maximumPort; start += 2 {
+		end := start + portCount - 1
+		overlaps := false
+		for _, other := range excluded {
+			if len(other) == 2 && start <= other[1] && other[0] <= end {
+				overlaps = true
+				break
+			}
+		}
+		if overlaps {
+			continue
+		}
+
+		reservations := make([]*net.UDPConn, 0, portCount)
+		available := true
+		for port := start; port <= end; port++ {
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
+			if err != nil {
+				available = false
+				break
+			}
+			reservations = append(reservations, conn)
+		}
+		for _, conn := range reservations {
+			_ = conn.Close()
+		}
+		if available {
+			return []int{start, end}
+		}
+	}
+	panic("allocUDPPortRange: no contiguous loopback UDP range available")
+}
+
+func addressPortRange(address string) []int {
+	_, portText, err := net.SplitHostPort(address)
 	if err != nil {
-		panic("allocUDPPortPair: " + err.Error())
+		return nil
 	}
-	port := conn.LocalAddr().(*net.UDPAddr).Port
-	conn.Close()
-	if port%2 != 0 {
-		port++
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 {
+		return nil
 	}
-	if port+100 > 65535 {
-		port = 65400 // safe fallback
-	}
-	return port
+	return []int{port, port}
 }

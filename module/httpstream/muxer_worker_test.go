@@ -15,13 +15,20 @@ import (
 	"github.com/im-pingo/liveforge/pkg/muxer/flv"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
 	"github.com/im-pingo/liveforge/pkg/muxer/ts"
+	"github.com/im-pingo/liveforge/pkg/util"
 )
 
 type muxerWorkerPublisher struct {
+	id   string
 	info *avframe.MediaInfo
 }
 
-func (p *muxerWorkerPublisher) ID() string                    { return "muxer-worker-publisher" }
+func (p *muxerWorkerPublisher) ID() string {
+	if p.id != "" {
+		return p.id
+	}
+	return "muxer-worker-publisher"
+}
 func (p *muxerWorkerPublisher) MediaInfo() *avframe.MediaInfo { return p.info }
 func (p *muxerWorkerPublisher) Close() error                  { return nil }
 
@@ -114,6 +121,372 @@ func collectMuxerOutput(reader *core.SharedBufferReader) []byte {
 	}
 }
 
+func TestMuxerLiveInputReportsDirectSourceOverwrite(t *testing.T) {
+	ring := util.NewRingBuffer[*avframe.AVFrame](2)
+	reader := ring.NewReaderAt(0)
+	for i := range 4 {
+		ring.Write(avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			int64(i), int64(i), []byte{byte(i)},
+		))
+	}
+
+	input := newMuxerWorkerLiveInput(reader, nil, func() {}, muxerAudioPlan{})
+	result := input.ReadResult()
+	if result.OK || result.Frame != nil {
+		t.Fatalf("direct overwrite result = %+v, want no sendable frame", result)
+	}
+	if result.Overwrite.Input != muxerWorkerInputDirectSource || result.Overwrite.Count != 2 {
+		t.Fatalf("direct overwrite = %+v, want direct source count 2", result.Overwrite)
+	}
+	input.Close()
+}
+
+func TestMuxerLiveInputReportsTransformedAudioOverwrite(t *testing.T) {
+	sourceRing := util.NewRingBuffer[*avframe.AVFrame](2)
+	audioRing := util.NewRingBuffer[*avframe.AVFrame](2)
+	audioReader := audioRing.NewReaderAt(0)
+	for i := range 5 {
+		audioRing.Write(avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+			int64(i), int64(i), []byte{byte(i)},
+		))
+	}
+
+	releases := 0
+	input := newMuxerWorkerLiveInput(
+		sourceRing.NewReaderAt(0),
+		audioReader,
+		func() { releases++ },
+		muxerAudioPlan{mode: muxerAudioTranscode, codec: avframe.CodecAAC},
+	)
+	result := input.ReadResult()
+	if result.OK || result.Frame != nil {
+		t.Fatalf("transformed overwrite result = %+v, want no sendable frame", result)
+	}
+	if result.Overwrite.Input != muxerWorkerInputTransformedAudio || result.Overwrite.Count != 3 {
+		t.Fatalf("transformed overwrite = %+v, want transformed audio count 3", result.Overwrite)
+	}
+	input.Close()
+	input.Close()
+	if releases != 1 {
+		t.Fatalf("transformed reader releases = %d, want 1", releases)
+	}
+}
+
+func TestMuxerWorkersTransformedAudioOverwriteFailsClosed(t *testing.T) {
+	for _, format := range []string{"flv", "ts", "fmp4"} {
+		t.Run(format, func(t *testing.T) {
+			stream := newMuxerWorkerStream(t, avframe.CodecAAC)
+			snapshot := stream.StartupSnapshot()
+			inst, outputReader := newMuxerWorkerInstance(stream)
+			sourceRing := util.NewRingBuffer[*avframe.AVFrame](2)
+			audioRing := util.NewRingBuffer[*avframe.AVFrame](2)
+			audioReadBlocked := make(chan struct{}, 1)
+			allowAudioRead := make(chan struct{})
+			sourceSelected := make(chan struct{}, 1)
+			allowSourceDelivery := make(chan struct{})
+			releases := make(chan struct{}, 2)
+			input := newMuxerWorkerLiveInputWithHooks(
+				sourceRing.NewReaderAt(0),
+				audioRing.NewReaderAt(0),
+				func() { releases <- struct{}{} },
+				muxerAudioPlan{
+					mode:           muxerAudioTranscode,
+					codec:          avframe.CodecAAC,
+					sequenceHeader: snapshot.AudioSequenceHeader,
+				},
+				muxerWorkerInputHooks{
+					beforeRead: func(kind muxerWorkerInputKind) {
+						if kind != muxerWorkerInputTransformedAudio {
+							return
+						}
+						select {
+						case audioReadBlocked <- struct{}{}:
+						default:
+						}
+						<-allowAudioRead
+					},
+					beforeDeliver: func(kind muxerWorkerInputKind) {
+						if kind != muxerWorkerInputDirectSource {
+							return
+						}
+						select {
+						case sourceSelected <- struct{}{}:
+						default:
+						}
+						<-allowSourceDelivery
+					},
+				},
+			)
+			plan := input.plan
+			workerDone := make(chan struct{})
+			go func() {
+				switch format {
+				case "flv":
+					new(Module).runFLVMuxerInput(inst, stream, snapshot, plan, input)
+				case "ts":
+					new(Module).runTSMuxerInput(inst, stream, snapshot, plan, input)
+				case "fmp4":
+					new(Module).runFMP4MuxerInput(inst, stream, snapshot, plan, input)
+				}
+				close(workerDone)
+			}()
+
+			select {
+			case <-audioReadBlocked:
+			case <-time.After(time.Second):
+				t.Fatal("transformed pump did not reach the controlled ring read")
+			}
+			sourceMarker := []byte("POST-TERMINAL-SOURCE-SENTINEL-" + format)
+			sourceRing.Write(avframe.NewAVFrame(
+				avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+				400, 400, avccInterframePayload(sourceMarker),
+			))
+			select {
+			case <-sourceSelected:
+			case <-time.After(time.Second):
+				t.Fatal("source pump did not select the competing terminal-boundary frame")
+			}
+
+			transformedMarker := []byte("RETAINED-TRANSFORMED-SENTINEL-" + format)
+			for i, payload := range [][]byte{
+				[]byte("old-audio-0"),
+				[]byte("old-audio-1"),
+				[]byte("old-audio-2"),
+				transformedMarker,
+				[]byte("post-gap-audio-tail"),
+			} {
+				dts := int64(20 + i*20)
+				audioRing.Write(avframe.NewAVFrame(
+					avframe.MediaTypeAudio, avframe.CodecAAC, avframe.FrameTypeInterframe,
+					dts, dts, payload,
+				))
+			}
+			close(allowAudioRead)
+			select {
+			case <-input.terminalDone:
+			case <-time.After(time.Second):
+				t.Fatal("transformed overwrite did not publish the terminal result")
+			}
+			close(allowSourceDelivery)
+
+			select {
+			case <-workerDone:
+			case <-time.After(time.Second):
+				t.Fatal("muxer worker did not terminate after transformed overwrite")
+			}
+			select {
+			case <-input.allDone:
+			case <-time.After(time.Second):
+				t.Fatal("source and transformed pumps did not join")
+			}
+			overwrite := input.overwriteResult().Overwrite
+			if overwrite.Input != muxerWorkerInputTransformedAudio || overwrite.Count != 3 {
+				t.Fatalf("worker terminal overwrite = %+v, want transformed audio count 3", overwrite)
+			}
+
+			input.Close()
+			input.Close()
+			if got := len(releases); got != 1 {
+				t.Fatalf("transformed reader releases = %d, want 1", got)
+			}
+			inst.Buffer.Close()
+			output := append([]byte(nil), inst.InitData()...)
+			output = append(output, collectMuxerOutput(outputReader)...)
+			if len(output) == 0 {
+				t.Fatal("muxer produced no pre-gap output")
+			}
+			if bytes.Contains(output, transformedMarker) {
+				t.Fatalf("muxer emitted retained transformed payload %q", transformedMarker)
+			}
+			if bytes.Contains(output, sourceMarker) {
+				t.Fatalf("muxer emitted source payload selected across terminal publication %q", sourceMarker)
+			}
+		})
+	}
+}
+
+func TestFLVMuxerDirectSourceOverwriteFailsClosed(t *testing.T) {
+	stream, snapshot, sentinel := newDirectOverwriteMuxerWorkerStream(t)
+	inst, reader := newMuxerWorkerInstance(stream)
+
+	new(Module).runFLVMuxerWithSnapshot(inst, stream, snapshot)
+	inst.Buffer.Close()
+	output := append(inst.InitData(), collectMuxerOutput(reader)...)
+	if len(output) == 0 {
+		t.Fatal("FLV muxer produced no pre-gap output")
+	}
+	if bytes.Contains(output, sentinel) {
+		t.Fatal("FLV muxer emitted the retained post-gap interframe")
+	}
+}
+
+func TestTSMuxerDirectSourceOverwriteFailsClosed(t *testing.T) {
+	stream, snapshot, sentinel := newDirectOverwriteMuxerWorkerStream(t)
+	inst, reader := newMuxerWorkerInstance(stream)
+
+	new(Module).runTSMuxerWithSnapshot(inst, stream, snapshot)
+	inst.Buffer.Close()
+	output := collectMuxerOutput(reader)
+	if len(output) == 0 {
+		t.Fatal("TS muxer produced no pre-gap output")
+	}
+	if bytes.Contains(output, sentinel) {
+		t.Fatal("TS muxer emitted the retained post-gap interframe")
+	}
+}
+
+func TestFMP4MuxerDirectSourceOverwriteFailsClosed(t *testing.T) {
+	stream, snapshot, sentinel := newDirectOverwriteMuxerWorkerStream(t)
+	inst, reader := newMuxerWorkerInstance(stream)
+
+	new(Module).runFMP4MuxerWithSnapshot(inst, stream, snapshot)
+	inst.Buffer.Close()
+	output := append(inst.InitData(), collectMuxerOutput(reader)...)
+	if len(output) == 0 {
+		t.Fatal("fMP4 muxer produced no pre-gap output")
+	}
+	if bytes.Contains(output, sentinel) {
+		t.Fatal("fMP4 muxer emitted the retained post-gap interframe")
+	}
+}
+
+func TestFMP4MuxerOverwriteDiscardsPendingFragment(t *testing.T) {
+	stream := newMuxerWorkerStream(t, 0)
+	snapshot := stream.StartupSnapshot()
+	inst, outputReader := newMuxerWorkerInstance(stream)
+	sourceRing := util.NewRingBuffer[*avframe.AVFrame](2)
+	input := newMuxerWorkerLiveInput(sourceRing.NewReaderAt(0), nil, func() {}, muxerAudioPlan{})
+	workerDone := make(chan struct{})
+	go func() {
+		new(Module).runFMP4MuxerInput(inst, stream, snapshot, muxerAudioPlan{}, input)
+		close(workerDone)
+	}()
+
+	waitForMuxerInit(t, inst)
+	readMuxerPacket(t, outputReader) // Cached pre-gap GOP.
+	pendingMarker := []byte("PENDING-PRE-GAP-FMP4")
+	delivered := make(chan bool, 1)
+	go func() {
+		delivered <- input.deliver(muxerWorkerFrame{frame: avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			40, 40, avccInterframePayload(pendingMarker),
+		)})
+	}()
+	select {
+	case ok := <-delivered:
+		if !ok {
+			t.Fatal("fMP4 input rejected the pre-gap frame before overwrite")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fMP4 worker did not accept the gated pre-gap frame")
+	}
+
+	input.terminateOverwrite(muxerWorkerInputDirectSource, 2)
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("fMP4 worker did not terminate after overwrite")
+	}
+	inst.Buffer.Close()
+	if result := outputReader.TryReadResult(); result.OK {
+		t.Fatalf("fMP4 overwrite published a %d-byte partial fragment", len(result.Data))
+	}
+}
+
+func TestFMP4MuxerCleanEndFlushesPendingFragment(t *testing.T) {
+	stream := newMuxerWorkerStream(t, 0)
+	snapshot := stream.StartupSnapshot()
+	inst, outputReader := newMuxerWorkerInstance(stream)
+	sourceRing := util.NewRingBuffer[*avframe.AVFrame](2)
+	input := newMuxerWorkerLiveInput(sourceRing.NewReaderAt(0), nil, func() {}, muxerAudioPlan{})
+	workerDone := make(chan struct{})
+	go func() {
+		new(Module).runFMP4MuxerInput(inst, stream, snapshot, muxerAudioPlan{}, input)
+		close(workerDone)
+	}()
+
+	waitForMuxerInit(t, inst)
+	readMuxerPacket(t, outputReader) // Cached GOP.
+	pendingMarker := []byte("CLEAN-PENDING-FMP4")
+	delivered := make(chan bool, 1)
+	go func() {
+		delivered <- input.deliver(muxerWorkerFrame{frame: avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			40, 40, avccInterframePayload(pendingMarker),
+		)})
+	}()
+	select {
+	case ok := <-delivered:
+		if !ok {
+			t.Fatal("fMP4 input rejected the clean pending frame")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fMP4 worker did not accept the gated clean frame")
+	}
+
+	sourceRing.Close()
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("fMP4 worker did not terminate after clean source end")
+	}
+	inst.Buffer.Close()
+	result := outputReader.ReadResult()
+	if !result.OK || !bytes.Contains(result.Data, pendingMarker) {
+		t.Fatalf("clean fMP4 pending fragment = %d bytes, want marker %q", len(result.Data), pendingMarker)
+	}
+}
+
+func newDirectOverwriteMuxerWorkerStream(t *testing.T) (*core.Stream, core.StreamStartupSnapshot, []byte) {
+	t.Helper()
+	stream := core.NewStream("live/muxer-overwrite", config.StreamConfig{
+		GOPCache:       true,
+		GOPCacheNum:    1,
+		RingBufferSize: 2,
+	}, config.LimitsConfig{}, core.NewEventBus())
+	if err := stream.SetPublisher(&muxerWorkerPublisher{info: &avframe.MediaInfo{
+		VideoCodec: avframe.CodecH264,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
+	))
+	stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0, 0, 0, 2, 0x65, 0x01},
+	))
+	snapshot := stream.StartupSnapshot()
+	if !snapshot.Ready {
+		t.Fatal("overwrite test stream is not ready")
+	}
+
+	sentinel := []byte("CONTINUITY-GAP-SENTINEL")
+	for i, marker := range [][]byte{
+		[]byte("pre-gap-a"),
+		[]byte("pre-gap-b"),
+		sentinel,
+		[]byte("post-gap-tail"),
+	} {
+		stream.WriteFrame(avframe.NewAVFrame(
+			avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe,
+			int64((i+1)*40), int64((i+1)*40), avccInterframePayload(marker),
+		))
+	}
+	return stream, snapshot, sentinel
+}
+
+func avccInterframePayload(marker []byte) []byte {
+	nal := append([]byte{0x41}, marker...)
+	payload := make([]byte, 4+len(nal))
+	binary.BigEndian.PutUint32(payload[:4], uint32(len(nal)))
+	copy(payload[4:], nal)
+	return payload
+}
+
 func TestFLVMuxerDropsOpusWhenAudioTranscodingIsUnavailable(t *testing.T) {
 	stream := newMuxerWorkerStream(t, avframe.CodecOpus)
 	inst, reader := newMuxerWorkerInstance(stream)
@@ -204,7 +577,7 @@ func TestFLVMuxerDoesNotAttachToReplacementAfterPreReadyGenerationEnds(t *testin
 	}()
 
 	stream.RemovePublisher()
-	replacement := &muxerWorkerPublisher{info: &avframe.MediaInfo{
+	replacement := &muxerWorkerPublisher{id: "muxer-worker-publisher-replacement", info: &avframe.MediaInfo{
 		VideoCodec:          avframe.CodecH264,
 		VideoSequenceHeader: []byte{0x01, 0x42, 0x00, 0x1e, 0xff},
 	}}

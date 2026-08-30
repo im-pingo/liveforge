@@ -88,15 +88,22 @@ type Stream struct {
 	config     config.StreamConfig
 	limits     config.LimitsConfig
 
-	mu        sync.RWMutex
-	state     StreamState
-	publisher Publisher
+	mu                      sync.RWMutex
+	state                   StreamState
+	publisher               Publisher
+	usedPublisherIDs        map[string]struct{}
+	lastPublisherID         string
+	lastPublisherGeneration uint64
 
 	ringBuffer            *util.RingBuffer[*avframe.AVFrame]
 	muxerManager          *MuxerManager
 	gopCache              [][]*avframe.AVFrame
 	gopStarts             []int64
+	gopBytes              []int64
+	gopMinDTS             []int64
+	gopMaxDTS             []int64
 	gopGeneration         uint64
+	gopCacheSealed        bool
 	subscribers           map[string]int // protocol -> count (e.g. "rtmp" -> 2)
 	generationSubscribers map[uint64]map[string]int
 
@@ -109,6 +116,7 @@ type Stream struct {
 	mediaInfo             avframe.MediaInfo
 	audioCodecEpoch       uint64
 	generationDone        chan struct{}
+	generationBoundary    *streamGenerationBoundary
 	startupStateChanged   chan struct{}
 	startupReady          bool
 
@@ -118,12 +126,37 @@ type Stream struct {
 	idleTimer        *time.Timer
 	feedbackRouter   *FeedbackRouter
 	transcodeManager *TranscodeManager
+	destroyCallback  func()
+	destroyOnce      sync.Once
 }
 
 var streamInstanceSequence atomic.Uint64
 
+// streamGenerationBoundary retains the immutable end position of one
+// publisher generation after that publisher detaches. Snapshots keep this
+// object alive without retaining the Stream or its publisher.
+type streamGenerationBoundary struct {
+	endCursor atomic.Int64
+	ended     atomic.Bool
+}
+
+func (b *streamGenerationBoundary) end() (int64, bool) {
+	if b == nil || !b.ended.Load() {
+		return 0, false
+	}
+	return b.endCursor.Load(), true
+}
+
+func normalizeGOPConfig(cfg config.StreamConfig) config.StreamConfig {
+	if cfg.GOPCache && cfg.GOPCacheNum > 0 && cfg.GOPCacheMaxFrames <= 0 && cfg.GOPCacheMaxBytes <= 0 {
+		cfg.GOPCacheMaxFrames = config.DefaultGOPCacheMaxFrames
+	}
+	return cfg
+}
+
 // NewStream creates a new Stream in idle state.
 func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, bus *EventBus) *Stream {
+	cfg = normalizeGOPConfig(cfg)
 	s := &Stream{
 		key:                   key,
 		instanceID:            streamInstanceSequence.Add(1),
@@ -133,6 +166,7 @@ func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, 
 		ringBuffer:            util.NewRingBuffer[*avframe.AVFrame](cfg.RingBufferSize),
 		eventBus:              bus,
 		subscribers:           make(map[string]int),
+		usedPublisherIDs:      make(map[string]struct{}),
 		generationSubscribers: make(map[uint64]map[string]int),
 		seqHeaderReady:        make(chan struct{}),
 		startupStateChanged:   make(chan struct{}),
@@ -142,8 +176,26 @@ func NewStream(key string, cfg config.StreamConfig, limits config.LimitsConfig, 
 	return s
 }
 
-// InstanceID identifies this concrete stream object without retaining it.
+// InstanceID identifies this concrete stream object without retaining the
+// object itself in registries or lifecycle events.
 func (s *Stream) InstanceID() uint64 { return s.instanceID }
+
+func (s *Stream) setDestroyCallback(callback func()) {
+	s.mu.Lock()
+	s.destroyCallback = callback
+	s.mu.Unlock()
+}
+
+func (s *Stream) notifyDestroy() {
+	s.destroyOnce.Do(func() {
+		s.mu.RLock()
+		callback := s.destroyCallback
+		s.mu.RUnlock()
+		if callback != nil {
+			callback()
+		}
+	})
+}
 
 // Key returns the stream key.
 func (s *Stream) Key() string {
@@ -161,16 +213,25 @@ func (s *Stream) Config() config.StreamConfig {
 // muxer capacity are intentionally not resized in place; new streams receive
 // those structural values from StreamHub.
 func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfig) {
+	cfg = normalizeGOPConfig(cfg)
 	s.mu.Lock()
 	s.config = cfg
 	s.limits = limits
 	if !cfg.GOPCache || cfg.GOPCacheNum <= 0 {
 		s.gopCache = nil
 		s.gopStarts = nil
+		s.gopBytes = nil
+		s.gopMinDTS = nil
+		s.gopMaxDTS = nil
+		s.gopCacheSealed = false
 	} else if len(s.gopCache) > cfg.GOPCacheNum {
 		s.gopCache = append([][]*avframe.AVFrame(nil), s.gopCache[len(s.gopCache)-cfg.GOPCacheNum:]...)
 		s.gopStarts = append([]int64(nil), s.gopStarts[len(s.gopStarts)-cfg.GOPCacheNum:]...)
+		s.gopBytes = append([]int64(nil), s.gopBytes[len(s.gopBytes)-cfg.GOPCacheNum:]...)
+		s.gopMinDTS = append([]int64(nil), s.gopMinDTS[len(s.gopMinDTS)-cfg.GOPCacheNum:]...)
+		s.gopMaxDTS = append([]int64(nil), s.gopMaxDTS[len(s.gopMaxDTS)-cfg.GOPCacheNum:]...)
 	}
+	s.trimGOPCacheLocked()
 	if s.noPublisherTimer != nil {
 		s.noPublisherTimer.Stop()
 		s.noPublisherTimer = nil
@@ -178,10 +239,16 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 	if s.state == StreamStateNoPublisher && cfg.NoPublisherTimeout > 0 {
 		s.noPublisherTimer = time.AfterFunc(cfg.NoPublisherTimeout, func() {
 			s.mu.Lock()
-			defer s.mu.Unlock()
+			notify := false
 			if s.state == StreamStateNoPublisher {
+				s.usedPublisherIDs = nil
 				s.state = StreamStateDestroying
 				s.signalStartupStateChangedLocked()
+				notify = true
+			}
+			s.mu.Unlock()
+			if notify {
+				s.notifyDestroy()
 			}
 		})
 	}
@@ -216,6 +283,13 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	if s.state == StreamStatePublishing {
 		return errors.New("stream already has a publisher")
 	}
+	if s.state == StreamStateDestroying {
+		return errors.New("stream is destroying")
+	}
+	publisherID := pub.ID()
+	if _, used := s.usedPublisherIDs[publisherID]; publisherID != "" && used {
+		return fmt.Errorf("publisher ID %q was already used by an earlier generation", publisherID)
+	}
 
 	// Cancel no-publisher timer if republishing
 	if s.noPublisherTimer != nil {
@@ -238,7 +312,11 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	s.generationStartCursor = s.ringBuffer.WriteCursor()
 	s.gopCache = nil
 	s.gopStarts = nil
+	s.gopBytes = nil
+	s.gopMinDTS = nil
+	s.gopMaxDTS = nil
 	s.gopGeneration = 0
+	s.gopCacheSealed = false
 	s.videoSeqHeader = nil
 	s.audioSeqHeader = nil
 	s.seqHeaderReady = make(chan struct{})
@@ -246,6 +324,7 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	s.audioCodecEpoch = 0
 	s.startupReady = false
 	s.generationDone = make(chan struct{})
+	s.generationBoundary = &streamGenerationBoundary{}
 	s.mergePublisherMediaInfoLocked(pub.MediaInfo())
 	if s.mediaInfo.AudioCodec != 0 {
 		s.audioCodecEpoch = 1
@@ -255,10 +334,15 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 		}
 	}
 	s.publisher = pub
+	s.lastPublisherID = publisherID
+	s.lastPublisherGeneration = s.publisherGeneration
 	s.state = StreamStatePublishing
 	s.startupReady = s.startupReadyLocked()
 	s.stats.initStats()
 	s.signalStartupStateChangedLocked()
+	if publisherID != "" {
+		s.usedPublisherIDs[publisherID] = struct{}{}
+	}
 
 	return nil
 }
@@ -275,7 +359,7 @@ func (s *Stream) RemovePublisher() {
 func (s *Stream) RemovePublisherIf(pub Publisher) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !samePublisher(s.publisher, pub) {
+	if !s.publisherMatchesLocked(pub) {
 		return false
 	}
 	s.removePublisherLocked()
@@ -283,6 +367,9 @@ func (s *Stream) RemovePublisherIf(pub Publisher) bool {
 }
 
 func (s *Stream) removePublisherLocked() {
+	if s.state == StreamStateDestroying {
+		return
+	}
 	s.closeGenerationLocked()
 	s.publisher = nil
 	s.state = StreamStateNoPublisher
@@ -292,10 +379,16 @@ func (s *Stream) removePublisherLocked() {
 	if s.config.NoPublisherTimeout > 0 {
 		s.noPublisherTimer = time.AfterFunc(s.config.NoPublisherTimeout, func() {
 			s.mu.Lock()
-			defer s.mu.Unlock()
+			notify := false
 			if s.state == StreamStateNoPublisher {
+				s.usedPublisherIDs = nil
 				s.state = StreamStateDestroying
 				s.signalStartupStateChangedLocked()
+				notify = true
+			}
+			s.mu.Unlock()
+			if notify {
+				s.notifyDestroy()
 			}
 		})
 	}
@@ -314,6 +407,20 @@ func samePublisher(left, right Publisher) bool {
 	return left == right
 }
 
+// publisherMatchesLocked uses the publisher contract's stable ID on the frame
+// hot path. The reflective comparison remains only for legacy publishers that
+// do not provide an ID, which are outside the normal protocol adapters.
+func (s *Stream) publisherMatchesLocked(pub Publisher) bool {
+	if s.state != StreamStatePublishing || isNilPublisher(s.publisher) || isNilPublisher(pub) {
+		return false
+	}
+	candidateID := pub.ID()
+	if s.lastPublisherID != "" || candidateID != "" {
+		return s.lastPublisherID != "" && s.lastPublisherID == candidateID
+	}
+	return samePublisher(s.publisher, pub)
+}
+
 func isNilPublisher(pub Publisher) bool {
 	if pub == nil {
 		return true
@@ -328,14 +435,14 @@ func isNilPublisher(pub Publisher) bool {
 }
 
 func (s *Stream) closeGenerationLocked() {
-	if s.generationDone == nil {
+	if s.generationDone == nil || s.generationBoundary == nil || s.generationBoundary.ended.Load() {
 		return
 	}
-	select {
-	case <-s.generationDone:
-	default:
-		close(s.generationDone)
-	}
+	// Frame writes and publisher removal are serialized by s.mu, so this is
+	// the exact exclusive upper bound for this generation in the shared ring.
+	s.generationBoundary.endCursor.Store(s.ringBuffer.WriteCursor())
+	s.generationBoundary.ended.Store(true)
+	close(s.generationDone)
 }
 
 func (s *Stream) signalStartupStateChangedLocked() {
@@ -430,9 +537,10 @@ func trackReady(codec avframe.CodecType, hasSequenceHeader bool) bool {
 // and transitions to destroying state.
 func (s *Stream) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.state == StreamStateDestroying {
+		s.ringBuffer.Close()
+		s.mu.Unlock()
+		s.notifyDestroy()
 		return
 	}
 
@@ -446,16 +554,36 @@ func (s *Stream) Close() {
 		s.idleTimer = nil
 	}
 
-	if s.publisher != nil {
-		s.publisher.Close() //nolint:errcheck
-		s.publisher = nil
-	}
+	publisher := s.publisher
+	s.publisher = nil
 
 	s.closeGenerationLocked()
 	s.startupReady = false
+	s.usedPublisherIDs = nil
 	s.state = StreamStateDestroying
 	s.signalStartupStateChangedLocked()
 	s.ringBuffer.Close()
+	s.mu.Unlock()
+	if publisher != nil {
+		publisher.Close() //nolint:errcheck
+	}
+	s.notifyDestroy()
+}
+
+// LastPublisherID returns the most recent publisher identity. It is used only
+// to scope delayed stream-destroy cleanup after the publisher has detached.
+func (s *Stream) LastPublisherID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastPublisherID
+}
+
+// LastPublisherGeneration returns the most recent publisher generation after
+// the publisher has detached.
+func (s *Stream) LastPublisherGeneration() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastPublisherGeneration
 }
 
 // Publisher returns the current publisher, if any.
@@ -468,6 +596,9 @@ func (s *Stream) Publisher() Publisher {
 // WriteFrame writes a media frame to the ring buffer and updates caches.
 // Returns false if the frame was rejected due to bitrate limit.
 func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
+	if frame == nil {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.writeFrameLocked(frame)
@@ -475,9 +606,12 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 
 // WriteFrameForPublisher writes a frame only when pub still owns the active generation.
 func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) bool {
+	if frame == nil {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if isNilPublisher(pub) || !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
+	if !s.publisherMatchesLocked(pub) || s.state != StreamStatePublishing {
 		return false
 	}
 	return s.writeFrameLocked(frame)
@@ -489,7 +623,7 @@ func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) b
 func (s *Stream) WithActivePublisher(pub Publisher, activity func()) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if isNilPublisher(pub) || !samePublisher(s.publisher, pub) || s.state != StreamStatePublishing {
+	if !s.publisherMatchesLocked(pub) || s.state != StreamStatePublishing {
 		return false
 	}
 	activity()
@@ -546,30 +680,213 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 	s.updateStartupReadyLocked()
 
 	// Update GOP cache for video frames
-	if s.config.GOPCache {
+	if s.config.GOPCache && s.config.GOPCacheNum > 0 {
 		if frame.MediaType.IsVideo() {
 			if frame.FrameType.IsKeyframe() {
 				// Start new GOP
 				s.gopGeneration++
+				s.gopCacheSealed = false
 				gopStart := s.ringBuffer.WriteCursor()
 				s.gopCache = append(s.gopCache, []*avframe.AVFrame{frame})
 				s.gopStarts = append(s.gopStarts, gopStart)
+				s.gopBytes = append(s.gopBytes, int64(len(frame.Payload)))
+				s.gopMinDTS = append(s.gopMinDTS, frame.DTS)
+				s.gopMaxDTS = append(s.gopMaxDTS, frame.DTS)
 				if len(s.gopCache) > s.config.GOPCacheNum {
 					s.gopCache = s.gopCache[len(s.gopCache)-s.config.GOPCacheNum:]
 					s.gopStarts = s.gopStarts[len(s.gopStarts)-s.config.GOPCacheNum:]
+					s.gopBytes = s.gopBytes[len(s.gopBytes)-s.config.GOPCacheNum:]
+					s.gopMinDTS = s.gopMinDTS[len(s.gopMinDTS)-s.config.GOPCacheNum:]
+					s.gopMaxDTS = s.gopMaxDTS[len(s.gopMaxDTS)-s.config.GOPCacheNum:]
 				}
 			} else if frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
-				s.gopCache[len(s.gopCache)-1] = append(s.gopCache[len(s.gopCache)-1], frame)
+				s.appendGOPFrameLocked(frame)
 			}
 		} else if frame.MediaType.IsAudio() && frame.FrameType != avframe.FrameTypeSequenceHeader && len(s.gopCache) > 0 {
 			// Interleave audio into GOP cache for DTS ordering
-			s.gopCache[len(s.gopCache)-1] = append(s.gopCache[len(s.gopCache)-1], frame)
+			s.appendGOPFrameLocked(frame)
 		}
 	}
 
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
 	return true
+}
+
+// appendGOPFrameLocked adds a frame to the current GOP when doing so stays
+// within every configured per-GOP bound. The keyframe that starts a GOP is
+// always retained, even when its payload alone exceeds max bytes.
+func (s *Stream) appendGOPFrameLocked(frame *avframe.AVFrame) {
+	if len(s.gopCache) == 0 || s.gopCacheSealed {
+		return
+	}
+	index := len(s.gopCache) - 1
+	gop := s.gopCache[index]
+	if s.config.GOPCacheMaxFrames > 0 && len(gop) >= s.config.GOPCacheMaxFrames {
+		s.gopCacheSealed = true
+		return
+	}
+	if s.config.GOPCacheMaxBytes > 0 && len(gop) > 0 && s.gopBytes[index]+int64(len(frame.Payload)) > s.config.GOPCacheMaxBytes {
+		s.gopCacheSealed = true
+		return
+	}
+	minDTS, maxDTS := s.gopMinDTS[index], s.gopMaxDTS[index]
+	if frame.DTS < minDTS {
+		minDTS = frame.DTS
+	}
+	if frame.DTS > maxDTS {
+		maxDTS = frame.DTS
+	}
+	if s.config.GOPCacheMaxDuration > 0 && len(gop) > 0 && gopDurationExceeded(minDTS, maxDTS, s.config.GOPCacheMaxDuration) {
+		s.gopCacheSealed = true
+		return
+	}
+	s.gopCache[index] = append(gop, frame)
+	s.gopBytes[index] += int64(len(frame.Payload))
+	s.gopMinDTS[index] = minDTS
+	s.gopMaxDTS[index] = maxDTS
+	if s.currentGOPAtBoundLocked() {
+		s.gopCacheSealed = true
+	}
+}
+
+func (s *Stream) currentGOPAtBoundLocked() bool {
+	if len(s.gopCache) == 0 {
+		return false
+	}
+	index := len(s.gopCache) - 1
+	gop := s.gopCache[index]
+	if s.config.GOPCacheMaxFrames > 0 && len(gop) >= s.config.GOPCacheMaxFrames {
+		return true
+	}
+	if s.config.GOPCacheMaxBytes > 0 && s.gopBytes[index] >= s.config.GOPCacheMaxBytes {
+		return true
+	}
+	return s.config.GOPCacheMaxDuration > 0 && len(gop) > 0 &&
+		gopDurationAtLeast(s.gopMinDTS[index], s.gopMaxDTS[index], s.config.GOPCacheMaxDuration)
+}
+
+func gopDurationExceeded(minDTS, maxDTS int64, limit time.Duration) bool {
+	if limit <= 0 || maxDTS < minDTS {
+		return false
+	}
+	return uint64(maxDTS)-uint64(minDTS) > uint64(limit/time.Millisecond)
+}
+
+func gopDurationAtLeast(minDTS, maxDTS int64, limit time.Duration) bool {
+	if limit <= 0 || maxDTS < minDTS {
+		return false
+	}
+	return uint64(maxDTS)-uint64(minDTS) >= uint64(limit/time.Millisecond)
+}
+
+func dtsSpanMillis(minDTS, maxDTS int64) int64 {
+	if maxDTS < minDTS {
+		minDTS, maxDTS = maxDTS, minDTS
+	}
+	span := uint64(maxDTS) - uint64(minDTS)
+	if span > uint64(1<<63-1) {
+		return int64(1<<63 - 1)
+	}
+	return int64(span)
+}
+
+// trimGOPCacheLocked repairs cache entries after a policy update. It keeps a
+// playable prefix beginning at each GOP keyframe and never trims a keyframe.
+func (s *Stream) trimGOPCacheLocked() {
+	s.gopCacheSealed = false
+	if !s.config.GOPCache || s.config.GOPCacheNum <= 0 {
+		s.gopCache = nil
+		s.gopStarts = nil
+		s.gopBytes = nil
+		s.gopMinDTS = nil
+		s.gopMaxDTS = nil
+		return
+	}
+	if len(s.gopCache) > s.config.GOPCacheNum {
+		start := len(s.gopCache) - s.config.GOPCacheNum
+		s.gopCache = s.gopCache[start:]
+		s.gopStarts = s.gopStarts[start:]
+		s.gopBytes = s.gopBytes[start:]
+		s.gopMinDTS = s.gopMinDTS[start:]
+		s.gopMaxDTS = s.gopMaxDTS[start:]
+	}
+	for i, gop := range s.gopCache {
+		if len(gop) == 0 {
+			s.gopBytes[i] = 0
+			s.gopMinDTS[i] = 0
+			s.gopMaxDTS[i] = 0
+			continue
+		}
+		limit := len(gop)
+		if s.config.GOPCacheMaxFrames > 0 && limit > s.config.GOPCacheMaxFrames {
+			limit = s.config.GOPCacheMaxFrames
+		}
+		if s.config.GOPCacheMaxBytes > 0 {
+			bytes := int64(0)
+			byteLimit := 0
+			for n, frame := range gop[:limit] {
+				frameBytes := int64(len(frame.Payload))
+				if n > 0 && bytes+frameBytes > s.config.GOPCacheMaxBytes {
+					break
+				}
+				bytes += frameBytes
+				byteLimit = n + 1
+				if bytes >= s.config.GOPCacheMaxBytes {
+					break
+				}
+			}
+			if byteLimit < limit {
+				limit = byteLimit
+			}
+		}
+		if s.config.GOPCacheMaxDuration > 0 {
+			durationLimit := 1
+			minDTS, maxDTS := gop[0].DTS, gop[0].DTS
+			for n := 1; n < limit; n++ {
+				candidateMin, candidateMax := minDTS, maxDTS
+				if gop[n].DTS < candidateMin {
+					candidateMin = gop[n].DTS
+				}
+				if gop[n].DTS > candidateMax {
+					candidateMax = gop[n].DTS
+				}
+				if gopDurationExceeded(candidateMin, candidateMax, s.config.GOPCacheMaxDuration) {
+					break
+				}
+				minDTS, maxDTS = candidateMin, candidateMax
+				durationLimit = n + 1
+			}
+			if durationLimit < limit {
+				limit = durationLimit
+			}
+		}
+		if limit < 1 {
+			limit = 1
+		}
+		if i == len(s.gopCache)-1 && limit < len(gop) {
+			s.gopCacheSealed = true
+		}
+		s.gopCache[i] = gop[:limit]
+		bytes := int64(0)
+		for _, frame := range s.gopCache[i] {
+			bytes += int64(len(frame.Payload))
+		}
+		s.gopBytes[i] = bytes
+		minDTS, maxDTS := s.gopCache[i][0].DTS, s.gopCache[i][0].DTS
+		for _, frame := range s.gopCache[i][1:] {
+			if frame.DTS < minDTS {
+				minDTS = frame.DTS
+			}
+			if frame.DTS > maxDTS {
+				maxDTS = frame.DTS
+			}
+		}
+		s.gopMinDTS[i], s.gopMaxDTS[i] = minDTS, maxDTS
+	}
+	if s.currentGOPAtBoundLocked() {
+		s.gopCacheSealed = true
+	}
 }
 
 // StreamStartupSnapshot is an atomic view of the current publisher generation's startup state.
@@ -587,6 +904,13 @@ type StreamStartupSnapshot struct {
 	GenerationDone        <-chan struct{}
 	Ready                 bool
 	audioCodecEpoch       uint64
+	generationBoundary    *streamGenerationBoundary
+}
+
+// GenerationEndCursor returns the exclusive source-ring boundary captured
+// when this snapshot's publisher generation ended.
+func (s StreamStartupSnapshot) GenerationEndCursor() (int64, bool) {
+	return s.generationBoundary.end()
 }
 
 // StartupSnapshot captures media information, headers, replay frames, and cursors atomically.
@@ -624,6 +948,7 @@ func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
 		GenerationDone:        s.generationDone,
 		Ready:                 s.startupReady,
 		audioCodecEpoch:       s.audioCodecEpoch,
+		generationBoundary:    s.generationBoundary,
 	}
 }
 
@@ -722,7 +1047,7 @@ func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 		}
 	}
 	if dtsSet {
-		d.DurationMs = maxDTS - minDTS
+		d.DurationMs = dtsSpanMillis(minDTS, maxDTS)
 	}
 	return d
 }
@@ -946,9 +1271,16 @@ func (s *Stream) checkIdleTimeout() {
 		if s.idleTimer == nil {
 			s.idleTimer = time.AfterFunc(s.config.IdleTimeout, func() {
 				s.mu.Lock()
-				defer s.mu.Unlock()
+				notify := false
 				if s.publisher == nil && s.totalSubscribers() == 0 {
+					s.usedPublisherIDs = nil
 					s.state = StreamStateDestroying
+					s.signalStartupStateChangedLocked()
+					notify = true
+				}
+				s.mu.Unlock()
+				if notify {
+					s.notifyDestroy()
 				}
 			})
 		}

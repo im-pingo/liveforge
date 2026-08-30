@@ -22,7 +22,7 @@ func BuildSource(cfg config.RuntimeConfig, bootstrapPath string) (NamedSource, e
 		if path == "" {
 			path = bootstrapPath
 		}
-		return NewFileSource(path)
+		return NewFileSourceWithOptions(FileSourceOptions{Path: path, MaxBytes: cfg.File.MaxBytes})
 	case "http", "https":
 		return NewHTTPSource(HTTPSourceOptions{URL: cfg.HTTP.URL, Token: cfg.HTTP.Token, Scheme: kind, MaxBytes: cfg.HTTP.MaxBytes})
 	case "consul":
@@ -32,7 +32,7 @@ func BuildSource(cfg config.RuntimeConfig, bootstrapPath string) (NamedSource, e
 		if cfg.Redis.TLS {
 			tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
-		return NewRedisSource(RedisSourceOptions{Addr: cfg.Redis.Addr, Username: cfg.Redis.Username, Password: cfg.Redis.Password, DB: cfg.Redis.DB, Prefix: cfg.Redis.Prefix, Hash: cfg.Redis.Hash, VersionKey: cfg.Redis.VersionKey, TLSConfig: tlsConfig})
+		return NewRedisSource(RedisSourceOptions{Addr: cfg.Redis.Addr, Username: cfg.Redis.Username, Password: cfg.Redis.Password, DB: cfg.Redis.DB, Prefix: cfg.Redis.Prefix, Hash: cfg.Redis.Hash, VersionKey: cfg.Redis.VersionKey, TLSConfig: tlsConfig, MaxBytes: cfg.Redis.MaxBytes})
 	default:
 		return nil, fmt.Errorf("unsupported runtime config source %q", kind)
 	}

@@ -13,12 +13,15 @@ import (
 const (
 	maxLifecycleQueueDepth = 8
 	maxLifecycleLanes      = 4096
+	maxAsyncDispatches     = 1024
 )
 
 var ErrAsyncBackpressure = errors.New("event bus async lifecycle capacity exceeded")
 
 type AsyncDispatchStats struct {
 	Rejected uint64
+	InFlight int
+	Capacity int
 }
 
 // EventBus dispatches events to registered hook handlers.
@@ -130,7 +133,10 @@ func (b *EventBus) EmitAsync(event EventType, ctx *EventContext) error {
 	if len(hooks) == 0 {
 		return nil
 	}
-	b.beginAsync(len(hooks))
+	if !b.tryBeginAsync(len(hooks)) {
+		b.asyncRejected.Add(1)
+		return ErrAsyncBackpressure
+	}
 	for _, hook := range hooks {
 		go b.runTrackedAsyncHook(hook, cloneEventContext(ctx))
 	}
@@ -167,6 +173,22 @@ func (b *EventBus) beginAsync(count int) {
 	b.dispatchMu.Unlock()
 }
 
+func (b *EventBus) tryBeginAsync(count int) bool {
+	if count <= 0 {
+		return true
+	}
+	b.dispatchMu.Lock()
+	defer b.dispatchMu.Unlock()
+	if b.pendingAsync+count > maxAsyncDispatches {
+		return false
+	}
+	if b.pendingAsync == 0 {
+		b.asyncIdle = make(chan struct{})
+	}
+	b.pendingAsync += count
+	return true
+}
+
 func (b *EventBus) completeAsync() {
 	b.dispatchMu.Lock()
 	b.pendingAsync--
@@ -182,7 +204,14 @@ func (b *EventBus) runTrackedAsyncHook(hook HookRegistration, ctx *EventContext)
 }
 
 func (b *EventBus) AsyncStats() AsyncDispatchStats {
-	return AsyncDispatchStats{Rejected: b.asyncRejected.Load()}
+	b.dispatchMu.Lock()
+	inFlight := b.pendingAsync
+	b.dispatchMu.Unlock()
+	return AsyncDispatchStats{
+		Rejected: b.asyncRejected.Load(),
+		InFlight: inFlight,
+		Capacity: maxAsyncDispatches,
+	}
 }
 
 func asyncHooks(hooks []HookRegistration) []HookRegistration {

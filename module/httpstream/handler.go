@@ -344,17 +344,31 @@ func (m *Module) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stream not found or not publishing", http.StatusNotFound)
 		return
 	}
+	startup := stream.StartupSnapshot()
+	releaseSubscriber, err := stream.AddSubscriberForGeneration(subscribeCtx.Protocol, startup.Generation)
+	if err != nil {
+		http.Error(w, "publisher generation is no longer available", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseSubscriber()
 
 	lifecycleCtx := *subscribeCtx
 	lifecycleCtx.SubscriberID = nextSubscriberID(lifecycleCtx.Protocol, streamKey)
+	lifecycleCtx.StreamInstanceID = startup.StreamInstanceID
+	lifecycleCtx.PublisherGeneration = startup.Generation
+	lifecycleCtx.PublisherID = startup.PublisherID
 	if err := m.server.GetEventBus().EmitAsync(core.EventSubscribe, &lifecycleCtx); err != nil {
 		http.Error(w, "subscriber lifecycle capacity exceeded", http.StatusServiceUnavailable)
 		return
 	}
-	defer m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &lifecycleCtx) //nolint:errcheck
+	defer func() {
+		if err := m.server.GetEventBus().EmitAsync(core.EventSubscribeStop, &lifecycleCtx); err != nil {
+			slog.Error("subscriber terminal lifecycle admission failed", "module", "httpstream", "format", format, "stream", streamKey, "error", err)
+		}
+	}()
 
 	slog.Info("subscriber connected", "module", "httpstream", "format", format, "stream", streamKey, "remote", r.RemoteAddr)
-	m.serveStream(w, r, format, stream)
+	m.serveStream(w, r, format, stream, startup.Generation)
 }
 
 func (m *Module) authorizeSubscribe(r *http.Request, streamKey, protocol string) error {
@@ -382,8 +396,8 @@ func queryToMap(vals map[string][]string) map[string]string {
 	return m
 }
 
-func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format string, stream *core.Stream) {
-	flusher, ok := w.(http.Flusher)
+func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format string, stream *core.Stream, generation uint64) {
+	_, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
@@ -393,7 +407,7 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 	m.ensureMuxerCallbacks(stream)
 
 	mm := stream.MuxerManager()
-	reader, inst := mm.GetOrCreateMuxer(format)
+	reader, inst := mm.GetOrCreateMuxerForGeneration(format, generation)
 	if reader == nil || inst == nil {
 		http.Error(w, "stream not publishing", http.StatusNotFound)
 		return
@@ -416,33 +430,55 @@ func (m *Module) serveStream(w http.ResponseWriter, r *http.Request, format stri
 	// Wait for init data (FLV header, FMP4 init segment)
 	// TS format doesn't need init data.
 	if format == "flv" || format == "mp4" {
-		for i := 0; i < 100; i++ {
-			if data := inst.InitData(); data != nil {
-				w.Write(data)
-				flusher.Flush()
-				break
+		var initData []byte
+		if waitForCondition(r.Context(), time.Second, 10*time.Millisecond, func() bool {
+			initData = inst.InitData()
+			return initData != nil
+		}) {
+			if err := writeHTTPStreamChunk(w, initData, httpStreamWriteTimeout); err != nil {
+				return
 			}
-			time.Sleep(10 * time.Millisecond)
+		} else {
+			if r.Context().Err() == nil {
+				http.Error(w, "initial stream data not ready", http.StatusServiceUnavailable)
+			}
+			return
 		}
 	}
 
-	// Read loop
-	// Close the reader when the HTTP client disconnects so Read() unblocks.
-	go func() {
-		<-r.Context().Done()
-		reader.Close()
-	}()
+	serveHTTPStreamReader(w, r, format, stream.Key(), reader)
+}
+
+func serveHTTPStreamReader(w http.ResponseWriter, r *http.Request, format, streamKey string, reader *core.SharedBufferReader) {
+	// Close and join the reader watcher on every handler exit, including a
+	// response writer failure.
+	stopReaderWatch := watchReaderContext(r.Context(), reader)
+	defer stopReaderWatch()
 
 	for {
-		data, ok := reader.Read()
-		if !ok {
+		result := reader.ReadResult()
+		if result.Overwritten > 0 {
+			logContinuousOutputOverwrite("http", format, streamKey, result.Overwritten)
 			return
 		}
-		if _, err := w.Write(data); err != nil {
+		if !result.OK {
 			return
 		}
-		flusher.Flush()
+		if err := writeHTTPStreamChunk(w, result.Data, httpStreamWriteTimeout); err != nil {
+			return
+		}
 	}
+}
+
+func logContinuousOutputOverwrite(transport, format, streamKey string, overwritten int64) {
+	slog.Warn("continuous stream continuity lost",
+		"module", "httpstream",
+		"transport", transport,
+		"format", format,
+		"stream", streamKey,
+		"input", "shared_output",
+		"overwritten", overwritten,
+	)
 }
 
 func (m *Module) setCORSHeaders(w http.ResponseWriter) {

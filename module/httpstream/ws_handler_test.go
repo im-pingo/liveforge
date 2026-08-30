@@ -3,6 +3,8 @@ package httpstream
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +62,139 @@ func newTestServer(t *testing.T) (*Module, *core.Server, string) {
 	return m, srv, addr
 }
 
+func TestWebSocketContinuousStreamOverwriteClosesTryAgainLater(t *testing.T) {
+	for _, format := range []string{"flv", "ts", "mp4"} {
+		t.Run(format, func(t *testing.T) {
+			buffer := core.NewSharedBuffer(2)
+			reader := buffer.NewReader()
+			sentinel := []byte("WEBSOCKET-CONTINUITY-GAP-SENTINEL-" + format)
+			for _, packet := range [][]byte{
+				[]byte("old-0"),
+				[]byte("old-1"),
+				sentinel,
+				[]byte("post-gap-tail"),
+			} {
+				buffer.Write(packet)
+			}
+
+			established := []byte("established-" + format)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.CloseNow()
+				if err := writeWebSocketStreamChunk(r.Context(), conn, established, httpStreamWriteTimeout); err != nil {
+					return
+				}
+				serveWebSocketStreamReader(r.Context(), conn, format, "live/overwrite", reader)
+			}))
+			t.Cleanup(server.Close)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.CloseNow()
+			messageType, data, err := conn.Read(ctx)
+			if err != nil || messageType != websocket.MessageBinary || string(data) != string(established) {
+				t.Fatalf("established WebSocket frame = (%v, %q, %v)", messageType, data, err)
+			}
+			_, data, err = conn.Read(ctx)
+			if err == nil {
+				t.Fatalf("WebSocket %s received post-gap data %q (sentinel %q)", format, data, sentinel)
+			}
+			if status := websocket.CloseStatus(err); status != websocket.StatusTryAgainLater {
+				t.Fatalf("WebSocket %s close status = %v, want %v (error %v)", format, status, websocket.StatusTryAgainLater, err)
+			}
+			if !strings.Contains(err.Error(), websocketContinuityLossReason) {
+				t.Fatalf("WebSocket %s close error = %q, want bounded continuity reason", format, err)
+			}
+		})
+	}
+}
+
+func TestWebSocketCanceledContextWinsOverBufferedOverwrite(t *testing.T) {
+	buffer := core.NewSharedBuffer(2)
+	reader := buffer.NewReader()
+	for _, packet := range [][]byte{
+		[]byte("old-0"),
+		[]byte("old-1"),
+		[]byte("retained-after-gap"),
+		[]byte("post-gap-tail"),
+	} {
+		buffer.Write(packet)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		ctx, cancel := context.WithCancel(r.Context())
+		cancel()
+		serveWebSocketStreamReader(ctx, conn, "ts", "live/canceled-overwrite", reader)
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	_, _, err = conn.Read(ctx)
+	if err == nil {
+		t.Fatal("canceled WebSocket reader remained open")
+	}
+	if status := websocket.CloseStatus(err); status != -1 {
+		t.Fatalf("canceled WebSocket close status = %v, want no close frame (error %v)", status, err)
+	}
+}
+
+func TestWebSocketCleanEndUsesNormalClosure(t *testing.T) {
+	buffer := core.NewSharedBuffer(2)
+	reader := buffer.NewReader()
+	buffer.Write([]byte("clean-packet"))
+	buffer.Close()
+	established := []byte("established-clean")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		if err := writeWebSocketStreamChunk(r.Context(), conn, established, httpStreamWriteTimeout); err != nil {
+			return
+		}
+		serveWebSocketStreamReader(r.Context(), conn, "ts", "live/clean", reader)
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://"+server.Listener.Addr().String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	for _, want := range [][]byte{established, []byte("clean-packet")} {
+		messageType, data, readErr := conn.Read(ctx)
+		if readErr != nil || messageType != websocket.MessageBinary || string(data) != string(want) {
+			t.Fatalf("clean WebSocket frame = (%v, %q, %v), want %q", messageType, data, readErr, want)
+		}
+	}
+	_, _, err = conn.Read(ctx)
+	if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure {
+		t.Fatalf("clean WebSocket close status = %v, want %v (error %v)", status, websocket.StatusNormalClosure, err)
+	}
+}
+
 func TestWebSocketUpgrade(t *testing.T) {
 	_, srv, addr := newTestServer(t)
 
@@ -87,6 +222,46 @@ func TestWebSocketUpgrade(t *testing.T) {
 
 	// Close cleanly
 	conn.Close(websocket.StatusNormalClosure, "done")
+}
+
+func TestModuleCloseTerminatesActiveWebSocketSubscriber(t *testing.T) {
+	m, srv, addr := newTestServer(t)
+	stream, err := srv.StreamHub().GetOrCreate("live/close-active-ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(dummyPublisher{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, addr+"/ws/live/close-active-ws.ts", nil)
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	defer conn.CloseNow()
+	deadline := time.Now().Add(time.Second)
+	for srv.ConnectionCount() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := srv.ConnectionCount(); got != 1 {
+		t.Fatalf("active connection count = %d, want 1", got)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- m.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HTTP module close exceeded the active WebSocket drain bound")
+	}
+	if got := srv.ConnectionCount(); got != 0 {
+		t.Fatalf("connection count after HTTP module close = %d, want 0", got)
+	}
 }
 
 func TestWebSocketInvalidFormat(t *testing.T) {
@@ -127,7 +302,7 @@ func TestWebSocketBinaryFrames(t *testing.T) {
 
 	// Pre-mark as registered so ensureMuxerCallbacks won't overwrite our test callback
 	m.registeredMu.Lock()
-	m.registered[stream] = true
+	m.registered[stream.Key()] = stream.InstanceID()
 	m.registeredMu.Unlock()
 
 	// Register a simple muxer start callback that pushes test data
@@ -179,6 +354,6 @@ func TestWebSocketInvalidPath(t *testing.T) {
 // dummyPublisher satisfies the core.Publisher interface for testing.
 type dummyPublisher struct{}
 
-func (dummyPublisher) ID() string                   { return "test-pub" }
+func (dummyPublisher) ID() string                    { return "test-pub" }
 func (dummyPublisher) MediaInfo() *avframe.MediaInfo { return nil }
 func (dummyPublisher) Close() error                  { return nil }

@@ -186,9 +186,11 @@ func TestManagerWriteHonorsContextWhileWaitingForSourceIO(t *testing.T) {
 
 func TestSnapshotReadDoesNotWaitForRefresh(t *testing.T) {
 	source := &blockingSource{release: make(chan struct{})}
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
 	m, err := NewManager(Options{
 		Source:  source,
-		Initial: &config.Config{Server: config.ServerConfig{Name: "initial"}},
+		Initial: initial,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -218,9 +220,11 @@ func TestSnapshotReadDoesNotWaitForRefresh(t *testing.T) {
 
 func TestFailedRefreshRetainsLastValidSnapshot(t *testing.T) {
 	source := &blockingSource{release: make(chan struct{}), err: errors.New("source unavailable")}
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
 	m, err := NewManager(Options{
 		Source:  source,
-		Initial: &config.Config{Server: config.ServerConfig{Name: "initial"}},
+		Initial: initial,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -239,6 +243,34 @@ func TestFailedRefreshRetainsLastValidSnapshot(t *testing.T) {
 	}
 	if m.Status().ConsecutiveFailures == 0 {
 		t.Fatal("expected source failure status")
+	}
+}
+
+func TestManagerRedactsURLCredentialsFromFailureStatus(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	source := &blockingSource{
+		release: release,
+		err:     errors.New(`Get "https://user:password@example.test/config.yaml?token=source-secret": connection refused`),
+	}
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
+	m, err := NewManager(Options{Source: source, Initial: initial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.load(context.Background()); err == nil {
+		t.Fatal("expected source failure")
+	}
+	lastError := m.Status().LastError
+	for _, secret := range []string{"user", "password", "source-secret", "token="} {
+		if strings.Contains(lastError, secret) {
+			t.Fatalf("status error leaked %q: %s", secret, lastError)
+		}
+	}
+	if !strings.Contains(lastError, "__liveforge_redacted__") {
+		t.Fatalf("status error did not retain an explicit redaction marker: %s", lastError)
 	}
 }
 
@@ -592,7 +624,7 @@ func TestManagerCountsAcceptedRejectedAndApplicationFailedChanges(t *testing.T) 
 }
 
 func BenchmarkSnapshotRead(b *testing.B) {
-	m, err := NewManager(Options{Source: &blockingSource{release: make(chan struct{})}, Initial: &config.Config{}})
+	m, err := NewManager(Options{Source: &blockingSource{release: make(chan struct{})}, Initial: config.Defaults()})
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -13,30 +13,33 @@ type StreamStats struct {
 	bytesIn     atomic.Int64
 	videoFrames atomic.Int64
 	audioFrames atomic.Int64
-	lastFrame   atomic.Value // time.Time
 
-	// windowMu also guards startTime: initStats runs on the publisher
-	// goroutine while snapshot() runs on API handler goroutines.
+	// recordFrame updates the window counters atomically. windowMu only
+	// serializes snapshot rotations, so frame ingestion never waits for a stats
+	// reader.
 	windowMu    sync.Mutex
-	startTime   time.Time
-	windowBytes int64
-	windowVideo int64
-	windowStart time.Time
-	snapBytes   int64
-	snapVideo   int64
-	snapTime    time.Time
+	startTime   atomic.Int64
+	windowBytes atomic.Int64
+	windowVideo atomic.Int64
+	windowStart atomic.Int64
+	snapBytes   atomic.Int64
+	snapVideo   atomic.Int64
+	snapTime    atomic.Int64
 }
 
 const statsWindowDuration = 2 * time.Second
 
 // initStats sets the start time. Called once when the stream begins publishing.
 func (s *StreamStats) initStats() {
-	now := time.Now()
-	s.lastFrame.Store(now)
+	now := time.Now().UnixNano()
 	s.windowMu.Lock()
-	s.startTime = now
-	s.windowStart = now
-	s.snapTime = now
+	s.startTime.Store(now)
+	s.windowStart.Store(now)
+	s.snapTime.Store(now)
+	s.windowBytes.Store(0)
+	s.windowVideo.Store(0)
+	s.snapBytes.Store(0)
+	s.snapVideo.Store(0)
 	s.windowMu.Unlock()
 }
 
@@ -48,15 +51,11 @@ func (s *StreamStats) recordFrame(payloadSize int, isVideo bool) {
 	} else {
 		s.audioFrames.Add(1)
 	}
-	s.lastFrame.Store(time.Now())
-
-	// Update sliding window counters.
-	s.windowMu.Lock()
-	s.windowBytes += int64(payloadSize)
+	// Update sliding window counters without contending with stats readers.
+	s.windowBytes.Add(int64(payloadSize))
 	if isVideo {
-		s.windowVideo++
+		s.windowVideo.Add(1)
 	}
-	s.windowMu.Unlock()
 }
 
 // StreamStatsSnapshot is a point-in-time copy of stream statistics.
@@ -81,30 +80,35 @@ func (s *StreamStats) snapshot() StreamStatsSnapshot {
 		AudioFrames: s.audioFrames.Load(),
 	}
 
-	// Compute instantaneous bitrate and FPS from sliding window.
+	// Compute instantaneous bitrate and FPS from the sliding window. Rotation is
+	// serialized, but frame ingestion uses atomic counters and does not wait.
 	s.windowMu.Lock()
-	snap.StartTime = s.startTime
-	elapsed := now.Sub(s.startTime)
+	startNano := s.startTime.Load()
+	windowStartNano := s.windowStart.Load()
+	snapTimeNano := s.snapTime.Load()
+	startTime := time.Unix(0, startNano)
+	windowStart := time.Unix(0, windowStartNano)
+	snapTime := time.Unix(0, snapTimeNano)
+	snap.StartTime = startTime
+	elapsed := now.Sub(startTime)
 	snap.Uptime = elapsed
-	windowElapsed := now.Sub(s.windowStart)
+	windowElapsed := now.Sub(windowStart)
 	if windowElapsed >= statsWindowDuration {
 		// Window has enough data: compute rates from current window,
 		// then rotate: current window becomes the new snapshot.
 		if ms := windowElapsed.Milliseconds(); ms > 0 {
-			snap.BitrateKbps = s.windowBytes * 8 / ms
-			snap.FPS = float64(s.windowVideo) / windowElapsed.Seconds()
+			snap.BitrateKbps = s.windowBytes.Load() * 8 / ms
+			snap.FPS = float64(s.windowVideo.Load()) / windowElapsed.Seconds()
 		}
-		s.snapBytes = s.windowBytes
-		s.snapVideo = s.windowVideo
-		s.snapTime = s.windowStart
-		s.windowBytes = 0
-		s.windowVideo = 0
-		s.windowStart = now
-	} else if s.snapTime != s.startTime || windowElapsed > 0 {
+		s.snapBytes.Store(s.windowBytes.Swap(0))
+		s.snapVideo.Store(s.windowVideo.Swap(0))
+		s.snapTime.Store(windowStartNano)
+		s.windowStart.Store(now.UnixNano())
+	} else if snapTimeNano != startNano || windowElapsed > 0 {
 		// Window too short: use snapshot + current window combined.
-		totalBytes := s.snapBytes + s.windowBytes
-		totalVideo := s.snapVideo + s.windowVideo
-		totalElapsed := now.Sub(s.snapTime)
+		totalBytes := s.snapBytes.Load() + s.windowBytes.Load()
+		totalVideo := s.snapVideo.Load() + s.windowVideo.Load()
+		totalElapsed := now.Sub(snapTime)
 		if ms := totalElapsed.Milliseconds(); ms > 0 {
 			snap.BitrateKbps = totalBytes * 8 / ms
 			snap.FPS = float64(totalVideo) / totalElapsed.Seconds()

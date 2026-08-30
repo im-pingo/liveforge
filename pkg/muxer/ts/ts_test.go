@@ -221,10 +221,15 @@ func TestMuxerWriteAudioFrame(t *testing.T) {
 		t.Fatalf("result length %d not multiple of %d", len(result), PacketSize)
 	}
 
-	// Should be on audio PID
-	pid := uint16(result[1]&0x1F)<<8 | uint16(result[2])
-	if pid != PIDAudio {
-		t.Errorf("audio packet PID = 0x%04X, want 0x%04X", pid, PIDAudio)
+	if len(result) < 3*PacketSize {
+		t.Fatalf("audio-first output has %d packets, want PAT, PMT, and audio PES", len(result)/PacketSize)
+	}
+	for packet, wantPID := range []uint16{PIDPat, PIDPmt, PIDAudio} {
+		offset := packet * PacketSize
+		pid := uint16(result[offset+1]&0x1F)<<8 | uint16(result[offset+2])
+		if pid != wantPID {
+			t.Errorf("packet %d PID = 0x%04X, want 0x%04X", packet, pid, wantPID)
+		}
 	}
 }
 

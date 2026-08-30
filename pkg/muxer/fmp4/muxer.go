@@ -1,6 +1,8 @@
 package fmp4
 
 import (
+	"math"
+
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/pkg/codec/aac"
 	"github.com/im-pingo/liveforge/pkg/codec/h265"
@@ -10,7 +12,7 @@ import (
 type Muxer struct {
 	videoCodec      avframe.CodecType
 	audioCodec      avframe.CodecType
-	audioSampleRate int
+	audioSampleRate uint32
 	sequenceNumber  uint32
 }
 
@@ -33,7 +35,8 @@ func (m *Muxer) Init(videoSeqHeader, audioSeqHeader *avframe.AVFrame, width, hei
 		audioData = audioSeqHeader.Payload
 	}
 	sampleRate, channels = resolveAudioConfig(m.audioCodec, audioData, sampleRate, channels)
-	m.audioSampleRate = sampleRate
+	sampleRate = boundedAudioSampleRate(sampleRate)
+	m.audioSampleRate = uint32(sampleRate) //nolint:gosec // bounded by boundedAudioSampleRate
 	if width <= 0 || height <= 0 {
 		if derivedWidth, derivedHeight := ParseVideoDimensions(m.videoCodec, videoData); derivedWidth > 0 && derivedHeight > 0 {
 			width, height = derivedWidth, derivedHeight
@@ -71,6 +74,16 @@ func resolveAudioConfig(codec avframe.CodecType, audioData []byte, sampleRate, c
 	return sampleRate, channels
 }
 
+func boundedAudioSampleRate(sampleRate int) int {
+	if sampleRate <= 0 {
+		return timescaleAudio
+	}
+	if sampleRate > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return sampleRate
+}
+
 // ParseVideoDimensions extracts display dimensions from a codec configuration record.
 func ParseVideoDimensions(codec avframe.CodecType, config []byte) (width, height int) {
 	switch codec {
@@ -86,11 +99,18 @@ func ParseVideoDimensions(codec avframe.CodecType, config []byte) (width, height
 // WriteSegment generates a moof+mdat segment from a GOP or group of frames.
 func (m *Muxer) WriteSegment(frames []*avframe.AVFrame) []byte {
 	m.sequenceNumber++
-	return BuildMediaSegment(frames, m.sequenceNumber, uint32(m.audioSampleRate))
+	return buildMediaSegment(frames, m.sequenceNumber, m.audioSampleRate, 0, 0, 0)
+}
+
+// WriteSegmentWithBaseDTS writes a segment with independent per-track decode
+// timestamp origins. Sample durations and composition offsets are unchanged.
+func (m *Muxer) WriteSegmentWithBaseDTS(frames []*avframe.AVFrame, videoBaseDTS, audioBaseDTS int64) []byte {
+	m.sequenceNumber++
+	return buildMediaSegment(frames, m.sequenceNumber, m.audioSampleRate, 0, videoBaseDTS, audioBaseDTS)
 }
 
 // WriteSegmentUntil generates a segment whose final video sample ends at endDTS.
 func (m *Muxer) WriteSegmentUntil(frames []*avframe.AVFrame, endDTS int64) []byte {
 	m.sequenceNumber++
-	return buildMediaSegment(frames, m.sequenceNumber, uint32(m.audioSampleRate), endDTS)
+	return buildMediaSegment(frames, m.sequenceNumber, m.audioSampleRate, endDTS, 0, 0)
 }

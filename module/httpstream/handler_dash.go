@@ -16,16 +16,26 @@ func (m *Module) serveDASHManifest(w http.ResponseWriter, r *http.Request, strea
 	}
 
 	mgr := m.getOrCreateDASH(streamKey, stream)
+	if mgr == nil {
+		http.Error(w, "stream generation ended", http.StatusNotFound)
+		return
+	}
 
 	// One completed keyframe-bounded segment is enough because the MPD uses an
 	// explicit SegmentTimeline. Waiting for a fixed three-segment buffer makes
 	// startup roughly three GOPs long for publishers with sparse keyframes.
-	for i := 0; i < 150 && mgr.SegmentCount() < 1; i++ {
-		select {
-		case <-r.Context().Done():
+	if !waitForCondition(r.Context(), 15*time.Second, 100*time.Millisecond, func() bool {
+		return mgr.SegmentCount() >= 1 || mgr.isTerminal()
+	}) {
+		if r.Context().Err() != nil {
 			return
-		case <-time.After(100 * time.Millisecond):
 		}
+		writeHTTPError(w, "initial DASH segment not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if mgr.SegmentCount() < 1 {
+		writeHTTPError(w, "initial DASH segment not ready", http.StatusServiceUnavailable)
+		return
 	}
 
 	manifest := mgr.GenerateMPD()
@@ -33,7 +43,7 @@ func (m *Module) serveDASHManifest(w http.ResponseWriter, r *http.Request, strea
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "application/dash+xml")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.Write([]byte(manifest))
+	_ = writeHTTPResponse(w, []byte(manifest), httpStreamWriteTimeout)
 }
 
 // serveDASHInit serves the fMP4 init segment.
@@ -56,7 +66,7 @@ func (m *Module) serveDASHInit(w http.ResponseWriter, r *http.Request, streamKey
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.Write(data)
+	_ = writeHTTPResponse(w, data, httpStreamWriteTimeout)
 }
 
 // serveDASHSegment serves a single fMP4 media segment by sequence number.
@@ -82,30 +92,24 @@ func (m *Module) serveDASHSegment(w http.ResponseWriter, r *http.Request, stream
 	if !found {
 		_, hi := mgr.SegmentRange()
 		if seqNum > hi {
-			for i := 0; i < 60; i++ {
-				select {
-				case <-r.Context().Done():
-					return
-				default:
-				}
-				time.Sleep(100 * time.Millisecond)
+			if !waitForCondition(r.Context(), 6*time.Second, 100*time.Millisecond, func() bool {
 				data, found = mgr.GetSegment(seqNum)
-				if found {
-					break
-				}
+				return found || mgr.isTerminal()
+			}) && r.Context().Err() != nil {
+				return
 			}
 		}
 	}
 
 	if !found {
-		http.Error(w, "segment not found", http.StatusNotFound)
+		writeHTTPError(w, "segment not found", http.StatusNotFound)
 		return
 	}
 
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "public, max-age=10")
-	w.Write(data)
+	_ = writeHTTPResponse(w, data, httpStreamWriteTimeout)
 }
 
 // serveDASHAudioInit serves the audio-only fMP4 init segment.
@@ -128,7 +132,7 @@ func (m *Module) serveDASHAudioInit(w http.ResponseWriter, r *http.Request, stre
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.Write(data)
+	_ = writeHTTPResponse(w, data, httpStreamWriteTimeout)
 }
 
 // serveDASHAudioSegment serves a single audio-only fMP4 segment by sequence number.
@@ -147,28 +151,22 @@ func (m *Module) serveDASHAudioSegment(w http.ResponseWriter, r *http.Request, s
 	if !found {
 		_, hi := mgr.SegmentRange()
 		if seqNum > hi {
-			for i := 0; i < 60; i++ {
-				select {
-				case <-r.Context().Done():
-					return
-				default:
-				}
-				time.Sleep(100 * time.Millisecond)
+			if !waitForCondition(r.Context(), 6*time.Second, 100*time.Millisecond, func() bool {
 				data, found = mgr.GetAudioSegment(seqNum)
-				if found {
-					break
-				}
+				return found || mgr.isTerminal()
+			}) && r.Context().Err() != nil {
+				return
 			}
 		}
 	}
 
 	if !found {
-		http.Error(w, "audio segment not found", http.StatusNotFound)
+		writeHTTPError(w, "audio segment not found", http.StatusNotFound)
 		return
 	}
 
 	m.setCORSHeaders(w)
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "public, max-age=10")
-	w.Write(data)
+	_ = writeHTTPResponse(w, data, httpStreamWriteTimeout)
 }

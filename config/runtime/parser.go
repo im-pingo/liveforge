@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"sort"
@@ -17,10 +18,10 @@ import (
 
 // ParseDocument parses YAML or JSON into a defaulted and normalized config.
 func ParseDocument(data []byte) (*config.Config, error) {
-	return parseDocument(data, true)
+	return parseDocument(data, true, false)
 }
 
-func parseDocument(data []byte, expandEnvironment bool) (*config.Config, error) {
+func parseDocument(data []byte, expandEnvironment, rejectUnknown bool) (*config.Config, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, fmt.Errorf("configuration document is empty")
 	}
@@ -31,7 +32,25 @@ func parseDocument(data []byte, expandEnvironment bool) (*config.Config, error) 
 		return nil, err
 	}
 	cfg := config.Defaults()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	var err error
+	if rejectUnknown {
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		decoder.KnownFields(true)
+		err = decoder.Decode(cfg)
+		if err == nil {
+			var extra yaml.Node
+			if extraErr := decoder.Decode(&extra); extraErr != io.EOF {
+				if extraErr != nil {
+					err = extraErr
+				} else {
+					err = fmt.Errorf("configuration must contain exactly one YAML or JSON document")
+				}
+			}
+		}
+	} else {
+		err = yaml.Unmarshal(data, cfg)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	config.Normalize(cfg)
@@ -104,7 +123,7 @@ func cloneConfig(cfg *config.Config) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseDocument(b, false)
+	return parseDocument(b, false, false)
 }
 
 func configMap(cfg *config.Config) (map[string]any, error) {
@@ -198,7 +217,7 @@ func applyHotChanges(current, desired *config.Config, changes []Change) (*config
 	if err != nil {
 		return nil, fmt.Errorf("marshal effective config: %w", err)
 	}
-	return parseDocument(data, false)
+	return parseDocument(data, false, false)
 }
 
 func mapPathValue(root map[string]any, parts []string) (any, bool) {

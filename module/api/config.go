@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,9 +94,9 @@ func (h *Handlers) handleConfigValidate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	cfg, err := configruntime.ValidateDocument(document)
+	cfg, err := configruntime.ValidateKnownDocument(document)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, configruntime.RedactError(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -217,6 +219,10 @@ func redactYAMLNode(node *yaml.Node) {
 		return
 	}
 	switch node.Kind {
+	case yaml.ScalarNode:
+		if isHierarchicalConfigURLValue(node.Value) {
+			redactURLYAMLNode(node, false)
+		}
 	case yaml.DocumentNode, yaml.SequenceNode:
 		for _, child := range node.Content {
 			redactYAMLNode(child)
@@ -483,6 +489,14 @@ func restoreRedactedConfigURL(candidate, current string) (string, error) {
 	if err != nil || !isValidConfigURL(currentURL) {
 		return "", fmt.Errorf("source URL is unavailable")
 	}
+	if isRedactedConfigURLPath(candidateURL.Path) {
+		expected := *currentURL
+		if !redactConfigURLPath(&expected) || candidateURL.Path != expected.Path {
+			return "", fmt.Errorf("source URL path identity does not match")
+		}
+		candidateURL.Path = currentURL.Path
+		candidateURL.RawPath = currentURL.RawPath
+	}
 	candidateURL.User = currentURL.User
 	candidateURL.RawQuery = currentURL.RawQuery
 	candidateURL.ForceQuery = currentURL.ForceQuery
@@ -517,11 +531,11 @@ func restoreRedactedYAMLSequence(node *yaml.Node, current any, path []string) er
 	}
 	candidateIdentities := make([][]string, len(candidateValues))
 	for index, value := range candidateValues {
-		candidateIdentities[index] = configStableIdentities(value)
+		candidateIdentities[index] = configStableIdentities(value, true)
 	}
 	originalIdentities := make([][]string, len(original))
 	for index, value := range original {
-		originalIdentities[index] = configStableIdentities(value)
+		originalIdentities[index] = configStableIdentities(value, false)
 	}
 	used := make(map[int]struct{}, len(redactedIndexes))
 	for _, candidateIndex := range redactedIndexes {
@@ -591,9 +605,9 @@ func uniqueConfigIdentityMatch(candidateIndex int, candidates, originals [][]str
 	return -1
 }
 
-func configStableIdentities(value any) []string {
+func configStableIdentities(value any, candidate bool) []string {
 	if text, ok := value.(string); ok {
-		if identity := publicConfigURLIdentity(text); identity != "" {
+		if identity := publicConfigURLIdentity(text, candidate); identity != "" {
 			return []string{"url:" + identity}
 		}
 		return nil
@@ -626,14 +640,14 @@ func configStableIdentities(value any) []string {
 		}
 		switch urls := child.(type) {
 		case string:
-			if identity := publicConfigURLIdentity(urls); identity != "" {
+			if identity := publicConfigURLIdentity(urls, candidate); identity != "" {
 				identities = append(identities, key+":"+identity)
 			}
 		case []any:
 			public := make([]string, 0, len(urls))
 			for _, item := range urls {
 				if text, ok := item.(string); ok {
-					public = append(public, publicConfigURLIdentity(text))
+					public = append(public, publicConfigURLIdentity(text, candidate))
 				}
 			}
 			if encoded, err := json.Marshal(public); err == nil {
@@ -653,7 +667,7 @@ func isStableConfigIdentityKey(key string) bool {
 	}
 }
 
-func publicConfigURLIdentity(raw string) string {
+func publicConfigURLIdentity(raw string, candidate bool) string {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" {
 		return strings.TrimSpace(raw)
@@ -662,6 +676,9 @@ func publicConfigURLIdentity(raw string) string {
 	parsed.RawQuery = ""
 	parsed.ForceQuery = false
 	parsed.Fragment = ""
+	if !candidate || !isRedactedConfigURLPath(parsed.Path) {
+		redactConfigURLPath(parsed)
+	}
 	return parsed.String()
 }
 
@@ -761,10 +778,18 @@ func redactConfigValue(value any) {
 				redactConfigURLValue(current, key, child)
 				continue
 			}
+			if text, ok := child.(string); ok && isHierarchicalConfigURLValue(text) {
+				current[key] = redactConfigURL(text, false)
+				continue
+			}
 			redactConfigValue(child)
 		}
 	case []any:
-		for _, child := range current {
+		for index, child := range current {
+			if text, ok := child.(string); ok && isHierarchicalConfigURLValue(text) {
+				current[index] = redactConfigURL(text, false)
+				continue
+			}
 			redactConfigValue(child)
 		}
 	}
@@ -828,7 +853,7 @@ func isScalarConfigURLValue(value any) bool {
 
 func isSensitiveConfigKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
-	for _, marker := range []string{"token", "password", "secret", "credential", "passphrase", "private_key"} {
+	for _, marker := range []string{"token", "password", "secret", "credential", "passphrase", "private_key", "api_key", "key_file"} {
 		if strings.Contains(key, marker) {
 			return true
 		}
@@ -836,7 +861,10 @@ func isSensitiveConfigKey(key string) bool {
 	return false
 }
 
-const redactedURLQuery = "__liveforge_redacted__=1"
+const (
+	redactedURLQuery      = "__liveforge_redacted__=1"
+	redactedURLPathPrefix = "/__liveforge_redacted_path__/"
+)
 
 func isURLConfigKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
@@ -848,6 +876,11 @@ func isURLConfigKey(key string) bool {
 func isAddressConfigKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	return strings.Contains(key, "address") || key == "addr"
+}
+
+func isHierarchicalConfigURLValue(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && parsed.IsAbs() && parsed.Opaque == "" && parsed.Host != "" && parsed.Hostname() != ""
 }
 
 func redactConfigURLValue(parent map[string]any, key string, value any) {
@@ -879,13 +912,16 @@ func redactConfigURL(raw string, allowPlainAddress bool) string {
 		}
 		return "[REDACTED]"
 	}
-	if parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" {
+	pathRedacted := redactConfigURLPath(parsed)
+	if parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && !pathRedacted {
 		return trimmed
 	}
 	if parsed.User != nil {
 		parsed.User = url.User("REDACTED")
 	}
-	parsed.RawQuery = redactedURLQuery
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		parsed.RawQuery = redactedURLQuery
+	}
 	parsed.ForceQuery = false
 	parsed.Fragment = ""
 	return parsed.String()
@@ -894,7 +930,30 @@ func redactConfigURL(raw string, allowPlainAddress bool) string {
 func isRedactedConfigURL(raw string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && isValidConfigURL(parsed) &&
-		(parsed.RawQuery == redactedURLQuery || (parsed.User != nil && parsed.User.Username() == "REDACTED"))
+		(parsed.RawQuery == redactedURLQuery || isRedactedConfigURLPath(parsed.Path) ||
+			(parsed.User != nil && parsed.User.Username() == "REDACTED"))
+}
+
+func redactConfigURLPath(parsed *url.URL) bool {
+	if parsed == nil || parsed.Path == "" || parsed.Path == "/" {
+		return false
+	}
+	digest := sha256.Sum256([]byte(parsed.EscapedPath()))
+	parsed.Path = redactedURLPathPrefix + hex.EncodeToString(digest[:16])
+	parsed.RawPath = ""
+	return true
+}
+
+func isRedactedConfigURLPath(path string) bool {
+	if !strings.HasPrefix(path, redactedURLPathPrefix) {
+		return false
+	}
+	digest := strings.TrimPrefix(path, redactedURLPathPrefix)
+	if len(digest) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
 }
 
 func isValidConfigURL(parsed *url.URL) bool {
@@ -915,10 +974,10 @@ func isValidConfigURL(parsed *url.URL) bool {
 func redactedSourceDetails(runtimeConfig config.RuntimeConfig) map[string]any {
 	return map[string]any{
 		"kind":   runtimeConfig.Source,
-		"file":   map[string]any{"path": runtimeConfig.File.Path},
+		"file":   map[string]any{"path": runtimeConfig.File.Path, "max_bytes": runtimeConfig.File.MaxBytes},
 		"http":   map[string]any{"url": redactedSourceURL(runtimeConfig.HTTP.URL), "max_bytes": runtimeConfig.HTTP.MaxBytes},
 		"consul": map[string]any{"address": redactedSourceURL(runtimeConfig.Consul.Address), "prefix": runtimeConfig.Consul.Prefix, "max_bytes": runtimeConfig.Consul.MaxBytes},
-		"redis":  map[string]any{"addr": redactedSourceAddress(runtimeConfig.Redis.Addr), "username": runtimeConfig.Redis.Username, "db": runtimeConfig.Redis.DB, "prefix": runtimeConfig.Redis.Prefix, "hash": runtimeConfig.Redis.Hash, "version_key": runtimeConfig.Redis.VersionKey, "tls": runtimeConfig.Redis.TLS},
+		"redis":  map[string]any{"addr": redactedSourceAddress(runtimeConfig.Redis.Addr), "username": runtimeConfig.Redis.Username, "db": runtimeConfig.Redis.DB, "prefix": runtimeConfig.Redis.Prefix, "hash": runtimeConfig.Redis.Hash, "version_key": runtimeConfig.Redis.VersionKey, "tls": runtimeConfig.Redis.TLS, "max_bytes": runtimeConfig.Redis.MaxBytes},
 	}
 }
 
@@ -950,7 +1009,9 @@ func redactedSourceURL(raw string) string {
 	}
 	parsed.User = nil
 	parsed.RawQuery = ""
+	parsed.ForceQuery = false
 	parsed.Fragment = ""
+	redactConfigURLPath(parsed)
 	return parsed.String()
 }
 

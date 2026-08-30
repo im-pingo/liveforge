@@ -145,7 +145,12 @@ func TestConfigSchemaAcceptsNegativeScalarDefaultSentinels(t *testing.T) {
 		"sip":     map[string]any{"gateway": map[string]any{"max_calls": -1}},
 		"cluster": map[string]any{"health_check": map[string]any{"evict_threshold": -1}},
 		"api":     map[string]any{"audit": map[string]any{"max_entries": -1}},
-		"runtime": map[string]any{"http": map[string]any{"max_bytes": -1}, "consul": map[string]any{"max_bytes": -1}},
+		"runtime": map[string]any{
+			"file":   map[string]any{"max_bytes": -1},
+			"http":   map[string]any{"max_bytes": -1},
+			"consul": map[string]any{"max_bytes": -1},
+			"redis":  map[string]any{"max_bytes": -1},
+		},
 	}
 	if err := validateSchemaValue(schema, schema, document, "$"); err != nil {
 		t.Fatalf("schema rejected source-supported negative default sentinels: %v", err)
@@ -162,9 +167,13 @@ api:
   audit:
     max_entries: -1
 runtime:
+  file:
+    max_bytes: -1
   http:
     max_bytes: -1
   consul:
+    max_bytes: -1
+  redis:
     max_bytes: -1
 `
 	cfg, err := ParseDocument([]byte(yamlDocument))
@@ -172,10 +181,11 @@ runtime:
 		t.Fatalf("runtime parser rejected source-supported negative default sentinels: %v", err)
 	}
 	if cfg.SIP.Gateway.MaxCalls != -1 || cfg.Cluster.HealthCheck.EvictThreshold != -1 ||
-		cfg.API.Audit.MaxEntries != -1 || cfg.Runtime.HTTP.MaxBytes != -1 || cfg.Runtime.Consul.MaxBytes != -1 {
-		t.Fatalf("runtime parser did not preserve negative sentinels: max_calls=%d evict_threshold=%d max_entries=%d http_max_bytes=%d consul_max_bytes=%d",
+		cfg.API.Audit.MaxEntries != -1 || cfg.Runtime.File.MaxBytes != -1 || cfg.Runtime.HTTP.MaxBytes != -1 ||
+		cfg.Runtime.Consul.MaxBytes != -1 || cfg.Runtime.Redis.MaxBytes != -1 {
+		t.Fatalf("runtime parser did not preserve negative sentinels: max_calls=%d evict_threshold=%d max_entries=%d file_max_bytes=%d http_max_bytes=%d consul_max_bytes=%d redis_max_bytes=%d",
 			cfg.SIP.Gateway.MaxCalls, cfg.Cluster.HealthCheck.EvictThreshold, cfg.API.Audit.MaxEntries,
-			cfg.Runtime.HTTP.MaxBytes, cfg.Runtime.Consul.MaxBytes)
+			cfg.Runtime.File.MaxBytes, cfg.Runtime.HTTP.MaxBytes, cfg.Runtime.Consul.MaxBytes, cfg.Runtime.Redis.MaxBytes)
 	}
 }
 

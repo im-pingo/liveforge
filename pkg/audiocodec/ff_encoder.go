@@ -163,21 +163,68 @@ static int ff_encode(AVCodecContext *ctx,
 static int ff_encoder_frame_size(AVCodecContext *ctx) {
     return ctx->frame_size;
 }
+
+static int ff_encoder_send_eof(AVCodecContext *ctx) {
+    return avcodec_send_frame(ctx, NULL);
+}
+
+// ff_encoder_receive returns 1 with one caller-owned packet, 0 for EAGAIN, 2
+// for EOF, or a negative FFmpeg/allocation error.
+static int ff_encoder_receive(AVCodecContext *ctx, uint8_t **out, int *out_size) {
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt) return AVERROR(ENOMEM);
+
+    int ret = avcodec_receive_packet(ctx, pkt);
+    if (ret == AVERROR(EAGAIN)) {
+        av_packet_free(&pkt);
+        return 0;
+    }
+    if (ret == AVERROR_EOF) {
+        av_packet_free(&pkt);
+        return 2;
+    }
+    if (ret < 0) {
+        av_packet_free(&pkt);
+        return ret;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(pkt->size);
+    if (!buf) {
+        av_packet_free(&pkt);
+        return AVERROR(ENOMEM);
+    }
+    memcpy(buf, pkt->data, pkt->size);
+    *out = buf;
+    *out_size = pkt->size;
+    av_packet_free(&pkt);
+    return 1;
+}
+
+static int ff_encoder_again(void) {
+    return AVERROR(EAGAIN);
+}
 */
 import "C"
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"unsafe"
 )
 
+var errFFmpegDrainAgain = errors.New("ffmpeg encoder drain needs receive")
+
 // FFmpegEncoder encodes PCM into compressed audio using FFmpeg's C API.
 type FFmpegEncoder struct {
-	ctx        *C.AVCodecContext
-	codecName  string
-	sampleRate int
-	channels   int
+	ctx               *C.AVCodecContext
+	codecName         string
+	sampleRate        int
+	channels          int
+	drainSent         bool
+	drained           bool
+	pendingSourceSpan SourceSpan
 }
 
 // NewFFmpegEncoder creates an encoder for the given FFmpeg codec name
@@ -202,14 +249,37 @@ func NewFFmpegEncoder(codecName string, sampleRate, channels int) *FFmpegEncoder
 }
 
 func (e *FFmpegEncoder) Encode(pcm *PCMFrame) ([]byte, error) {
+	return e.encode(pcm, SourceSpan{})
+}
+
+// EncodeAttributed encodes PCM and attaches its source interval without
+// copying the Go-owned compressed payload.
+func (e *FFmpegEncoder) EncodeAttributed(pcm *PCMFrame, sourceSpan SourceSpan) ([]AttributedPacket, error) {
+	if !sourceSpan.Valid() {
+		return nil, ErrInvalidSourceSpan
+	}
+	payload, err := e.encode(pcm, sourceSpan)
+	if err != nil {
+		return nil, err
+	}
+	return e.attributeImmediatePackets([][]byte{payload})
+}
+
+func (e *FFmpegEncoder) encode(pcm *PCMFrame, sourceSpan SourceSpan) ([]byte, error) {
 	if e.ctx == nil {
 		return nil, fmt.Errorf("ffmpeg encoder %q: context not initialised", e.codecName)
+	}
+	if e.drainSent {
+		return nil, fmt.Errorf("ffmpeg encoder %q: already draining", e.codecName)
 	}
 	if len(pcm.Samples) == 0 {
 		return nil, fmt.Errorf("ffmpeg encoder %q: empty PCM frame", e.codecName)
 	}
 
 	nbSamples := len(pcm.Samples) / pcm.Channels
+	if sourceSpan.Valid() {
+		e.trackSourceSpan(sourceSpan)
+	}
 
 	var (
 		out     *C.uint8_t
@@ -230,6 +300,21 @@ func (e *FFmpegEncoder) Encode(pcm *PCMFrame) ([]byte, error) {
 	return result, nil
 }
 
+func (e *FFmpegEncoder) trackSourceSpan(sourceSpan SourceSpan) {
+	if !sourceSpan.Valid() {
+		return
+	}
+	if !e.pendingSourceSpan.Valid() {
+		e.pendingSourceSpan = sourceSpan
+		return
+	}
+	e.pendingSourceSpan = e.pendingSourceSpan.Union(sourceSpan)
+}
+
+func (e *FFmpegEncoder) attributeImmediatePackets(payloads [][]byte) ([]AttributedPacket, error) {
+	return attributePackets(payloads, e.pendingSourceSpan)
+}
+
 func (e *FFmpegEncoder) SampleRate() int { return e.sampleRate }
 func (e *FFmpegEncoder) Channels() int   { return e.channels }
 
@@ -238,6 +323,128 @@ func (e *FFmpegEncoder) FrameSize() int {
 		return 0
 	}
 	return int(C.ff_encoder_frame_size(e.ctx))
+}
+
+// Drain sends the terminal nil frame once and copies every delayed packet into
+// Go-owned memory. Subsequent calls return no packets.
+func (e *FFmpegEncoder) Drain() ([][]byte, error) {
+	if e.drained {
+		return nil, nil
+	}
+	if e.ctx == nil {
+		return nil, fmt.Errorf("ffmpeg encoder %q: context not initialised", e.codecName)
+	}
+	return e.drainWith(e.sendDrainEOF, e.receiveDrainPacket)
+}
+
+// DrainAttributed returns every delayed packet with the conservative union of
+// all source spans submitted through EncodeAttributed.
+func (e *FFmpegEncoder) DrainAttributed() ([]AttributedPacket, error) {
+	if e.drained {
+		return nil, nil
+	}
+	if e.ctx == nil {
+		return nil, fmt.Errorf("ffmpeg encoder %q: context not initialised", e.codecName)
+	}
+	if !e.pendingSourceSpan.Valid() {
+		return nil, ErrInvalidSourceSpan
+	}
+	return e.drainAttributedWith(e.sendDrainEOF, e.receiveDrainPacket)
+}
+
+func (e *FFmpegEncoder) drainAttributedWith(
+	sendEOF func() error,
+	receive func() ([]byte, error),
+) ([]AttributedPacket, error) {
+	payloads, err := e.drainWith(sendEOF, receive)
+	packets, attributionErr := attributePackets(payloads, e.pendingSourceSpan)
+	if attributionErr != nil {
+		return nil, attributionErr
+	}
+	return packets, err
+}
+
+func (e *FFmpegEncoder) sendDrainEOF() error {
+	ret := C.ff_encoder_send_eof(e.ctx)
+	if ret == C.ff_encoder_again() {
+		return errFFmpegDrainAgain
+	}
+	if ret < 0 {
+		return fmt.Errorf("drain send error %d", int(ret))
+	}
+	return nil
+}
+
+func (e *FFmpegEncoder) receiveDrainPacket() ([]byte, error) {
+	var (
+		out     *C.uint8_t
+		outSize C.int
+	)
+	ret := C.ff_encoder_receive(e.ctx, &out, &outSize)
+	switch {
+	case ret == 0:
+		return nil, errFFmpegDrainAgain
+	case ret == 2:
+		return nil, io.EOF
+	case ret < 0:
+		return nil, fmt.Errorf("drain receive error %d", int(ret))
+	}
+
+	packet := make([]byte, int(outSize))
+	copy(packet, unsafe.Slice((*byte)(unsafe.Pointer(out)), int(outSize)))
+	C.free(unsafe.Pointer(out))
+	return packet, nil
+}
+
+func (e *FFmpegEncoder) drainWith(
+	sendEOF func() error,
+	receive func() ([]byte, error),
+) ([][]byte, error) {
+	if e.drained {
+		return nil, nil
+	}
+
+	var packets [][]byte
+	for !e.drainSent {
+		err := sendEOF()
+		if err == nil {
+			e.drainSent = true
+			break
+		}
+		if !errors.Is(err, errFFmpegDrainAgain) {
+			return packets, fmt.Errorf("ffmpeg encoder %q: %w", e.codecName, err)
+		}
+
+		received := false
+		for {
+			packet, receiveErr := receive()
+			if receiveErr == nil {
+				received = true
+				packets = append(packets, packet)
+				continue
+			}
+			if errors.Is(receiveErr, errFFmpegDrainAgain) {
+				if !received {
+					return packets, fmt.Errorf("ffmpeg encoder %q: terminal send and receive both returned EAGAIN", e.codecName)
+				}
+				break
+			}
+			return packets, fmt.Errorf("ffmpeg encoder %q: %w", e.codecName, receiveErr)
+		}
+	}
+
+	for {
+		packet, err := receive()
+		if err == nil {
+			packets = append(packets, packet)
+			continue
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, errFFmpegDrainAgain) {
+			e.drained = true
+			return packets, nil
+		}
+		return packets, fmt.Errorf("ffmpeg encoder %q: %w", e.codecName, err)
+	}
 }
 
 func (e *FFmpegEncoder) Close() {

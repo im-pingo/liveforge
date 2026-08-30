@@ -47,6 +47,10 @@ var (
 		prometheus.BuildFQName("liveforge", "sipgateway", "rtp_bytes_total"),
 		"Total SIP gateway RTP bytes including RTP headers.", []string{"direction"}, nil,
 	)
+	rtpFramesDroppedDesc = prometheus.NewDesc(
+		prometheus.BuildFQName("liveforge", "sipgateway", "rtp_frames_dropped_total"),
+		"Total SIP gateway media frames dropped before RTP egress.", nil, nil,
+	)
 )
 
 // Describe implements prometheus.Collector.
@@ -62,6 +66,7 @@ func (gw *Gateway) Describe(ch chan<- *prometheus.Desc) {
 	ch <- networkFailuresDesc
 	ch <- rtpPacketsDesc
 	ch <- rtpBytesDesc
+	ch <- rtpFramesDroppedDesc
 }
 
 // Collect implements prometheus.Collector with a fixed set of bounded labels.
@@ -81,6 +86,7 @@ func (gw *Gateway) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(rtpPacketsDesc, prometheus.CounterValue, float64(snapshot.RTPPacketsRecv), "received")
 	ch <- prometheus.MustNewConstMetric(rtpBytesDesc, prometheus.CounterValue, float64(snapshot.RTPBytesSent), "sent")
 	ch <- prometheus.MustNewConstMetric(rtpBytesDesc, prometheus.CounterValue, float64(snapshot.RTPBytesRecv), "received")
+	ch <- prometheus.MustNewConstMetric(rtpFramesDroppedDesc, prometheus.CounterValue, float64(snapshot.RTPFramesDropped))
 }
 
 var _ prometheus.Collector = (*Gateway)(nil)

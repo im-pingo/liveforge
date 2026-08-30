@@ -72,6 +72,13 @@ auth:
 	}
 }
 
+func TestValidateKnownDocumentRejectsSecondYAMLDocument(t *testing.T) {
+	_, err := ValidateKnownDocument([]byte("server:\n  name: liveforge\n---\nmalicious_or_unknown:\n  value: ignored\n"))
+	if err == nil {
+		t.Fatal("expected second YAML document to be rejected")
+	}
+}
+
 func TestParseDocumentAppliesDefaultsAndNormalizesContainer(t *testing.T) {
 	cfg, err := ParseDocument([]byte("http_stream:\n  llhls:\n    container: mpeg-ts\n"))
 	if err != nil {

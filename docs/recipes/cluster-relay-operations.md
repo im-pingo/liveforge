@@ -66,6 +66,8 @@ Status returns 200, including active forward/origin counts, bounded relay snapsh
 
 The default internal endpoints are `POST /api/relay/push`, `POST /api/relay/pull`, `POST /api/relay/gb/push`, and `POST /api/relay/gb/pull`. They require `server:mutate` and are node-to-node contracts, not operator workflows. RTP signaling uses SDP; GB signaling exchanges stream/port query values. Expected failures include 400 for invalid input, 404 for a missing pull stream, and 503 for allocation or setup failure.
 
+RTP relay media admission fails closed: packetizer errors, empty packetizer output, nil packets, RTP marshal errors, UDP write errors, and short writes terminate the affected relay instead of being counted as successful media. Push cancellation remains a normal shutdown path; non-cancellation send failures are reported in bounded logs and relay status.
+
 ## Credential Selection And Hot Rotation
 
 For every RTP/GB peer request, the node loads the current atomic configuration and selects credentials in this order:

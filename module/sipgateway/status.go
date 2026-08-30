@@ -40,6 +40,8 @@ var (
 	ErrLabInvalidRequest = errors.New("SIP gateway lab request is invalid")
 	// ErrLabDuplicateIdentity indicates that a lab identity is already active.
 	ErrLabDuplicateIdentity = errors.New("SIP gateway lab identity is already active")
+	// ErrLabCapacity indicates that the configured active lab ceiling was reached.
+	ErrLabCapacity = errors.New("SIP gateway maximum active lab sessions reached")
 	// ErrLabSessionNotFound indicates that a lab session does not exist.
 	ErrLabSessionNotFound = errors.New("SIP gateway lab session not found")
 	// ErrLabManagerUnimplemented indicates that a standalone contract manager has
@@ -147,25 +149,26 @@ const (
 
 // CallSnapshot is an immutable point-in-time view of a SIP gateway call.
 type CallSnapshot struct {
-	CallID          string    `json:"call_id"`
-	Direction       string    `json:"direction"`
-	StreamKey       string    `json:"stream_key"`
-	Codec           string    `json:"codec"`
-	RTPPort         int       `json:"rtp_port"`
-	RTCPPort        int       `json:"rtcp_port"`
-	VideoCodec      string    `json:"video_codec,omitempty"`
-	VideoRTPPort    int       `json:"video_rtp_port,omitempty"`
-	VideoRTCPPort   int       `json:"video_rtcp_port,omitempty"`
-	RemoteAddress   string    `json:"remote_address,omitempty"`
-	StartedAt       time.Time `json:"started_at"`
-	State           CallState `json:"state"`
-	LastError       string    `json:"last_error,omitempty"`
-	LastRTPAt       time.Time `json:"last_rtp_at,omitempty"`
-	RTPPacketsSent  uint64    `json:"rtp_packets_sent"`
-	RTPPacketsRecv  uint64    `json:"rtp_packets_received"`
-	RTPBytesSent    uint64    `json:"rtp_bytes_sent"`
-	RTPBytesRecv    uint64    `json:"rtp_bytes_received"`
-	RTCPPacketsRecv uint64    `json:"rtcp_packets_received"`
+	CallID           string    `json:"call_id"`
+	Direction        string    `json:"direction"`
+	StreamKey        string    `json:"stream_key"`
+	Codec            string    `json:"codec"`
+	RTPPort          int       `json:"rtp_port"`
+	RTCPPort         int       `json:"rtcp_port"`
+	VideoCodec       string    `json:"video_codec,omitempty"`
+	VideoRTPPort     int       `json:"video_rtp_port,omitempty"`
+	VideoRTCPPort    int       `json:"video_rtcp_port,omitempty"`
+	RemoteAddress    string    `json:"remote_address,omitempty"`
+	StartedAt        time.Time `json:"started_at"`
+	State            CallState `json:"state"`
+	LastError        string    `json:"last_error,omitempty"`
+	LastRTPAt        time.Time `json:"last_rtp_at,omitempty"`
+	RTPPacketsSent   uint64    `json:"rtp_packets_sent"`
+	RTPPacketsRecv   uint64    `json:"rtp_packets_received"`
+	RTPBytesSent     uint64    `json:"rtp_bytes_sent"`
+	RTPBytesRecv     uint64    `json:"rtp_bytes_received"`
+	RTPFramesDropped uint64    `json:"rtp_frames_dropped"`
+	RTCPPacketsRecv  uint64    `json:"rtcp_packets_received"`
 }
 
 // MetricsSnapshot contains bounded-cardinality gateway counters for metrics
@@ -186,6 +189,7 @@ type MetricsSnapshot struct {
 	RTPPacketsRecv     uint64 `json:"rtp_packets_received_total"`
 	RTPBytesSent       uint64 `json:"rtp_bytes_sent_total"`
 	RTPBytesRecv       uint64 `json:"rtp_bytes_received_total"`
+	RTPFramesDropped   uint64 `json:"rtp_frames_dropped_total"`
 }
 
 type gatewayMetrics struct {
@@ -201,6 +205,7 @@ type gatewayMetrics struct {
 	rtpPacketsRecv     atomic.Uint64
 	rtpBytesSent       atomic.Uint64
 	rtpBytesRecv       atomic.Uint64
+	rtpFramesDropped   atomic.Uint64
 }
 
 func redactedTerminalError(err error) string {
@@ -231,5 +236,6 @@ func (m *gatewayMetrics) snapshot() MetricsSnapshot {
 		RTPPacketsRecv:     m.rtpPacketsRecv.Load(),
 		RTPBytesSent:       m.rtpBytesSent.Load(),
 		RTPBytesRecv:       m.rtpBytesRecv.Load(),
+		RTPFramesDropped:   m.rtpFramesDropped.Load(),
 	}
 }

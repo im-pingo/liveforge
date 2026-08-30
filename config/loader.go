@@ -203,11 +203,15 @@ func defaults() *Config {
 		SIP: SIPConfig{
 			Listen:    ":5060",
 			Transport: []string{"udp", "tcp"},
+			Gateway:   SIPGatewayConfig{MaxLabSessions: 16},
 		},
 		Stream: StreamConfig{
-			GOPCache:       true,
-			GOPCacheNum:    1,
-			RingBufferSize: 1024,
+			GOPCache:            true,
+			GOPCacheNum:         1,
+			GOPCacheMaxFrames:   DefaultGOPCacheMaxFrames,
+			GOPCacheMaxDuration: 10 * time.Second,
+			GOPCacheMaxBytes:    32 * 1024 * 1024,
+			RingBufferSize:      1024,
 			SlowConsumer: SlowConsumerConfig{
 				Enabled:          true,
 				LagWarnRatio:     0.5,
@@ -236,13 +240,18 @@ func defaults() *Config {
 			Audit:  AuditConfig{MaxEntries: 1000},
 		},
 		Metrics: MetricsConfig{
-			Listen: ":9090",
-			Path:   "/metrics",
+			Listen:            ":9090",
+			Path:              "/metrics",
+			StreamDetailLimit: 100,
 		},
 		Runtime: RuntimeConfig{
 			Source:       "file",
 			PollInterval: 30 * time.Second,
 			LoadTimeout:  10 * time.Second,
+			File:         RuntimeFileSourceConfig{MaxBytes: DefaultRuntimeSourceMaxBytes},
+			HTTP:         RuntimeHTTPSourceConfig{MaxBytes: DefaultRuntimeSourceMaxBytes},
+			Consul:       RuntimeConsulSourceConfig{MaxBytes: DefaultRuntimeSourceMaxBytes},
+			Redis:        RuntimeRedisSourceConfig{MaxBytes: DefaultRuntimeSourceMaxBytes},
 		},
 		Record: RecordConfig{Format: "fmp4"},
 		DVR: DVRConfig{
@@ -252,6 +261,7 @@ func defaults() *Config {
 			SegmentDuration: 6 * time.Second,
 			CleanupInterval: 30 * time.Second,
 		},
+		GB28181: GB28181Config{MaxLabSessions: 16},
 		Cluster: ClusterConfig{
 			SRT: ClusterSRTConfig{
 				Latency:  120 * time.Millisecond,

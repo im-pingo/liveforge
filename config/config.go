@@ -2,6 +2,10 @@ package config
 
 import "time"
 
+// DefaultRuntimeSourceMaxBytes is the default complete-document limit for
+// file and network-backed runtime configuration sources.
+const DefaultRuntimeSourceMaxBytes int64 = 4 << 20
+
 // Config is the root configuration for the streaming server.
 type Config struct {
 	Server     ServerConfig     `yaml:"server"`
@@ -41,7 +45,8 @@ type RuntimeConfig struct {
 }
 
 type RuntimeFileSourceConfig struct {
-	Path string `yaml:"path"`
+	Path     string `yaml:"path"`
+	MaxBytes int64  `yaml:"max_bytes"`
 }
 
 type RuntimeHTTPSourceConfig struct {
@@ -66,6 +71,7 @@ type RuntimeRedisSourceConfig struct {
 	Hash       string `yaml:"hash"`
 	VersionKey string `yaml:"version_key"`
 	TLS        bool   `yaml:"tls"`
+	MaxBytes   int64  `yaml:"max_bytes"`
 }
 
 // AudioCodecConfig controls audio transcoding between protocols.
@@ -103,9 +109,10 @@ type LimitsConfig struct {
 
 // RateLimitConfig holds per-IP HTTP rate limiting settings.
 type RateLimitConfig struct {
-	Enabled bool    `yaml:"enabled"`
-	Rate    float64 `yaml:"rate"`  // requests per second per IP
-	Burst   int     `yaml:"burst"` // max burst size per IP
+	Enabled        bool     `yaml:"enabled"`
+	Rate           float64  `yaml:"rate"`  // requests per second per IP
+	Burst          int      `yaml:"burst"` // max burst size per IP
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 // RTMPConfig holds RTMP module settings.
@@ -231,11 +238,12 @@ type SIPAuth struct {
 
 // SIPGatewayConfig holds SIP-to-stream gateway settings.
 type SIPGatewayConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	StreamPrefix string   `yaml:"stream_prefix"`  // stream key prefix (default "sip")
-	RTPPortRange []int    `yaml:"rtp_port_range"` // [min, max] for RTP port allocation
-	Codecs       []string `yaml:"codecs"`         // preferred codecs (default: opus, PCMA, PCMU)
-	MaxCalls     int      `yaml:"max_calls"`      // max concurrent calls (default 100)
+	Enabled        bool     `yaml:"enabled"`
+	StreamPrefix   string   `yaml:"stream_prefix"`    // stream key prefix (default "sip")
+	RTPPortRange   []int    `yaml:"rtp_port_range"`   // [min, max] for RTP port allocation
+	Codecs         []string `yaml:"codecs"`           // preferred codecs (default: opus, PCMA, PCMU)
+	MaxCalls       int      `yaml:"max_calls"`        // max concurrent calls (default 100)
+	MaxLabSessions int      `yaml:"max_lab_sessions"` // max active local protocol labs (default 16)
 }
 
 // GB28181Config holds GB28181 module settings.
@@ -243,6 +251,7 @@ type GB28181Config struct {
 	Enabled         bool            `yaml:"enabled"`
 	StreamPrefix    string          `yaml:"stream_prefix"`
 	RTPPortRange    []int           `yaml:"rtp_port_range"`
+	MaxLabSessions  int             `yaml:"max_lab_sessions"` // max active local protocol labs (default 16)
 	SSRC            SSRCConfig      `yaml:"ssrc"`
 	Keepalive       KeepaliveConfig `yaml:"keepalive"`
 	AutoInvite      bool            `yaml:"auto_invite"`
@@ -283,15 +292,22 @@ type SlowConsumerConfig struct {
 
 // StreamConfig holds stream-level settings.
 type StreamConfig struct {
-	GOPCache           bool               `yaml:"gop_cache"`
-	GOPCacheNum        int                `yaml:"gop_cache_num"`
-	RingBufferSize     int                `yaml:"ring_buffer_size"`
-	IdleTimeout        time.Duration      `yaml:"idle_timeout"`
-	NoPublisherTimeout time.Duration      `yaml:"no_publisher_timeout"`
-	SlowConsumer       SlowConsumerConfig `yaml:"slow_consumer"`
-	Simulcast          SimulcastConfig    `yaml:"simulcast"`
-	Feedback           FeedbackConfig     `yaml:"feedback"`
+	GOPCache            bool               `yaml:"gop_cache"`
+	GOPCacheNum         int                `yaml:"gop_cache_num"`
+	GOPCacheMaxFrames   int                `yaml:"gop_cache_max_frames"`
+	GOPCacheMaxDuration time.Duration      `yaml:"gop_cache_max_duration"`
+	GOPCacheMaxBytes    int64              `yaml:"gop_cache_max_bytes"`
+	RingBufferSize      int                `yaml:"ring_buffer_size"`
+	IdleTimeout         time.Duration      `yaml:"idle_timeout"`
+	NoPublisherTimeout  time.Duration      `yaml:"no_publisher_timeout"`
+	SlowConsumer        SlowConsumerConfig `yaml:"slow_consumer"`
+	Simulcast           SimulcastConfig    `yaml:"simulcast"`
+	Feedback            FeedbackConfig     `yaml:"feedback"`
 }
+
+// DefaultGOPCacheMaxFrames is the defensive cardinality bound used when a
+// stream is constructed directly without passing through config validation.
+const DefaultGOPCacheMaxFrames = 300
 
 // SimulcastConfig holds simulcast layer settings.
 type SimulcastConfig struct {
@@ -499,9 +515,12 @@ type DVRConfig struct {
 
 // MetricsConfig holds Prometheus metrics settings.
 type MetricsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Listen  string `yaml:"listen"`
-	Path    string `yaml:"path"`
+	Enabled               bool     `yaml:"enabled"`
+	Listen                string   `yaml:"listen"`
+	Path                  string   `yaml:"path"`
+	StreamDetail          bool     `yaml:"stream_detail"`
+	StreamDetailLimit     int      `yaml:"stream_detail_limit"`
+	StreamDetailAllowlist []string `yaml:"stream_detail_allowlist"`
 }
 
 // APIConfig holds the management API settings.

@@ -99,6 +99,27 @@ func TestLabManagerRejectsDuplicateIdentity(t *testing.T) {
 	}
 }
 
+func TestSIPLabManagerEnforcesActiveSessionCeiling(t *testing.T) {
+	manager := newLabManagerWithLimit(nil, 1)
+	firstRequest := validSIPLabRequest()
+	firstRequest.DeviceID = "ceiling-device-1"
+	first, err := manager.Start(context.Background(), firstRequest)
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	secondRequest := validSIPLabRequest()
+	secondRequest.DeviceID = "ceiling-device-2"
+	if _, err := manager.Start(context.Background(), secondRequest); !errors.Is(err, ErrLabCapacity) {
+		t.Fatalf("second Start error = %v, want ErrLabCapacity", err)
+	}
+	if err := manager.Stop(first.ID); err != nil {
+		t.Fatalf("Stop first session: %v", err)
+	}
+	if _, err := manager.Start(context.Background(), secondRequest); err != nil {
+		t.Fatalf("Start after terminal session: %v", err)
+	}
+}
+
 func TestLabManagerStopIsIdempotent(t *testing.T) {
 	manager := NewLabManager()
 	session, err := manager.Start(context.Background(), validSIPLabRequest())
