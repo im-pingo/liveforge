@@ -2,7 +2,7 @@
 
 ## Scope
 
-Improve the embedded web console in two user-facing areas:
+Improve the embedded web console across the complete management surface:
 
 1. Keep the Streams list visually stable while live values change, especially
    GOP cache values.
@@ -10,6 +10,9 @@ Improve the embedded web console in two user-facing areas:
    trend view for bitrate, video/audio frame rate, and GOP duration.
 3. Replace the WHIP publish modal flow with a dedicated `/console/publish`
    workspace that feels like a broadcaster or video-conference control surface.
+4. Apply one visual system to Streams, GB28181, Config, Cluster, SIP Calls,
+   Storage, Security, and the Publish workspace without changing their business
+   operations.
 
 The existing REST API remains the source of truth. No new media or signaling
 protocol is introduced.
@@ -50,9 +53,11 @@ from the user flow.
 - Derive video FPS and audio FPS from cumulative `video_frames` and
   `audio_frames` deltas. Use the server-provided instantaneous bitrate and GOP
   duration for the other series.
-- Provide a compact metric switcher for bitrate, video FPS, audio FPS, and GOP
-  duration. Draw the active series with an inline SVG path and stable viewBox;
-  show the latest value, min/max range, and a no-data state.
+- Show four compact metric charts at the same time: bitrate, video FPS, audio
+  FPS, and GOP duration. Each chart uses a fixed low-height inline SVG and the
+  same 60-second x-axis; the title and latest value sit above its path.
+- Show min/max range and a no-data state for each chart without changing the
+  row or panel height as values update.
 - Reset the sample window when the stream generation changes or the selected
   stream is replaced. Stop the detail poller when the view is hidden, the row is
   deselected, or the page is not visible.
@@ -87,6 +92,25 @@ the one-second detail request is scoped to the selected stream only.
   start another stream or return to Console.
 - A failed or disconnected connection restores the start state and leaves the
   error visible until the next attempt.
+
+## Cross-Console Visual System
+
+- Define one token layer for background surfaces, borders, text roles, accent
+  colors, spacing, radius, focus rings, and motion. Keep the palette balanced
+  across mint, cyan, amber, and coral accents rather than tinting every
+  component with one hue.
+- Normalize page headings and toolbar rows, stat cards, section headers,
+  tables, forms, status badges, empty/error states, and action buttons across
+  `Streams`, `GB28181`, `Config`, `Cluster`, `SIP Calls`, `Storage`, and
+  `Security`.
+- Replace page-specific inline presentation rules where they conflict with the
+  shared system, while preserving existing element IDs, permission attributes,
+  keyboard behavior, and API-driven content.
+- Keep table layouts fixed where values are live or variable width, ensure
+  dense operational views remain scannable, and retain mobile stacking and
+  horizontal-scroll fallbacks for wide data tables.
+- The Publish workspace consumes the same tokens and primitives but may use its
+  own two-column layout and media preview treatment.
 
 ## Server and Routing
 
