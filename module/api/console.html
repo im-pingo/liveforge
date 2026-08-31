@@ -3502,7 +3502,7 @@ document.querySelectorAll(".protocol-switch [data-protocol]").forEach(function(b
     updatePublishProtocol();
   });
 });
-document.getElementById("publish-stream-key").addEventListener("input", updatePublishProtocol);
+document.getElementById("publish-stream-key").addEventListener("input", function() { updatePublishProtocol(true); });
 document.getElementById("publish-sip-stream").addEventListener("input", updatePublishProtocol);
 document.getElementById("publish-gb-stream").addEventListener("input", updatePublishProtocol);
 
@@ -3689,7 +3689,7 @@ function stopPublish() {
   if (location.pathname !== "/console/publish") startPreview();
 }
 
-function updatePublishProtocol() {
+function updatePublishProtocol(skipPreview) {
   var protocol = document.getElementById("publish-protocol").value;
   document.querySelectorAll(".protocol-switch [data-protocol]").forEach(function(button) {
     var active = button.getAttribute("data-protocol") === protocol;
@@ -3707,7 +3707,7 @@ function updatePublishProtocol() {
   var preview = document.querySelector(".publish-preview-wrap");
   if (preview) preview.style.display = protocol === "whip" ? "" : "none";
   if (protocol !== "whip") stopPreview();
-  else if (!publishPC) startPreview();
+  else if (!publishPC && !skipPreview) startPreview();
   var isWhip = protocol === "whip";
   document.getElementById("connection-note").textContent = isWhip ? "Camera and microphone are local only" : protocol === "sip" ? "SIP lab device publishes through RTP" : "GB28181 lab device publishes through PS/RTP";
   document.getElementById("preflight-source-label").textContent = isWhip ? "Camera + microphone" : protocol === "sip" ? "SIP lab device" : "GB28181 lab device";
