@@ -96,6 +96,23 @@ func consoleHasAttribute(node *html.Node, name string) bool {
 	return false
 }
 
+func consoleHasClass(node *html.Node, className string) bool {
+	if node == nil {
+		return false
+	}
+	for _, attr := range node.Attr {
+		if attr.Key != "class" {
+			continue
+		}
+		for _, value := range strings.Fields(attr.Val) {
+			if value == className {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func consoleFunctionSource(t *testing.T, script, name string) string {
 	t.Helper()
 	marker := "function " + name + "("
@@ -182,10 +199,26 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 		"recording-capability",
 		"dvr-tbody",
 		"audit-tbody",
+		"publish-workspace",
+		"publish-protocol",
+		"publish-whip-config",
+		"publish-sip-config",
+		"publish-gb-config",
+		"publish-sip-mode",
+		"publish-sip-device",
+		"publish-sip-stream",
+		"publish-sip-codec",
+		"publish-gb-mode",
+		"publish-gb-device",
+		"publish-gb-channel",
+		"publish-gb-stream",
 	} {
 		if elements[id] == nil {
 			t.Errorf("management console is missing element %q", id)
 		}
+	}
+	if !strings.Contains(string(consoleHTML), `value="whip"`) || !strings.Contains(string(consoleHTML), `value="sip"`) || !strings.Contains(string(consoleHTML), `value="gb28181"`) {
+		t.Error("publish workspace is missing WHIP, SIP, or GB28181 protocol options")
 	}
 	for _, group := range []struct {
 		id   string
@@ -254,10 +287,42 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 		if got := consoleAttribute(panel, "aria-labelledby"); got != "tab-"+view {
 			t.Errorf("panel %q aria-labelledby = %q", view, got)
 		}
+		if !strings.Contains(" "+consoleAttribute(panel, "class")+" ", " console-view ") {
+			t.Errorf("panel %q is missing shared console-view class", view)
+		}
 	}
 	modal := elements["modal"]
 	if modal == nil || consoleAttribute(modal, "role") != "dialog" || consoleAttribute(modal, "aria-modal") != "true" || consoleAttribute(modal, "aria-labelledby") != "modal-title" || consoleAttribute(modal, "aria-describedby") != "modal-msg" {
 		t.Error("confirmation modal is missing dialog naming and modality semantics")
+	}
+}
+
+func TestConsoleUsesObservabilityDemoVisualSystem(t *testing.T) {
+	doc, _ := consoleDocument(t)
+	elements := consoleElementsByID(doc)
+	for _, className := range []string{"topbar", "brand", "view-switch", "stats-grid", "toolbar", "table-frame", "publish-shell", "workspace", "preview-frame", "control-rail", "protocol-switch"} {
+		found := false
+		var walk func(*html.Node)
+		walk = func(node *html.Node) {
+			if consoleHasClass(node, className) {
+				found = true
+			}
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				walk(child)
+			}
+		}
+		walk(doc)
+		if !found {
+			t.Errorf("console is missing demo visual class %q", className)
+		}
+	}
+	for _, id := range []string{"view-streams", "view-gb28181", "view-config", "view-cluster", "view-sip", "view-storage", "view-security"} {
+		if !consoleHasClass(elements[id], "console-view") {
+			t.Errorf("management view %q is missing shared console-view class", id)
+		}
+	}
+	if !strings.Contains(string(consoleHTML), "--ink: #081116") || !strings.Contains(string(consoleHTML), "--mint: #61e0c1") {
+		t.Error("console is missing the demo ink/mint design tokens")
 	}
 }
 
@@ -726,6 +791,32 @@ func TestConsoleUsesLiveWHEPAsDefaultAndKeepsRealtimeOption(t *testing.T) {
 	}
 }
 
+func TestConsolePublishAndTrendAsyncOperationsHaveCancellationGuards(t *testing.T) {
+	_, script := consoleDocument(t)
+	openPublish := consoleFunctionSource(t, script, "openPublishModal")
+	if strings.Contains(openPublish, "getUserMedia(") {
+		t.Error("openPublishModal must not acquire a second camera/microphone stream")
+	}
+	pollTrend := consoleFunctionSource(t, script, "pollSelectedStream")
+	if !strings.Contains(pollTrend, "if (streamTrendRequest) return") || !strings.Contains(pollTrend, "streamTrendRequest === ctrl") {
+		t.Error("pollSelectedStream is missing serialized in-flight request protection")
+	}
+	for _, name := range []string{"startPublish", "startLabPublish"} {
+		source := consoleFunctionSource(t, script, name)
+		if !strings.Contains(source, "publishRunGeneration") {
+			t.Errorf("%s is missing publish generation guard", name)
+		}
+	}
+	preview := consoleFunctionSource(t, script, "startPreview")
+	if !strings.Contains(preview, "publishPreviewGeneration") {
+		t.Error("startPreview is missing stale media acquisition protection")
+	}
+	cleanup := consoleFunctionSource(t, script, "cleanupPublishPC")
+	if !strings.Contains(cleanup, "method:\"DELETE\"") {
+		t.Error("cleanupPublishPC must delete an established WHIP session")
+	}
+}
+
 func TestConsoleWHEPTabsUseDistinctPlaybackMetadata(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var calls []struct {
@@ -914,6 +1005,11 @@ type consoleProtocolLabMediaProbe struct {
 	SIPAudioCodec string `json:"sipAudioCodec"`
 	GBVideoCodec  string `json:"gbVideoCodec"`
 	GBAudioCodec  string `json:"gbAudioCodec"`
+	SameRow       bool   `json:"sameRow"`
+	DetailAfter   bool   `json:"detailAfter"`
+	ChartCount    int    `json:"chartCount"`
+	SampleCount   string `json:"sampleCount"`
+	TrendPath     bool   `json:"trendPath"`
 }
 
 func withConsoleBrowser(t *testing.T, run func(context.Context)) {
@@ -922,7 +1018,7 @@ func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 		t.Skip("skipping management console browser behavior in short mode")
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/console" {
+		if r.URL.Path == "/console" || r.URL.Path == "/console/publish" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write(consoleHTML)
 			return
@@ -1086,14 +1182,19 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var probe consoleProtocolLabMediaProbe
 		expression := `(function() {
-			renderStreams([{
+			var firstPayload = [{
 				key:"sip/lab", state:"publishing", publisher:"sip", subscribers:{}, stats:{},
 				gop_cache_len:26, gop_video_frames:25, gop_audio_frames:1, gop_duration_ms:960, gop_generation:7,
 				video_codec:"H264", audio_codec:"AAC"
 			}, {
 				key:"audio-only", state:"publishing", publisher:"audio", subscribers:{}, stats:{},
 				video_codec:"", audio_codec:"PCMA", gop_cache_len:0, gop_video_frames:0, gop_audio_frames:0, gop_duration_ms:0, gop_generation:0
-			}]);
+			}];
+			renderStreams(firstPayload);
+			var firstRow = document.querySelector('#tbody tr[data-stream-key="sip/lab"]');
+			var secondPayload = firstPayload.map(function(item) { return Object.assign({}, item); });
+			secondPayload[0].gop_duration_ms = 1200;
+			renderStreams(secondPayload);
 			renderSIPLabSessions([{session:{
 				id:"sip-1", device_id:"d1", mode:"publish", stream_key:"sip/lab", state:"active", codec:"PCMA",
 				audio_rtp_packets_sent:50, audio_rtp_packets_received:2,
@@ -1103,11 +1204,14 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 				id:"gb-1", device_id:"d2", channel_id:"c1", mode:"publish", stream_key:"gb/lab", state:"active"
 			}, playback:{available:true}}]);
 			var rows = Array.from(document.querySelectorAll("#tbody tr"));
-			var rowFor = function(key) { return rows.find(function(row) { return row.cells[0].textContent === key; }); };
+			var rowFor = function(key) { return rows.find(function(row) { var node = row.querySelector(".stream-name"); return node && node.textContent === key; }); };
 			var videoRow = rowFor("sip/lab");
 			var audioRow = rowFor("audio-only");
 			var sipCells = document.querySelectorAll("#sip-lab-sessions-tbody tr td");
-			return {
+			apiFetch = function() { return Promise.resolve({key:"sip/lab", gop_generation:7, gop_duration_ms:1200, stats:{video_frames:100, audio_frames:10, bitrate_kbps:850, fps:25}}); };
+			selectStream("sip/lab");
+			pollSelectedStream();
+			window.__protocolLabProbe = function() { return {
 				cacheHeader: document.querySelector("#view-streams thead th:nth-child(8)").textContent.trim(),
 				cacheText: videoRow ? videoRow.cells[7].textContent : "",
 				audioOnlyText: audioRow ? audioRow.cells[7].textContent : "",
@@ -1117,14 +1221,26 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 				sipVideoCodec: (streamMedia["sip/lab"] || {}).video_codec || "",
 				sipAudioCodec: (streamMedia["sip/lab"] || {}).audio_codec || "",
 				gbVideoCodec: (streamMedia["gb/lab"] || {}).video_codec || "",
-				gbAudioCodec: (streamMedia["gb/lab"] || {}).audio_codec || ""
-			};
+				gbAudioCodec: (streamMedia["gb/lab"] || {}).audio_codec || "",
+				sameRow: firstRow === document.querySelector('#tbody tr[data-stream-key="sip/lab"]'),
+				detailAfter: document.querySelector("#tbody tr[data-stream-key=\"sip/lab\"]").nextElementSibling && document.querySelector("#tbody tr[data-stream-key=\"sip/lab\"]").nextElementSibling.id === "stream-detail-row",
+				chartCount: document.querySelectorAll("#stream-detail-row svg").length,
+				sampleCount: document.getElementById("stream-detail-samples").textContent,
+				trendPath: !!document.querySelector('#stream-detail-row [data-path="bitrate"][d]')
+			}; };
 		})()`
-		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+		if err := chromedp.Run(browserCtx,
+			chromedp.Evaluate(expression, nil),
+			chromedp.Sleep(20*time.Millisecond),
+			chromedp.Evaluate(`window.__protocolLabProbe()`, &probe),
+		); err != nil {
 			t.Fatalf("probe protocol lab media rendering: %v", err)
 		}
-		if probe.CacheHeader != "GOP Cache" || probe.CacheText != "GOP #7 26 frames / 1.0s V25 A1" || probe.AudioOnlyText != "Not applicable (audio-only)" || probe.GOPBar {
+		if probe.CacheHeader != "GOP Cache" || !strings.Contains(probe.CacheText, "#7") || !strings.Contains(probe.CacheText, "26 fr") || !strings.Contains(probe.CacheText, "1.2 s") || !strings.Contains(probe.CacheText, "V25 / A1") || probe.AudioOnlyText != "Not applicable (audio-only)" || probe.GOPBar {
 			t.Errorf("cache rendering = header %q text %q", probe.CacheHeader, probe.CacheText)
+		}
+		if !probe.SameRow || !probe.DetailAfter || probe.ChartCount != 4 || !strings.Contains(probe.SampleCount, "/ 60") || !probe.TrendPath {
+			t.Errorf("stream detail rendering = %#v", probe)
 		}
 		if probe.SIPAudioRTP != "50 tx / 2 rx" || probe.SIPVideoRTP != "25 tx / 1 rx" {
 			t.Errorf("SIP track RTP = audio %q video %q", probe.SIPAudioRTP, probe.SIPVideoRTP)

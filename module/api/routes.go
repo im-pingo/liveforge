@@ -49,6 +49,7 @@ func registerRoutes(mux *http.ServeMux, s *core.Server, audit *AuditStore) {
 	mux.HandleFunc("POST /api/v1/streams/", h.handleKick)
 	mux.HandleFunc("GET /api/v1/streams/", h.handleStreamDetail)
 	mux.HandleFunc("GET /console", h.handleConsole)
+	mux.HandleFunc("GET /console/publish", h.handleConsole)
 	mux.HandleFunc("GET /console/cert.pem", h.handleCertDownload)
 	mux.HandleFunc("GET /debug/webrtc", h.handleDebugWebRTC)
 	mux.Handle("GET /console/static/", staticHandler())

@@ -160,6 +160,12 @@
     "audit": "bounded in-memory entries plus structured logs with secret metadata redaction",
     "production_requirements": ["Change console credentials", "Enable TLS", "Enable API and stream authentication", "Restrict exposed ports", "Configure rate limits"]
   },
+  "console_observability": {
+    "publish_route": "/console/publish",
+    "publish_protocols": ["whip", "sip", "gb28181"],
+    "stream_trends": "The Streams Console uses keyed fixed-layout rows, keeps Preview actions, inserts detail directly after the selected row, and samples bitrate, video FPS, audio FPS, and GOP duration once per second with at most 60 samples rendered as simultaneous inline SVG charts.",
+    "visual_system": "All management views share the console direction demo's dark teal surfaces with mint, cyan, amber, and coral accents; /console/publish uses the same two-column broadcaster workspace layout."
+  },
   "limitations": [
     "There is no current public release until a v* tag completes the release workflow.",
     "The Docker image is only available after the release workflow publishes it.",

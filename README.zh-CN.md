@@ -33,7 +33,7 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 | 📡 | **GB28181 视频监控** | 完整 SIP 信令栈，设备注册、实时拉流、录像回放、云台控制、报警处理 —— 附带内置设备模拟器 |
 | 🌐 | **多协议集群** | 支持 RTMP / SRT / RTSP / RTP / GB28181 的 Origin-Edge 级联，支持 HTTP 调度回调动态拓扑 |
 | ⚡ | **LL-HLS 低延迟** | fMP4 部分分片、阻塞式播放列表刷新（`_HLS_msn`/`_HLS_part`）、增量播放列表 |
-| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；按 Workspace、Operations、System 分组，Config/Security 不再与视频流页面平级；支持浏览器预览/推流 |
+| 🖥️ | **Web 控制台** | 权限感知标签页依次为 Streams、GB28181、Config、Cluster、SIP Calls、Storage、Security；Recent Audit 位于 Security 内部；按 Workspace、Operations、System 分组；Streams 提供稳定行和行内四指标趋势；`/console/publish` 是支持 WHIP/SIP/GB28181 的主播工作台 |
 | 🛡️ | **生产级可靠性** | 慢消费者保护（EWMA 丢帧）、GCC 拥塞控制、IP 级限流、Prometheus 监控 |
 
 ## 特性
@@ -132,7 +132,7 @@ Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：
 
 ### 管理与运维
 
-- **Web 控制台** — 七个权限感知标签页及多协议预览和 WHIP 推流：Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
+- **Web 控制台** — 七个权限感知标签页及多协议预览，并提供独立的 `/console/publish` 主播工作台。所有管理页统一使用 console demo 的深青黑底色与 mint/cyan/amber/coral 色彩系统。Streams 使用固定列宽并恢复 Preview 操作，点击流行会在该行下方展开四张同时显示的紧凑 60 秒趋势图（码率、视频 FPS、音频 FPS、GOP 时长），每秒采样一次。主播工作台可在 WHIP/WebRTC、SIP、GB28181 之间选择协议，并复用现有协议实验室生命周期。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。
 - **REST API** — 流生命周期、配置刷新/状态、集群状态、SIP 呼叫、录制/DVR、安全/审计、GB28181 和公开健康探针
 - **鉴权与 RBAC** — viewer/operator/admin 命名令牌、控制台会话、推拉流 JWT/回调鉴权，以及有界脱敏审计记录
 - **录制与 DVR** — FLV、FMP4、MP4、MPEG-TS、HLS 录制；新录像默认使用 fMP4/`.mp4`；每个轮转录像文件都会保留已声明轨道和最新 codec 初始化，并让每条轨道从文件内零时间轴开始，确保文件可独立解析；TS 会在首个媒体 PES 前写入 PAT/PMT，经典 MP4 按音视频各自时钟计算 duration、对超出 version-0 表示范围的时间字段做饱和而不回绕、对负 B 帧合成偏移使用有符号 `ctts` version 1，并使用可扩展 AAC ESDS 长度编码；fMP4 仅直接写入 AAC，启用可选 `audiocodec`/FFmpeg 构建时会将 G.711、Opus、MP3 等非 AAC 音频转为 AAC，未启用时过滤音频并保留可播放的纯视频输出；转码录制停止时会先排空停止边界前已经提交的源帧再完成文件，publisher generation 结束时还会先排空重采样滤波器保留的样本，再用静音补齐最后一个不完整 PCM 帧，并在 Record/DVR 输出关闭前仅一次排空编码器延迟包；DVR TS 同样会将目标不支持的音频统一转换；支持分段、存储健康、下载/Range/在线预览/删除管理、精确完整 ID 操作路由、清理失败后可重试且最后删除主文件、零字节会话保护和时移状态。录制在线预览/下载会在打开媒体前占用全局连接配额，并设置 10 秒写期限。

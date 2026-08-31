@@ -29,6 +29,7 @@ button:hover { opacity: 0.9; }
     <h1>LiveForge <span>Console</span></h1>
   </div>
   <form method="POST" action="/console/login">
+    <input type="hidden" name="redirect" value="">
     <label for="username">Username</label>
     <input type="text" id="username" name="username" autocomplete="username" required autofocus>
     <label for="password">Password</label>
@@ -69,6 +70,7 @@ button:hover { opacity: 0.9; }
     <h1>LiveForge <span>Console</span></h1>
   </div>
   <form method="POST" action="/console/login">
+    <input type="hidden" name="redirect" value="">
     <div class="error">Invalid username or password</div>
     <label for="username">Username</label>
     <input type="text" id="username" name="username" autocomplete="username" required autofocus>

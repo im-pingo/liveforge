@@ -17,7 +17,7 @@ import (
 // TestConsolePublishFlow launches headless Chrome on the console page
 // (served over localhost HTTP — a secure context) and exercises the full
 // WebRTC Publish workflow:
-//  1. Open the publish modal
+//  1. Open the dedicated publish workspace
 //  2. Verify fake camera/mic devices are enumerated
 //  3. Enter a stream key and click "Start Publishing"
 //  4. Verify the WHIP session succeeds and the stream appears in the hub
@@ -59,7 +59,7 @@ func TestConsolePublishFlow(t *testing.T) {
 	t.Cleanup(srv.Shutdown)
 
 	apiAddr := apiMod.Addr().String()
-	consoleURL := "http://" + apiAddr + "/console"
+	consoleURL := "http://" + apiAddr + "/console/publish"
 
 	// Patch the WebRTC listen address into the config so /api/v1/server/info
 	// returns the actual port (config stores the original ":0").
@@ -119,12 +119,10 @@ func TestConsolePublishFlow(t *testing.T) {
 	// Wait for server info to load (endpoints populated).
 	time.Sleep(2 * time.Second)
 
-	// --- open publish modal ---
-	t.Log("Opening publish modal...")
-	if err := chromedp.Run(browserCtx,
-		chromedp.Click("#btn-publish", chromedp.ByID),
-	); err != nil {
-		t.Fatalf("click publish button: %v", err)
+	// The publish route renders the full-page workspace directly.
+	t.Log("Opening publish workspace...")
+	if err := chromedp.Run(browserCtx, chromedp.WaitVisible("#publish-workspace", chromedp.ByID)); err != nil {
+		t.Fatalf("wait for publish workspace: %v", err)
 	}
 
 	// Wait for getUserMedia + enumerateDevices.
