@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 
@@ -197,7 +198,11 @@ func buildSecurityHandler(next http.Handler, server *core.Server, audit *AuditSt
 		}
 		if strings.HasPrefix(r.URL.Path, "/console") && !strings.HasPrefix(r.URL.Path, "/console/static/") {
 			if cfg.Console.Username != "" && !validateSession(r, cfg.Console) {
-				http.Redirect(w, r, "/console/login", http.StatusFound)
+				loginURL := "/console/login"
+				if r.URL.Path == "/console/publish" {
+					loginURL += "?redirect=" + url.QueryEscape(r.URL.Path)
+				}
+				http.Redirect(w, r, loginURL, http.StatusFound)
 				return
 			}
 			next.ServeHTTP(w, r)

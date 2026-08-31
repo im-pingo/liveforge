@@ -1,13 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -238,7 +241,11 @@ func buildAuthHandler(mux *http.ServeMux, cfg config.APIConfig) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/console") {
 			if cfg.Console.Username != "" {
 				if !validateSession(r, cfg.Console) {
-					http.Redirect(w, r, "/console/login", http.StatusFound)
+					loginURL := "/console/login"
+					if r.URL.Path == "/console/publish" {
+						loginURL += "?redirect=" + url.QueryEscape(r.URL.Path)
+					}
+					http.Redirect(w, r, loginURL, http.StatusFound)
 					return
 				}
 			}
@@ -294,7 +301,7 @@ func validateSession(r *http.Request, cfg config.ConsoleConfig) bool {
 func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, secure bool) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(loginHTML)
+		w.Write(renderLoginPage(loginHTML, r.URL.Query().Get("redirect")))
 		return
 	}
 
@@ -306,11 +313,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfi
 	r.ParseForm()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
+	redirect := consoleLoginRedirect(r.FormValue("redirect"))
 
 	if !secureEqual(username, cfg.Username) || !secureEqual(password, cfg.Password) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write(loginFailHTML)
+		w.Write(renderLoginPage(loginFailHTML, redirect))
 		return
 	}
 
@@ -324,5 +332,20 @@ func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfi
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400, // 24h
 	})
-	http.Redirect(w, r, "/console", http.StatusSeeOther)
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
+
+// consoleLoginRedirect keeps login return targets local to the console. Only
+// the two supported shells are accepted; all other values fall back safely.
+func consoleLoginRedirect(raw string) string {
+	if raw == "/console/publish" {
+		return raw
+	}
+	return "/console"
+}
+
+func renderLoginPage(page []byte, redirect string) []byte {
+	marker := []byte(`name="redirect" value=""`)
+	replacement := []byte(`name="redirect" value="` + html.EscapeString(consoleLoginRedirect(redirect)) + `"`)
+	return bytes.Replace(page, marker, replacement, 1)
 }

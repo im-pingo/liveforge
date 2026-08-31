@@ -1690,6 +1690,7 @@ function applyManagementPermissions() {
     controls[i].title = allowed ? "" : "Insufficient console role";
   }
   updateConfigEditorControls();
+  updatePublishStartButton();
 }
 
 function updateConfigEditorControls() {
@@ -3005,11 +3006,13 @@ function refreshServerInfo(signal) {
       if (!data) return;
       document.getElementById("server-version").textContent = "v" + (data.version || "?");
       document.getElementById("stat-uptime").textContent = formatUptime(data.uptime_sec || 0);
-	  if (data.endpoints) endpoints = data.endpoints;
+      publishEndpointsReady = !!(data.endpoints && data.endpoints.webrtc);
+      if (data.endpoints) endpoints = data.endpoints;
 	  if (data.endpoint_schemes) endpointSchemes = data.endpoint_schemes;
 	  serverCapabilities = data.capabilities || {};
       if (data.modules) updateGB28181Tab(data.modules);
       updatePublishButton();
+      updatePublishStartButton();
     })
     .catch(function() {});
 
@@ -3241,7 +3244,7 @@ function selectStream(streamKey) {
   stopStreamTrendPolling();
   selectedStreamKey = streamKey;
   streamTrendGeneration++;
-  streamTrendState = {samples:{bitrate:[], videoFps:[], audioFps:[], gopDuration:[]}, previous:null, generation:null};
+  streamTrendState = {samples:{bitrate:[], videoFps:[], audioFps:[], gopDuration:[]}, previous:null, generation:null, publisher:null};
   var row = streamRows[streamKey];
   if (!row) { selectedStreamKey = ""; return; }
   Object.keys(streamRows).forEach(function(key) { streamRows[key].classList.toggle("selected", key === streamKey); streamRows[key].setAttribute("aria-expanded", key === streamKey ? "true" : "false"); });
@@ -3265,6 +3268,7 @@ function startStreamTrendPolling() {
 
 function pollSelectedStream() {
   if (!selectedStreamKey || activeTab !== "streams" || document.hidden) return;
+  if (streamTrendRequest) return;
   var key = selectedStreamKey;
   var generation = streamTrendGeneration;
   var ctrl = new AbortController();
@@ -3275,16 +3279,23 @@ function pollSelectedStream() {
     var previous = streamTrendState.previous;
     var videoFPS = previous && stats.video_frames != null ? Math.max(0, Number(stats.video_frames) - Number(previous.video_frames || 0)) : Number(stats.fps || 0);
     var audioFPS = previous && stats.audio_frames != null ? Math.max(0, Number(stats.audio_frames) - Number(previous.audio_frames || 0)) : 0;
-    if (data.gop_generation != null && streamTrendState.generation != null && streamTrendState.generation !== data.gop_generation) {
+    var publisher = String(data.publisher || "");
+    if ((data.gop_generation != null && streamTrendState.generation != null && streamTrendState.generation !== data.gop_generation) ||
+        (streamTrendState.publisher != null && streamTrendState.publisher !== publisher)) {
       streamTrendState.samples = {bitrate:[], videoFps:[], audioFps:[], gopDuration:[]};
+      streamTrendState.previous = null;
     }
     streamTrendState.generation = data.gop_generation;
+    streamTrendState.publisher = publisher;
     streamTrendState.previous = {video_frames:stats.video_frames, audio_frames:stats.audio_frames};
     [ ["bitrate", Number(stats.bitrate_kbps || 0)], ["videoFps", videoFPS], ["audioFps", audioFPS], ["gopDuration", Number(data.gop_duration_ms || 0) / 1000] ].forEach(function(item) {
       var values = streamTrendState.samples[item[0]]; values.push(item[1]); if (values.length > 60) values.splice(0, values.length - 60);
     });
     renderStreamTrend();
-  }).catch(function(err) { if (!err || err.name !== "AbortError") showManagementError("streams", err); });
+  }).catch(function(err) { if (!err || err.name !== "AbortError") showManagementError("streams", err); })
+    .finally(function() {
+      if (streamTrendRequest === ctrl) streamTrendRequest = null;
+    });
 }
 
 function renderStreamTrend() {
@@ -3338,6 +3349,20 @@ var publishStatsPrev = null;
 var publishStatsVisible = false;
 var publishLabSessionID = null;
 var publishLabProtocol = null;
+var publishRunGeneration = 0;
+var publishPreviewGeneration = 0;
+var publishEndpointsReady = false;
+
+function isCurrentPublishRun(generation, pc) {
+  return generation === publishRunGeneration && (!pc || publishPC === pc);
+}
+
+function updatePublishStartButton() {
+  var button = document.getElementById("btn-start-publish");
+  if (!button) return;
+  var protocol = document.getElementById("publish-protocol").value;
+  button.disabled = !canManage("operator") || (protocol === "whip" && !publishEndpointsReady);
+}
 
 function openPublishModal() {
   if (location.pathname !== "/console/publish") {
@@ -3346,13 +3371,14 @@ function openPublishModal() {
   }
   document.getElementById("publish-overlay").classList.add("active");
   setPublishStatus("");
-  updatePublishProtocol();
 
   // Secure context check: getUserMedia requires HTTPS or localhost.
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setPublishStatus("Camera/mic unavailable. Access console via https:// or http://localhost:" + location.port + "/console", "error");
     return;
   }
+
+  updatePublishProtocol();
 
   // Filter codec options based on browser capabilities.
   if (RTCRtpSender && RTCRtpSender.getCapabilities) {
@@ -3367,16 +3393,6 @@ function openPublishModal() {
     }
   }
 
-  // Request permission first (any camera+mic), then enumerate to get labels.
-  navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(function(stream) {
-    publishStream = stream;
-    document.getElementById("publish-preview").srcObject = stream;
-    return navigator.mediaDevices.enumerateDevices();
-  }).then(function(devices) {
-    populateDeviceSelects(devices);
-  }).catch(function(e) {
-    setPublishStatus("Camera/mic error: " + e.message, "error");
-  });
 }
 
 function closePublishModal() {
@@ -3431,6 +3447,7 @@ function populateDeviceSelects(devices) {
 function startPreview() {
   stopPreview();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+  var previewGeneration = ++publishPreviewGeneration;
 
   var videoId = document.getElementById("publish-video-device").value;
   var audioId = document.getElementById("publish-audio-device").value;
@@ -3439,6 +3456,10 @@ function startPreview() {
     audio: audioId ? { deviceId: { exact: audioId } } : true
   };
   navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+    if (previewGeneration !== publishPreviewGeneration || publishPC || document.getElementById("publish-protocol").value !== "whip") {
+      stream.getTracks().forEach(function(track) { track.stop(); });
+      return null;
+    }
     publishStream = stream;
     document.getElementById("publish-preview").srcObject = stream;
     var previewState = document.getElementById("preview-state");
@@ -3446,13 +3467,14 @@ function startPreview() {
     // Re-enumerate to get labels after permission grant.
     return navigator.mediaDevices.enumerateDevices();
   }).then(function(devices) {
-    populateDeviceSelects(devices);
+    if (devices && previewGeneration === publishPreviewGeneration) populateDeviceSelects(devices);
   }).catch(function(e) {
     setPublishStatus("Camera/mic error: " + e.message, "error");
   });
 }
 
 function stopPreview() {
+  publishPreviewGeneration++;
   if (publishStream) {
     publishStream.getTracks().forEach(function(t) { t.stop(); });
     publishStream = null;
@@ -3490,6 +3512,11 @@ function startPublish() {
     startLabPublish(protocol);
     return;
   }
+  if (!publishEndpointsReady) {
+    setPublishStatus("WebRTC endpoint is still loading", "error");
+    updatePublishStartButton();
+    return;
+  }
   var streamKey = document.getElementById("publish-stream-key").value.trim();
   if (!streamKey) {
     setPublishStatus("Enter a stream key", "error");
@@ -3501,6 +3528,7 @@ function startPublish() {
     return;
   }
 
+  var run = ++publishRunGeneration;
   setPublishStatus("Negotiating...");
   document.getElementById("btn-start-publish").disabled = true;
 
@@ -3544,6 +3572,7 @@ function startPublish() {
   });
 
   pc.oniceconnectionstatechange = function() {
+    if (!isCurrentPublishRun(run, pc)) return;
     var state = pc.iceConnectionState;
     if (state === "connected" || state === "completed") {
       setPublishStatus("Publishing", "ok");
@@ -3565,8 +3594,10 @@ function startPublish() {
   var url = proto + location.hostname + ":" + port + "/webrtc/whip/" + streamKey;
 
   pc.createOffer().then(function(offer) {
+    if (!isCurrentPublishRun(run, pc)) throw new Error("publish run cancelled");
     return pc.setLocalDescription(offer);
   }).then(function() {
+    if (!isCurrentPublishRun(run, pc)) throw new Error("publish run cancelled");
     // Wait for at least one ICE candidate (host) or gathering complete,
     // whichever comes first. Avoids waiting for slow STUN/TURN timeouts.
     return new Promise(function(resolve) {
@@ -3588,34 +3619,46 @@ function startPublish() {
       setTimeout(function() { if (!resolved) { resolved = true; resolve(); } }, 500);
     });
   }).then(function() {
+    if (!isCurrentPublishRun(run, pc)) throw new Error("publish run cancelled");
     return fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/sdp" },
       body: pc.localDescription.sdp
     });
   }).then(function(resp) {
-    if (resp.status !== 201) {
-      return resp.text().then(function(t) { throw new Error("WHIP " + resp.status + ": " + t); });
-    }
     var loc = resp.headers.get("Location");
-    if (loc) {
-      publishSessionURL = proto + location.hostname + ":" + port + loc;
-    }
-    return resp.text();
+    var sessionURL = loc ? proto + location.hostname + ":" + port + loc : "";
+    return resp.text().then(function(sdp) {
+      if (resp.status !== 201) throw new Error("WHIP " + resp.status + ": " + sdp);
+      if (!isCurrentPublishRun(run, pc)) {
+        if (sessionURL) fetch(sessionURL, {method:"DELETE"}).catch(function(){});
+        pc.close();
+        throw new Error("publish run cancelled");
+      }
+      publishSessionURL = sessionURL;
+      return sdp;
+    });
   }).then(function(sdp) {
+    if (!isCurrentPublishRun(run, pc)) throw new Error("publish run cancelled");
     return pc.setRemoteDescription({ type: "answer", sdp: sdp });
   }).then(function() {
+    if (!isCurrentPublishRun(run, pc)) return;
     var s = pc.iceConnectionState;
     if (s !== "connected" && s !== "completed") {
       setPublishStatus("WebRTC connected, waiting for ICE...");
     }
   }).catch(function(e) {
-    setPublishStatus("WHIP error: " + e.message, "error");
-    cleanupPublishPC();
+    if (isCurrentPublishRun(run, pc)) {
+      setPublishStatus("WHIP error: " + e.message, "error");
+      cleanupPublishPC();
+    } else if (pc !== publishPC) {
+      pc.close();
+    }
   });
 }
 
 function stopPublish() {
+  publishRunGeneration++;
   stopPublishStatsOverlay();
   if (publishPC) {
     publishPC.close();
@@ -3632,7 +3675,7 @@ function stopPublish() {
     publishLabProtocol = null;
   }
   document.getElementById("btn-start-publish").style.display = "inline-block";
-  document.getElementById("btn-start-publish").disabled = false;
+  updatePublishStartButton();
   document.getElementById("btn-stop-publish").style.display = "none";
   document.getElementById("btn-publish-stats").style.display = "none";
   publishStatsVisible = false;
@@ -3671,10 +3714,12 @@ function updatePublishProtocol() {
   document.getElementById("preflight-transport-label").textContent = isWhip ? "WebRTC endpoint" : protocol === "sip" ? "SIP gateway" : "GB28181 gateway";
   document.getElementById("route-hint").textContent = isWhip ? "WHIP /webrtc/whip/" + document.getElementById("publish-stream-key").value.trim() : protocol === "sip" ? "SIP lab /api/v1/sipgateway/lab/sessions" : "GB lab /api/v1/gb28181/lab/sessions";
   setPublishStatus("");
+  updatePublishStartButton();
 }
 
 function startLabPublish(protocol) {
   if (!canManage("operator")) return;
+  var run = ++publishRunGeneration;
   var button = document.getElementById("btn-start-publish");
   var request;
   if (protocol === "sip") {
@@ -3689,6 +3734,10 @@ function startLabPublish(protocol) {
   apiFetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(request)})
     .then(function(data) {
       var session = data && data.session ? data.session : data;
+      if (!isCurrentPublishRun(run)) {
+        if (session && session.id) apiFetch(path + "/" + encodeURIComponent(session.id), {method:"DELETE"}).catch(function(){});
+        return;
+      }
       publishLabSessionID = session && session.id;
       publishLabProtocol = protocol;
       setPublishStatus(protocol.toUpperCase() + " publishing", "ok");
@@ -3699,18 +3748,24 @@ function startLabPublish(protocol) {
       document.getElementById("btn-stop-publish").style.display = "inline-block";
       showToast(protocol.toUpperCase() + " publish started");
     })
-    .catch(function(err) { setPublishStatus(managementErrorMessage(err), "error"); })
-    .finally(function() { button.disabled = !canManage("operator"); });
+    .catch(function(err) {
+      if (isCurrentPublishRun(run)) setPublishStatus(managementErrorMessage(err), "error");
+    })
+    .finally(function() {
+      if (isCurrentPublishRun(run)) updatePublishStartButton();
+    });
 }
 
 function cleanupPublishPC() {
+  var sessionURL = publishSessionURL;
   publishPC = null;
   publishSessionURL = null;
+  if (sessionURL) fetch(sessionURL, {method:"DELETE"}).catch(function(){});
   document.getElementById("connection-dot").classList.remove("ready");
   document.getElementById("connection-state").textContent = "Ready when you are";
   document.getElementById("preview-state").textContent = "READY TO PUBLISH";
   document.getElementById("btn-start-publish").style.display = "inline-block";
-  document.getElementById("btn-start-publish").disabled = false;
+  updatePublishStartButton();
   document.getElementById("btn-stop-publish").style.display = "none";
   document.getElementById("btn-publish-stats").style.display = "none";
   stopPublishStatsOverlay();
@@ -3989,7 +4044,9 @@ function refreshRuntimeConfigNow() {
       setTimeout(refreshActiveView, 250);
     })
     .catch(function(err) { showManagementError("config", err); })
-    .finally(function() { button.disabled = !canManage("operator"); });
+    .finally(function() {
+      button.disabled = !canManage("operator");
+    });
 }
 
 function refreshCluster(signal) {

@@ -288,6 +288,25 @@ func TestConsoleSessionAuth(t *testing.T) {
 		t.Errorf("console without session: expected 302, got %d", resp.StatusCode)
 	}
 
+	// An unauthenticated publish workspace request preserves its destination
+	// through login so the operator returns to the workspace after signing in.
+	resp, err = client.Get(addr + "/console/publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/console/login?redirect=%2Fconsole%2Fpublish" {
+		t.Errorf("publish workspace redirect = %d %q, want login with return path", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp.Body.Close()
+	resp, err = client.PostForm(addr+"/console/login", url.Values{"username": {"admin"}, "password": {"pass123"}, "redirect": {"/console/publish"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/console/publish" {
+		t.Errorf("publish login redirect = %d %q, want /console/publish", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	resp.Body.Close()
+
 	// API with session cookie should also work (when bearer token is configured)
 	cfg2 := newTestConfig()
 	cfg2.API.Auth.BearerToken = "tok"

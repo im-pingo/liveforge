@@ -791,6 +791,32 @@ func TestConsoleUsesLiveWHEPAsDefaultAndKeepsRealtimeOption(t *testing.T) {
 	}
 }
 
+func TestConsolePublishAndTrendAsyncOperationsHaveCancellationGuards(t *testing.T) {
+	_, script := consoleDocument(t)
+	openPublish := consoleFunctionSource(t, script, "openPublishModal")
+	if strings.Contains(openPublish, "getUserMedia(") {
+		t.Error("openPublishModal must not acquire a second camera/microphone stream")
+	}
+	pollTrend := consoleFunctionSource(t, script, "pollSelectedStream")
+	if !strings.Contains(pollTrend, "if (streamTrendRequest) return") || !strings.Contains(pollTrend, "streamTrendRequest === ctrl") {
+		t.Error("pollSelectedStream is missing serialized in-flight request protection")
+	}
+	for _, name := range []string{"startPublish", "startLabPublish"} {
+		source := consoleFunctionSource(t, script, name)
+		if !strings.Contains(source, "publishRunGeneration") {
+			t.Errorf("%s is missing publish generation guard", name)
+		}
+	}
+	preview := consoleFunctionSource(t, script, "startPreview")
+	if !strings.Contains(preview, "publishPreviewGeneration") {
+		t.Error("startPreview is missing stale media acquisition protection")
+	}
+	cleanup := consoleFunctionSource(t, script, "cleanupPublishPC")
+	if !strings.Contains(cleanup, "method:\"DELETE\"") {
+		t.Error("cleanupPublishPC must delete an established WHIP session")
+	}
+}
+
 func TestConsoleWHEPTabsUseDistinctPlaybackMetadata(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var calls []struct {
