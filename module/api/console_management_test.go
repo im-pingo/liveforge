@@ -96,6 +96,23 @@ func consoleHasAttribute(node *html.Node, name string) bool {
 	return false
 }
 
+func consoleHasClass(node *html.Node, className string) bool {
+	if node == nil {
+		return false
+	}
+	for _, attr := range node.Attr {
+		if attr.Key != "class" {
+			continue
+		}
+		for _, value := range strings.Fields(attr.Val) {
+			if value == className {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func consoleFunctionSource(t *testing.T, script, name string) string {
 	t.Helper()
 	marker := "function " + name + "("
@@ -277,6 +294,35 @@ func TestConsoleManagementViewsExposeSupportedControlPlanes(t *testing.T) {
 	modal := elements["modal"]
 	if modal == nil || consoleAttribute(modal, "role") != "dialog" || consoleAttribute(modal, "aria-modal") != "true" || consoleAttribute(modal, "aria-labelledby") != "modal-title" || consoleAttribute(modal, "aria-describedby") != "modal-msg" {
 		t.Error("confirmation modal is missing dialog naming and modality semantics")
+	}
+}
+
+func TestConsoleUsesObservabilityDemoVisualSystem(t *testing.T) {
+	doc, _ := consoleDocument(t)
+	elements := consoleElementsByID(doc)
+	for _, className := range []string{"topbar", "brand", "view-switch", "stats-grid", "toolbar", "table-frame", "publish-shell", "workspace", "preview-frame", "control-rail", "protocol-switch"} {
+		found := false
+		var walk func(*html.Node)
+		walk = func(node *html.Node) {
+			if consoleHasClass(node, className) {
+				found = true
+			}
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				walk(child)
+			}
+		}
+		walk(doc)
+		if !found {
+			t.Errorf("console is missing demo visual class %q", className)
+		}
+	}
+	for _, id := range []string{"view-streams", "view-gb28181", "view-config", "view-cluster", "view-sip", "view-storage", "view-security"} {
+		if !consoleHasClass(elements[id], "console-view") {
+			t.Errorf("management view %q is missing shared console-view class", id)
+		}
+	}
+	if !strings.Contains(string(consoleHTML), "--ink: #081116") || !strings.Contains(string(consoleHTML), "--mint: #61e0c1") {
+		t.Error("console is missing the demo ink/mint design tokens")
 	}
 }
 
@@ -1132,7 +1178,7 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 				id:"gb-1", device_id:"d2", channel_id:"c1", mode:"publish", stream_key:"gb/lab", state:"active"
 			}, playback:{available:true}}]);
 			var rows = Array.from(document.querySelectorAll("#tbody tr"));
-			var rowFor = function(key) { return rows.find(function(row) { return row.cells[0].textContent === key; }); };
+			var rowFor = function(key) { return rows.find(function(row) { var node = row.querySelector(".stream-name"); return node && node.textContent === key; }); };
 			var videoRow = rowFor("sip/lab");
 			var audioRow = rowFor("audio-only");
 			var sipCells = document.querySelectorAll("#sip-lab-sessions-tbody tr td");
@@ -1160,7 +1206,7 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
 			t.Fatalf("probe protocol lab media rendering: %v", err)
 		}
-		if probe.CacheHeader != "GOP Cache" || probe.CacheText != "GOP #7 26 frames / 1.2s V25 A1" || probe.AudioOnlyText != "Not applicable (audio-only)" || probe.GOPBar {
+		if probe.CacheHeader != "GOP Cache" || !strings.Contains(probe.CacheText, "#7") || !strings.Contains(probe.CacheText, "26 fr") || !strings.Contains(probe.CacheText, "1.2 s") || !strings.Contains(probe.CacheText, "V25 / A1") || probe.AudioOnlyText != "Not applicable (audio-only)" || probe.GOPBar {
 			t.Errorf("cache rendering = header %q text %q", probe.CacheHeader, probe.CacheText)
 		}
 		if !probe.SameRow || !probe.DetailAfter || probe.ChartCount != 4 || !strings.Contains(probe.SampleCount, "/ 60") || !probe.TrendPath {

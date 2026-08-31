@@ -863,23 +863,263 @@ select:focus-visible {
 @media (max-width: 460px) {
   .trend-grid { grid-template-columns:1fr; }
 }
+
+/* Demo direction: shared console visual system. */
+:root {
+  --ink: #081116;
+  --ink-2: #0d1a20;
+  --ink-3: #13242b;
+  --line: #223a42;
+  --line-soft: rgba(159, 195, 190, .14);
+  --text: #e9f0ed;
+  --muted: #91a8a6;
+  --dim: #637c7a;
+  --mint: #61e0c1;
+  --cyan: #65c7e8;
+  --amber: #ffbc5b;
+  --coral: #ff8277;
+  --lime: #b7e66d;
+  --bg: var(--ink);
+  --surface: var(--ink-2);
+  --surface2: var(--ink-3);
+  --border: var(--line);
+  --accent: var(--mint);
+  --green: var(--mint);
+  --yellow: var(--amber);
+  --red: var(--coral);
+  --blue: var(--cyan);
+  color-scheme: dark;
+}
+html, body { min-height: 100%; }
+body {
+  background: var(--ink);
+  color: var(--text);
+  font: 14px/1.45 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+}
+button, input, select, textarea { font: inherit; }
+.container.shell { width: min(1420px, calc(100% - 48px)); max-width: none; margin: 0 auto; padding: 26px 0 48px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 30px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid rgba(97,224,193,.42); color: var(--mint); background: rgba(97,224,193,.08); border-radius: 9px; font-size: 18px; }
+.logo h1 { font-size: 15px; font-weight: 720; letter-spacing: .02em; }
+.brand-sub { color: var(--muted); font-size: 12px; margin-left: 7px; font-weight: 450; }
+.top-actions { display: flex; align-items: center; gap: 12px; }
+.live-indicator { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.live-dot { width: 7px; height: 7px; background: var(--mint); border-radius: 99px; box-shadow: 0 0 0 4px rgba(97,224,193,.11); }
+.dot { animation: none; }
+.server-version, .clock { color: var(--dim); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.btn { border: 1px solid var(--line); background: var(--ink-2); color: var(--text); border-radius: 6px; padding: 8px 12px; transition: border-color .16s, background .16s, color .16s; }
+.btn:hover { border-color: var(--mint); background: var(--ink-3); color: var(--text); }
+.btn-primary { background: var(--mint); border-color: var(--mint); color: #07201d; font-weight: 700; }
+.btn-primary:hover { background: #8aead3; border-color: #8aead3; color: #07201d; }
+.btn-quiet { color: var(--muted); }
+.btn-publish { display: none; padding: 8px 12px; }
+.view-switch { display: flex; gap: 4px; padding: 4px; margin-bottom: 22px; background: var(--ink-2); border: 1px solid var(--line); border-radius: 7px; width: fit-content; }
+.view-switch .nav-group { display: contents; }
+.view-switch .nav-group-label { display: none; }
+.view-switch .nav-group-tabs { display: contents; }
+.view-switch .nav-tab { border: 0; color: var(--muted); background: transparent; padding: 8px 16px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+.view-switch .nav-tab:hover { color: var(--text); border-color: transparent; }
+.view-switch .nav-tab.active { background: var(--ink-3); color: var(--text); box-shadow: inset 0 -2px 0 var(--mint); border-color: transparent; }
+.section-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 16px; }
+.eyebrow { color: var(--mint); font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; }
+.section-heading h1 { margin: 4px 0 0; font-size: 28px; line-height: 1.1; letter-spacing: -.02em; }
+.heading-note { color: var(--muted); margin-top: 7px; }
+.stats, .stats-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+.stats .stat-card, .metric { border: 1px solid var(--line); background: var(--ink-2); border-radius: var(--radius); padding: 14px 15px; min-height: 86px; }
+.stat-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 0; }
+.stat-value { margin-top: 7px; font-size: 24px; line-height: 1.1; font-weight: 680; font-variant-numeric: tabular-nums; }
+.stat-value.accent { color: var(--mint); }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.toolbar .search, .search { width: 270px; max-width: 100%; border: 1px solid var(--line) !important; background: var(--ink-2) !important; color: var(--text); padding: 9px 11px !important; border-radius: 6px !important; outline: none; }
+.toolbar .search:focus, .search:focus, select:focus, input:focus, textarea:focus { border-color: var(--mint) !important; box-shadow: 0 0 0 2px rgba(97,224,193,.12); }
+.toolbar-meta { color: var(--dim); font-size: 12px; }
+.table-wrap, .table-frame { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--ink-2); }
+.table-wrap table, .table-frame table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.table-wrap th, .table-frame th { padding: 11px 13px; background: var(--ink-3); color: var(--dim); border-bottom: 1px solid var(--line); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
+.table-wrap td, .table-frame td { height: 76px; padding: 12px 13px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; overflow: hidden; }
+.table-wrap tr:last-child td, .table-frame tr:last-child td { border-bottom: 0; }
+.streams-table tbody .stream-row { height: 76px; }
+.streams-table tbody .stream-row > td { white-space: nowrap; }
+.streams-table tbody .stream-row > td:nth-child(8), .streams-table tbody .stream-row > td:nth-child(9), .streams-table tbody .stream-row > td:nth-child(10) { white-space: normal; }
+.table-wrap tbody tr:hover, .table-frame tbody tr:hover, .streams-table tbody tr.selected { background: rgba(97,224,193,.055); }
+.stream-key { color: var(--text); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.stream-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.stream-signal { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; color: var(--mint); border: 1px solid rgba(97,224,193,.25); border-radius: 5px; font-size: 12px; }
+.stream-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.stream-owner { color: var(--dim); font-size: 11px; margin-top: 2px; }
+.publisher-id { color: var(--dim); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.state { display: inline-flex; align-items: center; gap: 7px; color: var(--mint); background: transparent; padding: 0; font-size: 12px; }
+.state::before { content: ""; width: 6px; height: 6px; border-radius: 99px; background: currentColor; }
+.state-idle, .state-no_publisher { color: var(--dim); }
+.state-publishing { color: var(--mint); background: transparent; }
+.state-publishing::before { background: currentColor; }
+.codec-tag { display: inline-block; color: var(--cyan); border: 1px solid rgba(101,199,232,.24); background: rgba(101,199,232,.08); border-radius: 4px; padding: 3px 6px; margin: 2px 4px 2px 0; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.codec-tag.audio { color: var(--amber); border-color: rgba(255,188,91,.24); background: rgba(255,188,91,.08); }
+.mono { color: var(--text); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gop-cell { min-width: 0; line-height: 1.45; }
+.gop-cell .gop { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; min-width: 0; }
+.gop-cell .gop-key, .gop-cell .gop-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gop-cell .gop-label { display: grid; grid-template-columns: auto 1fr; gap: 3px 7px; color: var(--dim); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.gop-cell .gop-label b, .gop-cell .gop-value-frames, .gop-cell .gop-value-duration, .gop-cell .gop-value-media, .gop-cell .gop-value-generation { color: var(--text); font-weight: 500; }
+.gop-cell .gop-value-duration { color: var(--amber); }
+.subs { display: flex; gap: 4px; flex-wrap: wrap; }
+.sub-pill { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); border: 1px solid var(--line); background: var(--ink-3); border-radius: 4px; padding: 3px 6px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sub-pill.active { color: var(--cyan); border-color: rgba(101,199,232,.24); background: rgba(101,199,232,.08); }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions .btn { padding: 6px 9px; font-size: 11px; }
+.empty-state { padding: 80px 20px; text-align: center; }
+.empty-title { font-size: 15px; color: var(--muted); margin-bottom: 6px; }
+.empty-sub { font-size: 13px; color: var(--dim); }
+.ops-section, .ops-card, .table-wrap, .modal, .player-modal { border-color: var(--line); background: var(--ink-2); }
+.ops-section { border-radius: var(--radius); }
+.ops-input, .ops-form input, .ops-form select, .ops-form textarea, .publish-form-row input, .publish-form-row select { border-color: var(--line) !important; background: var(--ink) !important; color: var(--text); border-radius: 5px; }
+.ops-input:focus, .ops-form input:focus, .ops-form select:focus, .ops-form textarea:focus { border-color: var(--mint) !important; }
+.badge-online, .badge-on { background: rgba(97,224,193,.10); color: var(--mint); }
+.badge-offline { background: rgba(255,130,119,.10); color: var(--coral); }
+.badge-off { background: rgba(99,124,122,.12); color: var(--dim); }
+.stream-detail-row > td { height: auto; padding: 0; background: var(--ink); border-bottom: 1px solid var(--line); }
+.stream-detail-panel { border: 1px solid var(--line); border-left: 2px solid var(--mint); border-radius: var(--radius); background: var(--ink-2); overflow: hidden; margin: 0 8px 8px; padding: 0; }
+.stream-detail-header, .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 17px; border-bottom: 1px solid var(--line); }
+.stream-detail-title, .detail-title strong { color: var(--text); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.stream-detail-meta { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.detail-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 18px; padding: 17px; }
+.detail-metrics { display: grid; align-content: start; gap: 8px; }
+.trend-button { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); color: var(--muted); background: transparent; border-radius: 5px; padding: 9px 10px; text-align: left; }
+.trend-button.active { color: var(--text); border-color: var(--mint); background: rgba(97,224,193,.07); }
+.trend-button .swatch { width: 7px; height: 7px; border-radius: 99px; background: var(--mint); margin-right: 8px; display: inline-block; }
+.trend-button:nth-of-type(3) .swatch { background: var(--cyan); }
+.trend-button:nth-of-type(4) .swatch { background: var(--amber); }
+.trend-button:nth-of-type(5) .swatch { background: var(--coral); }
+.stream-detail-close, .detail-close { color: var(--muted); background: transparent; border: 0; font-size: 17px; padding: 4px 8px; }
+.stream-detail-close:hover, .detail-close:hover { color: var(--text); background: var(--ink-3); }
+.stream-detail-panel .trend-empty { color: var(--dim); padding: 10px 17px 0; font-size: 11px; }
+.stream-detail-panel .trend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 16px 17px 17px; }
+.trend-card { min-width: 0; padding: 10px 11px 8px; background: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+.trend-card-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.trend-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+.trend-current { color: var(--text); font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.trend-chart { display: block; width: 100%; height: 58px; overflow: visible; }
+.trend-gridline { stroke: rgba(159,195,190,.12); stroke-width: 1; }
+.trend-area { opacity: .16; }
+.trend-path { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.trend-card[data-metric="bitrate"] .trend-area { fill: var(--mint); }
+.trend-card[data-metric="bitrate"] .trend-path { stroke: var(--mint); }
+.trend-card[data-metric="video-fps"] .trend-area { fill: var(--cyan); }
+.trend-card[data-metric="video-fps"] .trend-path { stroke: var(--cyan); }
+.trend-card[data-metric="audio-fps"] .trend-area { fill: var(--amber); }
+.trend-card[data-metric="audio-fps"] .trend-path { stroke: var(--amber); }
+.trend-card[data-metric="gop-duration"] .trend-area { fill: var(--coral); }
+.trend-card[data-metric="gop-duration"] .trend-path { stroke: var(--coral); }
+.trend-range { display: flex; justify-content: space-between; gap: 8px; color: var(--dim); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.trend-summary { display: flex; gap: 16px; padding: 0 17px 15px; color: var(--dim); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.trend-summary strong { color: var(--text); font-weight: 500; }
+.publish-route .container > .topbar, .publish-route .container > #cert-banner, .publish-route .container > #nav-tabs, .publish-route .container > [id^="view-"] { display: none !important; }
+.publish-overlay { background: rgba(0,0,0,.7); }
+.publish-route .publish-overlay { position: static; display: block; min-height: auto; background: transparent; z-index: auto; }
+.publish-route .publish-modal { width: 100%; max-width: none; max-height: none; min-width: 0; border: 0; border-radius: 0; padding: 0; background: transparent; box-shadow: none; overflow: visible; }
+.publish-route .publish-modal.publish-shell { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+.publish-shell { max-width: 1180px; margin: 0 auto; }
+.publish-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+.publish-title { display: flex; align-items: center; gap: 12px; }
+.publish-title .eyebrow { margin-bottom: 6px; }
+.publish-title h1 { font-size: 28px; line-height: 1.1; letter-spacing: -.02em; }
+.publish-top-actions { display: flex; align-items: center; gap: 10px; }
+.back-link { color: var(--muted); text-decoration: none; font-size: 12px; }
+.back-link:hover { color: var(--text); }
+.publish-close { display: none; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(300px, .8fr); gap: 16px; align-items: start; }
+.preview-column, .control-rail { min-width: 0; }
+.preview-frame { position: relative; overflow: hidden; aspect-ratio: 16 / 9; border: 1px solid var(--line); border-radius: var(--radius); background: #071014; }
+.preview-frame::before { content: ""; position: absolute; inset: 0; opacity: .55; background-image: linear-gradient(rgba(97,224,193,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(97,224,193,.06) 1px, transparent 1px); background-size: 38px 38px; pointer-events: none; }
+.camera-ghost { position: absolute; left: 50%; top: 45%; z-index: 1; transform: translate(-50%, -50%); color: rgba(233,240,237,.72); text-align: center; pointer-events: none; }
+.camera-ghost .camera-icon { display: grid; place-items: center; width: 62px; height: 62px; margin: 0 auto 10px; border: 1px solid rgba(97,224,193,.38); border-radius: 50%; color: var(--mint); font-size: 25px; }
+.camera-ghost strong { display: block; font-size: 14px; font-weight: 580; }
+.camera-ghost span { display: block; color: var(--muted); margin-top: 4px; font-size: 12px; }
+.preview-frame video { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: contain; transform: scaleX(-1); }
+.preview-topline { position: absolute; inset: 12px 13px auto; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.preview-tag { padding: 5px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 4px; background: rgba(7,16,20,.64); color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; letter-spacing: .1em; }
+.preview-tag.live { color: var(--mint); border-color: rgba(97,224,193,.3); }
+.preview-footer { position: absolute; inset: auto 13px 12px; z-index: 2; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.preview-wave { display: flex; align-items: end; gap: 2px; height: 16px; }
+.preview-wave i { width: 2px; background: var(--mint); opacity: .7; animation: pulse-wave 1.1s ease-in-out infinite alternate; }
+.preview-wave i:nth-child(2n) { animation-delay: -.4s; } .preview-wave i:nth-child(3n) { animation-delay: -.8s; }
+@keyframes pulse-wave { from { height: 3px; } to { height: 15px; } }
+.stat-strip { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 9px; margin-top: 12px; }
+.stat-tile { border: 1px solid var(--line); background: var(--ink-2); border-radius: 6px; padding: 11px 12px; }
+.stat-tile span { display: block; color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.stat-tile strong { display: block; margin-top: 5px; color: var(--text); font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+.rail-card { border: 1px solid var(--line); background: var(--ink-2); border-radius: var(--radius); padding: 17px; }
+.rail-card + .rail-card { margin-top: 12px; }
+.rail-card h2 { margin-bottom: 15px; font-size: 18px; }
+.rail-card h3 { color: var(--text); font-size: 14px; }
+.protocol-switch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin: 0 0 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--ink); }
+.protocol-switch button { border: 0; border-radius: 4px; padding: 8px 5px; color: var(--muted); background: transparent; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.protocol-switch button:hover { color: var(--text); background: var(--ink-3); }
+.protocol-switch button.active { color: var(--ink); background: var(--mint); font-weight: 700; }
+.protocol-native-select { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.protocol-fields { display: none; }
+.protocol-fields.active { display: block; }
+.publish-protocol-panel[hidden] { display: none !important; }
+.field { margin-top: 14px; }
+.field:first-of-type { margin-top: 0; }
+.field label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.field input, .field select { width: 100%; border: 1px solid var(--line); background: var(--ink); color: var(--text); padding: 10px 11px; border-radius: 5px; outline: none; }
+.field input { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.publish-actions { display: flex; align-items: center; gap: 8px; margin-top: 17px; }
+.publish-actions .btn-start-publish { flex: 1; }
+.btn-start-publish, .btn-stop-publish { padding: 9px 14px; }
+.btn-stop-publish { display: none; color: var(--coral); border-color: rgba(255,130,119,.3); }
+.btn-stop-publish:hover { color: var(--coral); background: rgba(255,130,119,.08); border-color: var(--coral); }
+.publish-status { color: var(--dim); font-size: 11px; margin-top: 13px; line-height: 1.5; }
+.publish-status.ok { color: var(--mint); }
+.publish-status.error { color: var(--coral); }
+.connection { display: flex; align-items: center; gap: 9px; padding: 10px 0 13px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 12px; }
+.connection-dot { width: 8px; height: 8px; border-radius: 99px; background: var(--amber); box-shadow: 0 0 0 4px rgba(255,188,91,.11); }
+.connection-dot.ready { background: var(--mint); box-shadow: 0 0 0 4px rgba(97,224,193,.11); }
+.connection strong { color: var(--text); font-weight: 600; }
+.check-list { display: grid; gap: 12px; margin-top: 13px; }
+.check { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+.check b { color: var(--mint); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.route-hint { margin-top: 18px; color: var(--dim); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-word; }
+.publish-stats-overlay { z-index: 3; }
+@media (max-width: 1000px) { .stats, .stats-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 760px) {
+  .container.shell { width: min(100% - 24px, 620px); padding-top: 18px; }
+  .topbar { align-items: flex-start; margin-bottom: 22px; }
+  .top-actions .live-indicator, .top-actions .server-version { display: none; }
+  .top-actions { gap: 0; }
+  .view-switch { max-width: 100%; overflow-x: auto; }
+  .section-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .section-heading h1, .publish-title h1 { font-size: 24px; }
+  .stats, .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .toolbar { align-items: stretch; flex-direction: column; }
+  .toolbar .search, .search { width: 100%; }
+  .table-wrap, .table-frame { overflow-x: auto; }
+  .table-wrap table, .table-frame table { min-width: 1080px; }
+  .detail-body { grid-template-columns: 1fr; }
+  .detail-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stream-detail-panel .trend-grid { grid-template-columns: 1fr; }
+  .workspace { grid-template-columns: 1fr; }
+  .publish-top { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .stat-strip { grid-template-columns: repeat(2, 1fr); }
+  .publish-route .publish-modal.publish-shell { width: calc(100% - 24px); }
+}
 </style>
 </head>
 <body>
-<div class="container">
-  <header>
-    <div class="logo">
-      <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect width="28" height="28" rx="6" fill="#6c9eff" fill-opacity="0.15"/>
-        <path d="M8 10l4-3v14l-4-3V10zM14 7l6 4v6l-6 4V7z" fill="#6c9eff"/>
-      </svg>
-      <h1>LiveForge <span>Console</span></h1>
+<div class="container shell">
+  <header class="topbar">
+    <div class="logo brand">
+      <div class="brand-mark" aria-hidden="true">◈</div>
+      <div><h1>LiveForge <span class="brand-sub">Console</span></h1></div>
     </div>
-    <div class="status-bar">
-      <button class="btn-publish" id="btn-publish" onclick="openPublishModal()">+ WebRTC Publish</button>
-      <span><span class="dot"></span></span>
-      <span id="server-version"></span>
-      <span id="updated"></span>
+    <div class="status-bar top-actions">
+      <div class="live-indicator"><span class="dot live-dot"></span><span>API connected</span></div>
+      <span id="server-version" class="server-version"></span>
+      <span id="updated" class="clock"></span>
+      <button class="btn btn-primary btn-publish" id="btn-publish" onclick="openPublishModal()">Open Publish Workspace</button>
     </div>
   </header>
 
@@ -888,7 +1128,7 @@ select:focus-visible {
     To avoid browser warnings: <a href="/console/cert.pem" style="color:#6c9eff;text-decoration:underline;">Download cert.pem</a> and add it to your OS trust store, or launch Chrome with <code style="background:#221a00;padding:2px 6px;border-radius:3px;">--ignore-certificate-errors</code>
   </div>
 
-  <div class="nav-tabs" id="nav-tabs" role="tablist" aria-label="Management views">
+  <div class="nav-tabs view-switch" id="nav-tabs" role="tablist" aria-label="Management views">
     <div class="nav-group" id="nav-workspace">
       <div class="nav-group-label">Workspace</div>
       <div class="nav-group-tabs">
@@ -913,44 +1153,48 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-streams" class="console-view" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
-  <div class="stats">
-    <div class="stat-card">
+  <div id="view-streams" class="console-view view" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
+  <div class="section-heading">
+    <div><div class="eyebrow">Workspace / live inventory</div><h1>Streams</h1><p class="heading-note">Stable rows, live signal at a glance.</p></div>
+    <span class="toolbar-meta">Select a row to inspect the last 60 seconds</span>
+  </div>
+  <div class="stats stats-grid">
+    <div class="stat-card metric">
       <div class="stat-label">Active Streams</div>
       <div class="stat-value accent" id="stat-streams">0</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card metric">
       <div class="stat-label">Publishing</div>
       <div class="stat-value" id="stat-publishing" style="color:var(--green)">0</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card metric">
       <div class="stat-label">Total Subscribers</div>
       <div class="stat-value" id="stat-subs">0</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card metric">
       <div class="stat-label">Connections</div>
       <div class="stat-value" id="stat-conns">0</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card metric">
       <div class="stat-label">Uptime</div>
       <div class="stat-value" id="stat-uptime" style="font-size:20px">-</div>
     </div>
-    <div class="stat-card" id="stat-dvr-card" style="display:none">
+    <div class="stat-card metric" id="stat-dvr-card" style="display:none">
       <div class="stat-label">DVR Sessions</div>
       <div class="stat-value" id="stat-dvr" style="color:var(--blue)">0</div>
     </div>
   </div>
 
-  <div style="margin-bottom:16px">
-    <input type="text" id="stream-search" placeholder="Search streams..." oninput="refresh()"
-      style="width:100%;max-width:320px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:14px;outline:none;">
+  <div class="toolbar">
+    <input class="search" type="text" id="stream-search" placeholder="Search stream key" aria-label="Search stream key" oninput="refresh()">
+    <span class="toolbar-meta">Rows keep their width while GOP cache updates.</span>
   </div>
 
-  <div class="table-wrap">
+  <div class="table-wrap table-frame">
     <table class="console-table streams-table">
       <colgroup>
-        <col style="width:19%"><col style="width:10%"><col style="width:13%"><col style="width:12%"><col style="width:9%">
-        <col style="width:7%"><col style="width:8%"><col style="width:13%"><col style="width:9%"><col style="width:10%">
+        <col style="width:17%"><col style="width:8%"><col style="width:9%"><col style="width:9%"><col style="width:9%">
+        <col style="width:7%"><col style="width:8%"><col style="width:17%"><col style="width:8%"><col style="width:8%">
       </colgroup>
       <thead>
         <tr>
@@ -1240,72 +1484,55 @@ select:focus-visible {
   </div>
 </div>
 
-<!-- Publish modal -->
+<!-- Publish workspace -->
 <div class="publish-overlay" id="publish-overlay">
-  <div class="publish-modal" id="publish-workspace">
-    <div class="publish-header">
-      <h3>Publish Workspace</h3>
-      <a class="publish-back" id="publish-back-console" href="/console">Back to Console</a>
-      <button class="player-close" onclick="closePublishModal()">&times;</button>
-    </div>
-    <div class="publish-body">
-      <p class="publish-workspace-note">Choose a transport, configure the source, and publish one stream into LiveForge.</p>
-      <div class="publish-protocol-row">
-        <label for="publish-protocol">Protocol</label>
-        <select class="ops-input" id="publish-protocol" aria-label="Publish protocol">
-          <option value="whip">WHIP / WebRTC</option>
-          <option value="sip">SIP Gateway</option>
-          <option value="gb28181">GB28181</option>
-        </select>
-      </div>
-      <div id="publish-whip-config" class="publish-protocol-panel">
-      <div class="publish-form-row">
-        <label>Stream Key</label>
-        <input type="text" id="publish-stream-key" placeholder="live/test" value="live/test">
-      </div>
-      <div class="publish-form-row">
-        <label>Camera</label>
-        <select id="publish-video-device"></select>
-      </div>
-      <div class="publish-form-row">
-        <label>Microphone</label>
-        <select id="publish-audio-device"></select>
-      </div>
-      <div class="publish-form-row">
-        <label>Video Codec</label>
-        <select id="publish-video-codec">
-          <option value="H264">H.264</option>
-          <option value="VP8">VP8</option>
-          <option value="VP9">VP9</option>
-          <option value="H265">H.265 (HEVC)</option>
-          <option value="AV1">AV1</option>
-        </select>
-      </div>
-      </div>
-      <div id="publish-sip-config" class="publish-protocol-panel" hidden>
-        <div class="publish-form-row"><label>Mode</label><select class="ops-input" id="publish-sip-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
-        <div class="publish-form-row"><label>Device ID</label><input class="ops-input" id="publish-sip-device" placeholder="lab-device"></div>
-        <div class="publish-form-row"><label>Stream Key</label><input class="ops-input" id="publish-sip-stream" placeholder="sip/live"></div>
-        <div class="publish-form-row"><label>Audio Codec</label><select class="ops-input" id="publish-sip-codec"><option value="PCMA">PCMA</option><option value="PCMU">PCMU</option></select></div>
-      </div>
-      <div id="publish-gb-config" class="publish-protocol-panel" hidden>
-        <div class="publish-form-row"><label>Mode</label><select class="ops-input" id="publish-gb-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
-        <div class="publish-form-row"><label>Device ID</label><input class="ops-input" id="publish-gb-device" placeholder="34020000001320000011"></div>
-        <div class="publish-form-row"><label>Channel ID</label><input class="ops-input" id="publish-gb-channel" placeholder="34020000001320000012"></div>
-        <div class="publish-form-row"><label>Stream Key</label><input class="ops-input" id="publish-gb-stream" placeholder="gb28181/live"></div>
-      </div>
-      <div class="publish-preview-wrap">
-        <video id="publish-preview" autoplay playsinline muted></video>
-        <div class="publish-stats-overlay" id="publish-stats-overlay">
-          <div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for stats...</span></span></div>
+  <div class="publish-modal publish-shell" id="publish-workspace">
+    <header class="publish-top">
+      <div class="publish-title"><div class="brand-mark" aria-hidden="true">◈</div><div><div class="eyebrow">Workspace / broadcast</div><h1>Publish studio</h1></div></div>
+      <div class="publish-top-actions"><a class="back-link" id="publish-back-console" href="/console">&#8592; Back to Console</a><button class="player-close publish-close" onclick="closePublishModal()" aria-label="Close publish workspace">&times;</button></div>
+    </header>
+    <div class="workspace">
+      <div class="preview-column">
+        <div class="publish-preview-wrap preview-frame">
+          <div class="preview-topline"><span class="preview-tag live" id="preview-state">READY TO PUBLISH</span><span class="preview-tag">LOCAL PREVIEW</span></div>
+          <div class="camera-ghost"><div class="camera-icon">&#9673;</div><strong>Camera preview</strong><span>Choose a camera to begin</span></div>
+          <video id="publish-preview" autoplay playsinline muted aria-label="Local camera preview"></video>
+          <div class="preview-footer"><div class="preview-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span id="preview-format">1280 &times; 720 / 30 fps</span></div>
+          <div class="publish-stats-overlay" id="publish-stats-overlay"><div class="stat-row"><span class="stat-item"><span class="stat-label-s">Waiting for stats...</span></span></div></div>
         </div>
+        <div class="stat-strip"><div class="stat-tile"><span>Video out</span><strong id="pub-video-rate">--</strong></div><div class="stat-tile"><span>Audio out</span><strong id="pub-audio-rate">--</strong></div><div class="stat-tile"><span>Round trip</span><strong id="pub-rtt">--</strong></div><div class="stat-tile"><span>Packet loss</span><strong id="pub-loss">--</strong></div></div>
       </div>
-      <div class="publish-actions">
-        <button class="btn-start-publish" id="btn-start-publish" onclick="startPublish()">Start Publishing</button>
-        <button class="btn-stop-publish" id="btn-stop-publish" onclick="stopPublish()">Stop</button>
-        <button class="btn-stats" id="btn-publish-stats" onclick="togglePublishStats()" style="display:none">Stats</button>
-        <span class="publish-status" id="publish-status"></span>
-      </div>
+      <aside class="control-rail">
+        <div class="rail-card">
+          <h2>Stream setup</h2>
+          <div class="protocol-switch" role="tablist" aria-label="Publish protocol">
+            <button type="button" class="active" data-protocol="whip" role="tab" aria-selected="true">WHIP</button><button type="button" data-protocol="sip" role="tab" aria-selected="false">SIP</button><button type="button" data-protocol="gb28181" role="tab" aria-selected="false">GB28181</button>
+          </div>
+          <select id="publish-protocol" class="protocol-native-select" aria-label="Publish protocol"><option value="whip">WHIP / WebRTC</option><option value="sip">SIP Gateway</option><option value="gb28181">GB28181</option></select>
+          <div class="connection"><span class="connection-dot" id="connection-dot"></span><span><strong id="connection-state">Ready when you are</strong><br><span id="connection-note">Camera and microphone are local only</span></span></div>
+          <div id="publish-whip-config" class="publish-protocol-panel protocol-fields active">
+            <div class="field"><label for="publish-stream-key">Stream key</label><input type="text" id="publish-stream-key" placeholder="live/test" value="live/test" spellcheck="false"></div>
+            <div class="field"><label for="publish-video-device">Camera</label><select id="publish-video-device"></select></div>
+            <div class="field"><label for="publish-audio-device">Microphone</label><select id="publish-audio-device"></select></div>
+            <div class="field"><label for="publish-video-codec">Video codec</label><select id="publish-video-codec"><option value="H264">H.264</option><option value="VP8">VP8</option><option value="VP9">VP9</option><option value="H265">H.265 (HEVC)</option><option value="AV1">AV1</option></select></div>
+          </div>
+          <div id="publish-sip-config" class="publish-protocol-panel protocol-fields" hidden>
+            <div class="field"><label for="publish-sip-mode">Mode</label><select id="publish-sip-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
+            <div class="field"><label for="publish-sip-device">Device ID</label><input id="publish-sip-device" placeholder="lab-device" spellcheck="false"></div>
+            <div class="field"><label for="publish-sip-stream">Stream key</label><input id="publish-sip-stream" placeholder="sip/live" spellcheck="false"></div>
+            <div class="field"><label for="publish-sip-codec">Audio codec</label><select id="publish-sip-codec"><option value="PCMA">PCMA</option><option value="PCMU">PCMU</option></select></div>
+          </div>
+          <div id="publish-gb-config" class="publish-protocol-panel protocol-fields" hidden>
+            <div class="field"><label for="publish-gb-mode">Mode</label><select id="publish-gb-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
+            <div class="field"><label for="publish-gb-device">Device ID</label><input id="publish-gb-device" placeholder="34020000001320000011" spellcheck="false"></div>
+            <div class="field"><label for="publish-gb-channel">Channel ID</label><input id="publish-gb-channel" placeholder="34020000001320000012" spellcheck="false"></div>
+            <div class="field"><label for="publish-gb-stream">Stream key</label><input id="publish-gb-stream" placeholder="gb28181/live" spellcheck="false"></div>
+          </div>
+          <div class="publish-actions"><button class="btn btn-primary btn-start-publish" id="btn-start-publish" onclick="startPublish()">Start publishing</button><button class="btn btn-quiet btn-stop-publish" id="btn-stop-publish" onclick="stopPublish()">Stop</button><button class="btn-stats" id="btn-publish-stats" onclick="togglePublishStats()" style="display:none">Stats</button></div>
+          <p class="rail-note publish-status" id="publish-status">Choose a transport, configure the source, and publish one stream into LiveForge.</p>
+        </div>
+        <div class="rail-card"><h3>Preflight</h3><div class="check-list"><div class="check"><span id="preflight-source-label">Camera + microphone</span><b>READY</b></div><div class="check"><span id="preflight-transport-label">WebRTC endpoint</span><b>READY</b></div></div><div class="route-hint" id="route-hint">WHIP /webrtc/whip/live/test</div></div>
+      </aside>
     </div>
   </div>
 </div>
@@ -2838,10 +3065,26 @@ var streamTrendState = null;
 
 function createStreamRow() {
   var row = document.createElement("tr");
-  row.className = "stream-row";
+  row.className = "stream-row select-row";
   row.tabIndex = 0;
   row.setAttribute("role", "button");
-  var key = appendTextCell(row, "", "stream-key");
+  var keyCell = row.insertCell();
+  keyCell.className = "stream-key-cell";
+  var streamCell = document.createElement("div");
+  streamCell.className = "stream-cell";
+  var signal = document.createElement("span");
+  signal.className = "stream-signal";
+  signal.textContent = "↗";
+  var streamCopy = document.createElement("div");
+  var key = document.createElement("div");
+  key.className = "stream-name stream-key";
+  var owner = document.createElement("div");
+  owner.className = "stream-owner";
+  streamCopy.appendChild(key);
+  streamCopy.appendChild(owner);
+  streamCell.appendChild(signal);
+  streamCell.appendChild(streamCopy);
+  keyCell.appendChild(streamCell);
   var stateCell = row.insertCell();
   var state = document.createElement("span");
   stateCell.appendChild(state);
@@ -2862,7 +3105,7 @@ function createStreamRow() {
   var actions = document.createElement("div");
   actions.className = "actions";
   actionCell.appendChild(actions);
-  row._streamNodes = {key:key, state:state, publisher:publisher, codec:codecCell, bitrate:bitrate, fps:fps, uptime:uptime, gop:gop, subscribers:subscribers, actions:actions};
+  row._streamNodes = {key:key, owner:owner, state:state, publisher:publisher, codec:codecCell, bitrate:bitrate, fps:fps, uptime:uptime, gop:gop, subscribers:subscribers, actions:actions};
   row.addEventListener("click", function(event) {
     if (event.target.closest("button")) return;
     selectStream(row.dataset.streamKey);
@@ -2886,6 +3129,7 @@ function updateStreamRow(row, s) {
   n.state.className = "state state-" + String(s.state || "").replace(/[^a-z0-9_-]/gi, "-");
   n.state.textContent = String(s.state || "").replace("_", " ");
   n.publisher.textContent = s.publisher || "-";
+  if (n.owner) n.owner.textContent = s.publisher || "-";
   n.codec.replaceChildren();
   ["video", "audio"].forEach(function(kind) {
     var value = s[kind + "_codec"];
@@ -2904,13 +3148,19 @@ function updateStreamRow(row, s) {
     n.gop.textContent = "Not applicable (audio-only)";
   } else {
     var line = document.createElement("div");
-    line.className = "gop-label";
-    line.appendChild(document.createTextNode("GOP #"));
-    var generation = document.createElement("span"); generation.className = "gop-value-generation"; generation.textContent = s.gop_generation || 0;
-    var frames = document.createElement("span"); frames.className = "gop-value-frames"; frames.textContent = (s.gop_cache_len || 0) + " frames";
-    var duration = document.createElement("span"); duration.className = "gop-value-duration"; duration.textContent = ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s";
-    var media = document.createElement("span"); media.className = "gop-value-media"; media.textContent = "V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
-    line.appendChild(generation); line.appendChild(document.createTextNode(" ")); line.appendChild(frames); line.appendChild(document.createTextNode(" / ")); line.appendChild(duration); line.appendChild(document.createTextNode(" ")); line.appendChild(media);
+    line.className = "gop";
+    var items = [
+      ["generation", "#" + (s.gop_generation || 0), "gop-value-generation"],
+      ["frames", (s.gop_cache_len || 0) + " fr", "gop-value-frames"],
+      ["duration", ((s.gop_duration_ms || 0) / 1000).toFixed(1) + " s", "gop-value-duration"],
+      ["video / audio", "V" + (s.gop_video_frames || 0) + " / A" + (s.gop_audio_frames || 0), "gop-value-media"]
+    ];
+    items.forEach(function(item) {
+      var block = document.createElement("div"); block.className = "gop-item";
+      var label = document.createElement("div"); label.className = "gop-key"; label.textContent = item[0];
+      var value = document.createElement("div"); value.className = "gop-value " + item[2]; value.textContent = item[1];
+      block.appendChild(label); block.appendChild(value); line.appendChild(block);
+    });
     n.gop.appendChild(line);
   }
   n.subscribers.replaceChildren();
@@ -2964,7 +3214,14 @@ function streamTrendDetailRow() {
   row.className = "stream-detail-row";
   var cell = row.insertCell();
   cell.colSpan = 10;
-  cell.innerHTML = '<div class="stream-detail-panel"><div class="stream-detail-header"><div><span class="stream-detail-title">Live detail</span><span class="stream-detail-meta" id="stream-detail-key"></span><span class="stream-detail-meta" id="stream-detail-samples"></span></div><button class="btn stream-detail-close" type="button" data-action="stream-detail-close" aria-label="Close live detail">Close</button></div><div class="trend-empty" id="stream-trend-empty">Waiting for stream samples...</div><div class="trend-grid"><div class="trend-card" data-metric="bitrate"><div class="trend-card-header"><span class="trend-label">Bitrate</span><span class="trend-current" data-current="bitrate">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="bitrate"></path><path class="trend-path" data-path="bitrate"></path></svg><div class="trend-range"><span data-min="bitrate">min -</span><span data-max="bitrate">max -</span></div></div><div class="trend-card" data-metric="video-fps"><div class="trend-card-header"><span class="trend-label">Video FPS</span><span class="trend-current" data-current="videoFps">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="videoFps"></path><path class="trend-path" data-path="videoFps"></path></svg><div class="trend-range"><span data-min="videoFps">min -</span><span data-max="videoFps">max -</span></div></div><div class="trend-card" data-metric="audio-fps"><div class="trend-card-header"><span class="trend-label">Audio FPS</span><span class="trend-current" data-current="audioFps">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="audioFps"></path><path class="trend-path" data-path="audioFps"></path></svg><div class="trend-range"><span data-min="audioFps">min -</span><span data-max="audioFps">max -</span></div></div><div class="trend-card" data-metric="gop-duration"><div class="trend-card-header"><span class="trend-label">GOP Duration</span><span class="trend-current" data-current="gopDuration">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="gopDuration"></path><path class="trend-path" data-path="gopDuration"></path></svg><div class="trend-range"><span data-min="gopDuration">min -</span><span data-max="gopDuration">max -</span></div></div></div></div>';
+  cell.innerHTML = '<section class="stream-detail-panel detail-panel open" aria-live="polite">' +
+    '<div class="detail-head"><div class="detail-title"><strong>Live detail</strong><span class="detail-live">stream</span><span class="stream-detail-meta" id="stream-detail-key"></span><span class="stream-detail-meta" id="stream-detail-samples"></span></div><button class="detail-close stream-detail-close" type="button" data-action="stream-detail-close" aria-label="Close live detail">&times;</button></div>' +
+    '<div class="detail-body"><div class="detail-metrics"><div class="trend-summary"><span>Window <strong>60s</strong></span><span>Cadence <strong>1s</strong></span></div><div class="trend-button active"><span class="trend-label"><i class="swatch"></i>Bitrate</span><span class="trend-current" data-current="bitrate">-</span></div><div class="trend-button"><span class="trend-label"><i class="swatch"></i>Video FPS</span><span class="trend-current" data-current="videoFps">-</span></div><div class="trend-button"><span class="trend-label"><i class="swatch"></i>Audio FPS</span><span class="trend-current" data-current="audioFps">-</span></div><div class="trend-button"><span class="trend-label"><i class="swatch"></i>GOP duration</span><span class="trend-current" data-current="gopDuration">-</span></div></div>' +
+    '<div class="trend-grid"><div class="trend-card" data-metric="bitrate"><div class="trend-card-header"><span class="trend-label">Bitrate</span><span class="trend-current" data-current="bitrate">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none" aria-label="Bitrate trend"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="bitrate"></path><path class="trend-path" data-path="bitrate"></path></svg><div class="trend-range"><span data-min="bitrate">min -</span><span data-max="bitrate">max -</span></div></div>' +
+    '<div class="trend-card" data-metric="video-fps"><div class="trend-card-header"><span class="trend-label">Video FPS</span><span class="trend-current" data-current="videoFps">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none" aria-label="Video FPS trend"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="videoFps"></path><path class="trend-path" data-path="videoFps"></path></svg><div class="trend-range"><span data-min="videoFps">min -</span><span data-max="videoFps">max -</span></div></div>' +
+    '<div class="trend-card" data-metric="audio-fps"><div class="trend-card-header"><span class="trend-label">Audio FPS</span><span class="trend-current" data-current="audioFps">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none" aria-label="Audio FPS trend"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="audioFps"></path><path class="trend-path" data-path="audioFps"></path></svg><div class="trend-range"><span data-min="audioFps">min -</span><span data-max="audioFps">max -</span></div></div>' +
+    '<div class="trend-card" data-metric="gop-duration"><div class="trend-card-header"><span class="trend-label">GOP duration</span><span class="trend-current" data-current="gopDuration">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none" aria-label="GOP duration trend"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="gopDuration"></path><path class="trend-path" data-path="gopDuration"></path></svg><div class="trend-range"><span data-min="gopDuration">min -</span><span data-max="gopDuration">max -</span></div></div></div></div>' +
+    '<div class="trend-empty" id="stream-trend-empty">Waiting for stream samples...</div></section>';
   cell.querySelector('[data-action="stream-detail-close"]').addEventListener("click", closeStreamDetail);
   return row;
 }
@@ -3042,15 +3299,15 @@ function renderStreamTrend() {
     var values = streamTrendState.samples[metric] || [];
     var path = detail.querySelector('[data-path="' + metric + '"]');
     var area = detail.querySelector('[data-area="' + metric + '"]');
-    var current = detail.querySelector('[data-current="' + metric + '"]');
+    var currentNodes = detail.querySelectorAll('[data-current="' + metric + '"]');
     var minNode = detail.querySelector('[data-min="' + metric + '"]');
     var maxNode = detail.querySelector('[data-max="' + metric + '"]');
-    if (!values.length) { path.setAttribute("d", ""); area.setAttribute("d", ""); current.textContent = "-"; minNode.textContent = "min -"; maxNode.textContent = "max -"; return; }
+    if (!values.length) { path.setAttribute("d", ""); area.setAttribute("d", ""); currentNodes.forEach(function(node) { node.textContent = "-"; }); minNode.textContent = "min -"; maxNode.textContent = "max -"; return; }
     var min = Math.min.apply(null, values), max = Math.max.apply(null, values), span = Math.max(1, max - min);
     var points = values.map(function(value, index) { var x = values.length === 1 ? 0 : index * 720 / (values.length - 1); var y = 70 - ((value - min) / span) * 58; return [x, y]; });
     var d = points.map(function(point, index) { return (index ? "L" : "M") + point[0].toFixed(1) + " " + point[1].toFixed(1); }).join(" ");
     path.setAttribute("d", d); area.setAttribute("d", d + " L720 70 L0 70 Z");
-    current.textContent = Number(values[values.length - 1]).toFixed(metric === "bitrate" ? 0 : 1) + " " + labels[metric];
+    currentNodes.forEach(function(node) { node.textContent = Number(values[values.length - 1]).toFixed(metric === "bitrate" ? 0 : 1) + " " + labels[metric]; });
     minNode.textContent = "min " + Number(min).toFixed(metric === "bitrate" ? 0 : 1);
     maxNode.textContent = "max " + Number(max).toFixed(metric === "bitrate" ? 0 : 1);
   });
@@ -3184,6 +3441,8 @@ function startPreview() {
   navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
     publishStream = stream;
     document.getElementById("publish-preview").srcObject = stream;
+    var previewState = document.getElementById("preview-state");
+    if (previewState) previewState.textContent = "LOCAL PREVIEW";
     // Re-enumerate to get labels after permission grant.
     return navigator.mediaDevices.enumerateDevices();
   }).then(function(devices) {
@@ -3202,6 +3461,8 @@ function stopPreview() {
   if (preview) {
     preview.srcObject = null;
   }
+  var previewState = document.getElementById("preview-state");
+  if (previewState && !publishPC && !publishLabSessionID) previewState.textContent = "READY TO PUBLISH";
 }
 
 // Re-acquire preview when device selection changes
@@ -3212,6 +3473,16 @@ document.getElementById("publish-audio-device").addEventListener("change", funct
   if (!publishPC) startPreview();
 });
 document.getElementById("publish-protocol").addEventListener("change", updatePublishProtocol);
+document.querySelectorAll(".protocol-switch [data-protocol]").forEach(function(button) {
+  button.addEventListener("click", function() {
+    if (publishPC || publishLabSessionID) return;
+    document.getElementById("publish-protocol").value = button.getAttribute("data-protocol");
+    updatePublishProtocol();
+  });
+});
+document.getElementById("publish-stream-key").addEventListener("input", updatePublishProtocol);
+document.getElementById("publish-sip-stream").addEventListener("input", updatePublishProtocol);
+document.getElementById("publish-gb-stream").addEventListener("input", updatePublishProtocol);
 
 function startPublish() {
   var protocol = document.getElementById("publish-protocol").value;
@@ -3276,6 +3547,9 @@ function startPublish() {
     var state = pc.iceConnectionState;
     if (state === "connected" || state === "completed") {
       setPublishStatus("Publishing", "ok");
+      document.getElementById("connection-dot").classList.add("ready");
+      document.getElementById("connection-state").textContent = "Publishing live";
+      document.getElementById("preview-state").textContent = "LIVE / WHIP";
       document.getElementById("btn-start-publish").style.display = "none";
       document.getElementById("btn-stop-publish").style.display = "inline-block";
       document.getElementById("btn-publish-stats").style.display = "inline-block";
@@ -3364,6 +3638,9 @@ function stopPublish() {
   publishStatsVisible = false;
   var btn = document.getElementById("btn-publish-stats");
   if (btn) btn.classList.remove("active");
+  document.getElementById("connection-dot").classList.remove("ready");
+  document.getElementById("connection-state").textContent = "Ready when you are";
+  document.getElementById("preview-state").textContent = "READY TO PUBLISH";
 
   // Restart preview only for the legacy in-console modal.
   if (location.pathname !== "/console/publish") startPreview();
@@ -3371,15 +3648,28 @@ function stopPublish() {
 
 function updatePublishProtocol() {
   var protocol = document.getElementById("publish-protocol").value;
+  document.querySelectorAll(".protocol-switch [data-protocol]").forEach(function(button) {
+    var active = button.getAttribute("data-protocol") === protocol;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
   var activeProtocol = publishLabProtocol || (publishPC ? "whip" : "");
   if (activeProtocol && activeProtocol !== protocol) stopPublish();
   document.getElementById("publish-whip-config").hidden = protocol !== "whip";
   document.getElementById("publish-sip-config").hidden = protocol !== "sip";
   document.getElementById("publish-gb-config").hidden = protocol !== "gb28181";
+  document.getElementById("publish-whip-config").classList.toggle("active", protocol === "whip");
+  document.getElementById("publish-sip-config").classList.toggle("active", protocol === "sip");
+  document.getElementById("publish-gb-config").classList.toggle("active", protocol === "gb28181");
   var preview = document.querySelector(".publish-preview-wrap");
   if (preview) preview.style.display = protocol === "whip" ? "" : "none";
   if (protocol !== "whip") stopPreview();
   else if (!publishPC) startPreview();
+  var isWhip = protocol === "whip";
+  document.getElementById("connection-note").textContent = isWhip ? "Camera and microphone are local only" : protocol === "sip" ? "SIP lab device publishes through RTP" : "GB28181 lab device publishes through PS/RTP";
+  document.getElementById("preflight-source-label").textContent = isWhip ? "Camera + microphone" : protocol === "sip" ? "SIP lab device" : "GB28181 lab device";
+  document.getElementById("preflight-transport-label").textContent = isWhip ? "WebRTC endpoint" : protocol === "sip" ? "SIP gateway" : "GB28181 gateway";
+  document.getElementById("route-hint").textContent = isWhip ? "WHIP /webrtc/whip/" + document.getElementById("publish-stream-key").value.trim() : protocol === "sip" ? "SIP lab /api/v1/sipgateway/lab/sessions" : "GB lab /api/v1/gb28181/lab/sessions";
   setPublishStatus("");
 }
 
@@ -3402,6 +3692,9 @@ function startLabPublish(protocol) {
       publishLabSessionID = session && session.id;
       publishLabProtocol = protocol;
       setPublishStatus(protocol.toUpperCase() + " publishing", "ok");
+      document.getElementById("connection-dot").classList.add("ready");
+      document.getElementById("connection-state").textContent = "Publishing live";
+      document.getElementById("preview-state").textContent = "LIVE / " + protocol.toUpperCase();
       document.getElementById("btn-start-publish").style.display = "none";
       document.getElementById("btn-stop-publish").style.display = "inline-block";
       showToast(protocol.toUpperCase() + " publish started");
@@ -3413,6 +3706,9 @@ function startLabPublish(protocol) {
 function cleanupPublishPC() {
   publishPC = null;
   publishSessionURL = null;
+  document.getElementById("connection-dot").classList.remove("ready");
+  document.getElementById("connection-state").textContent = "Ready when you are";
+  document.getElementById("preview-state").textContent = "READY TO PUBLISH";
   document.getElementById("btn-start-publish").style.display = "inline-block";
   document.getElementById("btn-start-publish").disabled = false;
   document.getElementById("btn-stop-publish").style.display = "none";
