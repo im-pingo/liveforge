@@ -1185,7 +1185,7 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 			apiFetch = function() { return Promise.resolve({key:"sip/lab", gop_generation:7, gop_duration_ms:1200, stats:{video_frames:100, audio_frames:10, bitrate_kbps:850, fps:25}}); };
 			selectStream("sip/lab");
 			pollSelectedStream();
-			return {
+			window.__protocolLabProbe = function() { return {
 				cacheHeader: document.querySelector("#view-streams thead th:nth-child(8)").textContent.trim(),
 				cacheText: videoRow ? videoRow.cells[7].textContent : "",
 				audioOnlyText: audioRow ? audioRow.cells[7].textContent : "",
@@ -1201,9 +1201,13 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 				chartCount: document.querySelectorAll("#stream-detail-row svg").length,
 				sampleCount: document.getElementById("stream-detail-samples").textContent,
 				trendPath: !!document.querySelector('#stream-detail-row [data-path="bitrate"][d]')
-			};
+			}; };
 		})()`
-		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe)); err != nil {
+		if err := chromedp.Run(browserCtx,
+			chromedp.Evaluate(expression, nil),
+			chromedp.Sleep(20*time.Millisecond),
+			chromedp.Evaluate(`window.__protocolLabProbe()`, &probe),
+		); err != nil {
 			t.Fatalf("probe protocol lab media rendering: %v", err)
 		}
 		if probe.CacheHeader != "GOP Cache" || !strings.Contains(probe.CacheText, "#7") || !strings.Contains(probe.CacheText, "26 fr") || !strings.Contains(probe.CacheText, "1.2 s") || !strings.Contains(probe.CacheText, "V25 / A1") || probe.AudioOnlyText != "Not applicable (audio-only)" || probe.GOPBar {
