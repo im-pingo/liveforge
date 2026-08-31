@@ -301,7 +301,13 @@ func validateSession(r *http.Request, cfg config.ConsoleConfig) bool {
 func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, secure bool) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(renderLoginPage(loginHTML, r.URL.Query().Get("redirect")))
+		redirect := "/console"
+		if r.URL.Query().Get("redirect") == "/console/publish" {
+			redirect = "/console/publish"
+		}
+		if _, err := w.Write(renderLoginPage(loginHTML, redirect)); err != nil {
+			return
+		}
 		return
 	}
 
@@ -313,12 +319,17 @@ func handleLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfi
 	r.ParseForm()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	redirect := consoleLoginRedirect(r.FormValue("redirect"))
+	redirect := "/console"
+	if r.FormValue("redirect") == "/console/publish" {
+		redirect = "/console/publish"
+	}
 
 	if !secureEqual(username, cfg.Username) || !secureEqual(password, cfg.Password) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write(renderLoginPage(loginFailHTML, redirect))
+		if _, err := w.Write(renderLoginPage(loginFailHTML, redirect)); err != nil {
+			return
+		}
 		return
 	}
 
