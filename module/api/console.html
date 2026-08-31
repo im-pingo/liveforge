@@ -87,6 +87,8 @@ header {
   overflow-x: auto;
 }
 table { width: 100%; border-collapse: collapse; }
+table { table-layout: fixed; }
+table col { width: auto; }
 th {
   text-align: left;
   padding: 12px 16px;
@@ -126,6 +128,39 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* GOP cache */
 .gop-cell { min-width: 170px; }
+.gop-cell { line-height: 1.45; min-height: 42px; }
+.gop-value-frames, .gop-value-duration, .gop-value-generation, .gop-value-media { font-variant-numeric: tabular-nums; }
+.stream-row { cursor: pointer; }
+.streams-table tbody .stream-row { height: 68px; }
+.streams-table tbody .stream-row > td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.streams-table tbody .stream-row > td:nth-child(8), .streams-table tbody .stream-row > td:nth-child(9), .streams-table tbody .stream-row > td:nth-child(10) { white-space: normal; }
+.stream-row.selected td { background: rgba(108,158,255,0.08); border-bottom-color: rgba(108,158,255,0.3); }
+.stream-row:focus-visible td { outline: 2px solid var(--accent); outline-offset: -2px; }
+.stream-detail-row td { padding: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
+.stream-detail-panel { padding: 16px; border-left: 3px solid var(--accent); }
+.stream-detail-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+.stream-detail-title { font-size:13px; font-weight:600; color:var(--text); }
+.stream-detail-meta { color:var(--text2); font-size:12px; font-family:"SF Mono", "Fira Code", monospace; }
+.stream-detail-close { min-width:32px; padding:4px 8px; }
+.trend-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+.trend-card { min-width:0; padding:9px 10px 7px; background:var(--surface); border:1px solid var(--border); border-radius:6px; }
+.trend-card-header { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:4px; }
+.trend-label { color:var(--text2); font-size:10px; text-transform:uppercase; letter-spacing:.05em; white-space:nowrap; }
+.trend-current { color:var(--text); font:600 12px "SF Mono", "Fira Code", monospace; white-space:nowrap; }
+.trend-chart { display:block; width:100%; height:68px; overflow:visible; }
+.trend-gridline { stroke:var(--border); stroke-width:1; }
+.trend-area { opacity:.16; }
+.trend-path { fill:none; stroke-width:2; vector-effect:non-scaling-stroke; }
+.trend-card[data-metric="bitrate"] .trend-area { fill:var(--accent); }
+.trend-card[data-metric="bitrate"] .trend-path { stroke:var(--accent); }
+.trend-card[data-metric="video-fps"] .trend-area { fill:var(--green); }
+.trend-card[data-metric="video-fps"] .trend-path { stroke:var(--green); }
+.trend-card[data-metric="audio-fps"] .trend-area { fill:var(--blue); }
+.trend-card[data-metric="audio-fps"] .trend-path { stroke:var(--blue); }
+.trend-card[data-metric="gop-duration"] .trend-area { fill:var(--yellow); }
+.trend-card[data-metric="gop-duration"] .trend-path { stroke:var(--yellow); }
+.trend-range { display:flex; justify-content:space-between; gap:8px; color:var(--text2); font:10px "SF Mono", "Fira Code", monospace; }
+.trend-empty { color:var(--text2); font-size:12px; padding:9px 0 3px; }
 .gop-label {
   font-size: 11px;
   font-family: "SF Mono", "Fira Code", monospace;
@@ -447,6 +482,24 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-bottom: 1px solid var(--border);
 }
 .publish-header h3 { font-size: 15px; font-weight: 600; }
+.publish-header .publish-back { color:var(--text2); font-size:12px; text-decoration:none; margin-left:auto; margin-right:10px; }
+.publish-header .publish-back:hover { color:var(--text); }
+.publish-protocol-row { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.publish-protocol-row label { color:var(--text2); font-size:12px; }
+.publish-protocol-row select { flex:1; }
+.publish-protocol-panel[hidden] { display:none; }
+.publish-workspace-note { color:var(--text2); font-size:12px; line-height:1.5; margin:0 0 14px; }
+.publish-route .container { max-width:1180px; }
+.publish-route .container > header, .publish-route #cert-banner, .publish-route #nav-tabs, .publish-route .container > [id^="view-"] { display:none !important; }
+.publish-route .publish-overlay { position:static; display:flex; min-height:calc(100vh - 64px); background:transparent; z-index:auto; align-items:flex-start; justify-content:stretch; }
+.publish-route .publish-modal { width:100%; max-width:none; min-width:0; border-radius:10px; padding:0; box-shadow:0 12px 36px rgba(0,0,0,.25); }
+.publish-route .publish-header { padding:18px 22px; }
+.publish-route .publish-header h3 { font-size:18px; }
+.publish-route .publish-body { padding:22px; }
+.publish-route .publish-preview-wrap { max-width:860px; margin:0 auto 16px; }
+.publish-route .publish-actions { max-width:860px; margin:0 auto; }
+.publish-route .publish-form-row { max-width:860px; margin-left:auto; margin-right:auto; }
+.publish-route .publish-protocol-row { max-width:860px; margin-left:auto; margin-right:auto; }
 .publish-body { padding: 20px; flex: 1; overflow: auto; }
 .publish-form-row {
   margin-bottom: 14px;
@@ -804,6 +857,11 @@ select:focus-visible {
   .ops-toolbar { align-items: flex-start; flex-wrap: wrap; }
   .ops-toolbar-actions { width: 100%; }
   .ops-toolbar-actions .btn { width: 100%; }
+  .trend-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .publish-route .publish-body { padding:16px; }
+}
+@media (max-width: 460px) {
+  .trend-grid { grid-template-columns:1fr; }
 }
 </style>
 </head>
@@ -855,7 +913,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-streams" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
+  <div id="view-streams" class="console-view" role="tabpanel" aria-labelledby="tab-streams" tabindex="0">
   <div class="stats">
     <div class="stat-card">
       <div class="stat-label">Active Streams</div>
@@ -889,7 +947,11 @@ select:focus-visible {
   </div>
 
   <div class="table-wrap">
-    <table>
+    <table class="console-table streams-table">
+      <colgroup>
+        <col style="width:19%"><col style="width:10%"><col style="width:13%"><col style="width:12%"><col style="width:9%">
+        <col style="width:7%"><col style="width:8%"><col style="width:13%"><col style="width:9%"><col style="width:10%">
+      </colgroup>
       <thead>
         <tr>
           <th>Stream Key</th>
@@ -914,7 +976,7 @@ select:focus-visible {
   </div>
   </div><!-- /view-streams -->
 
-  <div id="view-gb28181" role="tabpanel" aria-labelledby="tab-gb28181" tabindex="0" hidden>
+  <div id="view-gb28181" class="console-view" role="tabpanel" aria-labelledby="tab-gb28181" tabindex="0" hidden>
     <div class="stats">
       <div class="stat-card">
         <div class="stat-label">Devices Online</div>
@@ -996,7 +1058,7 @@ select:focus-visible {
     </div>
   </div><!-- /view-gb28181 -->
 
-  <div id="view-config" class="ops-view" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
+  <div id="view-config" class="console-view ops-view" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
     <div class="ops-toolbar">
       <h2>Runtime Config</h2>
       <div class="ops-toolbar-actions">
@@ -1042,7 +1104,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-cluster" class="ops-view" role="tabpanel" aria-labelledby="tab-cluster" tabindex="0" hidden>
+  <div id="view-cluster" class="console-view ops-view" role="tabpanel" aria-labelledby="tab-cluster" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Cluster Relays</h2></div>
     <div class="ops-error" id="cluster-error"></div>
     <div class="stats">
@@ -1061,7 +1123,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-sip" class="ops-view" role="tabpanel" aria-labelledby="tab-sip" tabindex="0" hidden>
+  <div id="view-sip" class="console-view ops-view" role="tabpanel" aria-labelledby="tab-sip" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>SIP Gateway Calls</h2></div>
     <div class="ops-error" id="sip-error"></div>
     <form class="ops-form" onsubmit="dialSIPCall(event)">
@@ -1095,7 +1157,7 @@ select:focus-visible {
     <pre class="ops-detail" id="sip-call-detail">Select a call for details</pre>
   </div>
 
-  <div id="view-storage" class="ops-view" role="tabpanel" aria-labelledby="tab-storage" tabindex="0" hidden>
+  <div id="view-storage" class="console-view ops-view" role="tabpanel" aria-labelledby="tab-storage" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Recordings &amp; DVR</h2></div>
     <div class="ops-error" id="storage-error"></div>
     <div class="ops-capability" id="recording-capability" role="status"></div>
@@ -1117,7 +1179,7 @@ select:focus-visible {
     </div>
   </div>
 
-  <div id="view-security" class="ops-view" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
+  <div id="view-security" class="console-view ops-view" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
     <div class="ops-toolbar"><h2>Security &amp; Audit</h2></div>
     <div class="ops-error" id="security-error"></div>
     <div class="stats">
@@ -1180,12 +1242,23 @@ select:focus-visible {
 
 <!-- Publish modal -->
 <div class="publish-overlay" id="publish-overlay">
-  <div class="publish-modal">
+  <div class="publish-modal" id="publish-workspace">
     <div class="publish-header">
-      <h3>WebRTC Publish</h3>
+      <h3>Publish Workspace</h3>
+      <a class="publish-back" id="publish-back-console" href="/console">Back to Console</a>
       <button class="player-close" onclick="closePublishModal()">&times;</button>
     </div>
     <div class="publish-body">
+      <p class="publish-workspace-note">Choose a transport, configure the source, and publish one stream into LiveForge.</p>
+      <div class="publish-protocol-row">
+        <label for="publish-protocol">Protocol</label>
+        <select class="ops-input" id="publish-protocol" aria-label="Publish protocol">
+          <option value="whip">WHIP / WebRTC</option>
+          <option value="sip">SIP Gateway</option>
+          <option value="gb28181">GB28181</option>
+        </select>
+      </div>
+      <div id="publish-whip-config" class="publish-protocol-panel">
       <div class="publish-form-row">
         <label>Stream Key</label>
         <input type="text" id="publish-stream-key" placeholder="live/test" value="live/test">
@@ -1207,6 +1280,19 @@ select:focus-visible {
           <option value="H265">H.265 (HEVC)</option>
           <option value="AV1">AV1</option>
         </select>
+      </div>
+      </div>
+      <div id="publish-sip-config" class="publish-protocol-panel" hidden>
+        <div class="publish-form-row"><label>Mode</label><select class="ops-input" id="publish-sip-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
+        <div class="publish-form-row"><label>Device ID</label><input class="ops-input" id="publish-sip-device" placeholder="lab-device"></div>
+        <div class="publish-form-row"><label>Stream Key</label><input class="ops-input" id="publish-sip-stream" placeholder="sip/live"></div>
+        <div class="publish-form-row"><label>Audio Codec</label><select class="ops-input" id="publish-sip-codec"><option value="PCMA">PCMA</option><option value="PCMU">PCMU</option></select></div>
+      </div>
+      <div id="publish-gb-config" class="publish-protocol-panel" hidden>
+        <div class="publish-form-row"><label>Mode</label><select class="ops-input" id="publish-gb-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
+        <div class="publish-form-row"><label>Device ID</label><input class="ops-input" id="publish-gb-device" placeholder="34020000001320000011"></div>
+        <div class="publish-form-row"><label>Channel ID</label><input class="ops-input" id="publish-gb-channel" placeholder="34020000001320000012"></div>
+        <div class="publish-form-row"><label>Stream Key</label><input class="ops-input" id="publish-gb-stream" placeholder="gb28181/live"></div>
       </div>
       <div class="publish-preview-wrap">
         <video id="publish-preview" autoplay playsinline muted></video>
@@ -2743,72 +2829,230 @@ function refresh(signal) {
     .catch(function(err) { showManagementError("streams", err); });
 }
 
+var streamRows = Object.create(null);
+var selectedStreamKey = "";
+var streamTrendPoll = null;
+var streamTrendRequest = null;
+var streamTrendGeneration = 0;
+var streamTrendState = null;
+
+function createStreamRow() {
+  var row = document.createElement("tr");
+  row.className = "stream-row";
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  var key = appendTextCell(row, "", "stream-key");
+  var stateCell = row.insertCell();
+  var state = document.createElement("span");
+  stateCell.appendChild(state);
+  var publisher = appendTextCell(row, "", "publisher-id");
+  var codecCell = row.insertCell();
+  var bitrate = appendTextCell(row, "-", "mono");
+  var fps = appendTextCell(row, "-", "mono");
+  var uptime = appendTextCell(row, "-", "mono");
+  var gopCell = row.insertCell();
+  var gop = document.createElement("div");
+  gop.className = "gop-cell";
+  gopCell.appendChild(gop);
+  var subscriberCell = row.insertCell();
+  var subscribers = document.createElement("div");
+  subscribers.className = "subs";
+  subscriberCell.appendChild(subscribers);
+  var actionCell = row.insertCell();
+  var actions = document.createElement("div");
+  actions.className = "actions";
+  actionCell.appendChild(actions);
+  row._streamNodes = {key:key, state:state, publisher:publisher, codec:codecCell, bitrate:bitrate, fps:fps, uptime:uptime, gop:gop, subscribers:subscribers, actions:actions};
+  row.addEventListener("click", function(event) {
+    if (event.target.closest("button")) return;
+    selectStream(row.dataset.streamKey);
+  });
+  row.addEventListener("keydown", function(event) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    selectStream(row.dataset.streamKey);
+  });
+  return row;
+}
+
+function updateStreamRow(row, s) {
+  var st = s.stats || {};
+  var n = row._streamNodes;
+  var key = String(s.key || "");
+  row.dataset.streamKey = key;
+  row.classList.toggle("selected", selectedStreamKey === key);
+  row.setAttribute("aria-expanded", selectedStreamKey === key ? "true" : "false");
+  n.key.textContent = key;
+  n.state.className = "state state-" + String(s.state || "").replace(/[^a-z0-9_-]/gi, "-");
+  n.state.textContent = String(s.state || "").replace("_", " ");
+  n.publisher.textContent = s.publisher || "-";
+  n.codec.replaceChildren();
+  ["video", "audio"].forEach(function(kind) {
+    var value = s[kind + "_codec"];
+    if (!value) return;
+    var tag = document.createElement("span");
+    tag.className = "codec-tag " + kind;
+    tag.textContent = value;
+    n.codec.appendChild(tag);
+  });
+  if (!n.codec.childNodes.length) n.codec.textContent = "-";
+  n.bitrate.textContent = formatBitrate(st.bitrate_kbps);
+  n.fps.textContent = st.fps ? Number(st.fps).toFixed(1) : "-";
+  n.uptime.textContent = st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : "-";
+  n.gop.replaceChildren();
+  if (!s.video_codec && s.audio_codec) {
+    n.gop.textContent = "Not applicable (audio-only)";
+  } else {
+    var line = document.createElement("div");
+    line.className = "gop-label";
+    line.appendChild(document.createTextNode("GOP #"));
+    var generation = document.createElement("span"); generation.className = "gop-value-generation"; generation.textContent = s.gop_generation || 0;
+    var frames = document.createElement("span"); frames.className = "gop-value-frames"; frames.textContent = (s.gop_cache_len || 0) + " frames";
+    var duration = document.createElement("span"); duration.className = "gop-value-duration"; duration.textContent = ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s";
+    var media = document.createElement("span"); media.className = "gop-value-media"; media.textContent = "V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
+    line.appendChild(generation); line.appendChild(document.createTextNode(" ")); line.appendChild(frames); line.appendChild(document.createTextNode(" / ")); line.appendChild(duration); line.appendChild(document.createTextNode(" ")); line.appendChild(media);
+    n.gop.appendChild(line);
+  }
+  n.subscribers.replaceChildren();
+  var subscriberKeys = Object.keys(s.subscribers || {}).sort();
+  subscriberKeys.forEach(function(format) {
+    var count = s.subscribers[format];
+    var pill = document.createElement("span");
+    pill.className = count > 0 ? "sub-pill active" : "sub-pill";
+    pill.textContent = format.toUpperCase() + " " + count;
+    n.subscribers.appendChild(pill);
+  });
+  if (!subscriberKeys.length) n.subscribers.textContent = "-";
+  n.actions.replaceChildren();
+  if (s.state === "publishing") appendActionButton(n.actions, "Preview", "btn-play", "stream-preview", key);
+  if (s.publisher && canManage("operator")) appendActionButton(n.actions, "Kick", "btn-warn", "stream-kick", key);
+  if (canManage("admin")) appendActionButton(n.actions, "Delete", "btn-danger", "stream-delete", key);
+}
+
 function renderStreams(streams) {
   streams = streams || [];
   var tbody = document.getElementById("tbody");
   var empty = document.getElementById("empty");
-  tbody.replaceChildren();
-  empty.style.display = streams.length ? "none" : "block";
-  streams.slice().sort(function(a, b) { return String(a.key).localeCompare(String(b.key)); }).forEach(function(s) {
-    var st = s.stats || {};
-    var row = tbody.insertRow();
-    appendTextCell(row, s.key, "stream-key");
-
-    var stateCell = row.insertCell();
-    var state = document.createElement("span");
-    state.className = "state state-" + String(s.state || "").replace(/[^a-z0-9_-]/gi, "-");
-    state.textContent = String(s.state || "").replace("_", " ");
-    stateCell.appendChild(state);
-    appendTextCell(row, s.publisher || "-", "publisher-id");
-
-    var codecCell = row.insertCell();
-    ["video", "audio"].forEach(function(kind) {
-      var value = s[kind + "_codec"];
-      if (!value) return;
-      var tag = document.createElement("span");
-      tag.className = "codec-tag " + kind;
-      tag.textContent = value;
-      codecCell.appendChild(tag);
-    });
-    if (!codecCell.childNodes.length) codecCell.textContent = "-";
-    appendTextCell(row, formatBitrate(st.bitrate_kbps), "mono");
-    appendTextCell(row, st.fps ? st.fps.toFixed(1) : "-", "mono");
-    appendTextCell(row, st.uptime_sec > 0 ? formatUptime(st.uptime_sec) : "-", "mono");
-
-    var gopCell = row.insertCell();
-    var gop = document.createElement("div");
-    gop.className = "gop-cell";
-    if (!s.video_codec && s.audio_codec) {
-      gop.textContent = "Not applicable (audio-only)";
-    } else {
-      var gopLabel = document.createElement("div");
-      gopLabel.className = "gop-label";
-      gopLabel.textContent = "GOP #" + (s.gop_generation || 0) + " " + (s.gop_cache_len || 0) + " frames / " + ((s.gop_duration_ms || 0) / 1000).toFixed(1) + "s V" + (s.gop_video_frames || 0) + " A" + (s.gop_audio_frames || 0);
-      gop.appendChild(gopLabel);
+  var seen = Object.create(null);
+  var sorted = streams.slice().sort(function(a, b) { return String(a.key).localeCompare(String(b.key)); });
+  sorted.forEach(function(s) {
+    var key = String(s.key || "");
+    seen[key] = true;
+    if (!streamRows[key]) streamRows[key] = createStreamRow();
+    updateStreamRow(streamRows[key], s);
+  });
+  Object.keys(streamRows).forEach(function(key) {
+    if (!seen[key]) {
+      if (streamRows[key].nextSibling && streamRows[key].nextSibling.classList.contains("stream-detail-row")) streamRows[key].nextSibling.remove();
+      delete streamRows[key];
     }
-    gopCell.appendChild(gop);
+  });
+  if (selectedStreamKey && !seen[selectedStreamKey]) closeStreamDetail();
+  sorted.forEach(function(s) {
+    var row = streamRows[String(s.key || "")];
+    tbody.appendChild(row);
+    if (selectedStreamKey === String(s.key || "")) tbody.appendChild(streamTrendDetailRow());
+  });
+  empty.style.display = sorted.length ? "none" : "block";
+}
 
-    var subscriberCell = row.insertCell();
-    var subscriberList = document.createElement("div");
-    subscriberList.className = "subs";
-    var subscriberKeys = Object.keys(s.subscribers || {}).sort();
-    subscriberKeys.forEach(function(format) {
-      var count = s.subscribers[format];
-      var pill = document.createElement("span");
-      pill.className = count > 0 ? "sub-pill active" : "sub-pill";
-      pill.textContent = format.toUpperCase() + " " + count;
-      subscriberList.appendChild(pill);
+function streamTrendDetailRow() {
+  var existing = document.getElementById("stream-detail-row");
+  if (existing) return existing;
+  var row = document.createElement("tr");
+  row.id = "stream-detail-row";
+  row.className = "stream-detail-row";
+  var cell = row.insertCell();
+  cell.colSpan = 10;
+  cell.innerHTML = '<div class="stream-detail-panel"><div class="stream-detail-header"><div><span class="stream-detail-title">Live detail</span><span class="stream-detail-meta" id="stream-detail-key"></span><span class="stream-detail-meta" id="stream-detail-samples"></span></div><button class="btn stream-detail-close" type="button" data-action="stream-detail-close" aria-label="Close live detail">Close</button></div><div class="trend-empty" id="stream-trend-empty">Waiting for stream samples...</div><div class="trend-grid"><div class="trend-card" data-metric="bitrate"><div class="trend-card-header"><span class="trend-label">Bitrate</span><span class="trend-current" data-current="bitrate">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="bitrate"></path><path class="trend-path" data-path="bitrate"></path></svg><div class="trend-range"><span data-min="bitrate">min -</span><span data-max="bitrate">max -</span></div></div><div class="trend-card" data-metric="video-fps"><div class="trend-card-header"><span class="trend-label">Video FPS</span><span class="trend-current" data-current="videoFps">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="videoFps"></path><path class="trend-path" data-path="videoFps"></path></svg><div class="trend-range"><span data-min="videoFps">min -</span><span data-max="videoFps">max -</span></div></div><div class="trend-card" data-metric="audio-fps"><div class="trend-card-header"><span class="trend-label">Audio FPS</span><span class="trend-current" data-current="audioFps">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="audioFps"></path><path class="trend-path" data-path="audioFps"></path></svg><div class="trend-range"><span data-min="audioFps">min -</span><span data-max="audioFps">max -</span></div></div><div class="trend-card" data-metric="gop-duration"><div class="trend-card-header"><span class="trend-label">GOP Duration</span><span class="trend-current" data-current="gopDuration">-</span></div><svg class="trend-chart" viewBox="0 0 720 82" preserveAspectRatio="none"><line class="trend-gridline" x1="0" y1="12" x2="720" y2="12"></line><line class="trend-gridline" x1="0" y1="41" x2="720" y2="41"></line><line class="trend-gridline" x1="0" y1="70" x2="720" y2="70"></line><path class="trend-area" data-area="gopDuration"></path><path class="trend-path" data-path="gopDuration"></path></svg><div class="trend-range"><span data-min="gopDuration">min -</span><span data-max="gopDuration">max -</span></div></div></div></div>';
+  cell.querySelector('[data-action="stream-detail-close"]').addEventListener("click", closeStreamDetail);
+  return row;
+}
+
+function closeStreamDetail() {
+  stopStreamTrendPolling();
+  selectedStreamKey = "";
+  var detail = document.getElementById("stream-detail-row");
+  if (detail) detail.remove();
+  Object.keys(streamRows).forEach(function(key) { streamRows[key].classList.remove("selected"); streamRows[key].setAttribute("aria-expanded", "false"); });
+}
+
+function selectStream(streamKey) {
+  streamKey = String(streamKey || "");
+  if (!streamKey) return;
+  if (selectedStreamKey === streamKey) { closeStreamDetail(); return; }
+  stopStreamTrendPolling();
+  selectedStreamKey = streamKey;
+  streamTrendGeneration++;
+  streamTrendState = {samples:{bitrate:[], videoFps:[], audioFps:[], gopDuration:[]}, previous:null, generation:null};
+  var row = streamRows[streamKey];
+  if (!row) { selectedStreamKey = ""; return; }
+  Object.keys(streamRows).forEach(function(key) { streamRows[key].classList.toggle("selected", key === streamKey); streamRows[key].setAttribute("aria-expanded", key === streamKey ? "true" : "false"); });
+  row.parentNode.insertBefore(streamTrendDetailRow(), row.nextSibling);
+  document.getElementById("stream-detail-key").textContent = "  " + streamKey;
+  if (row) row.scrollIntoView({block:"nearest"});
+  startStreamTrendPolling();
+}
+
+function stopStreamTrendPolling() {
+  if (streamTrendPoll) { clearInterval(streamTrendPoll); streamTrendPoll = null; }
+  if (streamTrendRequest) { streamTrendRequest.abort(); streamTrendRequest = null; }
+}
+
+function startStreamTrendPolling() {
+  stopStreamTrendPolling();
+  if (activeTab !== "streams" || document.hidden || !selectedStreamKey) return;
+  pollSelectedStream();
+  streamTrendPoll = setInterval(pollSelectedStream, 1000);
+}
+
+function pollSelectedStream() {
+  if (!selectedStreamKey || activeTab !== "streams" || document.hidden) return;
+  var key = selectedStreamKey;
+  var generation = streamTrendGeneration;
+  var ctrl = new AbortController();
+  streamTrendRequest = ctrl;
+  apiFetch("/api/v1/streams/" + encodedStreamPath(key), {signal:ctrl.signal}).then(function(data) {
+    if (generation !== streamTrendGeneration || key !== selectedStreamKey || !data) return;
+    var stats = data.stats || {};
+    var previous = streamTrendState.previous;
+    var videoFPS = previous && stats.video_frames != null ? Math.max(0, Number(stats.video_frames) - Number(previous.video_frames || 0)) : Number(stats.fps || 0);
+    var audioFPS = previous && stats.audio_frames != null ? Math.max(0, Number(stats.audio_frames) - Number(previous.audio_frames || 0)) : 0;
+    if (data.gop_generation != null && streamTrendState.generation != null && streamTrendState.generation !== data.gop_generation) {
+      streamTrendState.samples = {bitrate:[], videoFps:[], audioFps:[], gopDuration:[]};
+    }
+    streamTrendState.generation = data.gop_generation;
+    streamTrendState.previous = {video_frames:stats.video_frames, audio_frames:stats.audio_frames};
+    [ ["bitrate", Number(stats.bitrate_kbps || 0)], ["videoFps", videoFPS], ["audioFps", audioFPS], ["gopDuration", Number(data.gop_duration_ms || 0) / 1000] ].forEach(function(item) {
+      var values = streamTrendState.samples[item[0]]; values.push(item[1]); if (values.length > 60) values.splice(0, values.length - 60);
     });
-    if (!subscriberKeys.length) subscriberList.textContent = "-";
-    subscriberCell.appendChild(subscriberList);
+    renderStreamTrend();
+  }).catch(function(err) { if (!err || err.name !== "AbortError") showManagementError("streams", err); });
+}
 
-    var actionCell = row.insertCell();
-    var actions = document.createElement("div");
-    actions.className = "actions";
-    if (s.state === "publishing") appendActionButton(actions, "Preview", "btn-play", "stream-preview", s.key);
-    if (s.publisher && canManage("operator")) appendActionButton(actions, "Kick", "btn-warn", "stream-kick", s.key);
-    if (canManage("admin")) appendActionButton(actions, "Delete", "btn-danger", "stream-delete", s.key);
-    actionCell.appendChild(actions);
+function renderStreamTrend() {
+  var detail = document.getElementById("stream-detail-row");
+  if (!detail || !streamTrendState) return;
+  document.getElementById("stream-detail-key").textContent = "  " + selectedStreamKey;
+  var count = streamTrendState.samples.bitrate.length;
+  document.getElementById("stream-detail-samples").textContent = "  " + count + " / 60 samples";
+  document.getElementById("stream-trend-empty").style.display = count ? "none" : "block";
+  var labels = {bitrate:"kbps", videoFps:"fps", audioFps:"fps", gopDuration:"s"};
+  Object.keys(labels).forEach(function(metric) {
+    var values = streamTrendState.samples[metric] || [];
+    var path = detail.querySelector('[data-path="' + metric + '"]');
+    var area = detail.querySelector('[data-area="' + metric + '"]');
+    var current = detail.querySelector('[data-current="' + metric + '"]');
+    var minNode = detail.querySelector('[data-min="' + metric + '"]');
+    var maxNode = detail.querySelector('[data-max="' + metric + '"]');
+    if (!values.length) { path.setAttribute("d", ""); area.setAttribute("d", ""); current.textContent = "-"; minNode.textContent = "min -"; maxNode.textContent = "max -"; return; }
+    var min = Math.min.apply(null, values), max = Math.max.apply(null, values), span = Math.max(1, max - min);
+    var points = values.map(function(value, index) { var x = values.length === 1 ? 0 : index * 720 / (values.length - 1); var y = 70 - ((value - min) / span) * 58; return [x, y]; });
+    var d = points.map(function(point, index) { return (index ? "L" : "M") + point[0].toFixed(1) + " " + point[1].toFixed(1); }).join(" ");
+    path.setAttribute("d", d); area.setAttribute("d", d + " L720 70 L0 70 Z");
+    current.textContent = Number(values[values.length - 1]).toFixed(metric === "bitrate" ? 0 : 1) + " " + labels[metric];
+    minNode.textContent = "min " + Number(min).toFixed(metric === "bitrate" ? 0 : 1);
+    maxNode.textContent = "max " + Number(max).toFixed(metric === "bitrate" ? 0 : 1);
   });
 }
 
@@ -2835,10 +3079,17 @@ var publishSessionURL = null;
 var publishStatsInterval = null;
 var publishStatsPrev = null;
 var publishStatsVisible = false;
+var publishLabSessionID = null;
+var publishLabProtocol = null;
 
 function openPublishModal() {
+  if (location.pathname !== "/console/publish") {
+    location.href = "/console/publish";
+    return;
+  }
   document.getElementById("publish-overlay").classList.add("active");
   setPublishStatus("");
+  updatePublishProtocol();
 
   // Secure context check: getUserMedia requires HTTPS or localhost.
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -2874,6 +3125,10 @@ function openPublishModal() {
 function closePublishModal() {
   stopPublish();
   stopPreview();
+  if (location.pathname === "/console/publish") {
+    location.href = "/console";
+    return;
+  }
   document.getElementById("publish-overlay").classList.remove("active");
 }
 
@@ -2956,8 +3211,14 @@ document.getElementById("publish-video-device").addEventListener("change", funct
 document.getElementById("publish-audio-device").addEventListener("change", function() {
   if (!publishPC) startPreview();
 });
+document.getElementById("publish-protocol").addEventListener("change", updatePublishProtocol);
 
 function startPublish() {
+  var protocol = document.getElementById("publish-protocol").value;
+  if (protocol === "sip" || protocol === "gb28181") {
+    startLabPublish(protocol);
+    return;
+  }
   var streamKey = document.getElementById("publish-stream-key").value.trim();
   if (!streamKey) {
     setPublishStatus("Enter a stream key", "error");
@@ -3090,6 +3351,12 @@ function stopPublish() {
     fetch(publishSessionURL, { method: "DELETE" }).catch(function(){});
     publishSessionURL = null;
   }
+  if (publishLabSessionID && publishLabProtocol) {
+    var labPath = publishLabProtocol === "sip" ? "/api/v1/sipgateway/lab/sessions/" : "/api/v1/gb28181/lab/sessions/";
+    apiFetch(labPath + encodeURIComponent(publishLabSessionID), {method:"DELETE"}).catch(function(){});
+    publishLabSessionID = null;
+    publishLabProtocol = null;
+  }
   document.getElementById("btn-start-publish").style.display = "inline-block";
   document.getElementById("btn-start-publish").disabled = false;
   document.getElementById("btn-stop-publish").style.display = "none";
@@ -3098,8 +3365,49 @@ function stopPublish() {
   var btn = document.getElementById("btn-publish-stats");
   if (btn) btn.classList.remove("active");
 
-  // Restart preview
-  startPreview();
+  // Restart preview only for the legacy in-console modal.
+  if (location.pathname !== "/console/publish") startPreview();
+}
+
+function updatePublishProtocol() {
+  var protocol = document.getElementById("publish-protocol").value;
+  var activeProtocol = publishLabProtocol || (publishPC ? "whip" : "");
+  if (activeProtocol && activeProtocol !== protocol) stopPublish();
+  document.getElementById("publish-whip-config").hidden = protocol !== "whip";
+  document.getElementById("publish-sip-config").hidden = protocol !== "sip";
+  document.getElementById("publish-gb-config").hidden = protocol !== "gb28181";
+  var preview = document.querySelector(".publish-preview-wrap");
+  if (preview) preview.style.display = protocol === "whip" ? "" : "none";
+  if (protocol !== "whip") stopPreview();
+  else if (!publishPC) startPreview();
+  setPublishStatus("");
+}
+
+function startLabPublish(protocol) {
+  if (!canManage("operator")) return;
+  var button = document.getElementById("btn-start-publish");
+  var request;
+  if (protocol === "sip") {
+    request = {mode:document.getElementById("publish-sip-mode").value, device_id:document.getElementById("publish-sip-device").value.trim(), stream_key:document.getElementById("publish-sip-stream").value.trim(), codec:document.getElementById("publish-sip-codec").value};
+  } else {
+    request = {mode:document.getElementById("publish-gb-mode").value, device_id:document.getElementById("publish-gb-device").value.trim(), channel_id:document.getElementById("publish-gb-channel").value.trim(), stream_key:document.getElementById("publish-gb-stream").value.trim()};
+  }
+  if (!validProtocolLabStreamKey(request.stream_key)) { setPublishStatus("Stream key segments must be non-empty and cannot be . or ..", "error"); return; }
+  button.disabled = true;
+  setPublishStatus("Starting " + protocol.toUpperCase() + " session...");
+  var path = protocol === "sip" ? "/api/v1/sipgateway/lab/sessions" : "/api/v1/gb28181/lab/sessions";
+  apiFetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(request)})
+    .then(function(data) {
+      var session = data && data.session ? data.session : data;
+      publishLabSessionID = session && session.id;
+      publishLabProtocol = protocol;
+      setPublishStatus(protocol.toUpperCase() + " publishing", "ok");
+      document.getElementById("btn-start-publish").style.display = "none";
+      document.getElementById("btn-stop-publish").style.display = "inline-block";
+      showToast(protocol.toUpperCase() + " publish started");
+    })
+    .catch(function(err) { setPublishStatus(managementErrorMessage(err), "error"); })
+    .finally(function() { button.disabled = !canManage("operator"); });
 }
 
 function cleanupPublishPC() {
@@ -3864,6 +4172,7 @@ function stopActiveViewPolling() {
     activeViewInterval = null;
   }
   abortActiveViewRequest();
+  if (activeTab === "streams") stopStreamTrendPolling();
 }
 
 function startActiveViewPolling() {
@@ -3871,6 +4180,7 @@ function startActiveViewPolling() {
   if (document.hidden) return;
   refreshActiveView();
   activeViewInterval = setInterval(refreshActiveView, 3000);
+  if (activeTab === "streams" && selectedStreamKey) startStreamTrendPolling();
 }
 
 document.addEventListener("visibilitychange", function() {
@@ -4306,6 +4616,13 @@ document.getElementById("gb-self-test").addEventListener("click", runGB28181Self
 applyManagementPermissions();
 bootstrapManagementRole();
 switchTab("streams");
+
+if (location.pathname === "/console/publish") {
+  stopActiveViewPolling();
+  document.body.classList.add("publish-route");
+  refreshServerInfo();
+  openPublishModal();
+}
 
 // Show self-signed cert banner when using HTTPS with auto-generated cert.
 if (location.protocol === "https:") {

@@ -104,6 +104,23 @@ func TestRoutes(t *testing.T) {
 			}
 		})
 	}
+
+	for _, path := range []string{"/console", "/console/publish"} {
+		t.Run("GET "+path, func(t *testing.T) {
+			resp, err := client.Get(addr + path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "LiveForge Console") {
+				t.Fatalf("GET %s = %d, want embedded console", path, resp.StatusCode)
+			}
+		})
+	}
 }
 
 func TestServerInfoEndpoint(t *testing.T) {

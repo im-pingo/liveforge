@@ -59,7 +59,7 @@ func TestConsolePublishFlow(t *testing.T) {
 	t.Cleanup(srv.Shutdown)
 
 	apiAddr := apiMod.Addr().String()
-	consoleURL := "http://" + apiAddr + "/console"
+	consoleURL := "http://" + apiAddr + "/console/publish"
 
 	// Patch the WebRTC listen address into the config so /api/v1/server/info
 	// returns the actual port (config stores the original ":0").
@@ -119,12 +119,10 @@ func TestConsolePublishFlow(t *testing.T) {
 	// Wait for server info to load (endpoints populated).
 	time.Sleep(2 * time.Second)
 
-	// --- open publish modal ---
-	t.Log("Opening publish modal...")
-	if err := chromedp.Run(browserCtx,
-		chromedp.Click("#btn-publish", chromedp.ByID),
-	); err != nil {
-		t.Fatalf("click publish button: %v", err)
+	// The publish route renders the full-page workspace directly.
+	t.Log("Opening publish workspace...")
+	if err := chromedp.Run(browserCtx, chromedp.WaitVisible("#publish-workspace", chromedp.ByID)); err != nil {
+		t.Fatalf("wait for publish workspace: %v", err)
 	}
 
 	// Wait for getUserMedia + enumerateDevices.
