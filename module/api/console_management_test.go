@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
 	"golang.org/x/net/html"
@@ -801,6 +802,9 @@ func TestConsolePublishAndTrendAsyncOperationsHaveCancellationGuards(t *testing.
 	if !strings.Contains(pollTrend, "if (streamTrendRequest) return") || !strings.Contains(pollTrend, "streamTrendRequest === ctrl") {
 		t.Error("pollSelectedStream is missing serialized in-flight request protection")
 	}
+	if strings.Contains(pollTrend, "streamTrendState.generation !== data.gop_generation") {
+		t.Error("pollSelectedStream must not reset the trend window on every GOP generation")
+	}
 	for _, name := range []string{"startPublish", "startLabPublish"} {
 		source := consoleFunctionSource(t, script, name)
 		if !strings.Contains(source, "publishRunGeneration") {
@@ -908,6 +912,189 @@ func TestConsoleWHEPVideoAutoplayFallbackKeepsAudioControl(t *testing.T) {
 			t.Errorf("WHEP autoplay fallback contract is missing %q", contract)
 		}
 	}
+}
+
+func TestConsoleWHEPUsesVideoElementWhenMetadataLagsTrack(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var result struct {
+			VideoDisplay string `json:"videoDisplay"`
+			VideoPlays   int    `json:"videoPlays"`
+			AudioPlays   int    `json:"audioPlays"`
+			VideoBound   bool   `json:"videoBound"`
+			PCReady      bool   `json:"pcReady"`
+			TrackHandler bool   `json:"trackHandler"`
+		}
+		expression := `(async function() {
+			var oldPC = window.RTCPeerConnection;
+			var oldFetch = window.fetch;
+			var oldPlay = HTMLMediaElement.prototype.play;
+			var oldAddTrack = MediaStream.prototype.addTrack;
+			var fakePC = null;
+			var fetchCount = 0;
+			function FakePC() {
+				fakePC = this;
+				this.iceGatheringState = "complete";
+				this.connectionState = "connected";
+				this.iceConnectionState = "connected";
+				this.addTransceiver = function() {};
+				this.createOffer = function() { return Promise.resolve({type:"offer", sdp:"v=0\\r\\n"}); };
+				this.setLocalDescription = function(description) { this.localDescription = description; return Promise.resolve(); };
+				this.setRemoteDescription = function() { return Promise.resolve(); };
+				this.close = function() {};
+				this.getStats = function() { return Promise.resolve(new Map()); };
+			}
+			try {
+				window.RTCPeerConnection = FakePC;
+				window.fetch = function() {
+					fetchCount++;
+					if (fetchCount === 1) return Promise.resolve({status:201, headers:{get:function() { return "/webrtc/session/stale"; }}, text:function() { return Promise.resolve("v=0\\r\\n"); }});
+					return Promise.resolve({ok:true, json:function() { return Promise.resolve({feed:{state:"waiting_keyframe"}}); }});
+				};
+				HTMLMediaElement.prototype.play = function() {
+					this.__playCount = (this.__playCount || 0) + 1;
+					return Promise.resolve();
+				};
+				MediaStream.prototype.addTrack = function(track) {
+					this.__tracks = (this.__tracks || []).concat([track]);
+				};
+				streamMedia["live/stale-track"] = {audio_codec:"Opus"};
+				endpoints.webrtc = location.host;
+				playWHEP("live/stale-track", "live", "/webrtc/whep/live/stale-track");
+				await new Promise(function(resolve) { setTimeout(resolve, 30); });
+				if (fakePC && fakePC.ontrack) fakePC.ontrack({track:{kind:"video"}});
+				await new Promise(function(resolve) { setTimeout(resolve, 30); });
+				return {
+					videoDisplay: document.getElementById("player-video").style.display,
+					videoPlays: document.getElementById("player-video").__playCount || 0,
+					audioPlays: document.getElementById("player-audio").__playCount || 0,
+					videoBound: !!document.getElementById("player-video").srcObject,
+					pcReady: !!fakePC,
+					trackHandler: !!(fakePC && fakePC.ontrack)
+				};
+			} finally {
+				destroyCurrentPlayer();
+				window.RTCPeerConnection = oldPC;
+				window.fetch = oldFetch;
+				HTMLMediaElement.prototype.play = oldPlay;
+				MediaStream.prototype.addTrack = oldAddTrack;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &result, func(params *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return params.WithAwaitPromise(true)
+		})); err != nil {
+			t.Fatalf("exercise WHEP track element selection: %v", err)
+		}
+		if result.VideoDisplay != "block" || result.VideoPlays == 0 || !result.VideoBound || result.AudioPlays != 0 {
+			t.Fatalf("WHEP track element selection = %#v, want video playback", result)
+		}
+	})
+}
+
+func TestConsoleMPEGTSPlaybackDoesNotStayConnectingWhenPlayPromisePending(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var result struct {
+			Status          string `json:"status"`
+			FirstDestroyed  int    `json:"firstDestroyed"`
+			SecondDestroyed int    `json:"secondDestroyed"`
+		}
+		expression := `(function() {
+			var oldMpegts = window.mpegts;
+			var oldPlay = HTMLMediaElement.prototype.play;
+			var players = [];
+			function fakePlayer() {
+				var player = {
+					attachMediaElement: function() {},
+					load: function() {},
+					play: function() { return new Promise(function() {}); },
+					on: function() {},
+					destroy: function() { player.destroyed = (player.destroyed || 0) + 1; }
+				};
+				players.push(player);
+				return player;
+			}
+			try {
+				window.mpegts = {
+					isSupported: function() { return true; },
+					createPlayer: fakePlayer,
+					Events: {ERROR: "error"}
+				};
+				HTMLMediaElement.prototype.play = function() { return new Promise(function() {}); };
+				endpoints.http = "127.0.0.1:8080";
+				streamMedia["live/pending"] = {video_codec:"H264", audio_codec:"Opus"};
+				playHTTPFLV("live/pending");
+				playHTTPFLV("live/pending");
+				return {
+					status: document.getElementById("player-status").textContent,
+					firstDestroyed: players[0] && players[0].destroyed || 0,
+					secondDestroyed: players[1] && players[1].destroyed || 0
+				};
+			} finally {
+				destroyCurrentPlayer();
+				window.mpegts = oldMpegts;
+				HTMLMediaElement.prototype.play = oldPlay;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &result)); err != nil {
+			t.Fatalf("exercise pending mpegts playback: %v", err)
+		}
+		if result.Status != "Connected, waiting for first decoded frame..." {
+			t.Fatalf("pending mpegts status = %q, want connected waiting status", result.Status)
+		}
+		if result.FirstDestroyed != 1 {
+			t.Fatalf("first pending mpegts player destroy calls = %d, want 1 after replacement", result.FirstDestroyed)
+		}
+		if result.SecondDestroyed != 0 {
+			t.Fatalf("second pending mpegts player destroyed before cleanup: %d", result.SecondDestroyed)
+		}
+	})
+}
+
+func TestConsoleMPEGTSPlaybackHandlesSynchronousStartupErrors(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var result struct {
+			Status string `json:"status"`
+			Thrown string `json:"thrown"`
+		}
+		expression := `(function() {
+			var oldMpegts = window.mpegts;
+			var thrown = "";
+			function fakePlayer() {
+				return {
+					attachMediaElement: function() { throw new Error("media element is busy"); },
+					load: function() {},
+					play: function() { return Promise.resolve(); },
+					on: function() {},
+					destroy: function() {}
+				};
+			}
+			try {
+				window.mpegts = {
+					isSupported: function() { return true; },
+					createPlayer: fakePlayer,
+					Events: {ERROR: "error"}
+				};
+				endpoints.http = "127.0.0.1:8080";
+				streamMedia["live/startup-error"] = {video_codec:"H264", audio_codec:"Opus"};
+				try { playHTTPFLV("live/startup-error"); } catch (e) { thrown = e.message || String(e); }
+				return {
+					status: document.getElementById("player-status").textContent,
+					thrown: thrown
+				};
+			} finally {
+				destroyCurrentPlayer();
+				window.mpegts = oldMpegts;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &result)); err != nil {
+			t.Fatalf("exercise synchronous mpegts startup error: %v", err)
+		}
+		if result.Thrown != "" {
+			t.Fatalf("mpegts startup propagated error %q", result.Thrown)
+		}
+		if result.Status != "Play error: media element is busy" {
+			t.Fatalf("mpegts startup error status = %q, want surfaced play error", result.Status)
+		}
+	})
 }
 
 func TestConsoleManagementActionsAreConfirmedAndPermissionAware(t *testing.T) {
@@ -1250,6 +1437,50 @@ func TestConsoleProtocolLabMediaAndCacheRendering(t *testing.T) {
 		}
 		if probe.GBVideoCodec != "H264" || probe.GBAudioCodec != "G711A" {
 			t.Errorf("GB28181 media hint = %s/%s, want H264/G711A", probe.GBVideoCodec, probe.GBAudioCodec)
+		}
+	})
+}
+
+func TestConsoleTrendRetainsSamplesAcrossGOPRotation(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var probe struct {
+			Samples string `json:"samples"`
+			Path    bool   `json:"path"`
+		}
+		expression := `(async function() {
+			var responses = [
+				{key:"live/trend", publisher:"pub", gop_generation:1, gop_duration_ms:800, stats:{video_frames:10, audio_frames:20, bitrate_kbps:500, fps:25}},
+				{key:"live/trend", publisher:"pub", gop_generation:2, gop_duration_ms:960, stats:{video_frames:35, audio_frames:40, bitrate_kbps:600, fps:25}}
+			];
+			var originalFetch = apiFetch;
+			var originalRows = streamRows;
+			try {
+				apiFetch = function() { return Promise.resolve(responses.shift()); };
+				streamRows = Object.create(null);
+				renderStreams([{key:"live/trend", state:"publishing", publisher:"pub", video_codec:"H264", audio_codec:"Opus", subscribers:{}, stats:{}}]);
+				selectStream("live/trend");
+				await new Promise(function(resolve) { setTimeout(resolve, 40); });
+				pollSelectedStream();
+				await new Promise(function(resolve) { setTimeout(resolve, 40); });
+				stopStreamTrendPolling();
+				return {
+					samples: document.getElementById("stream-detail-samples").textContent,
+					path: !!document.querySelector('#stream-detail-row [data-path="bitrate"][d]')
+				};
+			} finally {
+				stopStreamTrendPolling();
+				closeStreamDetail();
+				streamRows = originalRows;
+				apiFetch = originalFetch;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &probe, func(params *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return params.WithAwaitPromise(true)
+		})); err != nil {
+			t.Fatalf("exercise continuous stream trend: %v", err)
+		}
+		if !strings.Contains(probe.Samples, "2 / 60") || !probe.Path {
+			t.Fatalf("trend samples after GOP rotation = %#v", probe)
 		}
 	})
 }

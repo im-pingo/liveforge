@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,8 +32,6 @@ func TestWHEPPCMAudioPassthroughDeliversRTP(t *testing.T) {
 	}
 	if err := stream.SetPublisher(&g711TestPublisher{info: &avframe.MediaInfo{
 		AudioCodec: avframe.CodecG711A,
-		SampleRate: 8000,
-		Channels:   1,
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +86,9 @@ func TestWHEPPCMAudioPassthroughDeliversRTP(t *testing.T) {
 		SDP:  rr.Body.String(),
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(rr.Body.String(), "PCMA/8000") {
+		t.Fatalf("WHEP answer omitted PCMA/8000 for default G.711 parameters: %s", rr.Body.String())
 	}
 
 	connected := make(chan struct{})

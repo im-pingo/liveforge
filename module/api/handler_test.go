@@ -15,6 +15,7 @@ import (
 	configruntime "github.com/im-pingo/liveforge/config/runtime"
 	"github.com/im-pingo/liveforge/core"
 	"github.com/im-pingo/liveforge/module/dvr"
+	"github.com/im-pingo/liveforge/pkg/audiocodec"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
@@ -180,6 +181,34 @@ func TestHandleStreams_Publishing(t *testing.T) {
 	}
 	if si.Stats == nil {
 		t.Error("expected stats in stream list response")
+	}
+}
+
+func TestBuildStreamInfoReportsTranscodeTasks(t *testing.T) {
+	_, s := newTestHandlers(t)
+	stream, err := s.StreamHub().GetOrCreate("live/transcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetPublisher(&testPublisher{id: "aac-pub", info: &avframe.MediaInfo{AudioCodec: avframe.CodecAAC}}); err != nil {
+		t.Fatal(err)
+	}
+	tm := core.NewTranscodeManager(stream, &audiocodec.Registry{}, 16)
+	core.SetTranscodeManagerForTest(stream, tm)
+	reader, release, err := tm.GetOrCreateReader(avframe.CodecOpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	defer reader.Close()
+
+	info := buildStreamInfo(stream, false)
+	if len(info.TranscodeTasks) != 1 {
+		t.Fatalf("transcode task count = %d, want 1", len(info.TranscodeTasks))
+	}
+	task := info.TranscodeTasks[0]
+	if task.SourceCodec != "AAC" || task.TargetCodec != "Opus" || task.State != "running" || task.Subscribers != 1 {
+		t.Fatalf("transcode task = %+v", task)
 	}
 }
 

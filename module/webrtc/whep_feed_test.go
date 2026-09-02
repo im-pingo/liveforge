@@ -90,7 +90,10 @@ func TestWHEPFeedReadersKeepAtomicSourceCursorWhenTranscoderUnavailable(t *testi
 	)
 	stream.WriteFrame(betweenSnapshotAndReader)
 
-	readers := newWHEPFeedReaders(stream, snapshot, true, avframe.CodecOpus)
+	readers, err := newWHEPFeedReaders(stream, snapshot, true, avframe.CodecOpus)
+	if err != nil {
+		t.Fatalf("newWHEPFeedReaders: %v", err)
+	}
 	done := make(chan struct{})
 	readers.startWaiters(done, snapshot.GenerationDone)
 	defer func() {
@@ -146,8 +149,14 @@ func TestWHEPFeedReadersWakeIndependently(t *testing.T) {
 		RingBufferSize: 16,
 	}, config.LimitsConfig{}, core.NewEventBus())
 	snapshot := stream.StartupSnapshot()
-	r1 := newWHEPFeedReaders(stream, snapshot, false, 0)
-	r2 := newWHEPFeedReaders(stream, snapshot, false, 0)
+	r1, err := newWHEPFeedReaders(stream, snapshot, false, 0)
+	if err != nil {
+		t.Fatalf("newWHEPFeedReaders: %v", err)
+	}
+	r2, err := newWHEPFeedReaders(stream, snapshot, false, 0)
+	if err != nil {
+		t.Fatalf("newWHEPFeedReaders: %v", err)
+	}
 	defer r1.Close()
 	defer r2.Close()
 
@@ -182,7 +191,10 @@ func TestWHEPFeedReadersStopOnGenerationEnd(t *testing.T) {
 	}
 	stream.WriteFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader, 0, 0, []byte{1}))
 	snapshot := stream.StartupSnapshot()
-	readers := newWHEPFeedReaders(stream, snapshot, false, 0)
+	readers, err := newWHEPFeedReaders(stream, snapshot, false, 0)
+	if err != nil {
+		t.Fatalf("newWHEPFeedReaders: %v", err)
+	}
 	defer readers.Close()
 	done := make(chan struct{})
 	stream.RemovePublisher()

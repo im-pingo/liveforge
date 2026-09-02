@@ -3,6 +3,7 @@ package webrtc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -763,7 +764,11 @@ func whepFeedLoop(stream *core.Stream, startup core.StreamStartupSnapshot, video
 		gopCache = whepLiveSnapshot(startup, needsTranscode)
 	}
 
-	readers := newWHEPFeedReaders(stream, startup, needsTranscode, targetAudioCodec)
+	readers, readerErr := newWHEPFeedReaders(stream, startup, needsTranscode, targetAudioCodec)
+	if readerErr != nil {
+		status.SetError(WHEPFeedTargetAudioFailed, readerErr)
+		return
+	}
 	defer readers.Close()
 
 	// Live mode: send the cached GOP so the subscriber gets an immediate
@@ -1066,20 +1071,23 @@ var (
 	errWHEPReaderGenerationEnded = errors.New("whep reader generation ended")
 )
 
-func newWHEPFeedReaders(stream *core.Stream, snapshot core.StreamStartupSnapshot, needsTranscode bool, targetAudioCodec avframe.CodecType) *whepFeedReaders {
+func newWHEPFeedReaders(stream *core.Stream, snapshot core.StreamStartupSnapshot, needsTranscode bool, targetAudioCodec avframe.CodecType) (*whepFeedReaders, error) {
 	readers := &whepFeedReaders{source: stream.RingBuffer().NewReaderAt(snapshot.LiveCursor)}
 	if needsTranscode {
-		if tm := stream.TranscodeManager(); tm != nil {
-			reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, snapshot)
-			if err != nil {
-				slog.Warn("whep: audio transcode failed, video only", "error", err)
-			} else {
-				readers.targetAudio = reader
-				readers.release = release
-			}
+		tm := stream.TranscodeManager()
+		if tm == nil {
+			readers.Close()
+			return nil, errors.New("audio transcoding is not configured for this stream")
 		}
+		reader, release, err := tm.GetOrCreateAudioReaderAt(targetAudioCodec, snapshot)
+		if err != nil {
+			readers.Close()
+			return nil, fmt.Errorf("audio transcode setup failed: %w", err)
+		}
+		readers.targetAudio = reader
+		readers.release = release
 	}
-	return readers
+	return readers, nil
 }
 
 func (r *whepFeedReaders) Close() {

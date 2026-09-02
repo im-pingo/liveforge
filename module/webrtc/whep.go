@@ -191,9 +191,10 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info.HasAudio() && offerHasAudio {
-		canTranscode := stream.TranscodeManager() != nil &&
-			stream.TranscodeManager().CanTranscode(info.AudioCodec, avframe.CodecOpus)
-		targetAudioCodec, audioNeedsTranscode = selectWHEPAudioCodec(&parsedSDP, info.AudioCodec, canTranscode)
+		tm := stream.TranscodeManager()
+		targetAudioCodec, audioNeedsTranscode = selectWHEPAudioCodecForOffer(&parsedSDP, info.AudioCodec, func(target avframe.CodecType) bool {
+			return tm != nil && tm.CanTranscode(info.AudioCodec, target)
+		})
 		mime := codecToMime(targetAudioCodec)
 		if mime == "" {
 			sess.Close()
@@ -202,9 +203,14 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		}
 		clockRate := uint32(48000)
 		channels := uint16(2)
-		// When transcoding, always use Opus defaults (48kHz/2ch).
-		// For direct codec passthrough, use publisher's parameters.
-		if !audioNeedsTranscode {
+		// The target codec, rather than source metadata, determines the RTP
+		// clock/channel format for G.711. This also keeps direct PCMA/PCMU
+		// passthrough valid when an upstream publisher omitted its parameters.
+		if targetAudioCodec == avframe.CodecG711U || targetAudioCodec == avframe.CodecG711A {
+			clockRate = 8000
+			channels = 1
+		} else if !audioNeedsTranscode {
+			// For direct codec passthrough, use the publisher's parameters.
 			if info.SampleRate > 0 {
 				if info.SampleRate > 1<<32-1 {
 					sess.Close()
@@ -252,21 +258,31 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		audioSender.Start()
 	}
 
-	// Signal channel for when the peer connection is ready to send media.
+	// Signal channel for when ICE and DTLS/SRTP are ready to send media. ICE
+	// can reach "connected" before the DTLS handshake completes; sending the
+	// cached GOP at that point loses the only keyframe a late WHEP viewer may
+	// receive. Feed startup is therefore gated by PeerConnectionStateConnected.
 	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	markConnected := func() {
+		connectedOnce.Do(func() { close(connected) })
+	}
 
 	// Merge ICE state handling: log state, signal connection ready, and
 	// clean up on disconnect. This replaces the handler set by newSession.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		slog.Debug("WHEP ICE state", "module", "webrtc", "session", sessionID, "state", state)
 		switch state {
-		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
-			select {
-			case <-connected:
-			default:
-				close(connected)
-			}
 		case webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
+			sess.Close()
+		}
+	})
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		slog.Debug("WHEP peer connection state", "module", "webrtc", "session", sessionID, "state", state)
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			markConnected()
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			sess.Close()
 		}
 	})
@@ -515,9 +531,39 @@ func selectWHEPAudioCodec(parsed *sdp.SessionDescription, source avframe.CodecTy
 	if mime := codecToMime(source); mime != "" && offerSupportsCodec(parsed, "audio", mime) {
 		return source, false
 	}
-	if canTranscode && source != 0 && source != avframe.CodecOpus &&
-		offerSupportsCodec(parsed, "audio", webrtc.MimeTypeOpus) {
-		return avframe.CodecOpus, true
+	return selectWHEPAudioCodecForOffer(parsed, source, func(target avframe.CodecType) bool {
+		return canTranscode
+	})
+}
+
+// selectWHEPAudioCodecForOffer chooses a codec the offer can receive. Opus is
+// preferred, but PCMU/PCMA are valid browser fallbacks when the offer does not
+// advertise Opus. The capability callback is target-specific so a configured
+// registry cannot be mistaken for support for every conversion pair.
+func selectWHEPAudioCodecForOffer(parsed *sdp.SessionDescription, source avframe.CodecType, canTranscode func(avframe.CodecType) bool) (avframe.CodecType, bool) {
+	if source == 0 {
+		return 0, false
+	}
+	if mime := codecToMime(source); mime != "" && offerSupportsCodec(parsed, "audio", mime) {
+		return source, false
+	}
+	if canTranscode == nil {
+		return 0, false
+	}
+	for _, target := range []struct {
+		codec avframe.CodecType
+		mime  string
+	}{
+		{avframe.CodecOpus, webrtc.MimeTypeOpus},
+		{avframe.CodecG711U, webrtc.MimeTypePCMU},
+		{avframe.CodecG711A, webrtc.MimeTypePCMA},
+	} {
+		if target.codec == source || !canTranscode(target.codec) {
+			continue
+		}
+		if offerSupportsCodec(parsed, "audio", target.mime) {
+			return target.codec, true
+		}
 	}
 	return 0, false
 }

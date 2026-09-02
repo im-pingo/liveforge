@@ -315,14 +315,15 @@ go run ./tools/gb28181-sim -server 127.0.0.1:5060
 
 标签页顺序为 Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security。Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。视觉分组为 Workspace（Streams、GB28181、SIP Calls、Storage）、Operations（Cluster）和 System（Config、Security）。API 监听器启用 TLS 时，控制台登录签发的 HttpOnly、SameSite=Strict `lf_session` Cookie 会设置 `Secure`；本地纯 HTTP 监听器不会设置该属性。
 
-- 流列表：状态、编解码器、码率、帧率
-- GOP Cache 可视化，显示随关键帧递增的 generation、交错的视频/音频帧数和时长；纯音频流显示 `Not applicable (audio-only)`
+- 流列表：状态、编解码器、码率、帧率，以及正在运行的音频转码任务（`源 -> 目标`、状态、订阅数和有界错误）
+- GOP Cache 可视化，显示随关键帧递增的 generation、交错的视频/音频帧数和时长；纯音频流显示 `Not applicable (audio-only)`。选中流的四条趋势在普通 GOP 轮换时保持连续 60 秒窗口，仅在 publisher 或计数器重置时重新开始
 - 多协议预览播放器（HTTP-FLV、WS-FLV、HTTP-TS、FMP4、HLS、DASH、WebRTC 实时模式和 WebRTC Live 模式）
 - WebRTC 推流（摄像头/麦克风 + 发送端统计）
 - 权限感知的踢流、删流和运行时配置刷新
 - 集群 relay/peer 状态，以及 SIP 呼叫发起、详情和挂断
 - 录制详情/下载/在线预览/删除、DVR 会话/存储状态及 HLS 在线预览、安全状态和有界审计事件
 - WHEP 预览在浏览器自动播放策略需要时会让异步收到的媒体先静音启动，并提供 Unmute/Mute 控件恢复音频，不丢失音频轨
+- 当源音频 codec 不在浏览器 offer 中时，WHEP 优先转为 Opus，并在运行时具备 `audiocodec` 能力时回退到 offer 中的 PCMU/PCMA；answer 会使用目标 codec 对应的 RTP 格式（Opus 48 kHz 双声道、G.711 8 kHz 单声道），Streams API 和流列表显示有界 `transcode_tasks` 诊断
 - 完整脱敏 Config 文档/schema 展示、只读 Validate、按数据源执行 Apply & Refresh，并显示 file、HTTP/HTTPS、Consul、Redis 的可写/只读状态
 - SIP 和 GB28181 本地协议实验室结果，以及模块不可用状态；两者都支持无需外部平台的持久 H.264 加 G.711 模拟设备发布/接收，会话显示分轨 RTP/RTCP/PS 计数，停止时清理资源，并可通过已启用的其他输出协议预览
 

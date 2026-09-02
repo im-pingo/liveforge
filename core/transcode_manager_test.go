@@ -112,6 +112,26 @@ func TestTranscodeManagerCreateTrack(t *testing.T) {
 	}
 }
 
+func TestTranscodeManagerReportsTaskSnapshot(t *testing.T) {
+	s := newTranscodeTestStream(avframe.CodecG711U)
+	tm := s.TranscodeManager()
+	reader, release, err := tm.GetOrCreateReader(avframe.CodecOpus)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer release()
+	if reader == nil {
+		t.Fatal("expected non-nil reader")
+	}
+	tasks := tm.TranscodeTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+	if task := tasks[0]; task.SourceCodec != avframe.CodecG711U || task.TargetCodec != avframe.CodecOpus || task.AudioOnly || task.State != "running" || task.Subscribers != 1 {
+		t.Fatalf("task snapshot = %+v", task)
+	}
+}
+
 func TestTranscodeManagerReaderAtPreservesSnapshotStart(t *testing.T) {
 	s := newTranscodeTestStream(avframe.CodecG711U)
 	tm := s.TranscodeManager()

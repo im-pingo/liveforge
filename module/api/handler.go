@@ -52,18 +52,30 @@ func writeError(w http.ResponseWriter, httpCode int, msg string) {
 
 // StreamInfo represents a single stream in the API response.
 type StreamInfo struct {
-	Key            string             `json:"key"`
-	State          string             `json:"state"`
-	Publisher      string             `json:"publisher"`
-	VideoCodec     string             `json:"video_codec"`
-	AudioCodec     string             `json:"audio_codec"`
-	GOPCacheLen    int                `json:"gop_cache_len"`
-	GOPVideoFrames int                `json:"gop_video_frames"`
-	GOPAudioFrames int                `json:"gop_audio_frames"`
-	GOPDurationMs  int64              `json:"gop_duration_ms"`
-	GOPGeneration  uint64             `json:"gop_generation"`
-	Subscribers    map[string]int     `json:"subscribers"`
-	Stats          *StreamStatsDetail `json:"stats,omitempty"`
+	Key            string              `json:"key"`
+	State          string              `json:"state"`
+	Publisher      string              `json:"publisher"`
+	VideoCodec     string              `json:"video_codec"`
+	AudioCodec     string              `json:"audio_codec"`
+	GOPCacheLen    int                 `json:"gop_cache_len"`
+	GOPVideoFrames int                 `json:"gop_video_frames"`
+	GOPAudioFrames int                 `json:"gop_audio_frames"`
+	GOPDurationMs  int64               `json:"gop_duration_ms"`
+	GOPGeneration  uint64              `json:"gop_generation"`
+	Subscribers    map[string]int      `json:"subscribers"`
+	TranscodeTasks []TranscodeTaskInfo `json:"transcode_tasks,omitempty"`
+	Stats          *StreamStatsDetail  `json:"stats,omitempty"`
+}
+
+// TranscodeTaskInfo describes an on-demand audio conversion currently owned
+// by the stream, including failures that are still visible to subscribers.
+type TranscodeTaskInfo struct {
+	SourceCodec string `json:"source_codec"`
+	TargetCodec string `json:"target_codec"`
+	AudioOnly   bool   `json:"audio_only"`
+	State       string `json:"state"`
+	Subscribers int    `json:"subscribers"`
+	LastError   string `json:"last_error,omitempty"`
 }
 
 // StreamStatsDetail contains detailed stream statistics.
@@ -107,6 +119,18 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 		GOPDurationMs:  gopDetail.DurationMs,
 		GOPGeneration:  gopDetail.Generation,
 		Subscribers:    subs,
+	}
+	if tm := stream.TranscodeManager(); tm != nil {
+		for _, task := range tm.TranscodeTasks() {
+			info.TranscodeTasks = append(info.TranscodeTasks, TranscodeTaskInfo{
+				SourceCodec: task.SourceCodec.String(),
+				TargetCodec: task.TargetCodec.String(),
+				AudioOnly:   task.AudioOnly,
+				State:       task.State,
+				Subscribers: task.Subscribers,
+				LastError:   task.LastError,
+			})
+		}
 	}
 
 	if pub := stream.Publisher(); pub != nil {

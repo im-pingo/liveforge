@@ -276,6 +276,8 @@ The Console's default WHEP preview uses the cached live startup path, so a norma
 
 WHEP status also exposes `source_overwrites`. This is the number of source-ring positions lost during recovery and is intentionally separate from `dropped_video` and `dropped_audio`, because a mixed source ring cannot attribute each lost position to one media kind. Direct audio pacing is reset at the same recovery boundary; transformed target-audio pacing remains independent.
 
+When source audio is not directly offered by the browser, WHEP prefers Opus and falls back to an offered PCMU/PCMA target when the configured `audiocodec` runtime can convert it; each answer uses the selected target's RTP format (Opus 48 kHz stereo, G.711 8 kHz mono). The Streams API exposes bounded `transcode_tasks` diagnostics for active conversion readers.
+
 **GB28181:**
 Configure your IP camera's SIP server to point at `localhost:5060`, or use the built-in simulator:
 ```bash
@@ -314,8 +316,8 @@ Open `http://localhost:8090/console` for the real-time management dashboard. Pre
 
 The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, and Security. Recent Audit is a surface inside Security, not a separate tab. The visual groups are Workspace (Streams, GB28181, SIP Calls, Storage), Operations (Cluster), and System (Config, Security). When the API listener uses TLS, console login issues the HttpOnly, SameSite=Strict `lf_session` cookie with `Secure`; the local plain-HTTP listener leaves `Secure` unset.
 
-- Live stream list with state, codecs, bitrate, FPS
-- GOP Cache visualization with keyframe-driven generation, interleaved video/audio frame counts, and duration; audio-only streams show `Not applicable (audio-only)`
+- Live stream list with state, codecs, bitrate, FPS, and visible on-demand audio transcode tasks (`source -> target`, state, subscriber count, and bounded errors)
+- GOP Cache visualization with keyframe-driven generation, interleaved video/audio frame counts, and duration; audio-only streams show `Not applicable (audio-only)`. Selected-stream trends retain a continuous 60-second window across ordinary GOP rotations and reset only for a publisher or counter reset
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WebRTC realtime, and WebRTC Live)
 - WebRTC publish with camera/mic and outbound stats
 - Permission-aware stream kick/delete and runtime config refresh

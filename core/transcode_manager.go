@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -16,6 +17,8 @@ import (
 // TranscodedTrack holds source-attributed output for a specific target codec.
 type TranscodedTrack struct {
 	targetCodec        avframe.CodecType
+	sourceCodec        atomic.Uint32
+	sourceEpoch        atomic.Uint64
 	ringBuffer         *util.RingBuffer[transcodeOutput]
 	sourceStart        int64
 	sourceCursor       atomic.Int64
@@ -29,6 +32,17 @@ type TranscodedTrack struct {
 	termination        error
 	subCount           int
 	cancel             context.CancelCauseFunc
+}
+
+// TranscodeTaskSnapshot is a bounded point-in-time view of one on-demand
+// audio conversion task. It is safe to expose through management APIs.
+type TranscodeTaskSnapshot struct {
+	SourceCodec avframe.CodecType
+	TargetCodec avframe.CodecType
+	AudioOnly   bool
+	State       string
+	Subscribers int
+	LastError   string
 }
 
 const transcodeSequenceHeaderCacheLimit = 8
@@ -138,6 +152,79 @@ func NewTranscodeManager(stream *Stream, registry *audiocodec.Registry, bufSize 
 // one audio codec to another in the current build.
 func (tm *TranscodeManager) CanTranscode(from, to avframe.CodecType) bool {
 	return tm != nil && tm.registry != nil && tm.registry.CanTranscode(from, to)
+}
+
+// TranscodeTasks returns active tasks owned by this manager. The result
+// contains no mutable internal references; tasks are removed when their last
+// subscriber releases them or the publisher generation is reset.
+func (tm *TranscodeManager) TranscodeTasks() []TranscodeTaskSnapshot {
+	if tm == nil {
+		return nil
+	}
+	tm.mu.Lock()
+	type taskEntry struct {
+		codec       avframe.CodecType
+		audioOnly   bool
+		track       *TranscodedTrack
+		subscribers int
+	}
+	entries := make([]taskEntry, 0, len(tm.tracks)+len(tm.audioTracks))
+	for codec, track := range tm.tracks {
+		entries = append(entries, taskEntry{codec: codec, track: track, subscribers: track.subCount})
+	}
+	for codec, track := range tm.audioTracks {
+		entries = append(entries, taskEntry{codec: codec, audioOnly: true, track: track, subscribers: track.subCount})
+	}
+	tm.mu.Unlock()
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].audioOnly != entries[j].audioOnly {
+			return !entries[i].audioOnly
+		}
+		return entries[i].codec < entries[j].codec
+	})
+
+	result := make([]TranscodeTaskSnapshot, 0, len(entries))
+	for _, entry := range entries {
+		track := entry.track
+		if track == nil {
+			continue
+		}
+		task := TranscodeTaskSnapshot{
+			SourceCodec: avframe.CodecType(track.sourceCodec.Load()),
+			TargetCodec: entry.codec,
+			AudioOnly:   entry.audioOnly,
+			State:       "running",
+			Subscribers: entry.subscribers,
+		}
+		if cause := track.terminationCause(); cause != nil {
+			task.State = transcodeTaskState(cause)
+			task.LastError = boundedTranscodeError(cause)
+		}
+		result = append(result, task)
+	}
+	return result
+}
+
+func transcodeTaskState(cause error) string {
+	switch {
+	case errors.Is(cause, errTranscodeGenerationComplete):
+		return "completed"
+	case errors.Is(cause, errTranscodeSubscriberReleased), errors.Is(cause, errTranscodeManagerReset):
+		return "stopped"
+	default:
+		return "failed"
+	}
+}
+
+func boundedTranscodeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	if len(message) > 256 {
+		return message[:256]
+	}
+	return message
 }
 
 // GetOrCreateReader returns a reader for the given target codec.
@@ -264,6 +351,8 @@ func (tm *TranscodeManager) getOrCreateReaderAt(
 		generationDone:     generationDone,
 		generationBoundary: generationBoundary,
 	}
+	track.sourceCodec.Store(uint32(sourceCodec))
+	track.sourceEpoch.Store(audioEpochFloor)
 	track.sourceCursor.Store(sourceStart)
 	tracks[targetCodec] = track
 
@@ -883,6 +972,8 @@ func (tm *TranscodeManager) transcodeLoop(
 					}
 					sourceCodec = frame.Codec
 					sourceEpoch = frameEpoch
+					track.sourceCodec.Store(uint32(sourceCodec))
+					track.sourceEpoch.Store(sourceEpoch)
 					if sourceCodec != track.targetCodec {
 						var pipelineErr error
 						pipeline, pipelineErr = tm.newAudioTranscodePipeline(track, sourceCodec, sourceEpoch)

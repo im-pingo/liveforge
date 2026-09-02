@@ -124,6 +124,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 }
 .codec-tag.video { color: var(--blue); border-color: rgba(96,165,250,0.2); background: rgba(96,165,250,0.08); }
 .codec-tag.audio { color: #c084fc; border-color: rgba(192,132,252,0.2); background: rgba(192,132,252,0.08); }
+.transcode-tag { display: block; margin-top: 4px; color: var(--amber); font: 10px/1.2 "SF Mono", "Fira Code", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
 
 /* GOP cache */
@@ -2171,8 +2172,8 @@ function streamHasVideo(streamKey) {
   return ["h264", "avc", "avc1", "h265", "hevc", "hev1", "hvc1", "av1", "av01", "vp8", "vp08", "vp9", "vp09"].indexOf(codec) >= 0;
 }
 
-function selectStreamMediaElement(streamKey) {
-  var hasVideo = streamHasVideo(streamKey);
+function selectStreamMediaElement(streamKey, trackKind) {
+  var hasVideo = trackKind === "video" || streamHasVideo(streamKey);
   var wrap = document.querySelector('.player-video-wrap');
   var video = document.getElementById("player-video");
   var audio = document.getElementById("player-audio");
@@ -2191,7 +2192,8 @@ function monitorPlayableAudio(audio, generation, label, streamKey) {
 }
 
 function monitorStreamMedia(mediaElement, generation, label, streamKey) {
-  if (streamHasVideo(streamKey)) {
+  var videoElement = document.getElementById("player-video");
+  if (mediaElement === videoElement || streamHasVideo(streamKey)) {
     monitorPlayableVideo(mediaElement, generation, label, streamKey);
   } else {
     monitorPlayableAudio(mediaElement, generation, label, streamKey);
@@ -2310,6 +2312,28 @@ function playerPlaybackPath(playback, field, fallback) {
   return typeof value === "string" && value ? value : fallback;
 }
 
+function startMPEGTSPlayback(player, mediaElement, generation, label, streamKey) {
+  var playPromise;
+  try {
+    playPromise = player.play();
+  } catch (e) {
+    if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + formatErr(e), "error");
+    return;
+  }
+  if (!isCurrentPlayer(generation)) return;
+
+  // HTMLMediaElement.play() may remain pending until the first decodable
+  // sample arrives. Do not use that promise as the connection state gate;
+  // monitor media progress independently and surface a later rejection.
+  setPlayerStatus("Connected, waiting for first decoded frame...");
+  monitorStreamMedia(mediaElement, generation, label, streamKey);
+  if (playPromise && typeof playPromise.catch === "function") {
+    playPromise.catch(function(e) {
+      if (isCurrentPlayer(generation)) setPlayerStatus("Play error: " + formatErr(e), "error");
+    });
+  }
+}
+
 function playHTTPFLV(streamKey, playbackPath) {
   destroyCurrentPlayer();
   var generation = playerGeneration;
@@ -2322,30 +2346,27 @@ function playHTTPFLV(streamKey, playbackPath) {
     setPlayerStatus("mpegts.js not supported in this browser", "error");
     return;
   }
-  var player = mpegts.createPlayer({
-    type: "flv",
-    url: url,
-    isLive: true
-  });
-  player.attachMediaElement(mediaElement);
-  player.load();
-  player.play().then(function() {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorStreamMedia(mediaElement, generation, "HTTP-FLV", streamKey);
-  }).catch(function(e) {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Play error: " + e.message, "error");
-  });
-  player.on(mpegts.Events.ERROR, function(t, d, e) {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Error: " + formatErr(e || d || t), "error");
-  });
-  if (!isCurrentPlayer(generation)) {
-    try { player.destroy(); } catch(e) {}
+  var player = null;
+  try {
+    player = mpegts.createPlayer({
+      type: "flv",
+      url: url,
+      isLive: true
+    });
+    currentPlayer = player;
+    player.on(mpegts.Events.ERROR, function(t, d, e) {
+      if (!isCurrentPlayer(generation)) return;
+      setPlayerStatus("Error: " + formatErr(e || d || t), "error");
+    });
+    player.attachMediaElement(mediaElement);
+    player.load();
+    startMPEGTSPlayback(player, mediaElement, generation, "HTTP-FLV", streamKey);
+  } catch (e) {
+    if (currentPlayer === player) destroyCurrentPlayer();
+    else if (player) { try { player.destroy(); } catch (ignored) {} }
+    setPlayerStatus("Play error: " + formatErr(e), "error");
     return;
   }
-  currentPlayer = player;
 }
 
 function playWSFLV(streamKey, playbackPath) {
@@ -2360,30 +2381,27 @@ function playWSFLV(streamKey, playbackPath) {
     setPlayerStatus("mpegts.js not supported in this browser", "error");
     return;
   }
-  var player = mpegts.createPlayer({
-    type: "flv",
-    url: url,
-    isLive: true
-  });
-  player.attachMediaElement(mediaElement);
-  player.load();
-  player.play().then(function() {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorStreamMedia(mediaElement, generation, "WS-FLV", streamKey);
-  }).catch(function(e) {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Play error: " + e.message, "error");
-  });
-  player.on(mpegts.Events.ERROR, function(t, d, e) {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Error: " + formatErr(e || d || t), "error");
-  });
-  if (!isCurrentPlayer(generation)) {
-    try { player.destroy(); } catch(e) {}
+  var player = null;
+  try {
+    player = mpegts.createPlayer({
+      type: "flv",
+      url: url,
+      isLive: true
+    });
+    currentPlayer = player;
+    player.on(mpegts.Events.ERROR, function(t, d, e) {
+      if (!isCurrentPlayer(generation)) return;
+      setPlayerStatus("Error: " + formatErr(e || d || t), "error");
+    });
+    player.attachMediaElement(mediaElement);
+    player.load();
+    startMPEGTSPlayback(player, mediaElement, generation, "WS-FLV", streamKey);
+  } catch (e) {
+    if (currentPlayer === player) destroyCurrentPlayer();
+    else if (player) { try { player.destroy(); } catch (ignored) {} }
+    setPlayerStatus("Play error: " + formatErr(e), "error");
     return;
   }
-  currentPlayer = player;
 }
 
 function playHTTPTS(streamKey, playbackPath) {
@@ -2398,30 +2416,27 @@ function playHTTPTS(streamKey, playbackPath) {
     setPlayerStatus("mpegts.js not supported in this browser", "error");
     return;
   }
-  var player = mpegts.createPlayer({
-    type: "mpegts",
-    url: url,
-    isLive: true
-  });
-  player.attachMediaElement(mediaElement);
-  player.load();
-  player.play().then(function() {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Connected, waiting for first decoded frame...");
-    monitorStreamMedia(mediaElement, generation, "HTTP-TS", streamKey);
-  }).catch(function(e) {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Play error: " + e.message, "error");
-  });
-  player.on(mpegts.Events.ERROR, function(t, d, e) {
-    if (!isCurrentPlayer(generation)) return;
-    setPlayerStatus("Error: " + formatErr(e || d || t), "error");
-  });
-  if (!isCurrentPlayer(generation)) {
-    try { player.destroy(); } catch(e) {}
+  var player = null;
+  try {
+    player = mpegts.createPlayer({
+      type: "mpegts",
+      url: url,
+      isLive: true
+    });
+    currentPlayer = player;
+    player.on(mpegts.Events.ERROR, function(t, d, e) {
+      if (!isCurrentPlayer(generation)) return;
+      setPlayerStatus("Error: " + formatErr(e || d || t), "error");
+    });
+    player.attachMediaElement(mediaElement);
+    player.load();
+    startMPEGTSPlayback(player, mediaElement, generation, "HTTP-TS", streamKey);
+  } catch (e) {
+    if (currentPlayer === player) destroyCurrentPlayer();
+    else if (player) { try { player.destroy(); } catch (ignored) {} }
+    setPlayerStatus("Play error: " + formatErr(e), "error");
     return;
   }
-  currentPlayer = player;
 }
 
 function fmp4MimeCandidates(streamKey) {
@@ -2631,15 +2646,31 @@ function playHLS(streamKey, playbackPath) {
     var hls = new Hls({
       liveDurationInfinity: true,
       enableWorker: true,
-      lowLatencyMode: true
+      lowLatencyMode: true,
+      startFragPrefetch: true,
+      maxBufferLength: 6,
+      maxMaxBufferLength: 12
     });
     currentHls = hls;
 
     hls.loadSource(url);
     hls.attachMedia(video);
 
-    hls.on(Hls.Events.MANIFEST_PARSED, function() {
-      if (!isCurrentPlayer(generation) || currentHls !== hls) return;
+    var hlsPlaybackStarted = false;
+    var startHLSPlayback = function() {
+      if (hlsPlaybackStarted || !isCurrentPlayer(generation) || currentHls !== hls) return;
+      // MANIFEST_PARSED only confirms the playlist, not that a media segment
+      // has reached the media element. Waiting for a small buffered lead avoids
+      // the initial play/pause hiccup seen while the first segment is fetched.
+      var bufferedAhead = 0;
+      if (video.buffered && video.buffered.length) {
+        bufferedAhead = Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime);
+      }
+      if (video.readyState < 2 || bufferedAhead < 0.15) {
+        setTimeout(startHLSPlayback, 100);
+        return;
+      }
+      hlsPlaybackStarted = true;
       video.play().then(function() {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Connected, waiting for first decoded frame...");
@@ -2648,6 +2679,9 @@ function playHLS(streamKey, playbackPath) {
         if (!isCurrentPlayer(generation) || currentHls !== hls) return;
         setPlayerStatus("Play error: " + e.message, "error");
       });
+    };
+    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+      startHLSPlayback();
     });
 
     hls.on(Hls.Events.ERROR, function(event, data) {
@@ -2768,7 +2802,7 @@ function playWHEP(streamKey, mode, playbackPath) {
 
   var remoteStream = new MediaStream();
   var receivedTrack = false;
-  var playbackMonitorStarted = false;
+  var playbackMonitorKind = "";
   var mediaElement = selectStreamMediaElement(streamKey);
   var hasVideo = streamHasVideo(streamKey);
   mediaElement.srcObject = remoteStream;
@@ -2780,13 +2814,23 @@ function playWHEP(streamKey, mode, playbackPath) {
   pc.ontrack = function(event) {
     if (!isCurrentPlayer(generation)) return;
     receivedTrack = true;
+    // Streams metadata can lag behind the first WHIP video packet. Prefer the
+    // negotiated track kind so a video track cannot be attached to the audio
+    // fallback element while the list is still refreshing.
+    if (event.track.kind === "video") {
+      hasVideo = true;
+      mediaElement = selectStreamMediaElement(streamKey, "video");
+    } else if (event.track.kind === "audio" && !hasVideo) {
+      mediaElement = selectStreamMediaElement(streamKey, "audio");
+    }
     remoteStream.addTrack(event.track);
     // Rebind after the first track arrives so browsers refresh an element
     // that was initially attached to an empty MediaStream.
     mediaElement.srcObject = remoteStream;
     if (event.track.kind === "audio") setPlayerAudioControl(mediaElement, true);
-    if (!playbackMonitorStarted && (event.track.kind === "video" || !hasVideo)) {
-      playbackMonitorStarted = true;
+    var shouldStartPlayback = event.track.kind === "video" || (!hasVideo && event.track.kind === "audio");
+    if (shouldStartPlayback && playbackMonitorKind !== event.track.kind) {
+      playbackMonitorKind = event.track.kind;
       var playPromise = mediaElement.play();
       monitorStreamMedia(mediaElement, generation, "WebRTC/WHEP", streamKey);
       playPromise.catch(function(e) {
@@ -3142,6 +3186,17 @@ function updateStreamRow(row, s) {
     tag.textContent = value;
     n.codec.appendChild(tag);
   });
+  var transcodeTasks = Array.isArray(s.transcode_tasks) ? s.transcode_tasks : [];
+  transcodeTasks.forEach(function(task) {
+    var transcode = document.createElement("span");
+    transcode.className = "transcode-tag";
+    var source = task.source_codec || "?";
+    var target = task.target_codec || "?";
+    var scope = task.audio_only ? "audio" : "shared";
+    transcode.textContent = "↻ " + source + " → " + target + " · " + (task.state || "running") + " · " + scope;
+    if (task.last_error) transcode.title = task.last_error;
+    n.codec.appendChild(transcode);
+  });
   if (!n.codec.childNodes.length) n.codec.textContent = "-";
   n.bitrate.textContent = formatBitrate(st.bitrate_kbps);
   n.fps.textContent = st.fps ? Number(st.fps).toFixed(1) : "-";
@@ -3276,15 +3331,20 @@ function pollSelectedStream() {
   apiFetch("/api/v1/streams/" + encodedStreamPath(key), {signal:ctrl.signal}).then(function(data) {
     if (generation !== streamTrendGeneration || key !== selectedStreamKey || !data) return;
     var stats = data.stats || {};
-    var previous = streamTrendState.previous;
-    var videoFPS = previous && stats.video_frames != null ? Math.max(0, Number(stats.video_frames) - Number(previous.video_frames || 0)) : Number(stats.fps || 0);
-    var audioFPS = previous && stats.audio_frames != null ? Math.max(0, Number(stats.audio_frames) - Number(previous.audio_frames || 0)) : 0;
     var publisher = String(data.publisher || "");
-    if ((data.gop_generation != null && streamTrendState.generation != null && streamTrendState.generation !== data.gop_generation) ||
-        (streamTrendState.publisher != null && streamTrendState.publisher !== publisher)) {
+    var previous = streamTrendState.previous;
+    // GOP generation advances on every keyframe. It is a cache label, not a
+    // publisher lifecycle boundary, so it must not clear the rolling trend.
+    // Only a publisher replacement (or a reset counter) starts a new series.
+    var countersReset = previous && ((stats.video_frames != null && Number(stats.video_frames) < Number(previous.video_frames || 0)) ||
+      (stats.audio_frames != null && Number(stats.audio_frames) < Number(previous.audio_frames || 0)));
+    if ((streamTrendState.publisher != null && streamTrendState.publisher !== publisher) || countersReset) {
       streamTrendState.samples = {bitrate:[], videoFps:[], audioFps:[], gopDuration:[]};
       streamTrendState.previous = null;
+      previous = null;
     }
+    var videoFPS = previous && stats.video_frames != null ? Math.max(0, Number(stats.video_frames) - Number(previous.video_frames || 0)) : Number(stats.fps || 0);
+    var audioFPS = previous && stats.audio_frames != null ? Math.max(0, Number(stats.audio_frames) - Number(previous.audio_frames || 0)) : 0;
     streamTrendState.generation = data.gop_generation;
     streamTrendState.publisher = publisher;
     streamTrendState.previous = {video_frames:stats.video_frames, audio_frames:stats.audio_frames};

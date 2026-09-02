@@ -89,6 +89,17 @@ failure. A source kind omitted by the offer, disabled with port zero, or marked
 requested kind. Media-level direction overrides session-level direction, and codec
 matching requires an exact `rtpmap` name on a payload listed by that m-line.
 
+When the source audio codec is not offered directly, WHEP selects the first offered
+target in this order: Opus, PCMU, then PCMA. The target is selected only when the
+running process can convert the source through its configured `audiocodec` registry;
+portable no-CGO builds therefore still return 415 for a source that needs conversion.
+The answer advertises Opus as 48 kHz stereo or G.711 as 8 kHz mono. A converted
+reader setup failure is reported as `target_audio_failed` and is never silently
+downgraded to video-only. `GET /api/v1/streams/{stream_key}` exposes the active
+conversion as `transcode_tasks`, including source/target codec, scope, state,
+subscriber count, and a bounded error. The Console renders that task beneath the
+stream's codec tags.
+
 The plain HTTP FMP4 path establishes a near-zero timeline when the shared muxer starts, with the first cached GOP rebased once and later fragments preserving their relative DTS and PTS. Subscribers share already-muxed bytes, so a late subscriber is not independently rebased to zero. The Console appends fragments to an MSE `segments` SourceBuffer so explicit `tfdt` values and signed HEVC B-frame composition offsets remain authoritative, then starts playback at that subscriber's first buffered timestamp. An MSE failure aborts and releases the live response; a finite response reaches `endOfStream()` only after queued appends drain.
 
 For every mode, require all of the following:
@@ -119,6 +130,6 @@ Check these failure signatures:
 - WHIP H.265 + Opus has a fixed audio offset across HLS, DASH, FLV, or TS: inspect the WHIP session timeline. Audio and video must be mapped onto one session clock from their packet arrival offsets; each track must not independently reset DTS to zero. For transcoded output, confirm the audio reader starts at the cached GOP source position.
 - WHEP video arrives in `80ms + 0ms` bursts after source audio pauses: the WebRTC audio transcode worker must wait on its ring reader condition and must not consume the shared source playback wakeup. Run `CGO_ENABLED=1 go test -tags audiocodec ./module/webrtc -run TestWHEPJitterDiagnostic/video_audio_transcode -count=1 -timeout=180s -v` and confirm zero bursts, no sequence gaps, and a stable jitter trend.
 - `lf-test` realtime WHIP pacing rebases the current packet when processing falls behind the media timeline. This prevents an old absolute anchor from emitting a catch-up burst; the regression is covered by `TestWHIPRealtimePacerRebasesAfterFallingBehind`.
-- HLS or LL-HLS pauses after cached playback: verify the segmenter-specific compatibility path uses its combined historical transcode reader and filters only duplicated cached video by video DTS. Shared HTTP FLV/TS/fMP4 workers instead use independent direct-video and transformed-audio readers. The bundled Hls.js requires one completed segment in its initial manifest, then consumes low-latency parts; the server must not wait for the old three-segment buffer. The live reader begins at the atomic snapshot cursor, so no cross-track DTS watermark should discard a valid frame.
+- HLS or LL-HLS pauses after cached playback: verify the segmenter-specific compatibility path uses its combined historical transcode reader and filters only duplicated cached video by video DTS. Shared HTTP FLV/TS/fMP4 workers instead use independent direct-video and transformed-audio readers. The bundled Hls.js requires one completed segment in its initial manifest, then consumes low-latency parts; the server must not wait for the old three-segment buffer. The Console starts playback only after the media element has buffered a small lead, so `MANIFEST_PARSED` cannot trigger an initial play/pause hiccup. The live reader begins at the atomic snapshot cursor, so no cross-track DTS watermark should discard a valid frame.
 - DASH startup takes multiple GOPs or stalls after a segment: the initial MPD should return after one complete keyframe-bounded segment, advertise a `minimumUpdatePeriod` of at most two seconds, preserve measured GOP durations in `SegmentTimeline`, and use one fragment of player live delay. A cold DASH manager still needs the next keyframe to close its first segment; for a 30 fps publisher with `keyint=250`, this bounded wait can approach 8.3 seconds but must not multiply across three segments.
 - FLV/TS playback has no audio: confirm the binary was built with `CGO_ENABLED=1 -tags audiocodec` and that FFmpeg libraries were found. For a same-session codec transition, confirm direct-AAC startup still has a shared target reader, generated target headers never claim direct ownership, a later G.711/Opus epoch creates fresh transform state, and unsupported epochs neither close the mapped track nor poison later readers. A late reader must begin at its snapshot epoch floor rather than retained older audio.

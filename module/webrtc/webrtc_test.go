@@ -703,8 +703,9 @@ func TestSelectWHEPAudioCodecHonorsOffer(t *testing.T) {
 		{name: "direct PCMA", source: avframe.CodecG711A, offerCodecs: []string{"PCMA"}, want: avframe.CodecG711A},
 		{name: "PCMA to Opus", source: avframe.CodecG711A, offerCodecs: []string{"opus"}, canTranscode: true, want: avframe.CodecOpus, wantTranscode: true},
 		{name: "AAC to Opus", source: avframe.CodecAAC, offerCodecs: []string{"opus"}, canTranscode: true, want: avframe.CodecOpus, wantTranscode: true},
+		{name: "AAC to PCMU fallback", source: avframe.CodecAAC, offerCodecs: []string{"PCMU"}, canTranscode: true, want: avframe.CodecG711U, wantTranscode: true},
 		{name: "unsupported source", source: avframe.CodecG711A, offerCodecs: []string{"opus"}},
-		{name: "unsupported offer", source: avframe.CodecG711A, offerCodecs: []string{"PCMU"}, canTranscode: true},
+		{name: "PCMA to PCMU fallback", source: avframe.CodecG711A, offerCodecs: []string{"PCMU"}, canTranscode: true, want: avframe.CodecG711U, wantTranscode: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

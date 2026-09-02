@@ -1086,7 +1086,11 @@ components:
     StreamInfo:
       type: object
       required: [key, state, publisher, video_codec, audio_codec, gop_cache_len, gop_video_frames, gop_audio_frames, gop_duration_ms, gop_generation, subscribers]
-      properties: {key: {type: string}, state: {type: string}, publisher: {type: string}, video_codec: {type: string}, audio_codec: {type: string}, gop_cache_len: {type: integer}, gop_video_frames: {type: integer}, gop_audio_frames: {type: integer}, gop_duration_ms: {type: integer, format: int64}, gop_generation: {type: integer, format: int64, description: Monotonic stream-lifetime counter incremented when a new video keyframe starts a cached GOP.}, subscribers: {type: object, additionalProperties: {type: integer}}, stats: {$ref: '#/components/schemas/StreamStats'}}
+      properties: {key: {type: string}, state: {type: string}, publisher: {type: string}, video_codec: {type: string}, audio_codec: {type: string}, gop_cache_len: {type: integer}, gop_video_frames: {type: integer}, gop_audio_frames: {type: integer}, gop_duration_ms: {type: integer, format: int64}, gop_generation: {type: integer, format: int64, description: Monotonic stream-lifetime counter incremented when a new video keyframe starts a cached GOP.}, subscribers: {type: object, additionalProperties: {type: integer}}, transcode_tasks: {type: array, description: Active on-demand audio conversion tasks and bounded terminal diagnostics., items: {$ref: '#/components/schemas/TranscodeTask'}}, stats: {$ref: '#/components/schemas/StreamStats'}}
+    TranscodeTask:
+      type: object
+      required: [source_codec, target_codec, audio_only, state, subscribers]
+      properties: {source_codec: {type: string}, target_codec: {type: string}, audio_only: {type: boolean}, state: {type: string, enum: [running, completed, stopped, failed]}, subscribers: {type: integer}, last_error: {type: string, description: Bounded setup or terminal diagnostic}}
     StreamsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {streams: {type: array, items: {$ref: '#/components/schemas/StreamInfo'}}}}}}]}
     StreamResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/StreamInfo'}}}]}
     AuditEntry:
