@@ -2,7 +2,7 @@
 
 > Source-aligned project status. Update this file only after implementation and a passing verification path exist.
 >
-> Last updated: 2026-08-30
+> Last updated: 2026-09-02
 
 ## Current Status
 
@@ -46,6 +46,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - Status and Prometheus counters for accepted, rejected, application-failed, callback-failed, superseded callback, consecutive failure, and pending restart state.
 - Callback coalescing retains the latest transition and increments `DroppedCallbacks` for superseded pending notifications.
 - Source loads, Config Apply writes, and close are serialized by a cancellable source-I/O gate; Apply returns 202 only after the source write succeeds, while parse/application/publication remain asynchronous.
+- A successful ConfigWriter write publishes a pending desired overlay immediately; stale asynchronous source reads cannot overwrite it, and the overlay is cleared only after matching content is successfully applied.
 
 ### Management, Security, And Console
 
@@ -115,7 +116,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | WHIP H.265 + Opus eight-protocol browser playback | Codec-specific Annex-B tests, atomic WHEP Live snapshot test, and `docs/recipes/whip-h265-opus-playback.md` |
 | Storage recording availability and unified fMP4 playback | `module/record/record_test.go`, `module/api/recording_test.go`, and `RecordingStatusResponse` contract |
 | Config document/schema/validate/apply and five runtime sources | `module/api/config_api_test.go`, `config/runtime/source_test.go`, and `docs/recipes/runtime-config-sources.md` |
-| CONFIG-004 through CONFIG-008 runtime/API hardening | `config/runtime/source_test.go`, `module/api/console_management_test.go`, `module/api/openapi_contract_test.go`, and the synchronized schema/recipe/OpenAPI docs |
+| CONFIG-004 through CONFIG-009 runtime/API hardening | `config/runtime/source_test.go`, `config/runtime/manager_test.go`, `module/api/console_management_test.go`, `module/api/openapi_contract_test.go`, and the synchronized schema/recipe/OpenAPI docs |
 | SIP/GB28181 fast self-tests and persistent provider labs | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, `module/sipgateway/lab_test.go`, `module/gb28181/lab_test.go`, and `docs/recipes/protocol-test-lab.md` |
 | ARCH-033 unified HTTP header and idle timeouts | `module/api`, `module/webrtc`, and `module/metrics` `TestHTTPServerTimeouts`; `docs/recipes/auth-and-tls.md` |
 

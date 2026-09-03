@@ -33,6 +33,29 @@ func (s *mutableSource) Set(snapshot Snapshot) {
 	s.mu.Unlock()
 }
 
+type writableMutableSource struct {
+	mu       sync.Mutex
+	snapshot Snapshot
+}
+
+func (s *writableMutableSource) Load(context.Context, Version) (Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Snapshot{Data: append([]byte(nil), s.snapshot.Data...), Version: s.snapshot.Version}, nil
+}
+
+func (s *writableMutableSource) Write(ctx context.Context, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.snapshot = Snapshot{Data: append([]byte(nil), data...), Version: "written"}
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *writableMutableSource) Close() error { return nil }
+
 type blockingSource struct {
 	release chan struct{}
 	err     error
@@ -181,6 +204,84 @@ func TestManagerWriteHonorsContextWhileWaitingForSourceIO(t *testing.T) {
 	release()
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first write failed: %v", err)
+	}
+}
+
+func TestManagerWritePublishesDesiredDocumentBeforeAsynchronousRefresh(t *testing.T) {
+	source := &serializedWriterSource{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	close(source.release)
+	initial := config.Defaults()
+	initial.Server.Name = "initial"
+	m, err := NewManager(Options{Source: source, Initial: initial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	document := []byte("server:\n  name: submitted\n")
+	if err := m.Write(context.Background(), document); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := m.Snapshot()
+	if snapshot == nil || snapshot.DesiredConfig == nil {
+		t.Fatal("write did not publish a desired snapshot")
+	}
+	if got := snapshot.DesiredConfig.Server.Name; got != "submitted" {
+		t.Fatalf("desired server name = %q, want submitted", got)
+	}
+	if got := string(snapshot.DesiredDocument); got != string(document) {
+		t.Fatalf("desired document = %q, want %q", got, document)
+	}
+	if got := snapshot.Config.Server.Name; got != "initial" {
+		t.Fatalf("effective server name = %q, want initial until refresh", got)
+	}
+}
+
+func TestManagerWriteRetainsPendingDesiredAfterApplicationFailure(t *testing.T) {
+	initial := config.Defaults()
+	initial.Limits.MaxStreams = 1
+	source := &writableMutableSource{snapshot: Snapshot{Data: []byte("limits:\n  max_streams: 1\n"), Version: "initial"}}
+	var attempts atomic.Int32
+	m, err := NewManager(Options{
+		Source:       source,
+		Initial:      initial,
+		PollInterval: time.Hour,
+		Apply: func(*ConfigSnapshot, ChangeSet) error {
+			if attempts.Add(1) == 1 {
+				return errors.New("application failed")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	document := []byte("limits:\n  max_streams: 42\n")
+	if err := m.Write(context.Background(), document); err != nil {
+		t.Fatal(err)
+	}
+	waitForManagerTest(t, func() bool { return m.Status().ConfigChangesApplicationFailed == 1 })
+	if got := string(m.Snapshot().DesiredDocument); got != string(document) {
+		t.Fatalf("pending desired document = %q, want %q after application failure", got, document)
+	}
+	if got := m.Snapshot().Config.Limits.MaxStreams; got != 1 {
+		t.Fatalf("effective max streams = %d, want 1 after application failure", got)
+	}
+
+	if err := m.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForManagerTest(t, func() bool { return m.Snapshot().Config.Limits.MaxStreams == 42 })
+	if got := string(m.Snapshot().DesiredDocument); got != string(document) {
+		t.Fatalf("desired document = %q, want %q after retry", got, document)
 	}
 }
 

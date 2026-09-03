@@ -429,7 +429,7 @@ auth 模块以同步 priority 10 hook 参与 publish/subscribe；cluster、recor
 
 ## 16. 配置和可变性边界
 
-运行时配置管理器从 file、HTTP/HTTPS、Consul 或 Redis 读取文档，解析、规范化、验证、计算 hash 后以不可变 snapshot 原子发布。普通读取只做 atomic pointer load；source I/O、Apply 写入和 close 通过可取消 gate 串行化。
+运行时配置管理器从 file、HTTP/HTTPS、Consul 或 Redis 读取文档，解析、规范化、验证、计算 hash 后以不可变 snapshot 原子发布。普通读取只做 atomic pointer load；source I/O、Apply 写入和 close 通过可取消 gate 串行化。Apply 写入成功后会立即发布 pending desired overlay，异步刷新在接受匹配内容前不会用旧 source 覆盖它；因此 Console 立即刷新页面仍能看到提交的 desired 文档，而 effective 保持最近一次已应用快照。配置文档、状态和 schema 管理接口禁用 HTTP 缓存。
 
 可热更新的通常是策略值，例如重试、鉴权规则、慢消费者阈值或通知策略。listener 地址、端口范围、模块启停、TLS 文件/模式、RingBuffer 容量和音频 codec enablement 会改变资源拓扑，通常标记为 `restart_required`。RingBuffer 和 muxer capacity 不在已有 Stream 上原地扩容；新 stream 使用新的结构参数。
 

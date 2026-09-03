@@ -83,7 +83,11 @@ paths:
       summary: Read redacted runtime source, version, failures, counters, and pending restart paths
       x-liveforge-permission: config:read
       responses:
-        '200': {description: Runtime configuration status, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigRuntimeStatusResponse'}}}}
+        '200':
+          description: Runtime configuration status
+          headers:
+            Cache-Control: {description: Configuration status is never cacheable, schema: {type: string, const: no-store}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigRuntimeStatusResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -105,10 +109,14 @@ paths:
       tags: [server]
       operationId: getRuntimeConfigDocument
       summary: Read the complete effective and desired configuration document
-      description: Sensitive values are redacted. Valid absolute hierarchical URL scalars are recognized by value even under unmapped non-URL-shaped keys; safe scheme/host/port identity remains visible while non-root paths, userinfo, query, and fragment are opaque. URL-shaped keys retain TURN/opaque, malformed/hostless fail-closed, and plain-address handling; ordinary strings, durations, IDs, and bare host/address values remain unchanged outside that key policy. Desired document text is retained from the accepted source so comments and unmapped fields remain editable. The writable flag describes whether the selected runtime source supports POST apply.
+      description: Sensitive values are redacted. Valid absolute hierarchical URL scalars are recognized by value even under unmapped non-URL-shaped keys; safe scheme/host/port identity remains visible while non-root paths, userinfo, query, and fragment are opaque. URL-shaped keys retain TURN/opaque, malformed/hostless fail-closed, and plain-address handling; ordinary strings, durations, IDs, and bare host/address values remain unchanged outside that key policy. Desired document text is retained from the accepted source so comments and unmapped fields remain editable. After a successful Apply write, a pending desired overlay remains visible until the source refresh accepts matching normalized content, while effective remains the last applied snapshot. Configuration status, document, and schema responses disable HTTP caching. The writable flag describes whether the selected runtime source supports POST apply.
       x-liveforge-permission: config:read
       responses:
-        '200': {description: Configuration documents, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigDocumentResponse'}}}}
+        '200':
+          description: Configuration documents
+          headers:
+            Cache-Control: {description: Configuration documents are never cacheable, schema: {type: string, const: no-store}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigDocumentResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -119,7 +127,11 @@ paths:
       summary: Read the complete versioned runtime configuration JSON Schema embedded in the server binary
       x-liveforge-permission: config:read
       responses:
-        '200': {description: Configuration field descriptor, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigSchemaResponse'}}}}
+        '200':
+          description: Configuration field descriptor
+          headers:
+            Cache-Control: {description: The embedded schema is never cacheable, schema: {type: string, const: no-store}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigSchemaResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -146,7 +158,7 @@ paths:
       tags: [server]
       operationId: applyRuntimeConfigDocument
       summary: Persist a complete document to a writable runtime source and schedule refresh
-      description: The source write completes and is serialized with source loads before the 202 response; parsing, module application, and publication remain on the background manager worker. Apply and trusted runtime source loading remain permissive for source fields not mapped by the typed runtime struct. Consul KV PUT rejects redirects and never forwards X-Consul-Token. Listener, module, TLS, port, and audio-codec topology changes remain restart-required.
+      description: The source write completes and is serialized with source loads before the 202 response; parsing, module application, and publication remain on the background manager worker. A successful write publishes a pending desired overlay immediately so document reads remain consistent across an immediate page reload; effective values remain unchanged until asynchronous application completes. Apply and trusted runtime source loading remain permissive for source fields not mapped by the typed runtime struct. Consul KV PUT rejects redirects and never forwards X-Consul-Token. Listener, module, TLS, port, and audio-codec topology changes remain restart-required.
       x-liveforge-permission: config:reload
       requestBody:
         required: true

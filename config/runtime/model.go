@@ -85,8 +85,9 @@ type ConfigSnapshot struct {
 	// DesiredConfig retains the latest valid source values, including changes
 	// that are waiting for a restart. Consumers should normally read Config.
 	DesiredConfig *config.Config
-	// DesiredDocument is the latest accepted source document, retained so
-	// editors can preserve comments and fields not represented by Config.
+	// DesiredDocument is the latest accepted source document, or a successfully
+	// written pending document while an asynchronous refresh catches up.
+	// It is retained so editors can preserve comments and fields not represented by Config.
 	// Consumers must treat the bytes as immutable.
 	DesiredDocument []byte
 	Version         Version

@@ -36,6 +36,7 @@ type configDocumentResponse struct {
 }
 
 func (h *Handlers) handleConfigDocument(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	manager := h.server.ConfigManager()
 	if manager == nil {
 		effectiveMap := configMapFromConfig(h.server.Config())
@@ -85,6 +86,7 @@ func (h *Handlers) handleConfigDocument(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handlers) handleConfigSchema(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, configSchemaDescriptor())
 }
 

@@ -24,6 +24,12 @@ type Manager struct {
 
 	active atomic.Pointer[ConfigSnapshot]
 
+	// publishMu serializes snapshot publication with a successful ConfigWriter
+	// write. This keeps a just-written desired document from being overwritten
+	// by an in-flight refresh that still observes the previous source value.
+	publishMu      sync.Mutex
+	pendingDesired atomic.Pointer[pendingDesiredWrite]
+
 	mu            sync.Mutex
 	started       bool
 	closed        bool
@@ -44,6 +50,12 @@ type Manager struct {
 	callbackCh      chan struct{}
 	callbackDone    chan struct{}
 	pendingCallback atomic.Pointer[ChangeSet]
+}
+
+type pendingDesiredWrite struct {
+	config   *config.Config
+	document []byte
+	hash     string
 }
 
 // NewManager validates options and seeds the optional bootstrap snapshot.
@@ -221,8 +233,34 @@ func (m *Manager) load(parent context.Context) error {
 	if version.Value == "" {
 		version.Value = hash
 	}
+
+	// A successful Apply can be visible to readers before the asynchronous
+	// source refresh observes it. Keep that desired document in the snapshot
+	// while the source catches up; once the source returns the same content,
+	// continue through the normal effective-config application path.
+	m.publishMu.Lock()
+	defer m.publishMu.Unlock()
+	old := m.active.Load()
+	pendingWrite := m.pendingDesired.Load()
+	useEffectiveAsDiffBase := false
+	var clearPending *pendingDesiredWrite
+	if pendingWrite != nil {
+		switch {
+		case pendingWrite.hash == hash:
+			clearPending = pendingWrite
+			useEffectiveAsDiffBase = true
+		case old != nil && old.Version.Hash == hash:
+			m.setUnchangedVersion(version)
+			return nil
+		default:
+			// The source has advanced to a different revision after Apply. Let
+			// that source revision become authoritative.
+			clearPending = pendingWrite
+			useEffectiveAsDiffBase = true
+		}
+	}
 	if previous.Hash != "" && previous.Hash == hash {
-		current := m.active.Load()
+		current := old
 		unchanged := *current
 		unchanged.Version = version
 		unchanged.LoadedAt = time.Now()
@@ -231,11 +269,17 @@ func (m *Manager) load(parent context.Context) error {
 			unchanged.DesiredDocument = append([]byte(nil), result.Data...)
 		}
 		m.active.Store(&unchanged)
+		if pendingWrite != nil && pendingWrite.hash == hash {
+			m.pendingDesired.CompareAndSwap(pendingWrite, nil)
+		}
 		m.setUnchangedVersion(version)
 		return nil
 	}
-	old := m.active.Load()
-	changes, err := diffConfigs(snapshotDesiredConfig(old), cfg)
+	diffBase := snapshotDesiredConfig(old)
+	if useEffectiveAsDiffBase {
+		diffBase = snapshotConfig(old)
+	}
+	changes, err := diffConfigs(diffBase, cfg)
 	if err != nil {
 		m.setRejected(err)
 		return err
@@ -287,6 +331,9 @@ func (m *Manager) load(parent context.Context) error {
 		}
 	}
 	m.active.Store(next)
+	if clearPending != nil {
+		m.pendingDesired.CompareAndSwap(clearPending, nil)
+	}
 	m.updateKeys(next)
 	m.setAcceptedVersion(version, pending)
 	if len(changes) > 0 && m.onChange != nil {
@@ -350,7 +397,12 @@ func ValidateKnownDocument(data []byte) (*config.Config, error) {
 // selected source supports writes, then schedules the normal background
 // refresh path. It never applies a document directly on the request goroutine.
 func (m *Manager) Write(ctx context.Context, data []byte) error {
-	if _, err := ValidateDocument(data); err != nil {
+	cfg, err := ValidateDocument(data)
+	if err != nil {
+		return err
+	}
+	hash, err := configHash(cfg)
+	if err != nil {
 		return err
 	}
 	writer, ok := m.source.(ConfigWriter)
@@ -368,6 +420,20 @@ func (m *Manager) Write(ctx context.Context, data []byte) error {
 	}); err != nil {
 		return err
 	}
+	pending := &pendingDesiredWrite{
+		config:   cfg,
+		document: append([]byte(nil), data...),
+		hash:     hash,
+	}
+	m.publishMu.Lock()
+	m.pendingDesired.Store(pending)
+	if current := m.active.Load(); current != nil {
+		next := *current
+		next.DesiredConfig = cfg
+		next.DesiredDocument = append([]byte(nil), pending.document...)
+		m.active.Store(&next)
+	}
+	m.publishMu.Unlock()
 	return m.Refresh(ctx)
 }
 

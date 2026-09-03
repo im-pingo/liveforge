@@ -1,6 +1,6 @@
 # 技术风险、性能瓶颈与问题记录
 
-> 记录日期：2026-08-29
+> 记录日期：2026-09-02
 >
 > 本文是源码审查和当前复现结果的工作记录。`已确认` 表示已经从源码、测试或稳定复现得到证据；`待复现` 表示代码路径明确但还需要真实控制台/协议输入确认；`功能边界` 表示当前没有实现或受构建条件限制，不能当作已支持能力。
 
@@ -92,6 +92,7 @@
 | CONFIG-006 | 已关闭 | Consul/Redis flattened dotted/slashed key 先规范化、排序，再拒绝重复路径和 scalar/container 前缀冲突；错误顺序由测试固定 |
 | CONFIG-007 | 已关闭 | Console Apply 捕获提交文本和单调 editor revision，过期 desired refresh 只有在 revision 未变化时才能回填；browser race regression 覆盖新编辑优先 |
 | CONFIG-008 | 已关闭 | OpenAPI Apply 202 使用 `ConfigApplyResponse` 的 `written_and_refresh_scheduled`，独立 refresh 仍使用 `scheduled`；contract test 校验引用和 schema |
+| CONFIG-009 | 已关闭 | ConfigWriter 写入成功后立即发布 pending desired overlay；异步刷新读到旧 source 时保留提交文档，只有匹配内容成功应用后才清除；配置文档/状态/schema 响应设置 `Cache-Control: no-store`；`config/runtime/manager_test.go` 与 `module/api/config_api_test.go` 覆盖时序和缓存回归 |
 | STORAGE-001 | 已关闭 | Record 与 DVR 都在等待 admission/setup 锁前捕获唯一绝对 drain deadline；调用方在该边界返回 timeout，已经启动的清理继续后台完成 |
 | STORAGE-002 | 已关闭 | recording play/download 在打开媒体前申请全局连接槽，每条成功/错误路径 release-once，并在 `ServeContent` 前设置 10 秒写期限；metadata/list/status/delete 不额外占用媒体槽 |
 | STORAGE-003 | 已关闭 | 自动轮转在阈值后立即停止时不创建空后继；视频在阈值后首个有效关键帧前轮转，纯音频在阈值后首个音频帧前轮转；无 `{time}` 的固定模板也会为后继生成唯一且排他创建的路径 |

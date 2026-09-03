@@ -248,6 +248,8 @@ URL location retains that new location while restoring only matching secret
 components.
 A source that only implements `ConfigSource` is read-only and Apply returns HTTP 409. The response is 202 with `status: written_and_refresh_scheduled` only after the serialized source write succeeds; parsing, module application, and publication still run asynchronously and are visible in the status endpoint. After Apply completes, the Console repopulates the editor with the submitted document only if its monotonic editor revision is unchanged. A newer local edit wins over the stale desired snapshot returned by the scheduled refresh.
 
+After a successful Apply write, the manager keeps a pending desired overlay until a source refresh returns the same normalized content. `GET /api/v1/server/config/document` exposes that submitted desired document immediately, including after a page reload, while `effective_document` remains the last applied snapshot until asynchronous application completes.
+
 ## Refresh And Observe
 
 ```bash

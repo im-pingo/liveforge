@@ -380,6 +380,7 @@ type ConfigRuntimeStatus struct {
 }
 
 func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	manager := h.server.ConfigManager()
 	if manager == nil {
 		writeJSON(w, http.StatusOK, ConfigRuntimeStatus{})

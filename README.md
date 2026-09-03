@@ -48,14 +48,14 @@ LiveForge is a modular live streaming media server that ingests, transmuxes, and
 
 ### Audio Transcoding
 
-LiveForge transparently bridges audio codecs between protocols. When a subscriber requires a different audio codec than the publisher provides, on-demand transcoding kicks in automatically — zero configuration needed.
+On builds with the `audiocodec` tag and FFmpeg/libav available, LiveForge transparently bridges audio codecs between protocols. When a subscriber requires a different audio codec than the publisher provides, on-demand transcoding kicks in automatically — zero configuration needed. Portable no-CGO builds keep compatible audio pass-through and may omit unsupported audio while retaining playable video.
 
 | Publisher → Subscriber | Codec Path | Use Case |
 |----------------------|------------|----------|
 | RTMP (AAC) → WebRTC (Opus) | AAC → PCM → Opus | Browser playback of RTMP streams |
 | WebRTC (Opus) → RTMP (AAC) | Opus → PCM → AAC | Re-stream browser input to CDN |
 | GB28181 (G.711) → HLS (AAC) | G.711 → PCM → AAC | Surveillance camera to web player |
-| Any → Any | Decode → Resample → Encode | Full codec matrix supported |
+| Any → Any (tagged build) | Decode → Resample → Encode | Supported audio codec combinations |
 
 Transcoding is **shared per target codec** — multiple subscribers requesting the same codec share one transcode pipeline. When the publisher's codec matches the subscriber's, frames pass through with zero overhead.
 
@@ -369,6 +369,8 @@ The bootstrap file is loaded once. A background manager then polls the selected 
 
 File Apply creates new targets with private mode `0600` and preserves the existing file's permission bits during atomic replacement. Redis Apply writes the document and optional version increment in one `MULTI/EXEC` transaction; transaction errors are returned rather than producing a false success. The refresh response is `202` with `status: scheduled`, while a successful Apply is `202` with `status: written_and_refresh_scheduled`. The Console tracks a monotonic editor revision so a newer local edit cannot be overwritten by a stale desired snapshot after Apply.
 
+After a successful Apply write, the server keeps a pending desired overlay in memory until the source refresh accepts the matching content. `GET /api/v1/server/config/document` therefore shows the submitted desired document across an immediate page reload while the effective document remains the last applied snapshot.
+
 Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
 
 ## Testing Tools
@@ -467,7 +469,7 @@ The first command skips FFmpeg-tagged transcoding integration tests. The second 
 | HTTP-FLV | Yes | No | Yes | Plugin |
 | FMP4 streaming | Yes | No | No | No |
 | GB28181 | Yes (full SIP + live/playback/PTZ) | No | Yes | Plugin |
-| Audio transcoding | Yes (AAC↔Opus↔G.711↔MP3) | No | Yes | Plugin |
+| Audio transcoding | Optional (tagged FFmpeg build) | No | Yes | Plugin |
 | Cluster relay | Yes (RTMP/SRT/RTSP/RTP/GB28181) | No | Yes | Plugin |
 | Web console | Yes (built-in) | No | Yes | Yes |
 | Browser publish | Yes (WHIP) | No | No | No |
@@ -513,7 +515,7 @@ Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [
 - [x] GCC congestion control for WebRTC
 - [x] Rate limiting
 - [x] GB28181 (SIP + live + playback + PTZ + alarm)
-- [x] Audio transcoding (AAC, Opus, G.711, MP3)
+- [x] Optional audio transcoding (AAC, Opus, G.711, MP3; tagged FFmpeg build)
 - [x] SIP gateway
 - [x] Permission-aware seven-view management console
 - [x] Recording/DVR, cluster, security, and audit management APIs, including Storage online preview

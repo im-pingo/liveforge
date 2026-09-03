@@ -50,14 +50,14 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 
 ### 音频转码
 
-LiveForge 在协议间自动桥接音频编解码器。当订阅者需要的音频编解码与推流者不同时，按需转码自动生效 —— 无需任何配置。
+在带 `audiocodec` 标签并具备 FFmpeg/libav 的构建中，LiveForge 可以在协议之间透明桥接音频编解码器。当订阅者需要的音频编解码与推流者不同时，按需转码自动生效 —— 无需任何配置。便携 no-CGO 构建只保证兼容音频透传，不支持的音频可能被省略，但仍保留可播放的视频。
 
 | 推流 → 拉流 | 转码路径 | 典型场景 |
 |-------------|----------|----------|
 | RTMP (AAC) → WebRTC (Opus) | AAC → PCM → Opus | 浏览器播放 RTMP 流 |
 | WebRTC (Opus) → RTMP (AAC) | Opus → PCM → AAC | 浏览器推流转推到 CDN |
 | GB28181 (G.711) → HLS (AAC) | G.711 → PCM → AAC | 监控摄像头到 Web 播放 |
-| 任意 → 任意 | 解码 → 重采样 → 编码 | 全编解码矩阵支持 |
+| 任意 → 任意（带标签构建） | 解码 → 重采样 → 编码 | 支持的音频 codec 组合 |
 
 转码实例**按目标编解码共享** —— 多个请求同一编解码的订阅者共享一个转码管线。当推流和拉流编解码一致时，帧零开销透传。
 
@@ -369,6 +369,8 @@ LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读�
 
 文件 Apply 创建新目标时使用私有权限 `0600`，替换已存在文件时保留原有权限位。Redis Apply 会在一个 `MULTI/EXEC` 事务中写入文档并递增可选的 version key，事务或 EXEC 错误会返回给调用方而不会虚报成功。刷新接口成功返回 `202` 和 `status: scheduled`；Apply 成功返回 `202` 和 `status: written_and_refresh_scheduled`。Console 使用单调递增的编辑版本号，Apply 之后返回的过期 desired 快照不能覆盖更新后的本地编辑文本。
 
+Apply 写入成功后，服务端会在数据源刷新接受相同内容前保留一个内存中的 pending desired overlay。因此立刻刷新页面时，`GET /api/v1/server/config/document` 仍会返回刚提交的 desired 文档，而 effective 文档保持最近一次已应用的快照。
+
 运维人员可通过 `GET /api/v1/server/config` 查看脱敏后的加载器状态（遵循 API 的现有鉴权规则）。
 
 ## 测试工具
@@ -467,7 +469,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 | HTTP-FLV | 支持 | 不支持 | 支持 | 插件 |
 | FMP4 流式传输 | 支持 | 不支持 | 不支持 | 不支持 |
 | GB28181 | 支持（完整 SIP + 实时/回放/云台） | 不支持 | 支持 | 插件 |
-| 音频转码 | 支持（AAC↔Opus↔G.711↔MP3） | 不支持 | 支持 | 插件 |
+| 音频转码 | 可选（带标签的 FFmpeg 构建） | 不支持 | 支持 | 插件 |
 | 集群转发 | 支持（RTMP/SRT/RTSP/RTP/GB28181） | 不支持 | 支持 | 插件 |
 | Web 控制台 | 内置 | 无 | 有 | 有 |
 | 浏览器推流 | 支持（WHIP） | 不支持 | 不支持 | 不支持 |
@@ -513,7 +515,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 - [x] WebRTC GCC 拥塞控制
 - [x] IP 级限流
 - [x] GB28181（SIP + 实时拉流 + 录像回放 + 云台 + 报警）
-- [x] 音频转码（AAC、Opus、G.711、MP3）
+- [x] 可选音频转码（AAC、Opus、G.711、MP3；带标签的 FFmpeg 构建）
 - [x] SIP 网关
 - [x] 权限感知的七视图管理控制台
 - [x] 录制/DVR、集群、安全和审计管理 API（含 Storage 在线预览）

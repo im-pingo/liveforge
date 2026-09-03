@@ -348,6 +348,9 @@ func TestConfigDocumentPreservesRawSourceFieldsAndComments(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("config document Cache-Control = %q, want no-store", got)
+	}
 	data := decodeAPIData(t, w.Body.Bytes())
 	var response struct {
 		Desired     map[string]any `json:"desired"`
