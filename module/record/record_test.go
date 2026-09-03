@@ -1453,16 +1453,16 @@ func TestModuleRecordsGB28181PrefixedPublisher(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub := gb28181.NewPublisher("gb28181-test-publisher", nil)
-	if err := stream.SetPublisher(pub); err != nil {
-		t.Fatal(err)
+	if setErr := stream.SetPublisher(pub); setErr != nil {
+		t.Fatal(setErr)
 	}
 	m := NewModule()
-	if err := m.Init(s); err != nil {
-		t.Fatal(err)
+	if initErr := m.Init(s); initErr != nil {
+		t.Fatal(initErr)
 	}
 	ctx := &core.EventContext{StreamKey: "gb28181/34020000001320000001", PublisherID: pub.ID()}
-	if err := m.onPublish(ctx); err != nil {
-		t.Fatalf("onPublish: %v", err)
+	if publishErr := m.onPublish(ctx); publishErr != nil {
+		t.Fatalf("onPublish: %v", publishErr)
 	}
 	m.mu.Lock()
 	_, exists := m.sessions[ctx.StreamKey]
@@ -1483,8 +1483,8 @@ func TestModuleRecordsGB28181PrefixedPublisher(t *testing.T) {
 	)) {
 		t.Fatal("failed to write GB28181 publisher frame")
 	}
-	if err := m.onPublishStop(ctx); err != nil {
-		t.Fatalf("onPublishStop: %v", err)
+	if stopErr := m.onPublishStop(ctx); stopErr != nil {
+		t.Fatalf("onPublishStop: %v", stopErr)
 	}
 	items, err := m.ListRecordings(context.Background())
 	if err != nil {
