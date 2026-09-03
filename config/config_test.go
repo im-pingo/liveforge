@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+func TestResolveUserPathExpandsHomeAndRejectsNamedUsers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := ResolveUserPath("~/record/{date}/{stream_key}.mp4")
+	if err != nil {
+		t.Fatalf("ResolveUserPath returned error: %v", err)
+	}
+	want := filepath.Join(home, "record", "{date}", "{stream_key}.mp4")
+	if got != want {
+		t.Fatalf("ResolveUserPath = %q, want %q", got, want)
+	}
+	if _, err := ResolveUserPath("~other/record"); err == nil {
+		t.Fatal("ResolveUserPath accepted a named-user tilde path")
+	}
+}
+
 func TestLoadConfig(t *testing.T) {
 	yaml := `
 server:

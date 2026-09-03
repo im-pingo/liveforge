@@ -126,6 +126,31 @@ func (s *RecordSession) run() error {
 			return nil
 		}
 	}
+	// Protocol publishers that declare their codecs up front can start
+	// recording before a sequence header arrives. A zero-codec generation is
+	// the late-discovery path used by GB28181; wait there so the writer can bind
+	// the generation to its first media headers without dropping the session.
+	if snapshot.Generation != 0 && !snapshot.Ready &&
+		snapshot.MediaInfo.VideoCodec == 0 && snapshot.MediaInfo.AudioCodec == 0 {
+		readySnapshot, ok := waitRecordStartup(readCtx, s.stream, snapshot)
+		// Stop may race with the first media packet: the packet has already
+		// advanced the stream startup state, but cancelling readCtx prevents
+		// WaitForStartup from observing its final snapshot. Re-check the same
+		// generation once so a completed startup is not turned into an empty
+		// failed recording.
+		if !ok {
+			latest := s.stream.StartupSnapshot()
+			if latest.Generation == snapshot.Generation &&
+				latest.PublisherID == snapshot.PublisherID && latest.Ready {
+				readySnapshot, ok = latest, true
+			}
+		}
+		if !ok {
+			return nil
+		}
+		snapshot = readySnapshot
+		s.snapshot = snapshot
+	}
 	videoCodec := snapshot.MediaInfo.VideoCodec
 	audioCodec := snapshot.MediaInfo.AudioCodec
 	allowUndeclaredTracks := snapshot.Generation == 0
@@ -261,6 +286,32 @@ func (s *RecordSession) run() error {
 			return err
 		}
 	}
+}
+
+func waitRecordStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {
+	if pending.Generation == 0 || pending.GenerationDone == nil || pending.PublisherID == "" {
+		return core.StreamStartupSnapshot{}, false
+	}
+	if pending.Ready {
+		return pending, stream.IsPublisherGeneration(pending.Generation)
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-pending.GenerationDone:
+			cancel()
+		case <-waitCtx.Done():
+		}
+	}()
+	snapshot, ok := stream.WaitForStartup(waitCtx)
+	cancel()
+	<-watcherDone
+	if !ok || snapshot.Generation != pending.Generation || snapshot.PublisherID != pending.PublisherID {
+		return core.StreamStartupSnapshot{}, false
+	}
+	return snapshot, stream.IsPublisherGeneration(snapshot.Generation)
 }
 
 func isRecordFMP4Audio(codec avframe.CodecType) bool {

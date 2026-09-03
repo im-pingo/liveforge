@@ -11,6 +11,29 @@ import (
 	"github.com/im-pingo/liveforge/pkg/avframe"
 )
 
+func BenchmarkTranscodeReaderFanoutAdmission(b *testing.B) {
+	stream := newTranscodeTestStream(avframe.CodecG711U)
+	b.Cleanup(stream.Close)
+	snapshot := stream.StartupSnapshot()
+	seed, release, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(avframe.CodecAAC, snapshot)
+	if err != nil {
+		b.Fatal(err)
+	}
+	seed.Close()
+	release()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		reader, release, err := stream.TranscodeManager().GetOrCreateAudioReaderAt(snapshot.MediaInfo.AudioCodec, snapshot)
+		if err != nil {
+			b.Fatal(err)
+		}
+		reader.Close()
+		release()
+	}
+}
+
 // Catches a codec-boundary return closing the producer-owned ring after one
 // HTTP-style consumer hands off and releases its shared transform subscription.
 func TestTranscodeManagerHTTPHandoffDoesNotCloseSharedAudioReader(t *testing.T) {

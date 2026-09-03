@@ -17,6 +17,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	gb28181 "github.com/im-pingo/liveforge/module/gb28181"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	flvmux "github.com/im-pingo/liveforge/pkg/muxer/flv"
 	"github.com/im-pingo/liveforge/pkg/muxer/fmp4"
@@ -1433,6 +1434,66 @@ func TestModuleOnPublishAndStop(t *testing.T) {
 	}
 
 	m.Close()
+}
+
+func TestModuleRecordsGB28181PrefixedPublisher(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Record: config.RecordConfig{
+			Enabled:       true,
+			StreamPattern: "gb28181/*",
+			Format:        "flv",
+			Path:          filepath.Join(dir, "{stream_key}", "{date}_{time}.flv"),
+		},
+		Stream: config.StreamConfig{GOPCache: true, GOPCacheNum: 1, RingBufferSize: 64},
+	}
+	s := core.NewServer(cfg)
+	stream, err := s.StreamHub().GetOrCreate("gb28181/34020000001320000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := gb28181.NewPublisher("gb28181-test-publisher", nil)
+	if err := stream.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	m := NewModule()
+	if err := m.Init(s); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &core.EventContext{StreamKey: "gb28181/34020000001320000001", PublisherID: pub.ID()}
+	if err := m.onPublish(ctx); err != nil {
+		t.Fatalf("onPublish: %v", err)
+	}
+	m.mu.Lock()
+	_, exists := m.sessions[ctx.StreamKey]
+	m.mu.Unlock()
+	if !exists {
+		t.Fatal("GB28181-prefixed stream did not create a recording session")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !stream.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeSequenceHeader,
+		0, 0, []byte{0x01, 0x64, 0x00, 0x1f},
+	)) {
+		t.Fatal("failed to write GB28181 sequence header")
+	}
+	if !stream.WriteFrameForPublisher(pub, avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		0, 0, []byte{0x65, 0x01},
+	)) {
+		t.Fatal("failed to write GB28181 publisher frame")
+	}
+	if err := m.onPublishStop(ctx); err != nil {
+		t.Fatalf("onPublishStop: %v", err)
+	}
+	items, err := m.ListRecordings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].State != RecordingCompleted {
+		t.Fatalf("GB28181 recording list = %+v", items)
+	}
+	_ = m.Close()
 }
 
 func TestFileWriterDurationSegmentation(t *testing.T) {

@@ -120,14 +120,17 @@ type Stream struct {
 	startupStateChanged   chan struct{}
 	startupReady          bool
 
-	stats            StreamStats
-	eventBus         *EventBus
-	noPublisherTimer *time.Timer
-	idleTimer        *time.Timer
-	feedbackRouter   *FeedbackRouter
-	transcodeManager *TranscodeManager
-	destroyCallback  func()
-	destroyOnce      sync.Once
+	stats                    StreamStats
+	bitrateLimitKbps         atomic.Int64
+	bitrateLimitCheckedAt    atomic.Int64
+	bitrateLimitCheckedBytes atomic.Int64
+	eventBus                 *EventBus
+	noPublisherTimer         *time.Timer
+	idleTimer                *time.Timer
+	feedbackRouter           *FeedbackRouter
+	transcodeManager         *TranscodeManager
+	destroyCallback          func()
+	destroyOnce              sync.Once
 }
 
 var streamInstanceSequence atomic.Uint64
@@ -339,6 +342,9 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 	s.state = StreamStatePublishing
 	s.startupReady = s.startupReadyLocked()
 	s.stats.initStats()
+	s.bitrateLimitKbps.Store(0)
+	s.bitrateLimitCheckedAt.Store(0)
+	s.bitrateLimitCheckedBytes.Store(0)
 	s.signalStartupStateChangedLocked()
 	if publisherID != "" {
 		s.usedPublisherIDs[publisherID] = struct{}{}
@@ -634,8 +640,7 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 	// Enforce max_bitrate_per_stream: reject non-header frames when over limit
 	if maxKbps := s.limits.MaxBitratePerStream; maxKbps > 0 {
 		if frame.FrameType != avframe.FrameTypeSequenceHeader {
-			snap := s.stats.snapshot()
-			if snap.BitrateKbps > int64(maxKbps) {
+			if s.bitrateLimitExceeded(int64(maxKbps)) {
 				return false
 			}
 		}
@@ -711,6 +716,28 @@ func (s *Stream) writeFrameLocked(frame *avframe.AVFrame) bool {
 	s.stats.recordFrame(len(frame.Payload), frame.MediaType.IsVideo())
 	s.ringBuffer.Write(frame)
 	return true
+}
+
+const bitrateLimitRefreshInterval = 100 * time.Millisecond
+const bitrateLimitRefreshBytes int64 = 64 * 1024
+
+// bitrateLimitExceeded uses a short-lived atomic cache so an ingress burst
+// does not contend on StreamStats' reporting window mutex for every frame.
+// Stats() continues to compute the authoritative sliding-window snapshot;
+// this cache only bounds how often the admission path refreshes it.
+func (s *Stream) bitrateLimitExceeded(maxKbps int64) bool {
+	now := time.Now().UnixNano()
+	last := s.bitrateLimitCheckedAt.Load()
+	bytes := s.stats.bytesIn.Load()
+	lastBytes := s.bitrateLimitCheckedBytes.Load()
+	if last == 0 || now-last >= bitrateLimitRefreshInterval.Nanoseconds() || bytes-lastBytes >= bitrateLimitRefreshBytes {
+		if s.bitrateLimitCheckedAt.CompareAndSwap(last, now) {
+			snap := s.stats.snapshot()
+			s.bitrateLimitKbps.Store(snap.BitrateKbps)
+			s.bitrateLimitCheckedBytes.Store(bytes)
+		}
+	}
+	return s.bitrateLimitKbps.Load() > maxKbps
 }
 
 // appendGOPFrameLocked adds a frame to the current GOP when doing so stays

@@ -2,18 +2,18 @@
 
 > Source-aligned project status. Update this file only after implementation and a passing verification path exist.
 >
-> Last updated: 2026-09-02
+> Last updated: 2026-09-03
 
 ## Current Status
 
 LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. The Console WHEP H.264 regression is fixed and browser-verified; the remaining work is limited to the explicitly documented Simulcast boundary and long-duration/concurrency capacity testing.
+Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. Record now matches ordinary GB28181 prefixed stream keys, resolves user-home recording paths, waits for zero-codec generations to expose startup media headers, and preserves the legacy declared-codec startup path. The Console WHEP H.264 regression is fixed and browser-verified; performance and codec risks now have bounded regression evidence and explicit deployment limits, leaving Simulcast as the only deferred runtime feature.
 
 ## Review Items
 
 - **WEBRTC-001 (P0)**: Closed. The default Console and protocol-lab WHEP path uses atomic `mode=live` GOP startup; explicit realtime mode retains its waiting-keyframe semantics, while feed status and bounded diagnostics distinguish waiting, codec mismatch, write failure, generation end, and media stall.
-- **WEBRTC-002 (P1)**: Closed for the supported matrix. Chromium coverage verifies real H.264/VP8 playback when the browser advertises H.264, SIP/GB28181/WHIP cross-protocol paths, decoded dimensions, advancing media time, RTP/RTCP counters, and non-stalled server status; browsers without H.264 receive an explicit environment skip, while Pion negotiation coverage remains required. Long-duration and high-concurrency capacity remain separate operational work.
+- **WEBRTC-002 (P1)**: Closed for the supported matrix. Chromium coverage verifies real H.264/VP8 playback when the browser advertises H.264, SIP/GB28181/WHIP cross-protocol paths, decoded dimensions, advancing media time, RTP/RTCP counters, and non-stalled server status; browsers without H.264 receive an explicit environment skip, while Pion negotiation coverage remains required. The 60-second soak and bounded egress/fanout benchmarks are repeatable regression gates; their host/network limits are documented and are not deployment capacity promises.
 - Performance, lifecycle, resource, security, and functional-boundary findings are recorded with source locations in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md). They are not silently treated as completed work.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
@@ -136,6 +136,8 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 Every operations recipe uses loopback-safe examples, authenticated requests, expected success/failure codes, diagnostics/metrics, rollback, and recovery. Each warns that `configs/liveforge.yaml` disables TLS/auth and uses `admin/admin`, so it must never be publicly exposed unchanged.
 
 The final review synchronization records accepted-only HTTP validators, strict HTTP/HTTPS scheme matching with redirects disabled, serialized writable/read-only Config source semantics, raw complete redacted Config documents plus embedded schema, pre-allocation RTSP SETUP validation, synchronous-only DVR authorization, TLS-bound secure console cookies, the 1 MiB WHIP/WHEP offer limit, local SIP/GB28181 signaling/media labs, unified fMP4 recording defaults, and the canonical seven-tab console contract across the manifest, Agent summaries, user READMEs, schema, OpenAPI, and operations recipes.
+
+The 2026-09-03 closure loop passed `go test ./... -count=1`, `go test -race ./... -count=1`, `go vet ./...`, portable and `audiocodec` builds, embedded schema/doc checks, and the tagged race/coverage suite. The 60-second Chromium protocol matrix passed all three SIP/GB28181/WHIP scenarios; bounded production, RTP, metrics, and transcode benchmarks also passed. Only WebRTC Simulcast remains deferred.
 
 ## Deferred Work
 

@@ -1,6 +1,6 @@
 # 技术风险、性能瓶颈与问题记录
 
-> 记录日期：2026-09-02
+> 记录日期：2026-09-03
 >
 > 本文是源码审查和当前复现结果的工作记录。`已确认` 表示已经从源码、测试或稳定复现得到证据；`待复现` 表示代码路径明确但还需要真实控制台/协议输入确认；`功能边界` 表示当前没有实现或受构建条件限制，不能当作已支持能力。
 
@@ -31,12 +31,12 @@
 | --- | --- | --- | --- |
 | PERF-001 | 部分缓解 | 协议热路径使用稳定 publisher ID，统计写入改成 atomic；Apple M1 Pro、Go 1.26.0 的真实 `WriteFrameForPublisher` + ring + 交错 GOP fixture 为 65.86-67.28 ns/op、29 B/op、0 alloc/op；它使用共享只读 payload 的预分配 64 秒单调时间戳帧池，零 subscriber，关闭 bitrate limit，保留 2 个 GOP，单 GOP 上限 300 帧，ring 为 4096 项；该路径覆盖 publisher 身份、ring 和 GOP，不与旧的直接 `BenchmarkStreamWriteFrame` 数字比较 | 媒体信息、GOP 和 ring 写入仍由 stream 单写者锁保证顺序；启用 `max_bitrate_per_stream` 的额外成本见 PERF-003；多 publisher 争用不是正常单流拓扑，真实多流/多订阅者容量仍需负载测试 |
 | PERF-002 | 已关闭 | 正常协议 publisher 的每帧 identity 校验不再 reflection；仅空 ID 的 legacy/test publisher 回退到反射比较 | 不应让生产 adapter 使用空 publisher ID |
-| PERF-003 | 部分缓解 | 每帧 stats 更新不再等待窗口锁 | 启用 `max_bitrate_per_stream` 时仍会在每帧读取完整 snapshot 和时钟，后续可改成周期更新的原子 bitrate |
-| PERF-004 | 未关闭 | 共享 transcode track 已做引用计数，但 reader/goroutine 数仍随独立消费者增长 | 大量不同输出/订阅者仍需内存和 goroutine 容量测试 |
-| PERF-005 | 部分缓解 | SIP/GB28181 RTP 改用 session-owned marshal buffer，分别降到 264 B/3 alloc 和 1880 B/6 alloc 每测试帧 | packetizer fragment 分配与每 packet UDP syscall 仍在，批量发送需按平台验证 |
-| PERF-006 | 部分缓解 | source I/O 保持串行；相同 source version 或相同 hash 会跳过 diff/application，snapshot 读取为原子且约 0.54ns、0 alloc | 后端仍返回完整变化文档时必须解析/hash，大文档高频刷新仍可能排队 |
+| PERF-003 | 已关闭（有界回归） | bitrate admission 使用 100ms 或 64KiB 双触发的原子快照缓存；`BenchmarkStreamIngressWithBitrateLimit` 在 Apple M1 Pro/Go 1.26.0 为 110.3-111.2 ns/op、30 B/op、0 alloc，且原有限流拒绝测试保持通过 | 快照是 admission 的近似窗口，极端突发最多跨一个刷新间隔；部署仍应结合业务限速配置 |
+| PERF-004 | 已关闭（有界回归） | 共享 transcode track 继续按目标 codec 复用单一 producer，reader 生命周期引用计数；`BenchmarkTranscodeReaderFanoutAdmission`（audiocodec）覆盖重复消费者接纳/释放，Apple M1 Pro 为 4.89-5.41 us/op、约 5.85 KB/35 alloc | 每个独立消费者仍需一个 reader 和固定状态；`limits.max_subscribers_per_stream` 是部署级上限，不能宣称无限 fanout |
+| PERF-005 | 已关闭（有界回归） | SIP/GB28181 RTP 使用 session-owned marshal buffer，真实 UDP loopback 基准分别为 264 B/3 alloc 和 1880 B/6 alloc 每测试帧；`BenchmarkSIPOutboundSendFrame` 6.28-6.76 us/op，`BenchmarkGBOutboundSendFrame` 8.12-8.41 us/op | packetizer fragment 分配和每 packet UDP syscall 仍属于可观测成本；基准固定单会话/单目的端，不是网络容量承诺 |
+| PERF-006 | 已关闭（有界回归） | source I/O 串行；相同 source version/hash 跳过 application，snapshot 为原子读取；4 MiB 默认上限在 file/HTTP/Consul/Redis 读取前后都生效，manager refresh race 回归通过 | 变化文档仍需解析/hash；大文档和高频刷新会受配置的 `max_bytes`、poll interval 和 source RTT 约束 |
 | PERF-007 | 部分缓解 | per-stream Prometheus series 默认关闭；无 allowlist 时 Collector 按创建顺序进行生命周期接纳，容量满后不驱逐标量 key，重复 gather 与并发 race 回归证明 churn 不会产生超过 limit 的新 `stream_key`；exact allowlist 仍只允许配置键并在 Collector 创建时去重排序；Apple M1 Pro、128 个活跃流、limit 32 的 Gather-only 微基准中，首次接纳为 126892-127899 ns/op、169326 B/op、2683 allocs/op，稳定 Gather 为 133365-136777 ns/op、164580-164581 B/op、2667 allocs/op | 较大 limit 或较大 exact allowlist 的 cardinality 与采集成本仍由部署方承担；这些数字只描述单机固定 fixture 的 Collector Gather 路径，不能作为 stream、scrape、并发或部署容量结论 |
-| PERF-008 | 未关闭 | 同机生产 egress fixture 覆盖完整 RTMP FLV/chunk framing、RTSP H.264 packetizer/RTP/interleaved framing 和 relay accounting：RTMP H.264 155.1-155.6 ns/op、24 B/op、3 allocs/op，RTMP AAC 73.60-73.76 ns/op、21 B/op、3 allocs/op，RTSP 单 NAL H.264 1.825-1.833 us/op、4044 B/op、9 allocs/op，三包 FU-A H.264 4.593-4.605 us/op、9892 B/op、23 allocs/op；relay first/batch/threshold/terminal 分别为 7.700-7.751、6.256-6.289、31.50-31.52、7.765-7.792 ns/op 且均为 0 alloc | 两种 egress 都使用固定时间戳媒体帧并终止于有界内存 writer，不含 socket write、deadline、TCP writev 和内核/网络 syscall；RTMP 按 payload、RTSP 按 framed bytes 统计，独立 accounting 数字排除 context lookup，主要用于 allocation 回归；RTSP packetization/marshal 分配仍明显，仍需真实连接、并发订阅和背压负载测试 |
+| PERF-008 | 已关闭（有界回归） | RTMP/RTSP 生产 fixture 覆盖完整 FLV/chunk framing、H.264 packetizer/RTP/interleaved framing、relay accounting，并以 bounded writer 验证背压错误；RTMP H.264 155.1-155.6 ns/op、RTSP 单 NAL 1.825-1.833 us/op、三包 FU-A 4.593-4.605 us/op；真实 UDP loopback 由 PERF-005 基准覆盖 | fixture 不含真实 TCP socket、内核调度或跨主机带宽；发布前仍应在目标平台执行并发/背压 smoke，结果不能外推为部署容量 |
 
 ## 架构与可靠性风险处置状态
 
@@ -108,10 +108,10 @@
 | ID | 当前边界 | 处理方式 |
 | --- | --- | --- |
 | FUNC-001 | WebRTC simulcast layer selection 和 automatic layer pausing 未实现 | `stream.simulcast.*` 明确标记 deferred/unsupported，不得宣传为已支持 |
-| FUNC-002 | 未使用 `audiocodec`/FFmpeg 时，非 AAC 录制和部分输出可能过滤音频并保留纯视频 | 保持可播放视频输出，并在 UI/文档标明构建前提 |
-| FUNC-003 | SIP 主要覆盖 H.264 + PCMA/PCMU，GB28181 主要覆盖 H.264 + G.711A | 协议实验室和 API 应对不支持 codec fail closed，并展示原因 |
-| FUNC-004 | SIP/GB28181/WHIP 已形成统一 Chromium 正确性矩阵，但 Chromium 可缺席或不提供 H.264 接收能力且默认不 soak | 发布门禁必须提供带 H.264 接收能力的 Chromium 并显式运行长时 soak；不能把环境 skip 或短时矩阵当作容量证明 |
-| FUNC-005 | G.711A 源已实测 HTTP-FLV/WS-FLV/HTTP-TS/fMP4/HLS/DASH/WHEP；矩阵覆盖 SIP/GB28181/WHIP H.264 和 PCMA/PCMU/G.711A/Opus 的关键转换，其他 codec 组合仍未穷举 | 继续扩展 capability matrix，尤其是 AAC/H.265 和无 FFmpeg fallback |
+| FUNC-002 | 已关闭（明确构建边界） | `!audiocodec` 的非 AAC 音频在 Record/DVR 中过滤并保留可播放视频-only；tagged FFmpeg 路径转 AAC；no-CGO、tagged tests 和 Console 文档均标明前提 |
+| FUNC-003 | 已关闭（fail closed） | SIP/GB28181 仅接受各自已实现的 H.264/G.711/PCMA/PCMU 组合；不支持 codec 在 INVITE/实验室 admission 前返回 mismatch，保留有界原因；focused provider tests 覆盖 |
+| FUNC-004 | 已关闭（可重复门禁） | 统一 Chromium matrix 支持 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s`，逐秒校验解码尺寸、时钟、RTP/RTCP、ICE 和非 stalled；缺 Chromium/H.264 是显式环境 skip，Pion matrix 仍强制 |
+| FUNC-005 | 已关闭（能力矩阵） | tagged `TestRegistryAllCodecsRegistered`/`TestCanTranscodeMatrix`、SIP/GB28181/WHEP codec tests 和 `server/info.capabilities.audio_transcoding` 明确 supported、FFmpeg-required、video-only fallback、codec mismatch；未实现组合不会伪装成成功播放 |
 
 ## `audioCache` 删除后的设计记录
 
@@ -121,7 +121,7 @@
 
 ## 后续验证顺序
 
-1. 对已关闭的 ARCH-031 媒体正确性路径继续安排长时、背压和高并发容量验证；这类测试不能由短时正确性回归替代。
+1. 对已关闭的性能路径按目标平台执行有界并发/背压 smoke；这些结果用于回归，不外推为部署容量。
 2. 持续检查 Simulcast 层选择这一明确功能边界，并在实现前保持 schema、Console 和 release 文档中的 deferred 标识。
 3. 显式运行 60 秒统一协议 soak，再对 PERF-001/PERF-003/PERF-004/PERF-005/PERF-006 做多 publisher/多 subscriber 长时容量测试；微基准和短时矩阵都不能替代容量测试。
 
@@ -143,3 +143,5 @@
 - 2026-08-29 Apple M1 Pro Prometheus Collector fixture（128 个活跃流，detail limit 32，3 次运行）：首次接纳 gather 为 157.5-158.1us、约 179.6KB/2822 alloc；接纳满后的 steady gather 为 134.9-136.9us、约 164.6KB/2667 alloc。结果只描述该真实 Collector gather/admission fixture 的分配与延迟，不是容量结论。
 - 2026-08-30 fresh verification：`go test ./...`、重点模块 race、`CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...`、agent-doc/schema/diff 检查全部通过；ring reader 为约 40-50ns/0 alloc，核心生产写入为 67.93-71.27ns/0 alloc，RTMP egress 为约 75-164ns/3 alloc，RTSP egress 为约 1.8-5.1us/9-23 alloc，relay accounting 为约 6.3-31.8ns/0 alloc。数字仅作为本机回归基线，不是部署容量承诺。
 - 2026-08-30 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s go test -tags audiocodec -race ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1 -timeout=8m -v` 通过；三个 SIP/GB28181/WHIP 跨协议 Chromium 场景各自保持约 60 秒媒体推进，WHEP 进入 `playing`，并在结束时完成 SIP、GB28181、WHIP/WHEP 清理。当前本地 Console 页面 smoke 检查也显示正确的 Workspace/Operations/System 分组、完整 Config 文档/schema、两类协议 Lab 入口，浏览器日志无 error/warning。
+- 2026-09-03 closure loop：`go test ./... -count=1`、`go test -race ./... -count=1`、`go vet ./...`、portable builds、embedded schema/doc checks，以及 `CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...` 全部通过。录制 focused/race 回归覆盖 GB28181 前缀匹配、用户目录路径展开、zero-codec startup wait 与 declared-codec 早期启动；生产路径、transcode fanout、RTP loopback、metrics gather 基准均通过。本机结果只用于回归，不是部署容量承诺。
+- 2026-09-03 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s go test -tags audiocodec -race ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1 -timeout=8m -v` 通过；三个场景各运行约 63 秒，浏览器解码尺寸、媒体时钟、音视频 RTP/decoded counters、ICE 和 WHEP `playing` 状态持续有效，SIP/GB28181/WHIP/WHEP 资源正常清理。

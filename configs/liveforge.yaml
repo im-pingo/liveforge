@@ -218,10 +218,10 @@ cluster:
         rtcp_interval: 5s
         timeout: 15s
 record:
-    enabled: false
-    stream_pattern: "live/*"
+    enabled: true
+    stream_pattern: "*"
     format: fmp4
-    path: "/data/record/{date}/{stream_key}_{time}.{ext}"
+    path: "~/record/{date}/{stream_key}_{time}.{ext}"
     segment:
         mode: duration
         duration: 30m

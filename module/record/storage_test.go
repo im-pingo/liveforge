@@ -71,6 +71,29 @@ func TestLocalStorageLifecycle(t *testing.T) {
 	}
 }
 
+func TestNewStorageForConfigExpandsUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	storage, template, err := newStorageForConfig(config.RecordConfig{
+		Format: "fmp4",
+		Path:   "~/record/{date}/{stream_key}_{time}.{ext}",
+	})
+	if err != nil {
+		t.Fatalf("newStorageForConfig returned error: %v", err)
+	}
+	defer storage.Close()
+	wantRoot, err := filepath.EvalSymlinks(filepath.Join(home, "record"))
+	if err != nil {
+		t.Fatalf("resolve expected root: %v", err)
+	}
+	if storage.Root() != wantRoot {
+		t.Fatalf("storage root = %q, want %q", storage.Root(), wantRoot)
+	}
+	if template != filepath.ToSlash(filepath.Join("{date}", "{stream_key}_{time}.{ext}")) {
+		t.Fatalf("storage template = %q", template)
+	}
+}
+
 func TestLocalStorageDeleteRemovesOnlyOwnedTSSidecars(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "live", "cam")

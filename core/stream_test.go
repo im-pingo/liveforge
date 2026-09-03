@@ -1180,6 +1180,35 @@ func TestStreamMaxBitrateEnforcement(t *testing.T) {
 	}
 }
 
+func TestStreamBitrateLimitUsesCachedSnapshotWithinShortBatch(t *testing.T) {
+	cfg := config.StreamConfig{RingBufferSize: 64}
+	limits := config.LimitsConfig{MaxBitratePerStream: 100000}
+	s := NewStream("live/bitrate-cache", cfg, limits, NewEventBus())
+	defer s.Close()
+	pub := &testPublisher{id: "bitrate-cache-publisher", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}
+	if err := s.SetPublisher(pub); err != nil {
+		t.Fatal(err)
+	}
+	frame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 0, 0, []byte{1, 2, 3})
+	if !s.WriteFrameForPublisher(pub, frame) {
+		t.Fatal("initial frame rejected")
+	}
+	checkedAt := s.bitrateLimitCheckedAt.Load()
+	if checkedAt == 0 {
+		t.Fatal("bitrate limit did not publish an initial cached snapshot timestamp")
+	}
+	for i := 0; i < 100; i++ {
+		frame.DTS++
+		frame.PTS++
+		if !s.WriteFrameForPublisher(pub, frame) {
+			t.Fatalf("frame %d rejected", i)
+		}
+	}
+	if got := s.bitrateLimitCheckedAt.Load(); got != checkedAt {
+		t.Fatalf("cached bitrate snapshot refreshed for every frame: first=%d last=%d", checkedAt, got)
+	}
+}
+
 func TestStreamMaxBitrateDisabled(t *testing.T) {
 	bus := NewEventBus()
 	cfg := newTestStreamConfig()

@@ -21,6 +21,23 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
   -coverprofile=coverage.out -covermode=atomic ./...
 ```
 
+Run the bounded performance and capability gates as part of the same release
+review. They exercise the real Stream/ring/GOP ingress path, cached bitrate
+admission, RTMP/RTSP framing, relay accounting, local UDP RTP output, and the
+shared FFmpeg transcode reader fanout:
+
+```bash
+go test -run '^$' -bench 'BenchmarkStreamIngressProduction|BenchmarkStreamIngressWithBitrateLimit|BenchmarkRTMPRelaySendMediaFrameProduction|BenchmarkRTSPRelaySendFrameProduction|BenchmarkRelayObservationAccounting' -benchmem -count=3 ./core ./module/cluster
+go test -run '^$' -bench 'BenchmarkGBOutboundSendFrame|BenchmarkSIPOutboundSendFrame' -benchmem -count=3 ./module/gb28181 ./module/sipgateway
+go test -tags audiocodec -run '^$' -bench '^BenchmarkTranscodeReaderFanoutAdmission$' -benchmem -count=3 ./core
+go test -tags audiocodec ./pkg/audiocodec ./module/record ./module/sipgateway ./module/gb28181 ./module/webrtc -run 'Codec|codec|Audio|audio|WHEP|WHIP' -count=1
+```
+
+These measurements and tests are bounded regression evidence. Socket,
+kernel, network, subscriber-count, and deployment-capacity limits remain
+target-environment concerns; record the target-platform result rather than
+turning a local benchmark into a universal throughput claim.
+
 Every command must exit 0. `go test ./...` is the no-native-dependency quick check and skips FFmpeg-tagged transcoding integration tests. The tagged build/test pair is the project baseline.
 
 Verify workflow action majors remain Node 24-compatible: checkout/setup-go/upload-artifact v7, setup-buildx/login v4, build-push v7, golangci-lint v9, and action-gh-release v3. Do not add `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION`.

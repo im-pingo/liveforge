@@ -117,6 +117,13 @@ func newStorageForConfig(cfg config.RecordConfig) (*LocalStorage, string, error)
 		return nil, "", err
 	}
 	pattern := cfg.Path
+	if pattern != "" {
+		resolved, err := config.ResolveUserPath(pattern)
+		if err != nil {
+			return nil, "", fmt.Errorf("record path: %w", err)
+		}
+		pattern = resolved
+	}
 	if pattern == "" {
 		ext := "flv"
 		switch strings.ToLower(strings.TrimSpace(cfg.Format)) {

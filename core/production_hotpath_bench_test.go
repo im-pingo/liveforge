@@ -54,6 +54,29 @@ func BenchmarkStreamIngressProductionStablePublisher(b *testing.B) {
 	}
 }
 
+func BenchmarkStreamIngressWithBitrateLimit(b *testing.B) {
+	stream, publisher, frames, _, _ := newProductionIngressBenchmark(b)
+	stream.limits.MaxBitratePerStream = 1 << 30
+	frameIndex := 4
+	var cycleOffset int64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		fixture := frames[frameIndex]
+		fixture.frame.DTS = fixture.dts + cycleOffset
+		fixture.frame.PTS = fixture.dts + cycleOffset
+		if !stream.WriteFrameForPublisher(publisher, fixture.frame) {
+			b.Fatal("bitrate-limited ingress rejected the benchmark fixture")
+		}
+		frameIndex++
+		if frameIndex == len(frames) {
+			frameIndex = 0
+			cycleOffset += productionIngressFixtureDurationMillis
+		}
+	}
+}
+
 func newProductionIngressBenchmark(b *testing.B) (*Stream, Publisher, []productionIngressBenchmarkFrame, [3][]byte, int64) {
 	b.Helper()
 	cfg := config.StreamConfig{

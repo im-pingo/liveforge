@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -96,6 +98,11 @@ func ValidateRecordConfig(cfg RecordConfig) error {
 	default:
 		return fmt.Errorf("record.format must be flv, fmp4, mp4, ts, or hls")
 	}
+	if cfg.Path != "" {
+		if _, err := ResolveUserPath(cfg.Path); err != nil {
+			return fmt.Errorf("record.path: %w", err)
+		}
+	}
 	if cfg.Segment.MaxSize == "" {
 		return nil
 	}
@@ -103,6 +110,35 @@ func ValidateRecordConfig(cfg RecordConfig) error {
 		return fmt.Errorf("record.segment.max_size: %w", err)
 	}
 	return nil
+}
+
+// ResolveUserPath expands environment variables and a leading ~/ to the
+// current process user's home directory. Named-user paths such as ~alice are
+// rejected because their meaning is host-dependent and could silently write
+// recordings outside the operator's intended storage root.
+func ResolveUserPath(value string) (string, error) {
+	value = os.ExpandEnv(value)
+	if value == "" {
+		return value, nil
+	}
+	if value != "~" && !strings.HasPrefix(value, "~/") && !strings.HasPrefix(value, `~\`) {
+		if strings.HasPrefix(value, "~") {
+			return "", fmt.Errorf("named-user paths are not supported; use ~/... or an absolute path")
+		}
+		return value, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || filepath.Clean(home) == "." {
+		if err == nil {
+			err = fmt.Errorf("home directory is unavailable")
+		}
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	if value == "~" {
+		return filepath.Clean(home), nil
+	}
+	rel := strings.TrimLeft(value[2:], `/\`)
+	return filepath.Join(home, rel), nil
 }
 
 // ParseByteSize parses a decimal byte count with an optional binary suffix.

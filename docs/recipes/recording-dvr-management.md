@@ -45,6 +45,19 @@ api:
 
 `record.enabled`, `record.path`, `dvr.enabled`, `dvr.listen`, and `dvr.path` require a restart. Recording format, stream pattern, segmentation, DVR window, segment duration, and cleanup interval are hot-reload candidates. Formats are `flv`, `fmp4`, `mp4`, `ts`, and `hls`.
 
+`record.stream_pattern` is matched against the complete stream key. Ordinary
+GB28181 inbound streams use `{gb28181.stream_prefix}/{channel_id}` (the
+default prefix is `gb28181`), so use `gb28181/*` or `*` when those devices
+should be recorded; `live/*` intentionally excludes them. Recording paths may
+use `${HOME}` in trusted configuration or a leading `~/`; both resolve to the
+process user's home directory before storage is opened. Named-user paths such
+as `~alice/...` are rejected. `/api/v1/recordings/status` reports the resolved
+storage root. A session with no declared publisher codec waits for that
+generation to expose the required media headers before consuming frames, which
+covers GB28181 codec discovery after SIP/PS admission. Publishers that declare
+codecs up front can start before sequence headers arrive. Active files remain
+`.partial` until a matching publish-stop finalizes them.
+
 Record format validation accepts only `flv`, `fmp4`, `mp4`, `ts`, or `hls`; `hls` is a TS storage alias and uses a `.ts` extension. `record.segment.max_size` accepts an empty/whitespace value or `0` to disable size rotation, or a non-negative decimal byte count with an optional `B`, `KB`, `MB`, or `GB` suffix. Fractional values, negatives, unknown suffixes, and values that overflow the byte counter are rejected consistently by runtime validation and the configuration schema.
 
 The default recording format is fMP4 and the default extension is `.mp4`. fMP4
