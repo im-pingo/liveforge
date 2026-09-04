@@ -213,6 +213,75 @@ func TestMetricsStreamDetailLimitBoundsLifetimeLabelsAcrossChurn(t *testing.T) {
 	}
 }
 
+func TestMetricsConcurrentGatherProgressesWhileAdmissionLockHeld(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetailLimit = 32
+	server := core.NewServer(cfg)
+	for i := range 64 {
+		if _, err := server.StreamHub().GetOrCreate(fmt.Sprintf("live/gather/%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	collector := NewCollector(server)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
+	if _, err := registry.Gather(); err != nil {
+		t.Fatal(err)
+	}
+
+	collector.streamDetailMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := registry.Gather()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		collector.streamDetailMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		collector.streamDetailMu.Unlock()
+		t.Fatal("stable gather waited on the admission mutex")
+	}
+}
+
+func TestMetricsLargeAllowlistRemainsBounded(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics.StreamDetailLimit = 25
+	cfg.Metrics.StreamDetailAllowlist = make([]string, 0, 1100)
+	for i := 0; i < 1000; i++ {
+		cfg.Metrics.StreamDetailAllowlist = append(cfg.Metrics.StreamDetailAllowlist, fmt.Sprintf("live/allow/%04d", i))
+		if i%10 == 0 {
+			cfg.Metrics.StreamDetailAllowlist = append(cfg.Metrics.StreamDetailAllowlist, fmt.Sprintf("live/allow/%04d", i))
+		}
+	}
+	server := core.NewServer(cfg)
+	for i := 0; i < 40; i++ {
+		if _, err := server.StreamHub().GetOrCreate(fmt.Sprintf("live/allow/%04d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destroying, err := server.StreamHub().GetOrCreate("live/allow/0000-destroying")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destroying.Close()
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(NewCollector(server))
+	keys, err := gatherSelectedStreamKeys(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, 0, cfg.Metrics.StreamDetailLimit)
+	for i := 0; i < cfg.Metrics.StreamDetailLimit; i++ {
+		want = append(want, fmt.Sprintf("live/allow/%04d", i))
+	}
+	requireStreamSelection(t, keys, want, cfg.Metrics.StreamDetailLimit)
+}
+
 func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathers(t *testing.T) {
 	cfg := testConfig()
 	cfg.Metrics.StreamDetailLimit = 2
@@ -254,7 +323,7 @@ func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathe
 		return nil
 	})
 	for _, selection := range absentSelections {
-		requireStreamSelection(t, selection, []string{"live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
+		requireAdmittedStreamSelection(t, selection, []string{"live/admitted/one", "live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
 		recordSelection(selection)
 	}
 
@@ -269,7 +338,7 @@ func TestMetricsStreamDetailAdmissionStaysStickyDuringConcurrentMutationAndGathe
 		return nil
 	})
 	for _, selection := range reappearedSelections {
-		requireStreamSelection(t, selection, []string{"live/admitted/one", "live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
+		requireAdmittedStreamSelection(t, selection, []string{"live/admitted/one", "live/admitted/two"}, cfg.Metrics.StreamDetailLimit)
 		recordSelection(selection)
 	}
 
@@ -437,6 +506,27 @@ func requireStreamSelection(t *testing.T, got, want []string, limit int) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("stream detail labels = %v, want %v", got, want)
+	}
+}
+
+func requireAdmittedStreamSelection(t *testing.T, got, allowed []string, limit int) {
+	t.Helper()
+	if len(got) > limit {
+		t.Fatalf("stream detail labels = %v, want at most %d", got, limit)
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(got))
+	for _, key := range got {
+		if _, ok := allowedSet[key]; !ok {
+			t.Fatalf("stream detail labels contain non-admitted key %q: %v", key, got)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			t.Fatalf("stream detail labels contain duplicate key %q: %v", key, got)
+		}
+		seen[key] = struct{}{}
 	}
 }
 

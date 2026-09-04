@@ -3,10 +3,15 @@ package metrics
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/im-pingo/liveforge/core"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+type streamDetailSnapshot struct {
+	keys []string
+}
 
 // Collector implements prometheus.Collector and gathers LiveForge metrics.
 type Collector struct {
@@ -16,8 +21,7 @@ type Collector struct {
 	streamDetailAllowlist []string
 	// Admitted scalar keys persist for the Collector lifetime; streams do not.
 	streamDetailMu       sync.Mutex
-	streamDetailAdmitted map[string]struct{}
-	streamDetailKeys     []string
+	streamDetailSnapshot atomic.Value // stores streamDetailSnapshot
 
 	// Server-level gauges
 	streamCount     *prometheus.Desc
@@ -59,7 +63,7 @@ func NewCollector(s *core.Server) *Collector {
 		allowlist = append(allowlist, key)
 	}
 	sort.Strings(allowlist)
-	return &Collector{
+	collector := &Collector{
 		server:                s,
 		streamDetail:          metricsConfig.StreamDetail,
 		streamDetailLimit:     metricsConfig.StreamDetailLimit,
@@ -158,6 +162,8 @@ func NewCollector(s *core.Server) *Collector {
 			[]string{"stream_key"}, nil,
 		),
 	}
+	collector.streamDetailSnapshot.Store(streamDetailSnapshot{})
+	return collector
 }
 
 // Describe sends metric descriptors to the channel.
@@ -257,32 +263,45 @@ func (c *Collector) detailStreams(hub *core.StreamHub) []*core.Stream {
 		return streams
 	}
 
-	c.streamDetailMu.Lock()
-	defer c.streamDetailMu.Unlock()
-	if c.streamDetailAdmitted == nil {
-		c.streamDetailAdmitted = make(map[string]struct{})
+	snapshot := c.streamDetailSnapshot.Load().(streamDetailSnapshot)
+	admissionLocked := false
+	if len(snapshot.keys) < c.streamDetailLimit {
+		c.streamDetailMu.Lock()
+		admissionLocked = true
+		snapshot = c.streamDetailSnapshot.Load().(streamDetailSnapshot)
 	}
-
-	if len(c.streamDetailKeys) < c.streamDetailLimit {
+	if len(snapshot.keys) < c.streamDetailLimit {
+		keys := append([]string(nil), snapshot.keys...)
+		admitted := make(map[string]struct{}, len(keys))
+		for _, key := range keys {
+			admitted[key] = struct{}{}
+		}
 		for _, stream := range hub.StableStreams(c.streamDetailLimit) {
 			key := stream.Key()
-			if _, exists := c.streamDetailAdmitted[key]; exists {
+			if _, exists := admitted[key]; exists {
 				continue
 			}
 			current, active := hub.Find(key)
 			if !active || current != stream || current.State() == core.StreamStateDestroying {
 				continue
 			}
-			c.streamDetailAdmitted[key] = struct{}{}
-			c.streamDetailKeys = append(c.streamDetailKeys, key)
-			if len(c.streamDetailKeys) == c.streamDetailLimit {
+			admitted[key] = struct{}{}
+			keys = append(keys, key)
+			if len(keys) == c.streamDetailLimit {
 				break
 			}
 		}
+		if len(keys) != len(snapshot.keys) {
+			snapshot = streamDetailSnapshot{keys: keys}
+			c.streamDetailSnapshot.Store(snapshot)
+		}
+	}
+	if admissionLocked {
+		c.streamDetailMu.Unlock()
 	}
 
-	streams := make([]*core.Stream, 0, len(c.streamDetailKeys))
-	for _, key := range c.streamDetailKeys {
+	streams := make([]*core.Stream, 0, len(snapshot.keys))
+	for _, key := range snapshot.keys {
 		stream, active := hub.Find(key)
 		if !active || stream.State() == core.StreamStateDestroying {
 			continue
