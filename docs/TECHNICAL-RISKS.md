@@ -1,6 +1,6 @@
 # 技术风险、性能瓶颈与问题记录
 
-> 记录日期：2026-09-03
+> 记录日期：2026-09-04
 >
 > 本文是源码审查和当前复现结果的工作记录。`已确认` 表示已经从源码、测试或稳定复现得到证据；`待复现` 表示代码路径明确但还需要真实控制台/协议输入确认；`功能边界` 表示当前没有实现或受构建条件限制，不能当作已支持能力。
 
@@ -29,13 +29,13 @@
 
 | ID | 状态 | 当前结论 | 剩余影响 |
 | --- | --- | --- | --- |
-| PERF-001 | 部分缓解 | 协议热路径使用稳定 publisher ID，统计写入改成 atomic；Apple M1 Pro、Go 1.26.0 的真实 `WriteFrameForPublisher` + ring + 交错 GOP fixture 为 65.86-67.28 ns/op、29 B/op、0 alloc/op；它使用共享只读 payload 的预分配 64 秒单调时间戳帧池，零 subscriber，关闭 bitrate limit，保留 2 个 GOP，单 GOP 上限 300 帧，ring 为 4096 项；该路径覆盖 publisher 身份、ring 和 GOP，不与旧的直接 `BenchmarkStreamWriteFrame` 数字比较 | 媒体信息、GOP 和 ring 写入仍由 stream 单写者锁保证顺序；启用 `max_bitrate_per_stream` 的额外成本见 PERF-003；多 publisher 争用不是正常单流拓扑，真实多流/多订阅者容量仍需负载测试 |
+| PERF-001 | 已关闭（有界并发回归） | Stream 使用独立 write sequence lock 串行化 frame/generation-owned state 与 RingBuffer 发布，lifecycle mutation 固定为 `writeMu -> mu`；`WriteFrameForPublisher` 只在短暂 lifecycle 校验期间持有 `mu`，GOP/媒体快照读路径与写序列锁一致；subscriber 总数使用 atomic 计数。`BenchmarkStreamIngressMatrix` 覆盖 1/8/32 个 Stream 与每流 0/4/16 个 reader，Apple M1 Pro、Go 1.26.0 三次运行分别约为：1 流 114-115 ns/op（0 reader）、8 流 450-490 ns/op（0 reader）、32 流 1.17-1.44 us/op（0 reader）；16 reader/流为约 3.15-3.93 us、3.90-4.03 us、6.19-6.82 us；所有组合均保持 68/544/2176 B/op 级别的固定分配并通过 cursor/GOP/generation/race 回归。旧的单流生产 fixture 仍可复现，但不与该矩阵混合比较 | RingBuffer 仍是 single-producer；benchmark 使用进程内预分配帧和 reader，不包含 socket、内核调度或跨主机网络，因此是有界并发回归证据，不是部署容量保证；启用 `max_bitrate_per_stream` 的额外成本见 PERF-003 |
 | PERF-002 | 已关闭 | 正常协议 publisher 的每帧 identity 校验不再 reflection；仅空 ID 的 legacy/test publisher 回退到反射比较 | 不应让生产 adapter 使用空 publisher ID |
 | PERF-003 | 已关闭（有界回归） | bitrate admission 使用 100ms 或 64KiB 双触发的原子快照缓存；`BenchmarkStreamIngressWithBitrateLimit` 在 Apple M1 Pro/Go 1.26.0 为 110.3-111.2 ns/op、30 B/op、0 alloc，且原有限流拒绝测试保持通过 | 快照是 admission 的近似窗口，极端突发最多跨一个刷新间隔；部署仍应结合业务限速配置 |
 | PERF-004 | 已关闭（有界回归） | 共享 transcode track 继续按目标 codec 复用单一 producer，reader 生命周期引用计数；`BenchmarkTranscodeReaderFanoutAdmission`（audiocodec）覆盖重复消费者接纳/释放，Apple M1 Pro 为 4.89-5.41 us/op、约 5.85 KB/35 alloc | 每个独立消费者仍需一个 reader 和固定状态；`limits.max_subscribers_per_stream` 是部署级上限，不能宣称无限 fanout |
 | PERF-005 | 已关闭（有界回归） | SIP/GB28181 RTP 使用 session-owned marshal buffer，真实 UDP loopback 基准分别为 264 B/3 alloc 和 1880 B/6 alloc 每测试帧；`BenchmarkSIPOutboundSendFrame` 6.28-6.76 us/op，`BenchmarkGBOutboundSendFrame` 8.12-8.41 us/op | packetizer fragment 分配和每 packet UDP syscall 仍属于可观测成本；基准固定单会话/单目的端，不是网络容量承诺 |
 | PERF-006 | 已关闭（有界回归） | source I/O 串行；相同 source version/hash 跳过 application，snapshot 为原子读取；4 MiB 默认上限在 file/HTTP/Consul/Redis 读取前后都生效，manager refresh race 回归通过 | 变化文档仍需解析/hash；大文档和高频刷新会受配置的 `max_bytes`、poll interval 和 source RTT 约束 |
-| PERF-007 | 部分缓解 | per-stream Prometheus series 默认关闭；无 allowlist 时 Collector 按创建顺序进行生命周期接纳，容量满后不驱逐标量 key，重复 gather 与并发 race 回归证明 churn 不会产生超过 limit 的新 `stream_key`；exact allowlist 仍只允许配置键并在 Collector 创建时去重排序；Apple M1 Pro、128 个活跃流、limit 32 的 Gather-only 微基准中，首次接纳为 126892-127899 ns/op、169326 B/op、2683 allocs/op，稳定 Gather 为 133365-136777 ns/op、164580-164581 B/op、2667 allocs/op | 较大 limit 或较大 exact allowlist 的 cardinality 与采集成本仍由部署方承担；这些数字只描述单机固定 fixture 的 Collector Gather 路径，不能作为 stream、scrape、并发或部署容量结论 |
+| PERF-007 | 已关闭（有界 cardinality 回归） | per-stream Prometheus series 继续默认关闭；无 allowlist 时 admission 只在首次扩展时持有 mutex，并通过不可变 `atomic.Value` 快照供后续 Gather 读取，完整 metric traversal 不再共享 admission 锁；allowlist 仍 exact、去重、排序，且每次 Gather 受 `stream_detail_limit` 限制。Apple M1 Pro、Go 1.26.0、1000 个活跃流三次运行：limit 32 首次 admission 127-129 us、稳定 Gather 113-116 us、8 路并发 Gather 395-418 us；limit 512 分别 1.65-1.78 ms、1.45-1.52 ms、5.00-5.29 ms；1000-entry allowlist 为 2.85-3.28 ms。对应 cardinality、stream churn、并发 Gather 和 `-race` 测试均通过，且单次/生命周期 key 数量不超过配置上限 | 较大 limit、allowlist 或 Prometheus scrape 并发仍需部署方按目标机器压测；上述数字只描述固定进程内 Collector fixture，不是 stream、scrape 或部署容量承诺 |
 | PERF-008 | 已关闭（有界回归） | RTMP/RTSP 生产 fixture 覆盖完整 FLV/chunk framing、H.264 packetizer/RTP/interleaved framing、relay accounting，并以 bounded writer 验证背压错误；RTMP H.264 155.1-155.6 ns/op、RTSP 单 NAL 1.825-1.833 us/op、三包 FU-A 4.593-4.605 us/op；真实 UDP loopback 由 PERF-005 基准覆盖 | fixture 不含真实 TCP socket、内核调度或跨主机带宽；发布前仍应在目标平台执行并发/背压 smoke，结果不能外推为部署容量 |
 
 ## 架构与可靠性风险处置状态
@@ -123,7 +123,7 @@
 
 1. 对已关闭的性能路径按目标平台执行有界并发/背压 smoke；这些结果用于回归，不外推为部署容量。
 2. 持续检查 Simulcast 层选择这一明确功能边界，并在实现前保持 schema、Console 和 release 文档中的 deferred 标识。
-3. 显式运行 60 秒统一协议 soak，再对 PERF-001/PERF-003/PERF-004/PERF-005/PERF-006 做多 publisher/多 subscriber 长时容量测试；微基准和短时矩阵都不能替代容量测试。
+3. 对已关闭的 PERF-001/PERF-007 继续按目标平台执行多 publisher、多 subscriber 和 Prometheus scrape 长时容量测试；微基准和短时矩阵是回归门禁，不能替代部署容量验证。
 
 ## 当前验证记录
 
@@ -146,3 +146,5 @@
 - 2026-09-03 closure loop：`go test ./... -count=1`、`go test -race ./... -count=1`、`go vet ./...`、portable builds、embedded schema/doc checks，以及 `CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...` 全部通过。录制 focused/race 回归覆盖 GB28181 前缀匹配、用户目录路径展开、zero-codec startup wait 与 declared-codec 早期启动；生产路径、transcode fanout、RTP loopback、metrics gather 基准均通过。本机结果只用于回归，不是部署容量承诺。
 - 2026-09-03 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s go test -tags audiocodec -race ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1 -timeout=8m -v` 通过；三个场景各运行约 63 秒，浏览器解码尺寸、媒体时钟、音视频 RTP/decoded counters、ICE 和 WHEP `playing` 状态持续有效，SIP/GB28181/WHIP/WHEP 资源正常清理。
 - 2026-09-03 CI parity after the record-test lint cleanup: `golangci-lint v2.13.2 run --new-from-rev=HEAD^`, the tagged build, the full tagged race suite, and agent documentation checks passed; the change only renamed shadowed test-local errors and has no runtime behavior impact.
+- 2026-09-04 PERF-001 closure verification：`go test ./core -count=1`、`go test -race ./core -count=1` 和 `go test -run '^$' -bench '^BenchmarkStreamIngressMatrix$' -benchtime=100ms -benchmem -count=3 ./core` 通过；矩阵覆盖 1/8/32 个 Stream 与每流 0/4/16 个 Ring reader，Apple M1 Pro/Go 1.26.0 上零 reader 约 114-115 ns/op、450-490 ns/op、1.17-1.44 us/op，16 reader/流约 3.15-3.93 us、3.90-4.03 us、6.19-6.82 us。测试同时覆盖多流 cursor、multi-reader overwrite 顺序和 publisher replacement 旧代拒绝；结果是进程内并发回归证据，不是部署容量保证。
+- 2026-09-04 PERF-007 closure verification：`go test ./module/metrics -count=1`、`go test -race ./module/metrics -count=1` 和 `go test ./module/metrics -run '^$' -bench '^BenchmarkMetricsCardinalityMatrix$' -benchtime=100ms -benchmem -count=3` 通过；1000 活跃流 limit 32 的首次/稳定/8 路并发 Gather 约 127-129/113-116/395-418 us，limit 512 约 1.65-1.78/1.45-1.52/5.00-5.29 ms，1000-entry allowlist 约 2.85-3.28 ms。stable Gather 在 admission mutex 被持有时仍可完成，单次与生命周期 `stream_key` 均受 limit 约束；结果是固定进程内 Collector 回归证据，不是部署容量保证。

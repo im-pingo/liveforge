@@ -118,6 +118,10 @@ go run ./tools/gb28181-sim \
 
 可用 `go test -run '^$' -bench 'BenchmarkStreamIngressProduction|BenchmarkRTMPRelaySendMediaFrameProduction|BenchmarkRTSPRelaySendFrameProduction|BenchmarkRelayObservationAccounting' -benchmem -count=3 ./core ./module/cluster` 测量更接近生产路径的回归基准，其中包括稳定 publisher 校验、Stream ring/GOP 写入、完整 RTMP FLV/chunk framing、RTSP H.264 packetizer/RTP/interleaved framing 和有界 relay 字节统计。在 Apple M1 Pro、Go 1.26.0 上，三次结果为：稳定 Stream ingress 65.86-67.28 ns/op（29 B/op，0 allocs/op），RTMP H.264 155.1-155.6 ns/op（24 B/op，3 allocs/op），RTMP AAC 73.60-73.76 ns/op（21 B/op，3 allocs/op），RTSP 单 NAL H.264 1.825-1.833 us/op（4,044 B/op，9 allocs/op），RTSP 三包 FU-A H.264 4.593-4.605 us/op（9,892 B/op，23 allocs/op）。Stream 使用共享只读 payload 的预分配 64 秒单调时间戳、25 fps H.264/50 fps G.711A 帧池，零 subscriber，关闭 bitrate limit，保留 2 个 GOP，单 GOP 上限 300 帧，ring 为 4,096 项。RTMP 使用固定时间戳媒体帧和 payload 字节统计，RTSP 使用固定时间戳 RTP 输入和 framed-byte 统计；两种 egress 都终止于有界内存 writer，不包含 socket write、TCP writev、deadline 和内核/网络 syscall。独立 accounting 的 ns/op 还排除了生产 context lookup，主要用于 allocation 回归。该 fixture 与更窄的旧 `BenchmarkStreamWriteFrame` 微基准不可直接比较，也不代表订阅数、并发或部署容量。
 
+Stream 并发回归矩阵可运行：`go test -run '^$' -bench '^BenchmarkStreamIngressMatrix$' -benchtime=100ms -benchmem -count=3 ./core`。它覆盖 1、8、32 个独立 Stream，以及每流 0、4、16 个进程内 RingBuffer reader；benchmark 和 race 测试是回归证据，不是部署容量保证。
+
+Prometheus 有界 cardinality 矩阵可运行：`go test ./module/metrics -run '^$' -bench '^BenchmarkMetricsCardinalityMatrix$' -benchtime=100ms -benchmem -count=3`。它覆盖 1000 个活跃流、limit 32/512、1000 项精确 allowlist 和 8 路并发 Gather；admission key 使用不可变快照，稳定 Gather 不持有 admission mutex。
+
 ### LL-HLS（低延迟 HLS）
 
 Apple LL-HLS 标准实现，亚秒级延迟 HLS 分发：

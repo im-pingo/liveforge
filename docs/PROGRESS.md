@@ -2,19 +2,19 @@
 
 > Source-aligned project status. Update this file only after implementation and a passing verification path exist.
 >
-> Last updated: 2026-09-03
+> Last updated: 2026-09-04
 
 ## Current Status
 
 LiveForge is a Go 1.26+ modular streaming server with multi-protocol ingest/playback, protocol bridging, management operations, optional FFmpeg audio transcoding, runtime configuration refresh, and multi-node relay.
 
-Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. Record now matches ordinary GB28181 prefixed stream keys, resolves user-home recording paths, waits for zero-codec generations to expose startup media headers, and preserves the legacy declared-codec startup path. The Console WHEP H.264 regression is fixed and browser-verified; performance and codec risks now have bounded regression evidence and explicit deployment limits, leaving Simulcast as the only deferred runtime feature.
+Previously identified incomplete or unclosed runtime features are implemented and documented except Simulcast layer selection. `stream.simulcast` remains configuration-only, restart-required, explicitly deferred, and unsupported by the WebRTC runtime. SIP and GB28181 persistent fake-device publish/receive signaling and RTP/RTCP loopback are implemented and verified at their providers. Record now matches ordinary GB28181 prefixed stream keys, resolves user-home recording paths, waits for zero-codec generations to expose startup media headers, and preserves the legacy declared-codec startup path. The Console WHEP H.264 regression is fixed and browser-verified; PERF-001 Stream ingress and PERF-007 Prometheus cardinality now have bounded concurrent regression evidence and remain subject only to deployment-specific capacity testing, leaving Simulcast as the only deferred runtime feature.
 
 ## Review Items
 
 - **WEBRTC-001 (P0)**: Closed. The default Console and protocol-lab WHEP path uses atomic `mode=live` GOP startup; explicit realtime mode retains its waiting-keyframe semantics, while feed status and bounded diagnostics distinguish waiting, codec mismatch, write failure, generation end, and media stall.
 - **WEBRTC-002 (P1)**: Closed for the supported matrix. Chromium coverage verifies real H.264/VP8 playback when the browser advertises H.264, SIP/GB28181/WHIP cross-protocol paths, decoded dimensions, advancing media time, RTP/RTCP counters, and non-stalled server status; browsers without H.264 receive an explicit environment skip, while Pion negotiation coverage remains required. The 60-second soak and bounded egress/fanout benchmarks are repeatable regression gates; their host/network limits are documented and are not deployment capacity promises.
-- Performance, lifecycle, resource, security, and functional-boundary findings are recorded with source locations in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md). They are not silently treated as completed work.
+- Performance, lifecycle, resource, security, and functional-boundary findings are recorded with source locations in [docs/TECHNICAL-RISKS.md](TECHNICAL-RISKS.md). PERF-001 and PERF-007 are closed as bounded regression risks; their local benchmarks are not deployment capacity guarantees.
 
 Release artifacts remain conditional: source builds are available from the repository; versioned binaries and GHCR images exist only after a `v*` tag completes the Release workflow. Portable release binaries use `CGO_ENABLED=0` and do not provide audio transcoding. Tagged source builds and the Dockerfile use `audiocodec` plus FFmpeg.
 
@@ -23,6 +23,7 @@ Release artifacts remain conditional: source builds are available from the repos
 ### Core And Protocols
 
 - Shared stream hub, lifecycle events, GOP/ring buffers, statistics, resource limits, graceful drain, rollback-capable module reload, startup rollback limited to attempted modules, and slow-consumer handling.
+- Stream ingress uses a dedicated write-sequence lock for frame/generation state and RingBuffer publication, a fixed `writeMu -> mu` lifecycle lock order, atomic subscriber totals, and concurrent multi-stream/multi-reader regression coverage.
 - RTMP ingest/playback and FLV bridging.
 - RTSP ingest/playback over TCP interleaving and UDP, including separate audio/video track SETUP compatibility with unique, in-range, session-eligible track validation before transport allocation.
 - Pure-Go SRT ingest/playback with MPEG-TS and optional encryption.
@@ -60,6 +61,7 @@ Release artifacts remain conditional: source builds are available from the repos
 - SIP and GB28181 console pages expose fast local self-tests at `GET /api/v1/sipgateway/test` and `GET /api/v1/gb28181/test`, with no remote platform dependency. SIP fake-peer checks REGISTER/401/digest, dual-track H.264 plus PCMA/PCMU INVITE/200/ACK/BYE, rejection/timeout, RTP, and RTCP; GB28181 fake-device checks REGISTER, Keepalive, Catalog, PS INVITE/SDP/ACK/BYE, rejection/timeout, H.264 plus 8 kHz mono G.711A PS/RTP, and RTCP. Both providers also expose persistent publish/receive fake-device sessions with loopback signaling/media, aggregate and per-track counters, duplicate-identity rejection, idempotent stop, and socket/dialog/goroutine cleanup. The shared dependency-free sample is a moving 160x90 constrained-baseline pattern at 25 fps with one IDR per second and audible 20 ms audio frames. Persistent failure snapshots expose bounded redacted `last_error`; Streams reports keyframe-driven GOP generation with interleaved video/audio counts and duration, while audio-only streams show startup GOP as not applicable. Availability is claimed only after focused lab, RTP sequence-header, browser Console, and race verification pass.
 - TLS API listeners set `Secure` on the HttpOnly, SameSite=Strict `lf_session` cookie; plain HTTP development listeners leave it unset.
 - Redacted runtime config, security, cluster relay/peer, call, recording, storage, DVR, and audit status.
+- Prometheus per-stream admission uses an immutable atomic key snapshot: stable gathers do not hold the admission mutex, exact allowlists remain sorted and bounded, and both per-gather and lifetime `stream_key` cardinality stay within `stream_detail_limit`.
 
 ### Recording And DVR
 
@@ -119,6 +121,8 @@ CGO_ENABLED=1 go test -tags audiocodec -race \
 | CONFIG-004 through CONFIG-009 runtime/API hardening | `config/runtime/source_test.go`, `config/runtime/manager_test.go`, `module/api/console_management_test.go`, `module/api/openapi_contract_test.go`, and the synchronized schema/recipe/OpenAPI docs |
 | SIP/GB28181 fast self-tests and persistent provider labs | `module/api/config_api_test.go`, `module/api/protocol_testlab_api_test.go`, `module/sipgateway/lab_test.go`, `module/gb28181/lab_test.go`, and `docs/recipes/protocol-test-lab.md` |
 | ARCH-033 unified HTTP header and idle timeouts | `module/api`, `module/webrtc`, and `module/metrics` `TestHTTPServerTimeouts`; `docs/recipes/auth-and-tls.md` |
+| PERF-001 bounded Stream ingress concurrency | `core/stream_capacity_test.go`, `core/stream_test.go`, and `BenchmarkStreamIngressMatrix` covering 1/8/32 streams with 0/4/16 readers under default and race suites |
+| PERF-007 bounded Prometheus cardinality and concurrent Gather | `module/metrics/metrics_test.go`, `module/metrics/collector_benchmark_test.go`, `TestMetricsConcurrentGatherProgressesWhileAdmissionLockHeld`, and `BenchmarkMetricsCardinalityMatrix` |
 
 ## Operations Documentation
 
@@ -158,6 +162,13 @@ go test ./...
 CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
 CGO_ENABLED=1 go test -tags audiocodec -race \
   -coverprofile=coverage.out -covermode=atomic ./...
+```
+
+Performance regression matrices:
+
+```bash
+go test -run '^$' -bench '^BenchmarkStreamIngressMatrix$' -benchtime=100ms -benchmem -count=3 ./core
+go test ./module/metrics -run '^$' -bench '^BenchmarkMetricsCardinalityMatrix$' -benchtime=100ms -benchmem -count=3
 ```
 
 Do not claim Docker images, release assets, optional audio transcoding, or deferred Simulcast behavior without the corresponding artifact/build/runtime verification.
