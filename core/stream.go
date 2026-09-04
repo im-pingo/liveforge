@@ -88,6 +88,7 @@ type Stream struct {
 	config     config.StreamConfig
 	limits     config.LimitsConfig
 
+	writeMu                 sync.Mutex // serializes frame/generation state and ring publication
 	mu                      sync.RWMutex
 	state                   StreamState
 	publisher               Publisher
@@ -105,6 +106,7 @@ type Stream struct {
 	gopGeneration         uint64
 	gopCacheSealed        bool
 	subscribers           map[string]int // protocol -> count (e.g. "rtmp" -> 2)
+	subscriberTotal       atomic.Int64
 	generationSubscribers map[uint64]map[string]int
 
 	videoSeqHeader *avframe.AVFrame
@@ -217,6 +219,7 @@ func (s *Stream) Config() config.StreamConfig {
 // those structural values from StreamHub.
 func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfig) {
 	cfg = normalizeGOPConfig(cfg)
+	s.writeMu.Lock()
 	s.mu.Lock()
 	s.config = cfg
 	s.limits = limits
@@ -241,6 +244,7 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 	}
 	if s.state == StreamStateNoPublisher && cfg.NoPublisherTimeout > 0 {
 		s.noPublisherTimer = time.AfterFunc(cfg.NoPublisherTimeout, func() {
+			s.writeMu.Lock()
 			s.mu.Lock()
 			notify := false
 			if s.state == StreamStateNoPublisher {
@@ -250,6 +254,7 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 				notify = true
 			}
 			s.mu.Unlock()
+			s.writeMu.Unlock()
 			if notify {
 				s.notifyDestroy()
 			}
@@ -262,6 +267,7 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 	s.checkIdleTimeout()
 	feedback := s.feedbackRouter
 	s.mu.Unlock()
+	s.writeMu.Unlock()
 	if feedback != nil {
 		feedback.UpdateConfig(cfg.Feedback)
 	}
@@ -280,6 +286,8 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 		return errors.New("publisher is nil")
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -355,6 +363,8 @@ func (s *Stream) SetPublisher(pub Publisher) error {
 
 // RemovePublisher detaches the publisher and starts the no-publisher timeout.
 func (s *Stream) RemovePublisher() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removePublisherLocked()
@@ -363,6 +373,8 @@ func (s *Stream) RemovePublisher() {
 // RemovePublisherIf detaches pub only when it is still the active publisher.
 // It prevents a delayed connection cleanup from removing a replacement.
 func (s *Stream) RemovePublisherIf(pub Publisher) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.publisherMatchesLocked(pub) {
@@ -384,6 +396,7 @@ func (s *Stream) removePublisherLocked() {
 
 	if s.config.NoPublisherTimeout > 0 {
 		s.noPublisherTimer = time.AfterFunc(s.config.NoPublisherTimeout, func() {
+			s.writeMu.Lock()
 			s.mu.Lock()
 			notify := false
 			if s.state == StreamStateNoPublisher {
@@ -393,6 +406,7 @@ func (s *Stream) removePublisherLocked() {
 				notify = true
 			}
 			s.mu.Unlock()
+			s.writeMu.Unlock()
 			if notify {
 				s.notifyDestroy()
 			}
@@ -542,10 +556,12 @@ func trackReady(codec avframe.CodecType, hasSequenceHeader bool) bool {
 // Close force-closes the stream: closes the ring buffer, removes the publisher,
 // and transitions to destroying state.
 func (s *Stream) Close() {
+	s.writeMu.Lock()
 	s.mu.Lock()
 	if s.state == StreamStateDestroying {
 		s.ringBuffer.Close()
 		s.mu.Unlock()
+		s.writeMu.Unlock()
 		s.notifyDestroy()
 		return
 	}
@@ -570,6 +586,7 @@ func (s *Stream) Close() {
 	s.signalStartupStateChangedLocked()
 	s.ringBuffer.Close()
 	s.mu.Unlock()
+	s.writeMu.Unlock()
 	if publisher != nil {
 		publisher.Close() //nolint:errcheck
 	}
@@ -605,8 +622,8 @@ func (s *Stream) WriteFrame(frame *avframe.AVFrame) bool {
 	if frame == nil {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.writeFrameLocked(frame)
 }
 
@@ -615,11 +632,14 @@ func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) b
 	if frame == nil {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
 	if !s.publisherMatchesLocked(pub) || s.state != StreamStatePublishing {
+		s.mu.RUnlock()
 		return false
 	}
+	s.mu.RUnlock()
 	return s.writeFrameLocked(frame)
 }
 
@@ -627,6 +647,8 @@ func (s *Stream) WriteFrameForPublisher(pub Publisher, frame *avframe.AVFrame) b
 // generation. activity executes with the stream lock held and must not call
 // any Stream method.
 func (s *Stream) WithActivePublisher(pub Publisher, activity func()) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.publisherMatchesLocked(pub) || s.state != StreamStatePublishing {
@@ -941,8 +963,8 @@ func (s StreamStartupSnapshot) GenerationEndCursor() (int64, bool) {
 
 // StartupSnapshot captures media information, headers, replay frames, and cursors atomically.
 func (s *Stream) StartupSnapshot() StreamStartupSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.startupSnapshotLocked()
 }
 
@@ -984,14 +1006,17 @@ func (s *Stream) WaitForStartup(ctx context.Context) (StreamStartupSnapshot, boo
 		if ctx.Err() != nil {
 			return StreamStartupSnapshot{}, false
 		}
+		s.writeMu.Lock()
 		s.mu.RLock()
 		if s.state == StreamStatePublishing && s.startupReady {
 			snapshot := s.startupSnapshotLocked()
 			s.mu.RUnlock()
+			s.writeMu.Unlock()
 			return snapshot, true
 		}
 		changed := s.startupStateChanged
 		s.mu.RUnlock()
+		s.writeMu.Unlock()
 
 		select {
 		case <-ctx.Done():
@@ -1019,8 +1044,8 @@ func (s *Stream) activePublisherGeneration() (uint64, bool) {
 
 // GOPCacheLen returns the total number of frames across all cached GOPs.
 func (s *Stream) GOPCacheLen() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	total := 0
 	for _, gop := range s.gopCache {
 		total += len(gop)
@@ -1038,8 +1063,8 @@ type GOPCacheDetail struct {
 }
 
 func (s *Stream) GOPCacheDetail() GOPCacheDetail {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	d := GOPCacheDetail{Generation: s.gopGeneration}
 	for _, gop := range s.gopCache {
@@ -1080,8 +1105,8 @@ func (s *Stream) GOPCacheDetail() GOPCacheDetail {
 
 // GOPCache returns a flattened copy of all cached GOPs.
 func (s *Stream) GOPCache() []*avframe.AVFrame {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	var result []*avframe.AVFrame
 	for _, gop := range s.gopCache {
@@ -1098,8 +1123,8 @@ func (s *Stream) GOPCache() []*avframe.AVFrame {
 // then be delivered twice (once from the GOP cache, once from the ring)
 // and break DTS monotonicity.
 func (s *Stream) GOPCacheSnapshot() ([]*avframe.AVFrame, int64) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	var result []*avframe.AVFrame
 	for _, gop := range s.gopCache {
@@ -1113,8 +1138,8 @@ func (s *Stream) GOPCacheSnapshot() ([]*avframe.AVFrame, int64) {
 // its source reader here, while the normal live reader still starts at the
 // atomic cursor returned by GOPCacheSnapshot.
 func (s *Stream) GOPCacheSourceStart() int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if len(s.gopStarts) == 0 {
 		return s.ringBuffer.WriteCursor()
 	}
@@ -1123,29 +1148,29 @@ func (s *Stream) GOPCacheSourceStart() int64 {
 
 // VideoSeqHeader returns the cached video sequence header (SPS/PPS), if any.
 func (s *Stream) VideoSeqHeader() *avframe.AVFrame {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.videoSeqHeader
 }
 
 // AudioSeqHeader returns the cached audio sequence header (AudioSpecificConfig), if any.
 func (s *Stream) AudioSeqHeader() *avframe.AVFrame {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.audioSeqHeader
 }
 
 func (s *Stream) audioCodecState() (avframe.CodecType, uint64) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.mediaInfo.AudioCodec, s.audioCodecEpoch
 }
 
 // SeqHeaderReady returns a channel that is closed when the first sequence header
 // (video or audio) is stored. Subscribers can select on this instead of polling.
 func (s *Stream) SeqHeaderReady() <-chan struct{} {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.seqHeaderReady
 }
 
@@ -1184,16 +1209,13 @@ func (s *Stream) AddSubscriber(protocol string) error {
 
 func (s *Stream) addSubscriberLocked(protocol string) error {
 	if max := s.limits.MaxSubscribersPerStream; max > 0 {
-		total := 0
-		for _, n := range s.subscribers {
-			total += n
-		}
-		if total >= max {
+		if s.subscriberTotal.Load() >= int64(max) {
 			return fmt.Errorf("max subscribers per stream limit reached (%d)", max)
 		}
 	}
 
 	s.subscribers[protocol]++
+	s.subscriberTotal.Add(1)
 
 	// Update feedback router with new subscriber count
 	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
@@ -1247,6 +1269,7 @@ func (s *Stream) removeSubscriberForGeneration(protocol string, generation uint6
 	}
 	if s.subscribers[protocol] > 0 {
 		s.subscribers[protocol]--
+		s.subscriberTotal.Add(-1)
 		if s.subscribers[protocol] == 0 {
 			delete(s.subscribers, protocol)
 		}
@@ -1259,8 +1282,11 @@ func (s *Stream) removeSubscriberForGeneration(protocol string, generation uint6
 func (s *Stream) RemoveSubscriber(protocol string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.subscribers[protocol]--
-	if s.subscribers[protocol] <= 0 {
+	if s.subscribers[protocol] > 0 {
+		s.subscribers[protocol]--
+		s.subscriberTotal.Add(-1)
+	}
+	if s.subscribers[protocol] == 0 {
 		delete(s.subscribers, protocol)
 	}
 	s.feedbackRouter.SetSubscriberCount(s.totalSubscribers())
@@ -1280,11 +1306,12 @@ func (s *Stream) Subscribers() map[string]int {
 
 // totalSubscribers returns the sum of all subscriber counts. Must hold mu.
 func (s *Stream) totalSubscribers() int {
-	total := 0
-	for _, n := range s.subscribers {
-		total += n
-	}
-	return total
+	return int(s.subscriberTotal.Load())
+}
+
+// TotalSubscribers returns the current number of subscribers across all protocols.
+func (s *Stream) TotalSubscribers() int {
+	return int(s.subscriberTotal.Load())
 }
 
 // checkIdleTimeout starts or cancels the idle timer based on current state.

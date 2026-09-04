@@ -277,8 +277,11 @@ func (tm *TranscodeManager) getOrCreateReaderAt(
 	snapshot *StreamStartupSnapshot,
 ) (*util.RingReader[*avframe.AVFrame], func(), error) {
 	// SetPublisher takes these locks in the same order while Reset removes old
-	// tracks. Holding the stream lock through track lookup/creation makes the
-	// snapshot generation check and map mutation one atomic acquisition.
+	// tracks. Holding the stream sequence and lifecycle locks through track
+	// lookup/creation makes the snapshot generation check and map mutation one
+	// atomic acquisition.
+	tm.stream.writeMu.Lock()
+	defer tm.stream.writeMu.Unlock()
 	tm.stream.mu.RLock()
 	defer tm.stream.mu.RUnlock()
 	activeGeneration := tm.stream.state == StreamStatePublishing && !isNilPublisher(tm.stream.publisher)

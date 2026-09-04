@@ -2,6 +2,10 @@ package core
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,6 +77,79 @@ func BenchmarkStreamIngressWithBitrateLimit(b *testing.B) {
 		if frameIndex == len(frames) {
 			frameIndex = 0
 			cycleOffset += productionIngressFixtureDurationMillis
+		}
+	}
+}
+
+func BenchmarkStreamIngressMatrix(b *testing.B) {
+	for _, streamCount := range []int{1, 8, 32} {
+		for _, readersPerStream := range []int{0, 4, 16} {
+			b.Run(fmt.Sprintf("streams=%d/readers=%d", streamCount, readersPerStream), func(b *testing.B) {
+				streams := make([]*Stream, streamCount)
+				publishers := make([]Publisher, streamCount)
+				frames := make([][]*avframe.AVFrame, streamCount)
+				for streamIndex := range streams {
+					cfg := config.StreamConfig{GOPCache: true, GOPCacheNum: 1, GOPCacheMaxFrames: 300, RingBufferSize: 4096}
+					streams[streamIndex] = NewStream(fmt.Sprintf("bench/matrix/%d", streamIndex), cfg, config.LimitsConfig{}, NewEventBus())
+					pub := &testPublisher{id: fmt.Sprintf("matrix-publisher-%d", streamIndex), info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, VideoSequenceHeader: []byte{1, 2, 3}}}
+					publishers[streamIndex] = pub
+					if err := streams[streamIndex].SetPublisher(pub); err != nil {
+						b.Fatal(err)
+					}
+					frames[streamIndex] = []*avframe.AVFrame{
+						avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, 0, 0, []byte{0x65, 1, 2, 3}),
+						avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 40, 40, []byte{0x41, 4, 5, 6}),
+					}
+				}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				var readers sync.WaitGroup
+				for _, stream := range streams {
+					for range readersPerStream {
+						reader := stream.RingBuffer().NewReader()
+						readers.Add(1)
+						go func() {
+							defer readers.Done()
+							for {
+								if _, ok := reader.ReadContext(ctx); !ok {
+									return
+								}
+							}
+						}()
+					}
+				}
+
+				b.ReportAllocs()
+				b.ResetTimer()
+				var writers sync.WaitGroup
+				var rejected atomic.Int64
+				for streamIndex := range streams {
+					writers.Add(1)
+					go func(index int) {
+						defer writers.Done()
+						for n := 0; n < b.N; n++ {
+							if !streams[index].WriteFrameForPublisher(publishers[index], frames[index][n%len(frames[index])]) {
+								rejected.Add(1)
+							}
+						}
+					}(streamIndex)
+				}
+				writers.Wait()
+				b.StopTimer()
+				cancel()
+				readers.Wait()
+				for _, stream := range streams {
+					stream.Close()
+				}
+				if got := rejected.Load(); got != 0 {
+					b.Fatalf("ingress rejected %d frames", got)
+				}
+				for index, stream := range streams {
+					if got := stream.RingBuffer().WriteCursor(); got != int64(b.N) {
+						b.Fatalf("stream %d cursor = %d, want %d", index, got, b.N)
+					}
+				}
+			})
 		}
 	}
 }
