@@ -12,8 +12,76 @@ import (
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	"github.com/im-pingo/liveforge/tools/testkit/source"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
+
+func TestWHIPOpusSenderDoesNotBurstAfterSchedulerDelay(t *testing.T) {
+	for _, scenario := range []string{"late timer", "video ahead"} {
+		t.Run(scenario, func(t *testing.T) {
+			clock := &whipTestClock{now: time.Unix(1, 0)}
+			writer := &whipTestRTPWriter{clock: clock}
+			pacer := &whipRealtimePacer{enabled: true, clock: clock}
+			sender := whipOpusSender{track: writer, pacer: pacer}
+			payload := []byte{0x08, 0x01}
+			if _, _, err := sender.Write(context.Background(), [][]byte{payload}); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "late timer" {
+				clock.oversleep = 80 * time.Millisecond
+			} else {
+				clock.now = clock.now.Add(100 * time.Millisecond)
+				if err := pacer.Wait(context.Background(), 80*time.Millisecond); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := sender.Write(context.Background(), [][]byte{payload, payload, payload}); err != nil {
+				t.Fatal(err)
+			}
+			assertWHIPPacketEmissionTiming(t, writer.packets)
+		})
+	}
+}
+
+type whipTestClock struct {
+	now       time.Time
+	oversleep time.Duration
+}
+
+func (c *whipTestClock) Now() time.Time { return c.now }
+
+func (c *whipTestClock) Wait(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.now = c.now.Add(delay + c.oversleep)
+	c.oversleep = 0
+	return nil
+}
+
+type whipTestRTPWriter struct {
+	clock   *whipTestClock
+	packets []whipCapturedRTP
+}
+
+func (w *whipTestRTPWriter) WriteRTP(packet *rtp.Packet) error {
+	w.packets = append(w.packets, whipCapturedRTP{Timestamp: packet.Timestamp, Arrival: w.clock.Now(), Payload: append([]byte(nil), packet.Payload...)})
+	return nil
+}
+
+func assertWHIPPacketEmissionTiming(t *testing.T, packets []whipCapturedRTP) {
+	t.Helper()
+	for i := 1; i < len(packets); i++ {
+		duration, ok := whipOpusPacketDurationSamples(packets[i-1].Payload)
+		if !ok {
+			t.Fatal("invalid captured Opus duration")
+		}
+		gap := packets[i].Arrival.Sub(packets[i-1].Arrival)
+		if want := time.Duration(duration) * time.Second / 48000; gap < want {
+			t.Fatalf("packets %d/%d emitted %s apart, require %s", i-1, i, gap, want)
+		}
+	}
+}
 
 func TestWHIPDirectOpusUsesPacketDurationsForRTPTimestamps(t *testing.T) {
 	capture := newWHIPRTPCapture(t)
@@ -68,10 +136,11 @@ type whipCapturedRTP struct {
 }
 
 type whipRTPCapture struct {
-	server  *httptest.Server
-	packets chan whipCapturedRTP
-	mu      sync.Mutex
-	peers   []*webrtc.PeerConnection
+	server   *httptest.Server
+	packets  chan whipCapturedRTP
+	readGate <-chan struct{}
+	mu       sync.Mutex
+	peers    []*webrtc.PeerConnection
 }
 
 func newWHIPRTPCapture(t *testing.T) *whipRTPCapture {
@@ -102,6 +171,9 @@ func newWHIPRTPCapture(t *testing.T) *whipRTPCapture {
 						return
 					}
 					capture.packets <- whipCapturedRTP{Timestamp: packet.Timestamp, Arrival: time.Now(), Payload: append([]byte(nil), packet.Payload...)}
+					if capture.readGate != nil {
+						<-capture.readGate
+					}
 				}
 			}()
 		})

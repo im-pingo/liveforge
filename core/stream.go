@@ -133,6 +133,7 @@ type Stream struct {
 	transcodeManager         *TranscodeManager
 	destroyCallback          func()
 	destroyOnce              sync.Once
+	simulcast                *SimulcastFamily
 }
 
 var streamInstanceSequence atomic.Uint64
@@ -266,6 +267,10 @@ func (s *Stream) UpdatePolicy(cfg config.StreamConfig, limits config.LimitsConfi
 	}
 	s.checkIdleTimeout()
 	feedback := s.feedbackRouter
+	family := s.simulcast
+	if family != nil {
+		family.updatePrivatePolicy(cfg, limits)
+	}
 	s.mu.Unlock()
 	s.writeMu.Unlock()
 	if feedback != nil {
@@ -455,6 +460,10 @@ func isNilPublisher(pub Publisher) bool {
 }
 
 func (s *Stream) closeGenerationLocked() {
+	if s.simulcast != nil {
+		s.simulcast.closePrivateLayers()
+		s.simulcast = nil
+	}
 	if s.generationDone == nil || s.generationBoundary == nil || s.generationBoundary.ended.Load() {
 		return
 	}
@@ -978,6 +987,11 @@ func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
 	for _, gop := range s.gopCache {
 		replayFrames = append(replayFrames, gop...)
 	}
+	// A bounded GOP prefix may end before live. Recover the missing reference
+	// chain from the retained ring instead of joining that prefix across a gap.
+	if liveCursor-sourceCursor > int64(len(replayFrames)) {
+		replayFrames, sourceCursor = s.retainedStartupReplayLocked(liveCursor)
+	}
 	publisherID := ""
 	if !isNilPublisher(s.publisher) {
 		publisherID = s.publisher.ID()
@@ -998,6 +1012,37 @@ func (s *Stream) startupSnapshotLocked() StreamStartupSnapshot {
 		audioCodecEpoch:       s.audioCodecEpoch,
 		generationBoundary:    s.generationBoundary,
 	}
+}
+
+// retainedStartupReplayLocked runs under writeMu. It copies frame references
+// from at most one retained ring; persistent GOP cache bounds stay unchanged.
+func (s *Stream) retainedStartupReplayLocked(liveCursor int64) ([]*avframe.AVFrame, int64) {
+	for _, start := range s.gopStarts {
+		reader := s.ringBuffer.NewReaderAt(start)
+		first := reader.TryReadResult()
+		if !first.OK || first.Overwritten != 0 || first.Value == nil || !first.Value.FrameType.IsKeyframe() {
+			reader.Close()
+			continue
+		}
+		replay := make([]*avframe.AVFrame, 0, liveCursor-start)
+		replay = append(replay, first.Value)
+		complete := true
+		for cursor := start + 1; cursor < liveCursor; cursor++ {
+			read := reader.TryReadResult()
+			if !read.OK || read.Overwritten != 0 || read.Value == nil {
+				complete = false
+				break
+			}
+			if read.Value.FrameType != avframe.FrameTypeSequenceHeader {
+				replay = append(replay, read.Value)
+			}
+		}
+		reader.Close()
+		if complete {
+			return replay, start
+		}
+	}
+	return nil, liveCursor
 }
 
 // WaitForStartup waits until the current generation is publishing and ready.

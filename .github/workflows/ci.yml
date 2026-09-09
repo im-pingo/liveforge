@@ -75,6 +75,10 @@ jobs:
         run: CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
 
       - name: Test
+        env:
+          LIVEFORGE_REQUIRE_BROWSER: "1"
+          LIVEFORGE_PROTOCOL_MATRIX_SOAK: "15s"
+          LF_BINARY: ${{ github.workspace }}/liveforge
         run: CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage

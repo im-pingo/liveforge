@@ -757,8 +757,9 @@ func (r *muxerWorkerLiveInput) terminateOverwrite(input muxerWorkerInputKind, co
 	r.terminalOnce.Do(func() {
 		r.terminalMu.Lock()
 		r.terminal = muxerWorkerOverwrite{Input: input, Count: count}
-		r.cancel()
+		// Publish the cause before cancellation can expose an exhausted input.
 		close(r.terminalDone)
+		r.cancel()
 		r.terminalMu.Unlock()
 	})
 }

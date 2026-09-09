@@ -548,7 +548,7 @@ func whepFeedLoop(stream *core.Stream, startup core.StreamStartupSnapshot, video
 
 	// Determine if audio transcoding is needed.
 	sourceAudioCodec := startup.MediaInfo.AudioCodec
-	needsTranscode := targetAudioCodec != sourceAudioCodec && sourceAudioCodec != 0
+	needsTranscode := audio != nil && targetAudioCodec != sourceAudioCodec && sourceAudioCodec != 0
 	videoCodec := startup.MediaInfo.VideoCodec
 
 	// Track the last DTS to compute sample durations.

@@ -79,7 +79,12 @@ func (m *Module) PrepareReload(s *core.Server) (func(), error) {
 		cfg.Enabled = current.cfg.Enabled
 		cfg.Path = current.cfg.Path
 		next := &recordRuntime{cfg: cfg, storage: current.storage, template: current.template}
-		return func() { m.runtime.Store(next) }, nil
+		return func() {
+			if storage, ok := current.storage.(*LocalStorage); ok {
+				storage.listIndex.invalidate()
+			}
+			m.runtime.Store(next)
+		}, nil
 	}
 	storage, template, err := newStorageForConfig(cfg)
 	if err != nil {

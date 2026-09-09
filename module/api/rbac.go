@@ -87,7 +87,7 @@ func permissionForRequest(r *http.Request) string {
 		return "streams:delete"
 	case r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/streams/") && strings.HasSuffix(p, "/kick"):
 		return "streams:kick"
-	case r.Method == http.MethodPost && (p == "/api/v1/server/config/refresh" || p == "/api/v1/server/config/apply"):
+	case r.Method == http.MethodPost && (p == "/api/v1/server/config/refresh" || p == "/api/v1/server/config/apply" || p == "/api/v1/server/config/rollback"):
 		return "config:reload"
 	case r.Method == http.MethodPost && p == "/api/v1/server/config/validate":
 		return "config:read"
@@ -180,23 +180,64 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+type managementPermissionResolver func(*http.Request) (permission string, registered bool)
+
+func newManagementPermissionResolver(next http.Handler, server *core.Server) managementPermissionResolver {
+	registeredHandlers := server.APIHandlers()
+	registered := http.NewServeMux()
+	for pattern, handler := range registeredHandlers {
+		registered.Handle(pattern, handler)
+	}
+	// Match the serving mux when available: a built-in endpoint may be more
+	// specific than a registered subtree and must retain its own policy.
+	if mux, ok := next.(*http.ServeMux); ok {
+		registered = mux
+	}
+	return func(r *http.Request) (string, bool) {
+		_, pattern := registered.Handler(r)
+		if handler, ok := registeredHandlers[pattern]; ok {
+			return registeredAPIPermission(handler, r), true
+		}
+		return permissionForRequest(r), false
+	}
+}
+
 func buildSecurityHandler(next http.Handler, server *core.Server, audit *AuditStore, optionalCounters ...*SecurityCounters) http.Handler {
+	permissionFor := newManagementPermissionResolver(next, server)
 	var counters *SecurityCounters
 	if len(optionalCounters) > 0 {
 		counters = optionalCounters[0]
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := server.Config().API
-		if r.URL.Path == "/console/login" {
+		permission, customAPI := permissionFor(r)
+		if !customAPI && r.URL.Path == "/console/login" {
 			secure := server.HasTLS() && (cfg.TLS == nil || *cfg.TLS)
 			handleSecuredLogin(w, r, cfg.Console, secure, audit, counters)
 			return
 		}
-		if r.URL.Path == "/api/v1/server/health" {
+		if !customAPI && r.URL.Path == "/api/v1/server/health" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/console") && !strings.HasPrefix(r.URL.Path, "/console/static/") {
+		if !customAPI && r.URL.Path == "/console/logout" {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Deletion matches login's TLS policy, including explicitly configured HTTP listeners.
+				Name: "lf_session", Value: "", Path: "/", MaxAge: -1,
+				HttpOnly: true, SameSite: http.SameSiteStrictMode,
+				Secure: server.HasTLS() && (cfg.TLS == nil || *cfg.TLS),
+			})
+			w.Header().Set("Cache-Control", "no-store")
+			http.Redirect(w, r, "/console/login", http.StatusSeeOther)
+			return
+		}
+		if !customAPI && strings.HasPrefix(r.URL.Path, "/console") && !strings.HasPrefix(r.URL.Path, "/console/static/") {
 			if cfg.Console.Username != "" && !validateSession(r, cfg.Console) {
 				loginURL := "/console/login"
 				if r.URL.Path == "/console/publish" {
@@ -208,13 +249,12 @@ func buildSecurityHandler(next http.Handler, server *core.Server, audit *AuditSt
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/debug/") {
+		if !customAPI && !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/debug/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		requestID := newRequestID()
-		permission := permissionForRequest(r)
 		p, ok := resolvePrincipal(r, cfg)
 		if !ok {
 			if counters != nil {
@@ -246,6 +286,19 @@ func buildSecurityHandler(next http.Handler, server *core.Server, audit *AuditSt
 		}
 		audit.Record(AuditEntry{RequestID: requestID, Principal: p.Name, Role: p.Role, Action: permission, Resource: r.URL.Path, Result: result, RemoteAddr: r.RemoteAddr})
 	})
+}
+
+func registeredAPIPermission(handler http.Handler, r *http.Request) string {
+	if declared, ok := handler.(core.APIPermissionHandler); ok && declared.APIPermission() != "" {
+		return declared.APIPermission()
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+		return "server:mutate"
+	}
+	if strings.HasPrefix(r.URL.Path, "/debug/") {
+		return "debug:read"
+	}
+	return "server:read"
 }
 
 func handleSecuredLogin(w http.ResponseWriter, r *http.Request, cfg config.ConsoleConfig, secure bool, audit *AuditStore, counters *SecurityCounters) {

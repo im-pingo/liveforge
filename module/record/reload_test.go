@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,6 +56,12 @@ func TestModuleOnReloadKeepsStoragePathAndPriorRecordingsManageable(t *testing.T
 	if _, err := object.Complete(context.Background(), RecordingInfo{}); err != nil {
 		t.Fatal(err)
 	}
+	if items, listErr := m.ListRecordings(context.Background()); listErr != nil || len(items) != 1 {
+		t.Fatalf("initial recordings: items=%+v err=%v", items, listErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(firstRoot, "external.flv"), []byte("external"), 0600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
 
 	next := *first
 	next.Record.Path = filepath.Join(secondRoot, "{stream_key}.flv")
@@ -66,7 +73,14 @@ func TestModuleOnReloadKeepsStoragePathAndPriorRecordingsManageable(t *testing.T
 		t.Fatalf("record path changed in place: %q", got)
 	}
 	items, err := m.ListRecordings(context.Background())
-	if err != nil || len(items) != 1 || items[0].ID != "live/prior.flv" {
+	if err != nil || len(items) != 2 {
 		t.Fatalf("prior recordings disappeared: items=%+v err=%v", items, err)
+	}
+	listed := make(map[string]bool, len(items))
+	for _, item := range items {
+		listed[item.ID] = true
+	}
+	if !listed["live/prior.flv"] || !listed["external.flv"] {
+		t.Fatalf("reload did not refresh the original storage root: %+v", items)
 	}
 }

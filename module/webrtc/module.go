@@ -196,6 +196,7 @@ func (m *Module) Init(s *core.Server) error {
 			handler.ServeHTTP(w, r)
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 

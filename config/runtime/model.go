@@ -10,11 +10,12 @@ import (
 )
 
 var (
-	ErrClosed          = errors.New("config runtime manager is closed")
-	ErrNotStarted      = errors.New("config runtime manager is not started")
-	ErrNoInitial       = errors.New("config runtime source did not produce an initial snapshot")
-	ErrInvalidSource   = errors.New("config runtime source is nil")
-	ErrImmutableChange = errors.New("immutable configuration change")
+	ErrClosed           = errors.New("config runtime manager is closed")
+	ErrNotStarted       = errors.New("config runtime manager is not started")
+	ErrNoInitial        = errors.New("config runtime source did not produce an initial snapshot")
+	ErrInvalidSource    = errors.New("config runtime source is nil")
+	ErrImmutableChange  = errors.New("immutable configuration change")
+	ErrRevisionConflict = errors.New("configuration document changed; reload and reconcile before retrying")
 )
 
 // ConfigSource loads a complete configuration document. Implementations must not
@@ -89,13 +90,14 @@ type ConfigSnapshot struct {
 	// written pending document while an asynchronous refresh catches up.
 	// It is retained so editors can preserve comments and fields not represented by Config.
 	// Consumers must treat the bytes as immutable.
-	DesiredDocument []byte
-	Version         Version
-	Source          string
-	LoadedAt        time.Time
-	LastModified    time.Time
-	Changes         []Change
-	PendingRestart  []string
+	DesiredDocument  []byte
+	DocumentRevision string
+	Version          Version
+	Source           string
+	LoadedAt         time.Time
+	LastModified     time.Time
+	Changes          []Change
+	PendingRestart   []string
 }
 
 // Status is a point-in-time copy of manager health. Error text is source

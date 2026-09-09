@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,14 +21,29 @@ import (
 	pionrtp "github.com/pion/rtp/v2"
 )
 
+const maxRelayPSBytes = 4 << 20
+
+func appendRelayPS(buf, fragment []byte) ([]byte, error) {
+	if len(fragment) > maxRelayPSBytes-len(buf) {
+		return nil, fmt.Errorf("PS assembly exceeds %d bytes", maxRelayPSBytes)
+	}
+	if size := len(buf) + len(fragment); size > cap(buf) {
+		grown := make([]byte, len(buf), min(maxRelayPSBytes, max(size, cap(buf)*2)))
+		copy(grown, buf)
+		buf = grown
+	}
+	return append(buf, fragment...), nil
+}
+
 // GBTransport implements RelayTransport for GB28181 PS-over-RTP relay.
 // Uses SDP-over-HTTP signaling similar to RTPTransport, but encapsulates
 // frames in MPEG-PS format within RTP packets.
 type GBTransport struct {
-	cfg    config.ClusterGBConfig
-	ports  *portalloc.PortAllocator
-	hub    *core.StreamHub
-	server *core.Server
+	cfg      config.ClusterGBConfig
+	ports    *portalloc.PortAllocator
+	hub      *core.StreamHub
+	server   *core.Server
+	sessions relaySessions
 }
 
 // NewGBTransport creates a new GB28181 relay transport.
@@ -62,8 +78,8 @@ func NewGBTransport(cfg config.ClusterGBConfig, s *core.Server) *GBTransport {
 	// Register signaling handlers.
 	pushPath := cfg.SignalingPath + "/push"
 	pullPath := cfg.SignalingPath + "/pull"
-	s.RegisterAPIHandler("POST "+pushPath, http.HandlerFunc(t.handlePushSignal))
-	s.RegisterAPIHandler("POST "+pullPath, http.HandlerFunc(t.handlePullSignal))
+	s.RegisterAPIHandler("POST "+pushPath, core.WithAPIPermission("server:mutate", http.HandlerFunc(t.handlePushSignal)))
+	s.RegisterAPIHandler("POST "+pullPath, core.WithAPIPermission("server:mutate", http.HandlerFunc(t.handlePullSignal)))
 
 	slog.Info("gb transport ready", "module", "cluster",
 		"push_path", pushPath, "pull_path", pullPath)
@@ -78,12 +94,17 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 	if err != nil {
 		return fmt.Errorf("parse target URL: %w", err)
 	}
+	owner, err := t.sessions.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer owner.finish()
 	snapshot := stream.StartupSnapshot()
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil
 	}
-	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
-	defer cancelGeneration()
+	owner.bindGeneration(snapshot)
+	relayCtx := owner.ctx
 
 	// Allocate local port pair
 	rtpPort, _, err := t.ports.AllocatePair()
@@ -94,7 +115,7 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 
 	// Signal remote to start receiving
 	sigURL := fmt.Sprintf("http://%s%s/push?stream=%s&port=%d",
-		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
+		u.Host, t.cfg.SignalingPath, url.QueryEscape(strings.TrimPrefix(u.Path, "/")), rtpPort)
 
 	body, err := t.postSignal(relayCtx, sigURL)
 	if err != nil {
@@ -103,7 +124,7 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 
 	// Read remote port from response
 	remotePort, _ := strconv.Atoi(string(bytes.TrimSpace(body)))
-	if remotePort == 0 {
+	if remotePort < 1 || remotePort > 65535 {
 		return fmt.Errorf("invalid remote port from signaling")
 	}
 
@@ -117,8 +138,7 @@ func (t *GBTransport) Push(ctx context.Context, targetURL string, stream *core.S
 		return fmt.Errorf("dial UDP: %w", err)
 	}
 	defer conn.Close()
-	stopCancelWatch := closeOnContextDone(relayCtx, conn)
-	defer stopCancelWatch()
+	owner.ownSocket(conn)
 
 	slog.Info("gb relay push connected", "module", "cluster", "target", targetURL, "remote_port", remotePort)
 	markRelayConnected(relayCtx)
@@ -222,16 +242,22 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 		return fmt.Errorf("parse source URL: %w", err)
 	}
 
-	// Allocate local port pair for receiving
-	rtpPort, _, err := t.ports.AllocatePair()
+	owner, err := t.sessions.begin(ctx)
 	if err != nil {
-		return fmt.Errorf("allocate port pair: %w", err)
+		return err
 	}
-	defer t.ports.Free(rtpPort, rtpPort+1)
+	defer owner.finish()
+	ctx = owner.ctx
+
+	// Bind before the peer begins sending media.
+	conn, rtpPort, err := owner.listenUDPPair(t.ports)
+	if err != nil {
+		return fmt.Errorf("listen UDP pair: %w", err)
+	}
 
 	// Signal remote to start sending
 	sigURL := fmt.Sprintf("http://%s%s/pull?stream=%s&port=%d",
-		u.Host, t.cfg.SignalingPath, url.QueryEscape(u.Path), rtpPort)
+		u.Host, t.cfg.SignalingPath, url.QueryEscape(strings.TrimPrefix(u.Path, "/")), rtpPort)
 
 	if _, err := t.postSignal(ctx, sigURL); err != nil {
 		return fmt.Errorf("signaling request: %w", err)
@@ -239,22 +265,13 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 
 	slog.Info("gb relay pull started", "module", "cluster", "source", sourceURL, "local_port", rtpPort)
 
-	// Listen for incoming RTP
-	listenAddr := &net.UDPAddr{Port: rtpPort}
-	conn, err := net.ListenUDP("udp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("listen UDP: %w", err)
-	}
-	defer conn.Close()
-	stopCancelWatch := closeOnContextDone(ctx, conn)
-	defer stopCancelWatch()
 	markRelayConnected(ctx)
 
 	pub := newOriginPublisher("gb-pull", stream.Key(), &avframe.MediaInfo{})
-	if err := stream.SetPublisher(pub); err != nil {
+	event := &core.EventContext{StreamKey: stream.Key(), PublisherID: pub.ID(), Protocol: "gb28181", RemoteAddr: u.Host}
+	if _, err := admitRelayPublisher(owner, t.server, stream, pub, event); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisherIf(pub)
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte
@@ -270,6 +287,9 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 		conn.SetReadDeadline(time.Now().Add(t.cfg.Timeout))
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				return fmt.Errorf("receive timeout")
 			}
@@ -286,7 +306,10 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 			continue
 		}
 
-		psBuf = append(psBuf, pkt.Payload...)
+		psBuf, err = appendRelayPS(psBuf, pkt.Payload)
+		if err != nil {
+			return err
+		}
 
 		if pkt.Marker {
 			frames, err := demuxer.Feed(psBuf)
@@ -294,11 +317,9 @@ func (t *GBTransport) Pull(ctx context.Context, sourceURL string, stream *core.S
 				slog.Debug("ps demux error in gb pull", "module", "cluster", "error", err)
 			}
 			for _, frame := range frames {
-				if pub.info.VideoCodec == 0 && frame.MediaType == avframe.MediaTypeVideo {
-					pub.info.VideoCodec = frame.Codec
-				}
-				if pub.info.AudioCodec == 0 && frame.MediaType == avframe.MediaTypeAudio {
-					pub.info.AudioCodec = frame.Codec
+				if frame.MediaType.IsAudio() {
+					// The PS demuxer borrows audio payload storage from psBuf.
+					frame.Payload = bytes.Clone(frame.Payload)
 				}
 				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
 					return nil
@@ -318,7 +339,8 @@ func (t *GBTransport) postSignal(ctx context.Context, sigURL string) ([]byte, er
 	if err := authorizePeerRequest(req, t.server); err != nil {
 		return nil, fmt.Errorf("authorize peer signaling: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -330,34 +352,60 @@ func (t *GBTransport) postSignal(ctx context.Context, sigURL string) ([]byte, er
 	return readPeerSignalingResponse(resp.Body)
 }
 
-func (t *GBTransport) Close() error { return nil }
+func (t *GBTransport) Close() error { return t.sessions.close() }
 
 // handlePushSignal handles the signaling request for an incoming GB push relay.
 func (t *GBTransport) handlePushSignal(w http.ResponseWriter, r *http.Request) {
+	if _, ok := readSignalingRequest(w, r); !ok {
+		return
+	}
 	streamKey := r.URL.Query().Get("stream")
 	remotePortStr := r.URL.Query().Get("port")
-	if streamKey == "" || remotePortStr == "" {
-		http.Error(w, "missing stream or port", http.StatusBadRequest)
+	remotePort, err := strconv.Atoi(remotePortStr)
+	if streamKey == "" || err != nil || remotePort < 1 || remotePort > 65535 {
+		http.Error(w, "missing stream or invalid port", http.StatusBadRequest)
 		return
 	}
-
-	rtpPort, _, err := t.ports.AllocatePair()
+	session, err := t.sessions.begin(context.Background())
 	if err != nil {
-		http.Error(w, "port allocation failed", http.StatusServiceUnavailable)
+		http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
 		return
 	}
-
-	// Start background receiver for the pushed stream
-	stream, _ := t.hub.GetOrCreate(streamKey)
-	go t.receivePush(stream, rtpPort)
-
+	accepted := false
+	defer func() {
+		if !accepted {
+			session.finish()
+		}
+	}()
+	conn, rtpPort, err := session.listenUDPPair(t.ports)
+	if err != nil {
+		http.Error(w, "no available UDP ports", http.StatusServiceUnavailable)
+		return
+	}
+	stream, pub, status, err := admitSignaledPublisher(session, t.server, t.hub, r, "gb-push", "gb28181", &avframe.MediaInfo{})
+	if err != nil {
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	if session.ctx.Err() != nil {
+		http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	// Return local port for remote to send to
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "%d", rtpPort)
+	if _, err := fmt.Fprintf(w, "%d", rtpPort); err != nil {
+		return
+	}
+	session.established = true
+	accepted = true
+	go func() { defer session.finish(); t.receivePush(stream, pub, conn) }()
 }
 
 // handlePullSignal handles the signaling request for an outgoing GB pull relay.
 func (t *GBTransport) handlePullSignal(w http.ResponseWriter, r *http.Request) {
+	if _, ok := readSignalingRequest(w, r); !ok {
+		return
+	}
 	streamKey := r.URL.Query().Get("stream")
 	remotePortStr := r.URL.Query().Get("port")
 	if streamKey == "" || remotePortStr == "" {
@@ -365,11 +413,12 @@ func (t *GBTransport) handlePullSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remotePort, _ := strconv.Atoi(remotePortStr)
-	if remotePort == 0 {
+	remotePort, err := strconv.Atoi(remotePortStr)
+	if err != nil || remotePort < 1 || remotePort > 65535 {
 		http.Error(w, "invalid port", http.StatusBadRequest)
 		return
 	}
+	remoteSSRC := uint32(remotePort)
 
 	stream, ok := t.hub.Find(streamKey)
 	if !ok {
@@ -381,10 +430,42 @@ func (t *GBTransport) handlePullSignal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stream not found or no publisher", http.StatusNotFound)
 		return
 	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || net.ParseIP(host) == nil {
+		http.Error(w, "invalid remote address", http.StatusBadRequest)
+		return
+	}
+	session, err := t.sessions.begin(context.Background())
+	if err != nil {
+		http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	accepted := false
+	defer func() {
+		if !accepted {
+			session.finish()
+		}
+	}()
+	session.bindGeneration(snapshot)
+	conn, err := session.dialUDP(t.ports, &net.UDPAddr{IP: net.ParseIP(host), Port: remotePort})
+	if err != nil {
+		http.Error(w, "UDP setup failed", http.StatusServiceUnavailable)
+		return
+	}
+	if session.ctx.Err() != nil || !stream.IsPublisherGeneration(snapshot.Generation) {
+		http.Error(w, "publisher retired during setup", http.StatusServiceUnavailable)
+		return
+	}
+	if err := session.subscribe(stream, snapshot, "gb28181"); err != nil {
+		http.Error(w, "subscriber admission failed", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Start background sender
+	accepted = true
 	go func() {
-		if err := t.sendPull(stream, snapshot, r.RemoteAddr, remotePort); err != nil {
+		defer session.finish()
+		if err := t.sendPullConnection(session.ctx, stream, snapshot, conn, remoteSSRC); err != nil {
 			slog.Warn("gb pull sender stopped", "module", "cluster", "error", err)
 		}
 	}()
@@ -392,22 +473,7 @@ func (t *GBTransport) handlePullSignal(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
-	defer t.ports.Free(rtpPort, rtpPort+1)
-
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: rtpPort})
-	if err != nil {
-		slog.Error("gb push receiver listen failed", "module", "cluster", "error", err)
-		return
-	}
-	defer conn.Close()
-
-	pub := newOriginPublisher("gb-push", stream.Key(), &avframe.MediaInfo{})
-	if err := stream.SetPublisher(pub); err != nil {
-		slog.Error("gb push set publisher failed", "module", "cluster", "error", err)
-		return
-	}
-	defer stream.RemovePublisherIf(pub)
+func (t *GBTransport) receivePush(stream *core.Stream, pub *originPublisher, conn *net.UDPConn) {
 
 	demuxer := ps.NewDemuxer()
 	var psBuf []byte
@@ -418,7 +484,7 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				slog.Info("gb push receiver timeout", "module", "cluster", "port", rtpPort)
+				slog.Info("gb push receiver timeout", "module", "cluster", "port", conn.LocalAddr())
 			}
 			return
 		}
@@ -432,12 +498,15 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 			continue
 		}
 
-		psBuf = append(psBuf, pkt.Payload...)
+		psBuf, err = appendRelayPS(psBuf, pkt.Payload)
+		if err != nil {
+			return
+		}
 		if pkt.Marker {
 			frames, _ := demuxer.Feed(psBuf)
 			for _, frame := range frames {
-				if pub.info.VideoCodec == 0 && frame.MediaType == avframe.MediaTypeVideo {
-					pub.info.VideoCodec = frame.Codec
+				if frame.MediaType.IsAudio() {
+					frame.Payload = bytes.Clone(frame.Payload)
 				}
 				if !stream.WriteFrameForPublisher(pub, frame) && stream.Publisher() != pub {
 					return
@@ -449,8 +518,15 @@ func (t *GBTransport) receivePush(stream *core.Stream, rtpPort int) {
 }
 
 func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupSnapshot, remoteAddr string, remotePort int) error {
-	ctx, cancelGeneration := bindRelayGeneration(context.Background(), snapshot)
-	defer cancelGeneration()
+	if remotePort < 1 || remotePort > 65535 {
+		return fmt.Errorf("invalid remote UDP port: %d", remotePort)
+	}
+	session, err := t.sessions.begin(context.Background())
+	if err != nil {
+		return err
+	}
+	defer session.finish()
+	session.bindGeneration(snapshot)
 	host, _, _ := net.SplitHostPort(remoteAddr)
 	remote := &net.UDPAddr{IP: net.ParseIP(host), Port: remotePort}
 
@@ -460,11 +536,14 @@ func (t *GBTransport) sendPull(stream *core.Stream, snapshot core.StreamStartupS
 		return fmt.Errorf("dial UDP: %w", err)
 	}
 	defer conn.Close()
+	session.ownSocket(conn)
+	return t.sendPullConnection(session.ctx, stream, snapshot, conn, uint32(remotePort))
+}
 
+func (t *GBTransport) sendPullConnection(ctx context.Context, stream *core.Stream, snapshot core.StreamStartupSnapshot, conn *net.UDPConn, ssrc uint32) error {
 	muxer := ps.NewMuxer()
 	var seq uint16
 	var ts uint32
-	ssrc := uint32(remotePort)
 	var mu sync.Mutex
 
 	sendFrame := func(frame *avframe.AVFrame) error {

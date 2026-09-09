@@ -5,6 +5,7 @@ package push
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,7 +51,45 @@ func TestWHIPPushPublishesOpusAudio(t *testing.T) {
 }
 
 func TestWHIPConvertedOpusPacketsAreIndividuallyPaced(t *testing.T) {
+	src := source.NewFLVSourceLoop(0)
+	processor, err := newWHIPAudioProcessor(src.MediaInfo().AudioCodec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer processor.Close()
+	var converted [][]byte
+	for frames := 0; frames < 100 && len(converted) < 20; frames++ {
+		frame, readErr := src.NextFrame()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !frame.MediaType.IsAudio() {
+			continue
+		}
+		packets, processErr := processor.Process(frame)
+		if processErr != nil {
+			t.Fatal(processErr)
+		}
+		converted = append(converted, packets...)
+	}
+	if len(converted) < 20 {
+		t.Fatalf("converted %d Opus packets, require at least 20", len(converted))
+	}
+	clock := &whipTestClock{now: time.Unix(1, 0), oversleep: 80 * time.Millisecond}
+	writer := &whipTestRTPWriter{clock: clock}
+	sender := whipOpusSender{track: writer, pacer: &whipRealtimePacer{enabled: true, clock: clock}}
+	if sent, _, sendErr := sender.Write(context.Background(), converted); sendErr != nil || sent != int64(len(converted)) {
+		t.Fatalf("sent=%d err=%v", sent, sendErr)
+	}
+	assertWHIPPacketEmissionTiming(t, writer.packets)
+}
+
+func TestWHIPConvertedOpusRTPTimestampsSurviveReceiverBacklog(t *testing.T) {
 	capture := newWHIPRTPCapture(t)
+	gate := make(chan struct{})
+	capture.readGate = gate
+	releaseReads := sync.OnceFunc(func() { close(gate) })
+	defer releaseReads()
 	pusher, err := NewPusher("whip")
 	if err != nil {
 		t.Fatalf("NewPusher: %v", err)
@@ -69,21 +108,19 @@ func TestWHIPConvertedOpusPacketsAreIndividuallyPaced(t *testing.T) {
 		result <- pushErr
 	}()
 
-	packets := capture.Wait(t, 20)
+	// Queue media after the first packet while the transport remains active.
+	// ReadRTP timestamps cannot establish individual sender spacing.
+	packets := capture.Wait(t, 1)
+	time.Sleep(150 * time.Millisecond)
+	releaseReads()
+	packets = append(packets, capture.Wait(t, 19)...)
 	for i := 1; i < len(packets); i++ {
-		if gap := packets[i].Arrival.Sub(packets[i-1].Arrival); gap < 8*time.Millisecond {
-			t.Fatalf("converted Opus packets %d/%d arrived %s apart; timestamps=%d/%d durations=%v/%v; each emitted packet must be paced", i-1, i, gap, packets[i-1].Timestamp, packets[i].Timestamp, opusPacketDurationForTest(packets[i-1]), opusPacketDurationForTest(packets[i]))
+		duration, valid := whipOpusPacketDurationSamples(packets[i-1].Payload)
+		if !valid || packets[i].Timestamp-packets[i-1].Timestamp != duration {
+			t.Fatalf("converted Opus packets %d/%d have timestamps=%d/%d, prior duration=%d valid=%v", i-1, i, packets[i-1].Timestamp, packets[i].Timestamp, duration, valid)
 		}
 	}
 	if pushErr := <-result; pushErr != nil {
 		t.Fatalf("WHIP push: %v", pushErr)
 	}
-}
-
-func opusPacketDurationForTest(packet whipCapturedRTP) time.Duration {
-	samples, ok := whipOpusPacketDurationSamples(packet.Payload)
-	if !ok {
-		return 0
-	}
-	return time.Duration(samples) * time.Second / 48000
 }

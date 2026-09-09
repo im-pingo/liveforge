@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -42,11 +43,12 @@ func parsePortRange(portRange string) (*portalloc.PortAllocator, error) {
 
 // RTPTransport implements RelayTransport for direct RTP relay with SDP-over-HTTP signaling.
 type RTPTransport struct {
-	cfg     config.ClusterRTPConfig
-	ports   *portalloc.PortAllocator
-	hub     *core.StreamHub
-	server  *core.Server
-	metrics *RelayMetrics
+	cfg      config.ClusterRTPConfig
+	ports    *portalloc.PortAllocator
+	hub      *core.StreamHub
+	server   *core.Server
+	metrics  *RelayMetrics
+	sessions relaySessions
 }
 
 type sequenceLossTracker struct {
@@ -134,8 +136,8 @@ func NewRTPTransport(cfg config.ClusterRTPConfig, s *core.Server) *RTPTransport 
 	// Register signaling handlers.
 	pushPath := cfg.SignalingPath + "/push"
 	pullPath := cfg.SignalingPath + "/pull"
-	s.RegisterAPIHandler(pushPath, http.HandlerFunc(t.handleSignalingPush))
-	s.RegisterAPIHandler(pullPath, http.HandlerFunc(t.handleSignalingPull))
+	s.RegisterAPIHandler("POST "+pushPath, core.WithAPIPermission("server:mutate", http.HandlerFunc(t.handleSignalingPush)))
+	s.RegisterAPIHandler("POST "+pullPath, core.WithAPIPermission("server:mutate", http.HandlerFunc(t.handleSignalingPull)))
 
 	slog.Info("rtp transport initialized", "module", "cluster",
 		"port_range", cfg.PortRange, "signaling_path", cfg.SignalingPath)
@@ -151,12 +153,17 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 	if err != nil {
 		return fmt.Errorf("parse RTP URL: %w", err)
 	}
+	owner, err := t.sessions.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer owner.finish()
 	snapshot := stream.StartupSnapshot()
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil
 	}
-	relayCtx, cancelGeneration := bindRelayGeneration(ctx, snapshot)
-	defer cancelGeneration()
+	owner.bindGeneration(snapshot)
+	relayCtx := owner.ctx
 
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil
@@ -186,32 +193,13 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 	}
 
 	// Allocate local UDP port and dial remote.
-	localPort, err := t.ports.Allocate()
-	if err != nil {
-		return fmt.Errorf("allocate port: %w", err)
-	}
-	defer t.ports.Free(localPort)
-
-	localAddr := &net.UDPAddr{Port: localPort}
-	udpConn, err := net.DialUDP("udp", localAddr, remoteAddr)
+	udpConn, err := owner.dialUDP(t.ports, remoteAddr)
 	if err != nil {
 		return fmt.Errorf("dial UDP %s: %w", remoteAddr, err)
 	}
 
-	// Close connection on context cancel.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-relayCtx.Done():
-			udpConn.Close()
-		case <-done:
-			udpConn.Close()
-		}
-	}()
-
 	slog.Info("rtp relay push connected", "module", "cluster",
-		"target", targetURL, "remote", remoteAddr, "local_port", localPort)
+		"target", targetURL, "remote", remoteAddr, "local_port", udpConn.LocalAddr().(*net.UDPAddr).Port)
 	markRelayConnected(relayCtx)
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return nil
@@ -223,15 +211,11 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 
 	if mi.VideoCodec != 0 {
 		videoPkt, _ = pkgrtp.NewPacketizer(mi.VideoCodec)
-		videoSession = pkgrtp.NewSession(96, 90000)
+		videoSession = relayMediaSession(sd, "video")
 	}
 	if mi.AudioCodec != 0 {
 		audioPkt, _ = pkgrtp.NewPacketizer(mi.AudioCodec)
-		clockRate := uint32(mi.SampleRate)
-		if clockRate == 0 {
-			clockRate = 48000
-		}
-		audioSession = pkgrtp.NewSession(97, clockRate)
+		audioSession = relayMediaSession(sd, "audio")
 	}
 
 	// Start RTCP SR goroutine.
@@ -242,7 +226,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 		defer ticker.Stop()
 		for {
 			select {
-			case <-done:
+			case <-relayCtx.Done():
 				return
 			case <-ticker.C:
 				if videoSession != nil {
@@ -256,6 +240,7 @@ func (t *RTPTransport) Push(ctx context.Context, targetURL string, stream *core.
 			}
 		}
 	}()
+	defer func() { owner.cancel(); <-rtcpDone }()
 
 	sendFrame := func(frame *avframe.AVFrame) error {
 		var pkt pkgrtp.Packetizer
@@ -323,12 +308,18 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 		return fmt.Errorf("parse RTP URL: %w", err)
 	}
 
-	// Allocate local UDP port for receiving.
-	localPort, err := t.ports.Allocate()
+	owner, err := t.sessions.begin(ctx)
 	if err != nil {
-		return fmt.Errorf("allocate port: %w", err)
+		return err
 	}
-	defer t.ports.Free(localPort)
+	defer owner.finish()
+	ctx = owner.ctx
+
+	// Bind before signaling so the peer cannot send into an unopened port.
+	udpConn, localPort, err := owner.listenUDP(t.ports)
+	if err != nil {
+		return fmt.Errorf("listen UDP: %w", err)
+	}
 
 	// Build a minimal SDP offer with our listen port.
 	offerSD := &sdp.SessionDescription{
@@ -349,6 +340,11 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 				Proto:   "RTP/AVP",
 				Formats: []int{96, 97, 98, 99, 100},
 				Attributes: []sdp.Attribute{
+					{Key: "rtpmap", Value: "96 H264/90000"},
+					{Key: "rtpmap", Value: "97 H265/90000"},
+					{Key: "rtpmap", Value: "98 VP8/90000"},
+					{Key: "rtpmap", Value: "99 VP9/90000"},
+					{Key: "rtpmap", Value: "100 AV1/90000"},
 					{Key: "recvonly"},
 				},
 			},
@@ -358,6 +354,10 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 				Proto:   "RTP/AVP",
 				Formats: []int{101, 111, 0, 8},
 				Attributes: []sdp.Attribute{
+					{Key: "rtpmap", Value: "101 MPEG4-GENERIC/48000/2"},
+					{Key: "rtpmap", Value: "111 opus/48000/2"},
+					{Key: "rtpmap", Value: "0 PCMU/8000"},
+					{Key: "rtpmap", Value: "8 PCMA/8000"},
 					{Key: "recvonly"},
 				},
 			},
@@ -381,34 +381,15 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	mi := sdpToMediaInfo(answerSD)
 	ptMap := buildPTMap(answerSD)
 
-	// Listen on local UDP port.
-	listenAddr := &net.UDPAddr{Port: localPort}
-	udpConn, err := net.ListenUDP("udp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("listen UDP :%d: %w", localPort, err)
-	}
-
-	// Close connection on context cancel.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			udpConn.Close()
-		case <-done:
-			udpConn.Close()
-		}
-	}()
-
 	slog.Info("rtp relay pull listening", "module", "cluster",
 		"source", sourceURL, "local_port", localPort)
 	markRelayConnected(ctx)
 
 	pub := newOriginPublisher("rtp-pull", stream.Key(), mi)
-	if err := stream.SetPublisher(pub); err != nil {
+	event := &core.EventContext{StreamKey: stream.Key(), PublisherID: pub.ID(), Protocol: "rtp", RemoteAddr: host}
+	if _, err := admitRelayPublisher(owner, t.server, stream, pub, event); err != nil {
 		return fmt.Errorf("set publisher: %w", err)
 	}
-	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -428,12 +409,14 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	lossTracker := newSequenceLossTracker()
 
 	// RTCP RR goroutine — sends Receiver Reports to remote sender.
+	rtcpDone := make(chan struct{})
 	go func() {
+		defer close(rtcpDone)
 		ticker := time.NewTicker(t.cfg.RTCPInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-done:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				mu.Lock()
@@ -451,6 +434,7 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 			}
 		}
 	}()
+	defer func() { owner.cancel(); <-rtcpDone }()
 
 	sendPullBYE := func() {
 		mu.Lock()
@@ -531,26 +515,20 @@ func (t *RTPTransport) Pull(ctx context.Context, sourceURL string, stream *core.
 	}
 }
 
-func (t *RTPTransport) Close() error { return nil }
+func (t *RTPTransport) Close() error { return t.sessions.close() }
 
 // handleSignalingPush handles POST {signaling_path}/push?stream={key}.
 // A remote node wants to push RTP to us. We allocate a local UDP port,
 // parse their SDP offer, and respond with an SDP answer containing our listen address.
 func (t *RTPTransport) handleSignalingPush(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	body, ok := readSignalingRequest(w, r)
+	if !ok {
 		return
 	}
 
 	streamKey := r.URL.Query().Get("stream")
 	if streamKey == "" {
 		http.Error(w, "missing stream parameter", http.StatusBadRequest)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -566,16 +544,29 @@ func (t *RTPTransport) handleSignalingPush(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Verify stream exists before allocating resources.
-	if _, ok := t.hub.Find(streamKey); !ok {
-		http.Error(w, "stream not found", http.StatusNotFound)
+	session, err := t.sessions.begin(context.Background())
+	if err != nil {
+		http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
 		return
 	}
-
-	// Allocate local port for receiving RTP.
-	localPort, err := t.ports.Allocate()
+	accepted := false
+	defer func() {
+		if !accepted {
+			session.finish()
+		}
+	}()
+	conn, localPort, err := session.listenUDP(t.ports)
 	if err != nil {
-		http.Error(w, "no available ports", http.StatusServiceUnavailable)
+		http.Error(w, "no available UDP ports", http.StatusServiceUnavailable)
+		return
+	}
+	stream, pub, status, err := admitSignaledPublisher(session, t.server, t.hub, r, "rtp-push", "rtp", sdpToMediaInfo(offerSD))
+	if err != nil {
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	if session.ctx.Err() != nil {
+		http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -585,20 +576,22 @@ func (t *RTPTransport) handleSignalingPush(w http.ResponseWriter, r *http.Reques
 	slog.Info("rtp signaling push accepted", "module", "cluster",
 		"stream", streamKey, "local_port", localPort)
 
-	// Start a goroutine to receive RTP and write to stream.
-	go t.receiveRTP(streamKey, localPort, offerSD)
-
 	w.Header().Set("Content-Type", "application/sdp")
 	w.WriteHeader(http.StatusOK)
-	w.Write(answerSD.Marshal())
+	if _, err := w.Write(answerSD.Marshal()); err != nil {
+		return
+	}
+	session.established = true
+	accepted = true
+	go func() { defer session.finish(); t.receiveRTP(stream, pub, conn, offerSD) }()
 }
 
 // handleSignalingPull handles POST {signaling_path}/pull?stream={key}.
 // A remote node wants to pull RTP from us. We look up the stream,
 // parse their SDP offer, and start sending RTP to them.
 func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	body, ok := readSignalingRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -616,12 +609,6 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 	snapshot := stream.StartupSnapshot()
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		http.Error(w, "stream not found or no publisher", http.StatusNotFound)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -643,6 +630,39 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "extract remote address: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if remoteAddr.IP.IsUnspecified() {
+		host, _, addressErr := net.SplitHostPort(r.RemoteAddr)
+		if addressErr != nil || net.ParseIP(host) == nil {
+			http.Error(w, "invalid peer address", http.StatusBadRequest)
+			return
+		}
+		remoteAddr.IP = net.ParseIP(host)
+	}
+	session, err := t.sessions.begin(context.Background())
+	if err != nil {
+		http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	accepted := false
+	defer func() {
+		if !accepted {
+			session.finish()
+		}
+	}()
+	session.bindGeneration(snapshot)
+	conn, err := session.dialUDP(t.ports, remoteAddr)
+	if err != nil {
+		http.Error(w, "UDP setup failed", http.StatusServiceUnavailable)
+		return
+	}
+	if session.ctx.Err() != nil || !stream.IsPublisherGeneration(snapshot.Generation) {
+		http.Error(w, "publisher retired during setup", http.StatusServiceUnavailable)
+		return
+	}
+	if err := session.subscribe(stream, snapshot, "rtp"); err != nil {
+		http.Error(w, "subscriber admission failed", http.StatusServiceUnavailable)
+		return
+	}
 
 	mi := &snapshot.MediaInfo
 
@@ -652,44 +672,19 @@ func (t *RTPTransport) handleSignalingPull(w http.ResponseWriter, r *http.Reques
 	slog.Info("rtp signaling pull accepted", "module", "cluster",
 		"stream", streamKey, "remote", remoteAddr)
 
-	// Start a goroutine to send RTP to the remote node.
-	go t.sendRTP(stream, snapshot, remoteAddr)
-
 	w.Header().Set("Content-Type", "application/sdp")
 	w.WriteHeader(http.StatusOK)
-	w.Write(answerSD.Marshal())
+	if _, err := w.Write(answerSD.Marshal()); err != nil {
+		return
+	}
+	accepted = true
+	go func() { defer session.finish(); t.sendRTPConnection(session.ctx, stream, snapshot, conn) }()
 }
 
 // receiveRTP listens on localPort for incoming RTP and writes frames to a stream.
-func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.SessionDescription) {
-	defer t.ports.Free(localPort)
-
-	listenAddr := &net.UDPAddr{Port: localPort}
-	udpConn, err := net.ListenUDP("udp", listenAddr)
-	if err != nil {
-		slog.Warn("rtp receive: listen failed", "module", "cluster",
-			"port", localPort, "error", err)
-		return
-	}
-	defer udpConn.Close()
-
-	stream, ok := t.hub.Find(streamKey)
-	if !ok {
-		slog.Warn("rtp receive: stream not found", "module", "cluster", "stream", streamKey)
-		return
-	}
-
-	// Set up publisher from offered codecs.
-	mi := sdpToMediaInfo(offerSD)
+func (t *RTPTransport) receiveRTP(stream *core.Stream, pub *originPublisher, udpConn *net.UDPConn, offerSD *sdp.SessionDescription) {
+	streamKey := stream.Key()
 	ptMap := buildPTMap(offerSD)
-
-	pub := newOriginPublisher("rtp-push", streamKey, mi)
-	if err := stream.SetPublisher(pub); err != nil {
-		slog.Warn("rtp receive: set publisher failed", "module", "cluster",
-			"stream", streamKey, "error", err)
-		return
-	}
-	defer stream.RemovePublisherIf(pub)
 
 	// Build depacketizers.
 	depacketizers := make(map[uint8]pkgrtp.Depacketizer)
@@ -759,42 +754,40 @@ func (t *RTPTransport) receiveRTP(streamKey string, localPort int, offerSD *sdp.
 
 // sendRTP reads from a stream and sends RTP to the remote address.
 func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupSnapshot, remoteAddr *net.UDPAddr) {
-	ctx, cancelGeneration := bindRelayGeneration(context.Background(), snapshot)
-	defer cancelGeneration()
-	localPort, err := t.ports.Allocate()
+	session, err := t.sessions.begin(context.Background())
 	if err != nil {
-		slog.Warn("rtp send: allocate port failed", "module", "cluster", "error", err)
 		return
 	}
-	defer t.ports.Free(localPort)
-
-	localAddr := &net.UDPAddr{Port: localPort}
-	udpConn, err := net.DialUDP("udp", localAddr, remoteAddr)
+	defer session.finish()
+	session.bindGeneration(snapshot)
+	udpConn, err := session.dialUDP(t.ports, remoteAddr)
 	if err != nil {
 		slog.Warn("rtp send: dial failed", "module", "cluster", "error", err)
 		return
 	}
-	defer udpConn.Close()
+	t.sendRTPConnection(session.ctx, stream, snapshot, udpConn)
+}
+
+func (t *RTPTransport) sendRTPConnection(parent context.Context, stream *core.Stream, snapshot core.StreamStartupSnapshot, udpConn *net.UDPConn) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return
 	}
 	mi := &snapshot.MediaInfo
+	sd := sdp.BuildFromMediaInfo(mi, "", "")
 
 	var videoSession, audioSession *pkgrtp.Session
 	var videoPkt, audioPkt pkgrtp.Packetizer
 
 	if mi.VideoCodec != 0 {
 		videoPkt, _ = pkgrtp.NewPacketizer(mi.VideoCodec)
-		videoSession = pkgrtp.NewSession(96, 90000)
+		videoSession = relayMediaSession(sd, "video")
 	}
 	if mi.AudioCodec != 0 {
 		audioPkt, _ = pkgrtp.NewPacketizer(mi.AudioCodec)
-		clockRate := uint32(mi.SampleRate)
-		if clockRate == 0 {
-			clockRate = 48000
-		}
-		audioSession = pkgrtp.NewSession(97, clockRate)
+		audioSession = relayMediaSession(sd, "audio")
 	}
 
 	// RTCP SR goroutine for server-side send.
@@ -819,6 +812,7 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupS
 			}
 		}
 	}()
+	defer func() { cancel(); <-srDone }()
 
 	if !stream.IsPublisherGeneration(snapshot.Generation) {
 		return
@@ -879,6 +873,28 @@ func (t *RTPTransport) sendRTP(stream *core.Stream, snapshot core.StreamStartupS
 }
 
 // --- Helper functions ---
+
+func relayMediaSession(sd *sdp.SessionDescription, kind string) *pkgrtp.Session {
+	for _, media := range sd.Media {
+		if media.Type != kind || len(media.Formats) == 0 {
+			continue
+		}
+		pt := media.Formats[0]
+		if pt < 0 || pt > 127 {
+			return nil
+		}
+		clockRate := uint32(90000)
+		if mapping := media.RTPMap(pt); mapping != nil {
+			rate := int64(mapping.ClockRate)
+			if rate < 1 || rate > math.MaxUint32 {
+				return nil
+			}
+			clockRate = uint32(rate)
+		}
+		return pkgrtp.NewSession(uint8(pt), clockRate)
+	}
+	return nil
+}
 
 type rtpFrameWriter interface {
 	Write([]byte) (int, error)

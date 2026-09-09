@@ -163,13 +163,14 @@
       "properties": {"default_mode": {"type": "string", "enum": ["auto", "passthrough", "aggregate", "drop"]}, "auto_thresholds": {"type": "object", "additionalProperties": false, "properties": {"passthrough_max": {"type": "integer", "minimum": 0}, "aggregate_max": {"type": "integer", "minimum": 0}}}}
     },
     "simulcast": {
-      "type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred",
-      "description": "Reserved configuration only; runtime layer selection and auto-pause are not implemented.",
+      "type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "x-liveforge-support": "available",
+      "description": "WHIP RID simulcast with up to three isolated encodings. WHEP selects one layer at session creation; other protocols use the highest-ranked offered layer. All settings require restart.",
       "properties": {
-        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"},
-        "auto_pause_layer": {"type": "boolean", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"},
-        "layers": {"type": "array", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred", "items": {"type": "object", "additionalProperties": false, "properties": {"rid": {"type": "string", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}, "max_bitrate": {"type": "integer", "minimum": 0, "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}}}}
-      }
+        "enabled": {"type": "boolean", "x-liveforge-reload": "restart_required"},
+        "auto_pause_layer": {"type": "boolean", "description": "Suspend server-local video processing for unused noncanonical layers while continuing RTP reads. Resume waits for fresh keyframes/headers; does not pause upstream encoding or promise bandwidth savings.", "x-liveforge-reload": "restart_required"},
+        "layers": {"type": "array", "maxItems": 3, "description": "RID values must be unique. Enabled simulcast requires at least one layer. Offered RIDs must match configured entries.", "x-liveforge-reload": "restart_required", "items": {"type": "object", "additionalProperties": false, "required": ["rid", "max_bitrate"], "properties": {"rid": {"type": "string", "minLength": 1, "maxLength": 16, "pattern": "^[A-Za-z0-9_-]+$", "not": {"enum": ["auto", "high", "low"]}, "x-liveforge-reload": "restart_required"}, "max_bitrate": {"type": "integer", "minimum": 1, "description": "Advisory ranking in bits per second, descending with lexical RID tie-break; not an encoder bitrate limit.", "x-liveforge-reload": "restart_required"}}}}
+      },
+      "allOf": [{"if": {"properties": {"enabled": {"const": true}}, "required": ["enabled"]}, "then": {"required": ["layers"], "properties": {"layers": {"minItems": 1}}}}]
     },
     "stream": {
       "type": "object", "additionalProperties": false,
@@ -177,7 +178,7 @@
         "gop_cache": {"type": "boolean", "x-liveforge-reload": "hot_reload"}, "gop_cache_num": {"type": "integer", "minimum": 0, "x-liveforge-reload": "hot_reload"}, "gop_cache_max_frames": {"type": "integer", "minimum": 0, "description": "Maximum frames in one cached GOP; zero disables this bound. Hot reload recomputes the retained prefix; relaxation affects future frames only.", "x-liveforge-reload": "hot_reload"}, "gop_cache_max_duration": {"$ref": "#/$defs/duration", "description": "Maximum duration of one cached GOP; zero disables this bound. Hot reload recomputes the retained prefix; relaxation affects future frames only.", "x-liveforge-reload": "hot_reload"}, "gop_cache_max_bytes": {"type": "integer", "minimum": 0, "description": "Maximum payload bytes in one cached GOP; zero disables this bound. Hot reload recomputes the retained prefix; relaxation affects future frames only.", "x-liveforge-reload": "hot_reload"},
         "ring_buffer_size": {"type": "integer", "minimum": 1, "x-liveforge-reload": "restart_required"}, "idle_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"}, "no_publisher_timeout": {"$ref": "#/$defs/duration", "x-liveforge-reload": "hot_reload"},
         "slow_consumer": {"$ref": "#/$defs/slow_consumer", "x-liveforge-reload": "hot_reload"}, "feedback": {"$ref": "#/$defs/feedback", "x-liveforge-reload": "hot_reload"},
-        "simulcast": {"$ref": "#/$defs/simulcast", "x-liveforge-reload": "restart_required", "x-liveforge-support": "deferred"}
+        "simulcast": {"$ref": "#/$defs/simulcast", "x-liveforge-reload": "restart_required", "x-liveforge-support": "available"}
       },
       "allOf": [{"if": {"properties": {"gop_cache": {"const": true}, "gop_cache_num": {"minimum": 1}}, "required": ["gop_cache", "gop_cache_num"]}, "then": {"anyOf": [{"required": ["gop_cache_max_frames"], "properties": {"gop_cache_max_frames": {"minimum": 1}}}, {"required": ["gop_cache_max_bytes"], "properties": {"gop_cache_max_bytes": {"minimum": 1}}}]}}]
     },
@@ -256,7 +257,7 @@
           "tokens": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["token", "role"], "properties": {"name": {"type": "string"}, "token": {"type": "string", "minLength": 1, "writeOnly": true, "x-liveforge-secret": true}, "role": {"type": "string", "enum": ["viewer", "operator", "admin"]}}}}
         }},
         "console": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "hot_reload", "properties": {"username": {"type": "string"}, "password": {"type": "string", "writeOnly": true, "x-liveforge-secret": true}, "role": {"type": "string", "enum": ["viewer", "operator", "admin"]}}},
-        "audit": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "properties": {"max_entries": {"type": "integer", "description": "Bounded in-memory audit capacity; any non-positive value selects the default of 1000 entries."}}}
+        "audit": {"type": "object", "additionalProperties": false, "x-liveforge-reload": "restart_required", "properties": {"max_entries": {"type": "integer", "description": "Bounded in-memory audit capacity; any non-positive value selects the default of 1000 entries."}, "path": {"type": "string", "default": "", "description": "Optional Linux/macOS private NDJSON audit file; empty disables persistence. Trusted environment references and ~/ expand. Retains one rotated .1 file and an empty .lock file; requires regular single-link mode0600 files and one writer. Restart required."}, "max_bytes": {"type": "integer", "default": 8388608, "anyOf": [{"const": 0}, {"minimum": 65536, "maximum": 1073741824}], "description": "Maximum bytes per audit data file. Zero selects8MiB; retains at most two data files. Existing files above a tightened limit fail startup. Restart required."}}}
       }
     },
     "runtime": {

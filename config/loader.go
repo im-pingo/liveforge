@@ -237,7 +237,7 @@ func defaults() *Config {
 		},
 		API: APIConfig{
 			Listen: ":8090",
-			Audit:  AuditConfig{MaxEntries: 1000},
+			Audit:  AuditConfig{MaxEntries: 1000, MaxBytes: DefaultAuditMaxBytes},
 		},
 		Metrics: MetricsConfig{
 			Listen:            ":9090",

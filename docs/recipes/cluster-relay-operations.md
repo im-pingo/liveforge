@@ -1,5 +1,15 @@
 # Cluster Relay Operations
 
+RTP signaling validates advertised payload types in 0..127 and explicit RTP
+clock rates in 1..4294967295 before constructing packet sessions. GB peer media
+ports must be in 1..65535; invalid values fail before socket/session setup.
+
+The local origin-edge testkit uses production Stream defaults, including hard
+GOP bounds, and reads the current management response envelope. Supply an
+already built binary with `LF_BINARY=/absolute/path/to/liveforge` when running
+`go test ./tools/testkit/cluster -run '^TestClusterOriginEdge$' -count=1`; without
+a discoverable binary this external-process test is explicitly skipped.
+
 The checked-in sample configuration is for local development only: it disables TLS and authentication and uses the console credentials `admin/admin`. Never expose it publicly unchanged.
 
 ## Prerequisites
@@ -67,6 +77,24 @@ Status returns 200, including active forward/origin counts, bounded relay snapsh
 The default internal endpoints are `POST /api/relay/push`, `POST /api/relay/pull`, `POST /api/relay/gb/push`, and `POST /api/relay/gb/pull`. They require `server:mutate` and are node-to-node contracts, not operator workflows. RTP signaling uses SDP; GB signaling exchanges stream/port query values. Expected failures include 400 for invalid input, 404 for a missing pull stream, and 503 for allocation or setup failure.
 
 RTP relay media admission fails closed: packetizer errors, empty packetizer output, nil packets, RTP marshal errors, UDP write errors, and short writes terminate the affected relay instead of being counted as successful media. Push cancellation remains a normal shutdown path; non-cancellation send failures are reported in bounded logs and relay status.
+
+Custom registered signaling paths receive the same authentication and
+`server:mutate` checks even outside `/api/`. Push creates a new destination when
+needed and binds its receive socket and publisher before returning 200. Stream
+capacity, subscriber capacity, bind, and setup failures return 503; an occupied
+publisher returns 409 and synchronous publish authorization denial returns 403.
+Signaling request bodies are limited to 64 KiB and oversized bodies return 413.
+Pull obtains a generation-bound subscriber and outgoing socket before success.
+Incoming push and outgoing pull emit matched publisher lifecycle events so
+Record/DVR can follow the admitted generation. Failed responses, timeout,
+generation end, and transport shutdown release owned sockets, ports,
+publishers/subscribers, and RTCP workers. Outgoing GB HTTP signaling has a
+10-second client timeout and transport Close cancels pending peer requests.
+
+Incomplete GB PS data is bounded to 4 MiB, including retained capacity; overflow
+ends that receiver. RTP pull offers advertise codec mappings and outgoing RTP
+payload types/clock rates match negotiated SDP. An unspecified peer media IP
+falls back to the HTTP signaling peer address.
 
 ## Credential Selection And Hot Rotation
 

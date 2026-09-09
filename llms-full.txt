@@ -10,13 +10,18 @@ For a source-oriented Chinese architecture walkthrough, see [docs/architecture.z
 
 The current review record, including performance bottlenecks, lifecycle and resource risks, functional boundaries, and the Console WHEP regression record, is [docs/TECHNICAL-RISKS.md](docs/TECHNICAL-RISKS.md). The WHEP regression is not closed by SDP success or an `ontrack` callback: the browser must receive a decodable frame and an advancing media clock.
 
-The API, WebRTC signaling, and metrics HTTP servers use the same transport bounds: `ReadHeaderTimeout` is 5 seconds and `IdleTimeout` is 2 minutes. These bounds protect slow header parsing and idle keep-alive connections; existing handler and media write deadlines remain unchanged, and no server-level `WriteTimeout` is added by this policy.
+The API, WebRTC signaling, and metrics HTTP servers use a5-second `ReadHeaderTimeout` and2-minute `IdleTimeout`. API/WebRTC additionally use a10-second total request `ReadTimeout`, which bounds incomplete bodies without limiting streaming response lifetimes; incomplete SDP returns408 and releases its connection slot. Existing handler/media write deadlines remain in place, and no server-level `WriteTimeout` is added by this policy.
 
 Startup readiness requires a sequence header only for H.264, H.265, and AAC.
 AV1, VP8, VP9, Opus, MP3, G.711, G.722, and G.729 can start from the publisher
 declaration and their in-band media or protocol-negotiated parameters. A
 consumer still waits for every known track's own rule, while pure-audio
 streams start from the live cursor and never use an independent audio cache.
+
+VP8 RTP ingest uses Pion's extended descriptor parser. Reassembly requires a
+fresh S=1/PID=0 start and contiguous sequence/timestamp/SSRC/payload type, retains
+at most16MiB/16384fragments, and releases partial storage on malformed, missing,
+or oversized input. Ordinary WHIP and Simulcast share this behavior and tests.
 
 fMP4 `Muxer.Init` derives omitted AAC sample rate and channel count from the
 AudioSpecificConfig. It passes the resolved values into the init segment and
@@ -115,6 +120,10 @@ WHEP selects a browser-offered audio target in this order: direct source codec, 
 
 ## Build profiles
 
+Startup snapshots never bridge a bounded GOP prefix across omitted source frames to `LiveCursor`. When the cached frame count does not cover the captured ring span, the snapshot uses the earliest retained GOP start with a complete chain through `LiveCursor`, including frames omitted from the persistent GOP cache. This temporary replay holds at most one ring's frame references; cache frame/byte/duration bounds are unchanged. If no retained keyframe can cover the span, `ReplayFrames` is empty and `SourceCursor=LiveCursor`, so consumers wait for a fresh keyframe. All snapshot replay consumers share this continuity rule. The hls.js Console path disables element autoplay until 0.8 seconds of contiguous media surrounds the playhead, ignores disconnected future buffered ranges, and sets a 1.5-second target live latency to avoid immediately seeking back into an undersized LL-HLS buffer. Native Safari HLS remains browser-managed after metadata readiness.
+
+For Console WHEP previews with known AAC/MP3 source audio and explicit `capabilities.audio_transcoding=false`, mixed video/audio streams offer video only and retain a localized video-only notice until the player is closed or replaced. Audio-only previews report the missing transcoding capability without sending an empty offer. Missing capabilities, missing codec metadata, unknown codecs, and direct Opus/G.711 continue normal negotiation. This Console offer policy does not relax server-side requested-track validation: unsupported requested audio still returns 415, and an unrequested audio track never creates a target transcode reader. H.264+AAC RTMP uses direct AAC in HLS/DASH; AAC-to-Opus WebRTC audio requires the tagged build and enabled audio codec configuration. See [docs/recipes/rtmp-to-hls.md](docs/recipes/rtmp-to-hls.md).
+
 The normal build is:
 
 ```bash
@@ -190,6 +199,74 @@ GB28181 Lab publish treats the requested `stream_key` as authoritative when it i
 
 ## Runtime configuration
 
+The management review added exact desired-document concurrency and history.
+Status/document responses expose opaque `document_revision`, and the document
+response carries a quoted ETag. Apply accepts one quoted `If-Match`; stale
+revisions return409 before writing. The version check, ConfigWriter call, and
+pending publication share one serialized path. Legacy header omission remains
+accepted, but races after secret restoration are rejected. This protects this
+manager's writes; independent external source writers do not participate in a
+native CAS. Comment-only and unmapped-field edits change revision, and returning
+to older content does not reuse a retired revision. History retains at most32
+documents/16MiB per process, exposes metadata and redacted YAML, and resets on
+restart. Rollback requires config:reload and the current quotedIf-Match, writes
+the retained original through validation/ConfigWriter, and schedules normal
+refresh; restart and application-failure rules still apply.
+
+Console dirty drafts survive blur, polling, view changes, delayed Apply and401
+reauthentication in page memory. Explicit discard and navigation guards protect
+edits; drafts are not stored in localStorage. Schema is read once per page and
+documents are fetched by revision. The split embedded scripts provide English
+and Chinese controls, common YAML-preserving config controls, redacted
+comparison/history preview and explicit rollback. A401 stops polling and offers
+new-tab sign-in then resume. POST/console/logout expires the browser cookie and
+redirects303 to login; copied signed tokens still require normal expiry or
+credential rotation to become invalid.
+
+Common server.name is read-only because it is immutable; schema-derived diff
+labels distinguish immutable, restart-required and hot-reload changes. Supplied
+secret and URL replacements remain visible as redacted changes. Only language
+preference persists in localStorage. Long configuration versions/hashes wrap
+inside responsive status fields without truncation. Audit persistence is optional on Linux and
+macOS via api.audit.path: private mode0600 active/.1 data files and an empty
+.lock, one writer, bounded recovery, synchronous append, sync on rotation/Close,
+and explicit audit_persistence health. It has no per-event fsync guarantee.
+Configured persistence on other operating systems fails explicitly; empty-path
+memory mode remains portable. See the RBAC/audit recipe for retention and recovery.
+
+Custom management authorization and mutation audit resolve the actual mux
+handler. core.WithAPIPermission declares module policy; unknown custom writes
+default to server:mutate even inside read/operator namespaces. Native GB28181
+declares its granular permissions, and cluster relay uses explicit POST routes.
+Public health/login/logout exemptions cannot be inherited by custom handlers.
+
+Streams, recordings, SIP calls and audit support optional limit1..500/offset
+pagination, with a top-level pagination object and unchanged data shapes;
+omission preserves complete legacy lists. Recording list snapshots last at most
+five seconds from scan start, coalesce concurrent scans, and invalidate on
+creation/finalization/failure/metadata/deletion/reload/close. Cache retention is
+at most100000 entries/32MiB conservative value/string budget; larger results
+bypass caching. External changes become visible on the next list after expiry;
+detail/open/delete retain direct descriptor-relative file validation. Audit
+supports exact principal/action/result, RFC3339 time bounds, order, and NDJSON
+export of retained entries. See the [regression gate](docs/recipes/review-regression-gate.md).
+
+Shared HTTP muxer input publishes an overwrite cause and terminal notification
+before canceling reader pumps. Cancellation therefore cannot expose clean EOF
+ahead of the terminal notification, including externally injected termination
+in tests. fMP4 discards pending fragments on overwrite and flushes only clean
+completion; deterministic cancellation-boundary tests preserve this distinction.
+
+The WHIP test publisher rebases pacing at actual wakeup and spaces converted
+Opus packets by their own durations, including video-ahead and scheduler-stall
+cases. Sender-clock tests and real Pion RTP timestamp/backlog checks keep the
+regression independent of receiver goroutine scheduling. The cluster testkit
+generates bounded production Stream defaults, reads the current API envelope,
+and paces its looping source in real time so correctness checks do not flood
+the bounded relay ring. LF_BINARY enables its real origin-edge subprocess test. CI passes the executable
+from its build step; local full integration should use an absolute current build
+path to prevent a missing-binary skip.
+
 The bootstrap YAML file is read once during startup. The `config/runtime` manager then polls the selected source (`file`, `http`, `https`, `consul`, or `redis`) in a background goroutine. It parses, normalizes, validates, hashes, and atomically publishes immutable snapshots. Runtime reads are one atomic pointer load and do not perform file/network I/O, wait on channels, or contend with refresh locks. Source loads, Config Apply writes, and close are serialized with a cancellable source-I/O gate; Apply waits for the source write before returning 202 with `written_and_refresh_scheduled` and schedules parse/application/publication asynchronously.
 
 All file, HTTP/HTTPS, Consul, and Redis source reads have a 4 MiB complete-document/materialization limit by default. Configure the corresponding `runtime.<source>.max_bytes`; non-positive values select the same default. File and network responses are bounded before parsing. Redis prefix/hash values use length preflight and bounded batches so oversized data is rejected before materialization.
@@ -198,7 +275,21 @@ For HTTP sources, `runtime.source: http` requires an `http://` URL and `runtime.
 
 Flattened Consul and Redis leaves conservatively infer case-insensitive booleans and null, canonical base-10 integers without leading zeroes, and finite decimal/exponent floats. Leading-zero identifiers, durations, non-finite or out-of-range numbers, and arbitrary YAML-looking strings remain strings; structured values must use a complete document entry. Dotted and slash-separated paths are canonicalized and sorted before materialization; duplicate paths and scalar/container prefix collisions fail closed with deterministic errors. Generated flattened documents retain deterministic serialization.
 
-`SIGHUP` and `POST /api/v1/server/config/refresh` only schedule asynchronous refresh. A source timeout, backend failure, malformed document, or validation error keeps the last valid snapshot active and updates manager status. Hot policy changes can be delivered to reloadable modules; listener addresses, module enablement, TLS files/mode, port ranges, and audio codec enablement are classified as `restart_required`. Status and Prometheus expose accepted/rejected/application-failed changes, callback failures, superseded callbacks, and pending restart paths. Simulcast configuration remains deferred because no layer selection runtime exists.
+`SIGHUP` and `POST /api/v1/server/config/refresh` only schedule asynchronous refresh. A source timeout, backend failure, malformed document, or validation error keeps the last valid snapshot active and updates manager status. Hot policy changes can be delivered to reloadable modules; listener addresses, module enablement, TLS files/mode, port ranges, and audio codec enablement are classified as `restart_required`. Status and Prometheus expose accepted/rejected/application-failed changes, callback failures, superseded callbacks, and pending restart paths. Simulcast configuration requires restart; WHIP RID ingest and WHEP session-time selection are implemented.
+
+WHIP accepts one active video m-line with up to three configured sending RIDs.
+Each encoding has isolated headers, GOP, ring and publisher identity; audio uses
+separate envelopes. The highest-ranked offered layer is the canonical public
+parent used by existing protocols, recorders and relays; other layers stay
+private. WHEP layer=<rid>|low|high|auto selects at session creation; missing,
+auto and high choose the highest configured max_bitrate, with lexical RID ties.
+Status reports the selected RID. All consumers share parent subscriber limits.
+Unused noncanonical video processing can pause locally while RTP reads continue;
+resume resets partial/cached video and waits for fresh headers/keyframes. This
+does not control upstream encoders or adaptively switch WHEP sessions. H264/VP8
+three-RID transport, H264 selected WHEP/canonical fMP4, pause/resume, generation
+replacement and hot-policy propagation have focused coverage. See
+[Simulcast operations](docs/recipes/whip-simulcast.md) for validation and bounds.
 
 Documented non-positive scalar sentinels retain their owning module defaults: SIP Gateway calls use 100, cluster eviction uses 3 failures, audit retains 1000 entries, and HTTP/Consul sources cap documents at 4 MiB. `http_stream.llhls.part_duration` controls low-latency parts while `http_stream.llhls.segment_duration` controls completed full segments; the latter defaults to 1.0 second and has a schema minimum of 0.1 second. Explicit empty RTSP, WebRTC, and GB28181 port ranges are valid and select their module fallback behavior; non-empty ranges require two ordered positive ports. Exact semantics are annotated in `docs/config/config.schema.json`.
 

@@ -2,9 +2,11 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -24,15 +26,16 @@ import (
 
 // Module implements the management API as a standalone HTTP server.
 type Module struct {
-	listener  net.Listener
-	httpSrv   *http.Server
-	server    *core.Server
-	limiter   *ratelimit.Limiter
-	limiterMu sync.RWMutex
-	rateCfg   config.RateLimitConfig
-	audit     *AuditStore
-	security  SecurityCounters
-	wg        sync.WaitGroup
+	listener      net.Listener
+	httpSrv       *http.Server
+	server        *core.Server
+	limiter       *ratelimit.Limiter
+	limiterMu     sync.RWMutex
+	rateCfg       config.RateLimitConfig
+	audit         *AuditStore
+	security      SecurityCounters
+	wg            sync.WaitGroup
+	permissionFor managementPermissionResolver
 }
 
 // NewModule creates a new API module.
@@ -47,16 +50,22 @@ func (m *Module) Name() string { return "api" }
 func (m *Module) Init(s *core.Server) error {
 	cfg := s.Config()
 	m.server = s
-	m.audit = NewAuditStore(cfg.API.Audit.MaxEntries)
+	audit, err := OpenAuditStore(cfg.API.Audit)
+	if err != nil {
+		return fmt.Errorf("initialize audit storage: %w", err)
+	}
+	m.audit = audit
 
 	ln, err := s.MakeListenerAutoTLS(cfg.API.Listen, cfg.API.TLS)
 	if err != nil {
+		_ = m.audit.Close()
 		return err
 	}
 	m.listener = ln
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, s, m.audit)
+	m.permissionFor = newManagementPermissionResolver(mux, s)
 
 	var handler http.Handler = buildSecurityHandler(mux, s, m.audit, &m.security)
 	if rl := cfg.Limits.RateLimit; rl.Enabled && rl.Rate > 0 {
@@ -77,6 +86,7 @@ func (m *Module) Init(s *core.Server) error {
 			handler.ServeHTTP(w, r)
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
 
@@ -99,6 +109,9 @@ func (m *Module) Init(s *core.Server) error {
 
 func (m *Module) auditRateLimitDenial(r *http.Request) {
 	permission := permissionForRequest(r)
+	if m.permissionFor != nil {
+		permission, _ = m.permissionFor(r)
+	}
 	if m.audit == nil || !isAuditedOperation(permission) {
 		return
 	}
@@ -182,8 +195,18 @@ func (m *Module) Hooks() []core.HookRegistration { return nil }
 
 // Close shuts down the API server.
 func (m *Module) Close() error {
+	var closeErr error
 	if m.httpSrv != nil {
-		m.httpSrv.Close()
+		timeout := 10 * time.Second
+		if m.server != nil && m.server.Config().Server.DrainTimeout > 0 {
+			timeout = m.server.Config().Server.DrainTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		closeErr = m.httpSrv.Shutdown(ctx)
+		cancel()
+		if closeErr != nil {
+			_ = m.httpSrv.Close()
+		}
 	}
 	m.limiterMu.Lock()
 	limiter := m.limiter
@@ -193,8 +216,11 @@ func (m *Module) Close() error {
 		limiter.Close()
 	}
 	m.wg.Wait()
+	if m.audit != nil {
+		closeErr = errors.Join(closeErr, m.audit.Close())
+	}
 	slog.Info("stopped", "module", "api")
-	return nil
+	return closeErr
 }
 
 // Addr returns the listener address (useful for tests).

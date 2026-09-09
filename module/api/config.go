@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,13 +27,14 @@ import (
 var embeddedConfigSchema []byte
 
 type configDocumentResponse struct {
-	Effective     map[string]any `json:"effective"`
-	Desired       map[string]any `json:"desired"`
-	EffectiveText string         `json:"effective_document"`
-	DesiredText   string         `json:"desired_document"`
-	SourceDetails map[string]any `json:"source_details"`
-	Schema        map[string]any `json:"schema"`
-	Writable      bool           `json:"writable"`
+	DocumentRevision string         `json:"document_revision"`
+	Effective        map[string]any `json:"effective"`
+	Desired          map[string]any `json:"desired"`
+	EffectiveText    string         `json:"effective_document"`
+	DesiredText      string         `json:"desired_document"`
+	SourceDetails    map[string]any `json:"source_details"`
+	Schema           map[string]any `json:"schema"`
+	Writable         bool           `json:"writable"`
 }
 
 func (h *Handlers) handleConfigDocument(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +68,11 @@ func (h *Handlers) handleConfigDocument(w http.ResponseWriter, r *http.Request) 
 	effectiveMap := configMapFromConfig(effective)
 	desiredMap := configMapFromConfig(desired)
 	desiredText := configTextFromMap(desiredMap)
+	var revision string
+	if snapshot != nil {
+		revision = snapshot.DocumentRevision
+		w.Header().Set("ETag", strconv.Quote(revision))
+	}
 	if snapshot != nil && len(snapshot.DesiredDocument) > 0 {
 		if sourceMap, err := configMapFromDocument(snapshot.DesiredDocument); err == nil {
 			desiredMap = sourceMap
@@ -75,13 +82,14 @@ func (h *Handlers) handleConfigDocument(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, configDocumentResponse{
-		Effective:     effectiveMap,
-		Desired:       desiredMap,
-		EffectiveText: configTextFromMap(effectiveMap),
-		DesiredText:   desiredText,
-		SourceDetails: redactedSourceDetails(effective.Runtime),
-		Schema:        configSchemaDescriptor(),
-		Writable:      manager.SourceWritable(),
+		DocumentRevision: revision,
+		Effective:        effectiveMap,
+		Desired:          desiredMap,
+		EffectiveText:    configTextFromMap(effectiveMap),
+		DesiredText:      desiredText,
+		SourceDetails:    redactedSourceDetails(effective.Runtime),
+		Schema:           configSchemaDescriptor(),
+		Writable:         manager.SourceWritable(),
 	})
 }
 
@@ -120,7 +128,9 @@ func (h *Handlers) handleConfigApply(w http.ResponseWriter, r *http.Request) {
 	}
 	secretSource := h.server.Config()
 	var sourceDocument []byte
+	var baseline string
 	if snapshot := manager.Snapshot(); snapshot != nil {
+		baseline = snapshot.DocumentRevision
 		if snapshot.DesiredConfig != nil {
 			secretSource = snapshot.DesiredConfig
 		} else if snapshot.Config != nil {
@@ -128,14 +138,26 @@ func (h *Handlers) handleConfigApply(w http.ResponseWriter, r *http.Request) {
 		}
 		sourceDocument = append([]byte(nil), snapshot.DesiredDocument...)
 	}
+	if expected, matchErr := configIfMatch(r); matchErr != nil {
+		writeError(w, http.StatusBadRequest, matchErr.Error())
+		return
+	} else if expected != "" && expected != baseline {
+		writeError(w, http.StatusConflict, configruntime.ErrRevisionConflict.Error())
+		return
+	}
 	document, err = preserveRedactedSecretsWithDocument(document, secretSource, sourceDocument)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := manager.Write(r.Context(), document); err != nil {
+	h.writeConfigRevision(w, r, document, baseline)
+}
+
+func (h *Handlers) writeConfigRevision(w http.ResponseWriter, r *http.Request, document []byte, baseline string) {
+	revision, err := h.server.ConfigManager().WriteIfRevision(r.Context(), document, baseline)
+	if err != nil {
 		status := http.StatusServiceUnavailable
-		if strings.Contains(err.Error(), "read-only") {
+		if errors.Is(err, configruntime.ErrRevisionConflict) || strings.Contains(err.Error(), "read-only") {
 			status = http.StatusConflict
 		} else if _, parseErr := configruntime.ValidateDocument(document); parseErr != nil {
 			status = http.StatusBadRequest
@@ -143,7 +165,82 @@ func (h *Handlers) handleConfigApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, configruntime.RedactError(err))
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "written_and_refresh_scheduled"})
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("ETag", strconv.Quote(revision))
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "written_and_refresh_scheduled", "document_revision": revision})
+}
+
+func configIfMatch(r *http.Request) (string, error) {
+	value := strings.TrimSpace(r.Header.Get("If-Match"))
+	if value == "" {
+		return "", nil
+	}
+	if len(value) < 3 || value[0] != '"' || value[len(value)-1] != '"' || strings.ContainsAny(value[1:len(value)-1], "\"\\ ,\t\r\n") {
+		return "", fmt.Errorf("If-Match must contain one quoted document revision")
+	}
+	return value[1 : len(value)-1], nil
+}
+
+func (h *Handlers) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime config manager unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, manager.DocumentHistory())
+}
+
+func (h *Handlers) handleConfigHistoryDocument(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime config manager unavailable")
+		return
+	}
+	revision := r.PathValue("revision")
+	document, ok := manager.HistoryDocument(revision)
+	if !ok {
+		writeError(w, http.StatusNotFound, "configuration revision unavailable or evicted")
+		return
+	}
+	document, err := redactedConfigDocument(document)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "configuration revision cannot be displayed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "document": string(document)})
+}
+
+func (h *Handlers) handleConfigRollback(w http.ResponseWriter, r *http.Request) {
+	manager := h.server.ConfigManager()
+	if manager == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime config manager unavailable")
+		return
+	}
+	expected, err := configIfMatch(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if expected == "" {
+		writeError(w, http.StatusPreconditionRequired, "If-Match document revision is required for rollback")
+		return
+	}
+	var request struct {
+		Revision string `json:"revision"`
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4097))
+	if err != nil || len(body) > 4096 || json.Unmarshal(body, &request) != nil || request.Revision == "" {
+		writeError(w, http.StatusBadRequest, "body must contain a configuration revision")
+		return
+	}
+	document, ok := manager.HistoryDocument(request.Revision)
+	if !ok {
+		writeError(w, http.StatusNotFound, "configuration revision unavailable or evicted")
+		return
+	}
+	h.writeConfigRevision(w, r, document, expected)
 }
 
 func readConfigDocument(r *http.Request) ([]byte, error) {

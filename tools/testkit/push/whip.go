@@ -13,7 +13,6 @@ import (
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/tools/testkit/report"
 	"github.com/im-pingo/liveforge/tools/testkit/source"
-	pionrtp "github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -143,9 +142,6 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 			fmt.Errorf("whip: create packetizer: %w", err)
 	}
 	session := pkgrtp.NewSession(106, 90000) // H264 PT=106, 90kHz clock
-	var audioSequence uint16
-	var audioTimestamp uint32
-	var audioBaseDTS int64
 	var audioBaseSet bool
 
 	// Determine deadline from cfg.Duration.
@@ -154,6 +150,7 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 		deadline = start.Add(cfg.Duration)
 	}
 	pacer := whipRealtimePacer{enabled: cfg.Realtime}
+	audioSender := whipOpusSender{track: audioTrack, pacer: &pacer}
 
 	// Frame loop: read frames from source and send as RTP.
 	for {
@@ -180,7 +177,7 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 				continue
 			}
 			if frame.FrameType != avframe.FrameTypeSequenceHeader && !audioBaseSet {
-				audioBaseDTS = frame.DTS
+				audioSender.baseMedia = time.Duration(frame.DTS) * time.Millisecond
 				audioBaseSet = true
 			}
 			packets, processErr := audioProcessor.Process(frame)
@@ -188,33 +185,11 @@ func (p *whipPusher) Push(ctx context.Context, src source.Source, cfg PushConfig
 				return buildPushReport(cfg, start, framesSent, bytesSent),
 					fmt.Errorf("whip: process audio: %w", processErr)
 			}
-			for _, payload := range packets {
-				durationSamples, ok := whipOpusPacketDurationSamples(payload)
-				if !ok {
-					return buildPushReport(cfg, start, framesSent, bytesSent),
-						fmt.Errorf("whip: invalid Opus packet duration")
-				}
-				mediaTime := time.Duration(audioBaseDTS)*time.Millisecond +
-					time.Duration(audioTimestamp)*time.Second/48000
-				if err := pacer.Wait(ctx, mediaTime); err != nil {
-					return buildPushReport(cfg, start, framesSent, bytesSent), err
-				}
-				packet := &pionrtp.Packet{
-					Header: pionrtp.Header{
-						Version:        2,
-						SequenceNumber: audioSequence,
-						Timestamp:      audioTimestamp,
-					},
-					Payload: payload,
-				}
-				if err := audioTrack.WriteRTP(packet); err != nil {
-					return buildPushReport(cfg, start, framesSent, bytesSent),
-						fmt.Errorf("whip: write audio RTP: %w", err)
-				}
-				audioSequence++
-				audioTimestamp += durationSamples
-				framesSent++
-				bytesSent += int64(packet.MarshalSize())
+			sent, sentBytes, sendErr := audioSender.Write(ctx, packets)
+			framesSent += sent
+			bytesSent += sentBytes
+			if sendErr != nil {
+				return buildPushReport(cfg, start, framesSent, bytesSent), sendErr
 			}
 			continue
 		}
@@ -267,38 +242,44 @@ type whipRealtimePacer struct {
 	enabled   bool
 	baseWall  time.Time
 	baseMedia time.Duration
+	clock     whipPacingClock
 }
 
 func (p *whipRealtimePacer) Wait(ctx context.Context, mediaTime time.Duration) error {
+	return p.wait(ctx, mediaTime, time.Time{})
+}
+
+func (p *whipRealtimePacer) wait(ctx context.Context, mediaTime time.Duration, earliest time.Time) error {
 	if !p.enabled {
 		return nil
 	}
-	now := time.Now()
+	if p.clock == nil {
+		p.clock = whipWallClock{}
+	}
+	now := p.clock.Now()
 	if p.baseWall.IsZero() {
 		p.baseWall = now
 		p.baseMedia = mediaTime
 		return nil
 	}
 	target := p.baseWall.Add(mediaTime - p.baseMedia)
-	if !target.After(now) && mediaTime > p.baseMedia {
-		// Processing or transport can fall behind the source timeline. Rebase
-		// the current packet instead of sending a burst to catch up.
-		p.baseWall = now
-		p.baseMedia = mediaTime
-		return nil
+	if earliest.After(target) {
+		target = earliest
 	}
 	wait := target.Sub(now)
-	if wait <= 0 {
-		return nil
+	if wait > 0 {
+		if err := p.clock.Wait(ctx, wait); err != nil {
+			return err
+		}
 	}
-	timer := time.NewTimer(wait)
-	select {
-	case <-ctx.Done():
-		timer.Stop()
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	// Rebase at actual wakeup as well as after processing delay. A timer may
+	// become ready long before this goroutine is scheduled to send its packet.
+	now = p.clock.Now()
+	if mediaTime > p.baseMedia && now.After(p.baseWall.Add(mediaTime-p.baseMedia)) {
+		p.baseWall = now
+		p.baseMedia = mediaTime
 	}
+	return nil
 }
 
 // whipSignal sends the SDP offer to the WHIP endpoint via HTTP POST and returns

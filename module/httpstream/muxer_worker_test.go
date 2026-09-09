@@ -142,6 +142,30 @@ func TestMuxerLiveInputReportsDirectSourceOverwrite(t *testing.T) {
 	input.Close()
 }
 
+func TestMuxerLiveInputPublishesOverwriteBeforeCancelingPumps(t *testing.T) {
+	ring := util.NewRingBuffer[*avframe.AVFrame](2)
+	input := newMuxerWorkerLiveInput(ring.NewReaderAt(0), nil, func() {}, muxerAudioPlan{})
+	cancel := input.cancel
+	input.cancel = func() {
+		cancel()
+		<-input.allDone
+		// Let the canceled pump expose EOF before cancellation returns.
+		select {
+		case <-input.terminalDone:
+		default:
+			result := input.ReadResult()
+			t.Errorf("canceled pump exposed clean EOF before overwrite publication: %+v", result)
+		}
+	}
+	defer input.Close()
+
+	input.terminateOverwrite(muxerWorkerInputDirectSource, 2)
+	result := input.ReadResult()
+	if result.OK || result.Frame != nil || result.Overwrite.Input != muxerWorkerInputDirectSource || result.Overwrite.Count != 2 {
+		t.Fatalf("terminal result = %+v, want direct source overwrite count 2", result)
+	}
+}
+
 func TestMuxerLiveInputReportsTransformedAudioOverwrite(t *testing.T) {
 	sourceRing := util.NewRingBuffer[*avframe.AVFrame](2)
 	audioRing := util.NewRingBuffer[*avframe.AVFrame](2)

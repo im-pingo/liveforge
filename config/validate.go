@@ -26,6 +26,12 @@ func Validate(cfg *Config) error {
 	if role := strings.ToLower(strings.TrimSpace(cfg.API.Console.Role)); role != "" && !validAPIRole(role) {
 		return fmt.Errorf("api.console.role must be viewer, operator, or admin")
 	}
+	if err := ValidateAuditConfig(cfg.API.Audit); err != nil {
+		return err
+	}
+	if err := ValidateSimulcastConfig(cfg.Stream.Simulcast); err != nil {
+		return err
+	}
 	if cfg.HTTP.LLHLS.Enabled && cfg.HTTP.LLHLS.SegmentDuration <= 0 {
 		return fmt.Errorf("http_stream.llhls.segment_duration must be greater than zero")
 	}
@@ -84,6 +90,19 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("api.auth.tokens contains a duplicate token")
 		}
 		seenTokens[binding.Token] = struct{}{}
+	}
+	return nil
+}
+
+func ValidateAuditConfig(cfg AuditConfig) error {
+	if cfg.MaxBytes != 0 && (cfg.MaxBytes < 64<<10 || cfg.MaxBytes > 1<<30) {
+		return fmt.Errorf("api.audit.max_bytes must be zero or between 65536 and 1073741824")
+	}
+	if cfg.Path != "" {
+		resolved, err := ResolveUserPath(cfg.Path)
+		if err != nil || strings.TrimSpace(resolved) == "" || filepath.Base(resolved) == "." || filepath.Base(resolved) == ".." || strings.HasSuffix(resolved, string(filepath.Separator)) {
+			return fmt.Errorf("api.audit.path must resolve to a file path")
+		}
 	}
 	return nil
 }

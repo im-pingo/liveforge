@@ -90,12 +90,12 @@ func TestOpenAPIIncludesMiddlewareResponseStatuses(t *testing.T) {
 		want   []string
 	}{
 		{method: "GET", path: "/api/v1/server/health", want: []string{"200", "429"}},
-		{method: "POST", path: "/api/relay/push", want: []string{"200", "400", "401", "403", "404", "406", "429", "503"}},
-		{method: "POST", path: "/api/relay/pull", want: []string{"200", "400", "401", "403", "404", "406", "429"}},
-		{method: "POST", path: "/api/relay/gb/push", want: []string{"200", "400", "401", "403", "429", "503"}},
-		{method: "POST", path: "/api/relay/gb/pull", want: []string{"200", "400", "401", "403", "404", "429"}},
-		{method: "POST", path: "/webrtc/whip/{streamKey}", want: []string{"201", "400", "401", "413", "415", "429", "500", "503"}},
-		{method: "POST", path: "/webrtc/whep/{streamKey}", want: []string{"201", "400", "401", "404", "413", "415", "429", "500", "503"}},
+		{method: "POST", path: "/api/relay/push", want: []string{"200", "400", "401", "403", "406", "409", "413", "429", "503"}},
+		{method: "POST", path: "/api/relay/pull", want: []string{"200", "400", "401", "403", "404", "406", "413", "429", "503"}},
+		{method: "POST", path: "/api/relay/gb/push", want: []string{"200", "400", "401", "403", "409", "413", "429", "503"}},
+		{method: "POST", path: "/api/relay/gb/pull", want: []string{"200", "400", "401", "403", "404", "413", "429", "503"}},
+		{method: "POST", path: "/webrtc/whip/{streamKey}", want: []string{"201", "400", "401", "408", "413", "415", "429", "500", "503"}},
+		{method: "POST", path: "/webrtc/whep/{streamKey}", want: []string{"201", "400", "401", "404", "408", "413", "415", "429", "500", "503"}},
 		{method: "OPTIONS", path: "/webrtc/whip/{streamKey}", want: []string{"204", "429"}},
 		{method: "OPTIONS", path: "/webrtc/whep/{streamKey}", want: []string{"204", "429"}},
 		{method: "GET", path: "/webrtc/session/{sessionId}/status", want: []string{"200", "404", "409", "429"}},

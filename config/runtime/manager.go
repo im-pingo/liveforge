@@ -27,8 +27,11 @@ type Manager struct {
 	// publishMu serializes snapshot publication with a successful ConfigWriter
 	// write. This keeps a just-written desired document from being overwritten
 	// by an in-flight refresh that still observes the previous source value.
-	publishMu      sync.Mutex
-	pendingDesired atomic.Pointer[pendingDesiredWrite]
+	publishMu       sync.Mutex
+	pendingDesired  atomic.Pointer[pendingDesiredWrite]
+	writeGeneration atomic.Uint64
+	history         []documentHistoryItem
+	historyBytes    int
 
 	mu            sync.Mutex
 	started       bool
@@ -113,7 +116,13 @@ func NewManager(opts Options) (*Manager, error) {
 		if err != nil {
 			return nil, err
 		}
-		m.active.Store(&ConfigSnapshot{Config: cfg, DesiredConfig: cfg, Version: Version{Hash: hash}, Source: name, LoadedAt: time.Now()})
+		document, err := normalizedBytes(cfg)
+		if err != nil {
+			return nil, err
+		}
+		snapshot := &ConfigSnapshot{Config: cfg, DesiredConfig: cfg, DesiredDocument: document, Version: Version{Hash: hash}, Source: name, LoadedAt: time.Now()}
+		m.assignDocumentRevision(snapshot)
+		m.active.Store(snapshot)
 		m.status.ActiveVersion = Version{Hash: hash}
 	}
 	go m.callbackLoop()
@@ -201,9 +210,11 @@ func (m *Manager) load(parent context.Context) error {
 	defer cancel()
 	m.setAttempt()
 	var result Snapshot
+	var writeGeneration uint64
 	err := m.withSourceIO(ctx, func() error {
 		var err error
 		result, err = m.source.Load(ctx, previous)
+		writeGeneration = m.writeGeneration.Load()
 		return err
 	})
 	if err != nil {
@@ -240,6 +251,11 @@ func (m *Manager) load(parent context.Context) error {
 	// continue through the normal effective-config application path.
 	m.publishMu.Lock()
 	defer m.publishMu.Unlock()
+	// Parsing happens outside the source gate. A write that completed since
+	// this read owns the desired document; its scheduled refresh will catch up.
+	if writeGeneration != m.writeGeneration.Load() {
+		return nil
+	}
 	old := m.active.Load()
 	pendingWrite := m.pendingDesired.Load()
 	useEffectiveAsDiffBase := false
@@ -268,6 +284,7 @@ func (m *Manager) load(parent context.Context) error {
 		if len(result.Data) > 0 {
 			unchanged.DesiredDocument = append([]byte(nil), result.Data...)
 		}
+		m.assignDocumentRevision(&unchanged)
 		m.active.Store(&unchanged)
 		if pendingWrite != nil && pendingWrite.hash == hash {
 			m.pendingDesired.CompareAndSwap(pendingWrite, nil)
@@ -330,6 +347,7 @@ func (m *Manager) load(parent context.Context) error {
 			return err
 		}
 	}
+	m.assignDocumentRevision(next)
 	m.active.Store(next)
 	if clearPending != nil {
 		m.pendingDesired.CompareAndSwap(clearPending, nil)
@@ -397,44 +415,62 @@ func ValidateKnownDocument(data []byte) (*config.Config, error) {
 // selected source supports writes, then schedules the normal background
 // refresh path. It never applies a document directly on the request goroutine.
 func (m *Manager) Write(ctx context.Context, data []byte) error {
+	_, err := m.WriteIfRevision(ctx, data, "")
+	return err
+}
+
+// WriteIfRevision checks the current desired revision atomically with the
+// source write and pending publication. An empty revision is unconditional.
+func (m *Manager) WriteIfRevision(ctx context.Context, data []byte, expected string) (string, error) {
 	cfg, err := ValidateDocument(data)
 	if err != nil {
-		return err
+		return "", err
 	}
 	hash, err := configHash(cfg)
 	if err != nil {
-		return err
+		return "", err
 	}
 	writer, ok := m.source.(ConfigWriter)
 	if !ok {
-		return fmt.Errorf("config source %q is read-only", m.sourceName)
+		return "", fmt.Errorf("config source %q is read-only", m.sourceName)
 	}
+	var revision string
 	if err := m.withSourceIO(ctx, func() error {
+		m.publishMu.Lock()
+		defer m.publishMu.Unlock()
 		m.mu.Lock()
 		closed := m.closed
 		m.mu.Unlock()
 		if closed {
 			return ErrClosed
 		}
-		return writer.Write(ctx, append([]byte(nil), data...))
+		current := m.active.Load()
+		if expected != "" && (current == nil || current.DocumentRevision != expected) {
+			return ErrRevisionConflict
+		}
+		if err := writer.Write(ctx, append([]byte(nil), data...)); err != nil {
+			return err
+		}
+		pending := &pendingDesiredWrite{
+			config:   cfg,
+			document: append([]byte(nil), data...),
+			hash:     hash,
+		}
+		m.writeGeneration.Add(1)
+		m.pendingDesired.Store(pending)
+		if current != nil {
+			next := *current
+			next.DesiredConfig = cfg
+			next.DesiredDocument = pending.document
+			m.assignDocumentRevision(&next)
+			revision = next.DocumentRevision
+			m.active.Store(&next)
+		}
+		return nil
 	}); err != nil {
-		return err
+		return "", err
 	}
-	pending := &pendingDesiredWrite{
-		config:   cfg,
-		document: append([]byte(nil), data...),
-		hash:     hash,
-	}
-	m.publishMu.Lock()
-	m.pendingDesired.Store(pending)
-	if current := m.active.Load(); current != nil {
-		next := *current
-		next.DesiredConfig = cfg
-		next.DesiredDocument = append([]byte(nil), pending.document...)
-		m.active.Store(&next)
-	}
-	m.publishMu.Unlock()
-	return m.Refresh(ctx)
+	return revision, m.Refresh(context.Background())
 }
 
 func (m *Manager) withSourceIO(ctx context.Context, operation func() error) error {

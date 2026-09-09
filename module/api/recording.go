@@ -21,9 +21,15 @@ func (h *Handlers) recordingProvider() (record.RecordingProvider, bool) {
 }
 
 func (h *Handlers) handleRecordings(w http.ResponseWriter, r *http.Request) {
+	page, err := readPagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	provider, ok := h.recordingProvider()
 	if !ok {
-		writeJSON(w, http.StatusOK, []record.RecordingInfo{})
+		items := pageItems([]record.RecordingInfo{}, page)
+		writePageJSON(w, items, page)
 		return
 	}
 	items, err := provider.ListRecordings(r.Context())
@@ -31,7 +37,16 @@ func (h *Handlers) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		writeRecordingError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	if query := r.URL.Query().Get("q"); query != "" {
+		filtered := make([]record.RecordingInfo, 0)
+		for _, item := range items {
+			if strings.Contains(item.ID, query) || strings.Contains(item.StreamKey, query) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	writePageJSON(w, pageItems(items, page), page)
 }
 
 func (h *Handlers) handleRecordingStatus(w http.ResponseWriter, r *http.Request) {

@@ -36,6 +36,7 @@ func TestClusterOriginEdge(t *testing.T) {
 	if rpt.Play == nil {
 		t.Fatal("play report is nil")
 	}
+	t.Logf("relay startup=%dms video=%d audio=%d play=%dms push=%+v", rpt.RelayMs, rpt.Play.Video.FrameCount, rpt.Play.Audio.FrameCount, rpt.Play.DurationMs, rpt.Push)
 	if rpt.Play.Video.FrameCount == 0 {
 		t.Error("no video frames received through cluster relay")
 	}

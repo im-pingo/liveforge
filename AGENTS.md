@@ -35,6 +35,8 @@ Do not claim a feature is supported until there is a source implementation and a
 - Release binaries are built with the portable no-CGO profile; audio transcoding is available in source builds with FFmpeg or in the tagged Docker image.
 - Run `tools/check-agent-docs_test.sh` after every change. Run `tools/check-agent-docs.sh` with `CHECK_AGENT_DOCS_DIFF=1` in CI or before opening a pull request.
 - Run focused package tests for the changed module, then the tagged baseline suite when the environment has Go 1.26 and FFmpeg available.
+- CI enables `LIVEFORGE_REQUIRE_BROWSER=1`: required Console and tagged media browser checks must fail, rather than skip, when Chrome/H.264 is unavailable or `-short` excludes them. Use `tools/check-review-regressions.sh` for the bounded concurrency, backpressure, fuzz, and browser soak gate. Do not run separate cluster test binaries concurrently because legacy fixtures share ports.
+- CI passes the just-built executable through `LF_BINARY` so the origin-edge subprocess test runs. For local full integration, set `LF_BINARY` to an absolute path to a current build; ordinary package checks may skip this external-process test when no binary is discoverable.
 - GitHub Actions workflows must use action versions whose declared runtime is Node 24 or newer. Keep the current Node 24-compatible majors in `.github/workflows/ci.yml` and `.github/workflows/release.yml`; do not restore deprecated Node 20 action versions or add `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION`.
 
 ## Safety and review rules

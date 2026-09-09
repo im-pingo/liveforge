@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"reflect"
 	"runtime"
 	"sync/atomic"
@@ -1700,6 +1701,53 @@ func TestStreamGOPCacheMaxFramesKeepsPlayablePrefix(t *testing.T) {
 	got := stream.GOPCache()
 	if len(got) != 3 || got[0] != frames[0] || got[2] != frames[2] {
 		t.Fatalf("frame-bounded GOP = %v, want first three interleaved frames", got)
+	}
+}
+
+func TestStartupSnapshotRepairsTruncatedGOPFromRetainedRing(t *testing.T) {
+	for _, ringSize := range []int{16, 2} {
+		t.Run(fmt.Sprintf("ring-%d", ringSize), func(t *testing.T) {
+			cfg := newTestStreamConfig()
+			cfg.GOPCacheNum = 1
+			cfg.GOPCacheMaxFrames = 2
+			cfg.RingBufferSize = ringSize
+			stream := NewStream("live/truncated-startup", cfg, config.LimitsConfig{}, NewEventBus())
+			t.Cleanup(stream.Close)
+			if err := stream.SetPublisher(&testPublisher{id: "source", info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264}}); err != nil {
+				t.Fatal(err)
+			}
+			var frames []*avframe.AVFrame
+			for i := 0; i < 5; i++ {
+				kind := avframe.FrameTypeInterframe
+				if i == 0 {
+					kind = avframe.FrameTypeKeyframe
+				}
+				frame := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, kind, int64(i*40), int64(i*40), []byte{byte(i)})
+				frames = append(frames, frame)
+				stream.WriteFrame(frame)
+			}
+			if len(stream.GOPCache()) != 2 {
+				t.Fatal("persistent GOP cache exceeded its configured bound")
+			}
+			snapshot := stream.StartupSnapshot()
+			if snapshot.LiveCursor != 5 {
+				t.Fatalf("live cursor=%d", snapshot.LiveCursor)
+			}
+			if ringSize == 2 {
+				if len(snapshot.ReplayFrames) != 0 || snapshot.SourceCursor != snapshot.LiveCursor {
+					t.Fatal("overwritten GOP must wait for a fresh keyframe instead of bridging a partial prefix to live")
+				}
+				return
+			}
+			if !reflect.DeepEqual(snapshot.ReplayFrames, frames) || snapshot.SourceCursor != 0 {
+				t.Fatalf("startup skipped reference frames: replay=%d source=%d, want all 5 retained frames from cursor 0", len(snapshot.ReplayFrames), snapshot.SourceCursor)
+			}
+			next := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeInterframe, 200, 200, []byte{5})
+			stream.WriteFrame(next)
+			if got := stream.RingBuffer().NewReaderAt(snapshot.LiveCursor).TryReadResult(); !got.OK || got.Value != next || got.Overwritten != 0 {
+				t.Fatal("repaired replay did not join the live reader without duplication or a gap")
+			}
+		})
 	}
 }
 

@@ -358,18 +358,18 @@ func TestGB28181MutationsUseExplicitPermissionsAndAuditThroughRealMux(t *testing
 	}
 	server := core.NewServer(cfg)
 	mutations := make(map[string]int)
-	for pattern := range map[string]struct{}{
-		"DELETE /api/v1/gb28181/devices/":  {},
-		"DELETE /api/v1/gb28181/sessions/": {},
-		"DELETE /api/v1/gb28181/channels/": {},
-		"POST /api/v1/gb28181/channels/":   {},
-		"POST /api/relay/push":             {},
+	for pattern, permission := range map[string]string{
+		"DELETE /api/v1/gb28181/devices/":  "gb28181:delete",
+		"DELETE /api/v1/gb28181/sessions/": "gb28181:delete",
+		"DELETE /api/v1/gb28181/channels/": "gb28181:control",
+		"POST /api/v1/gb28181/channels/":   "gb28181:control",
+		"POST /api/relay/push":             "server:mutate",
 	} {
 		pattern := pattern
-		server.RegisterAPIHandler(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.RegisterAPIHandler(pattern, core.WithAPIPermission(permission, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mutations[pattern]++
 			w.WriteHeader(http.StatusNoContent)
-		}))
+		})))
 	}
 	audit := NewAuditStore(32)
 	mux := http.NewServeMux()
@@ -428,10 +428,10 @@ func TestGB28181StopPermissionThroughRealMux(t *testing.T) {
 	}
 	server := core.NewServer(cfg)
 	mutations := 0
-	server.RegisterAPIHandler("DELETE /api/v1/gb28181/channels/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server.RegisterAPIHandler("DELETE /api/v1/gb28181/channels/", core.WithAPIPermission("gb28181:control", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mutations++
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 	audit := NewAuditStore(16)
 	mux := http.NewServeMux()
 	registerRoutes(mux, server, audit)

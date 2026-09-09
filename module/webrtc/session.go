@@ -22,6 +22,7 @@ type Session struct {
 	pc        *webrtc.PeerConnection
 	streamKey string
 	role      string // "whip" or "whep"
+	layer     string // selected simulcast RID, fixed for this WHEP session
 	module    *Module
 	done      chan struct{}
 	closeOnce sync.Once
@@ -135,6 +136,7 @@ func (s *Session) statusResponse() (sessionStatusResponse, bool) {
 		SessionID: s.id,
 		StreamKey: s.streamKey,
 		Role:      s.role,
+		Layer:     s.layer,
 		Feed:      feed,
 	}, true
 }

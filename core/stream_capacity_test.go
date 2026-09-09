@@ -80,8 +80,15 @@ func TestStreamMultiStreamConcurrentIngress(t *testing.T) {
 		if got := stream.RingBuffer().WriteCursor(); got != framesPerStream {
 			t.Fatalf("stream %d cursor = %d, want %d", i, got, framesPerStream)
 		}
-		if snapshot := stream.StartupSnapshot(); !snapshot.Ready || len(snapshot.ReplayFrames) == 0 {
-			t.Fatalf("stream %d has invalid startup snapshot", i)
+		if snapshot := stream.StartupSnapshot(); !snapshot.Ready || len(snapshot.ReplayFrames) != 0 || snapshot.SourceCursor != framesPerStream {
+			t.Fatalf("stream %d must wait for a keyframe after its truncated GOP has left the ring", i)
+		}
+		keyframe := avframe.NewAVFrame(avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe, framesPerStream, framesPerStream, []byte{1})
+		if !stream.WriteFrameForPublisher(publishers[i], keyframe) {
+			t.Fatalf("stream %d rejected its next keyframe", i)
+		}
+		if snapshot := stream.StartupSnapshot(); !snapshot.Ready || len(snapshot.ReplayFrames) != 1 || snapshot.ReplayFrames[0] != keyframe || snapshot.SourceCursor != framesPerStream {
+			t.Fatalf("stream %d failed to recover startup at the fresh keyframe", i)
 		}
 	}
 }

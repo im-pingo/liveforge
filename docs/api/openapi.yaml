@@ -115,6 +115,7 @@ paths:
         '200':
           description: Configuration documents
           headers:
+            ETag: {description: Quoted opaque desired document_revision; changes include comments and pending writes., schema: {type: string}}
             Cache-Control: {description: Configuration documents are never cacheable, schema: {type: string, const: no-store}}
           content: {application/json: {schema: {$ref: '#/components/schemas/ConfigDocumentResponse'}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
@@ -160,6 +161,8 @@ paths:
       summary: Persist a complete document to a writable runtime source and schedule refresh
       description: The source write completes and is serialized with source loads before the 202 response; parsing, module application, and publication remain on the background manager worker. A successful write publishes a pending desired overlay immediately so document reads remain consistent across an immediate page reload; effective values remain unchanged until asynchronous application completes. Apply and trusted runtime source loading remain permissive for source fields not mapped by the typed runtime struct. Consul KV PUT rejects redirects and never forwards X-Consul-Token. Listener, module, TLS, port, and audio-codec topology changes remain restart-required.
       x-liveforge-permission: config:reload
+      parameters:
+        - {$ref: '#/components/parameters/ConfigIfMatch'}
       requestBody:
         required: true
         content:
@@ -170,17 +173,88 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '409': {$ref: '#/components/responses/Conflict'}
+        '409': {description: Read-only source or stale document revision. No source write occurs on a revision conflict., content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/server/config/history:
+    get:
+      tags: [server]
+      operationId: listConfigHistory
+      summary: List newest-first metadata for this process's retained desired documents
+      description: At most 32 entries and 16 MiB of original document bytes are retained in memory. History resets on restart; this endpoint does not return secret content. Responses use Cache-Control no-store.
+      x-liveforge-permission: config:read
+      responses:
+        '200': {description: Revision metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigHistoryResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/server/config/history/{revision}:
+    parameters:
+      - {name: revision, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [server]
+      operationId: getConfigHistoryDocument
+      summary: Read a redacted retained configuration document
+      x-liveforge-permission: config:read
+      responses:
+        '200': {description: Redacted YAML document; Cache-Control no-store, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigHistoryDocumentResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v1/server/config/rollback:
+    post:
+      tags: [server]
+      operationId: rollbackConfigDocument
+      summary: Validate and write a retained original document, then schedule refresh
+      description: Uses the original retained secrets internally. This is a conditional source write, not an immediate runtime application; restart-required and application-failure behavior matches Apply.
+      x-liveforge-permission: config:reload
+      parameters:
+        - {name: If-Match, in: header, required: true, description: One quoted current desired document_revision., schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [revision], properties: {revision: {type: string}}}}}
+      responses:
+        '202': {description: Document written and refresh scheduled, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigApplyResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '428': {description: If-Match is required, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /console/logout:
+    post:
+      tags: [security]
+      operationId: logoutConsole
+      summary: Expire the browser console session cookie
+      description: Sets an expired HttpOnly SameSite Strict lf_session cookie on path / and redirects to /console/login. Secure follows API TLS. This clears the browser cookie; copied signed tokens remain valid until their normal expiry or credential rotation. GET returns 405.
+      security: []
+      responses:
+        '303': {description: Cookie expired; redirect to login}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /api/v1/audit:
     get:
       tags: [security]
       operationId: listAuditEntries
       summary: Read the bounded in-memory management audit trail
       x-liveforge-permission: audit:read
+      parameters:
+        - {$ref: '#/components/parameters/ListLimit'}
+        - {$ref: '#/components/parameters/ListOffset'}
+        - {name: principal, in: query, schema: {type: string}, description: Exact principal filter.}
+        - {name: action, in: query, schema: {type: string}, description: Exact action filter.}
+        - {name: result, in: query, schema: {type: string}, description: Exact result filter.}
+        - {name: since, in: query, schema: {type: string, format: date-time}, description: Inclusive RFC3339 lower time bound.}
+        - {name: until, in: query, schema: {type: string, format: date-time}, description: Inclusive RFC3339 upper time bound.}
+        - {name: order, in: query, schema: {type: string, enum: [asc, desc], default: asc}}
+        - {name: format, in: query, schema: {type: string, enum: [json, ndjson], default: json}, description: NDJSON exports matching retained entries as an attachment.}
       responses:
-        '200': {description: Audit entries, content: {application/json: {schema: {$ref: '#/components/schemas/AuditResponse'}}}}
+        '200': {description: Audit entries, content: {application/json: {schema: {$ref: '#/components/schemas/AuditResponse'}}, application/x-ndjson: {schema: {type: string}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -203,8 +277,11 @@ paths:
       x-liveforge-permission: streams:read
       parameters:
         - {name: q, in: query, required: false, description: Case-sensitive stream-key substring., schema: {type: string}}
+        - {$ref: '#/components/parameters/ListLimit'}
+        - {$ref: '#/components/parameters/ListOffset'}
       responses:
         '200': {description: Active streams, content: {application/json: {schema: {$ref: '#/components/schemas/StreamsResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -257,8 +334,12 @@ paths:
       operationId: listSIPGatewayCalls
       summary: List calls and SIP Gateway counters
       x-liveforge-permission: sip:read
+      parameters:
+        - {$ref: '#/components/parameters/ListLimit'}
+        - {$ref: '#/components/parameters/ListOffset'}
       responses:
         '200': {description: Calls and counters, content: {application/json: {schema: {$ref: '#/components/schemas/SIPCallsResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -388,8 +469,13 @@ paths:
       operationId: listRecordings
       summary: List recordings from configured storage
       x-liveforge-permission: recordings:read
+      parameters:
+        - {$ref: '#/components/parameters/ListLimit'}
+        - {$ref: '#/components/parameters/ListOffset'}
+        - {name: q, in: query, schema: {type: string}, description: Case-sensitive recording ID or stream-key substring.}
       responses:
         '200': {description: Recordings, content: {application/json: {schema: {$ref: '#/components/schemas/RecordingsResponse'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '429': {$ref: '#/components/responses/RateLimited'}
@@ -790,6 +876,7 @@ paths:
       tags: [internal-cluster]
       operationId: signalRTPRelayPush
       summary: Negotiate a default-path RTP push relay
+      description: Custom registered paths have the same management authorization. Creates a new destination and synchronously binds sockets and admits a publisher before success. Request bodies are limited to64KiB.
       x-liveforge-permission: server:mutate
       parameters:
         - {name: stream, in: query, required: true, schema: {type: string}}
@@ -798,9 +885,10 @@ paths:
         '200': {description: SDP answer, content: {application/sdp: {schema: {type: string}}}}
         '400': {$ref: '#/components/responses/RelayBadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {$ref: '#/components/responses/RelayNotFound'}
+        '403': {$ref: '#/components/responses/RelayForbidden'}
         '406': {$ref: '#/components/responses/RelayNotAcceptable'}
+        '409': {$ref: '#/components/responses/RelayConflict'}
+        '413': {$ref: '#/components/responses/RelayTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/RelayUnavailable'}
   /api/relay/pull:
@@ -808,6 +896,7 @@ paths:
       tags: [internal-cluster]
       operationId: signalRTPRelayPull
       summary: Negotiate a default-path RTP pull relay
+      description: Binds the outgoing socket and admits a generation-scoped subscriber before success. Request bodies are limited to64KiB.
       x-liveforge-permission: server:mutate
       parameters:
         - {name: stream, in: query, required: true, schema: {type: string}}
@@ -819,12 +908,15 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/RelayNotFound'}
         '406': {$ref: '#/components/responses/RelayNotAcceptable'}
+        '413': {$ref: '#/components/responses/RelayTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/RelayUnavailable'}
   /api/relay/gb/push:
     post:
       tags: [internal-cluster]
       operationId: signalGBRelayPush
       summary: Allocate the receiver port for a default-path GB28181 push relay
+      description: Creates a new destination and synchronously binds sockets and admits a publisher before success. Optional request bodies are limited to64KiB.
       x-liveforge-permission: server:mutate
       parameters:
         - {name: stream, in: query, required: true, schema: {type: string}}
@@ -833,7 +925,9 @@ paths:
         '200': {description: Allocated UDP port, content: {text/plain: {schema: {type: integer}}}}
         '400': {$ref: '#/components/responses/RelayBadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/Forbidden'}
+        '403': {$ref: '#/components/responses/RelayForbidden'}
+        '409': {$ref: '#/components/responses/RelayConflict'}
+        '413': {$ref: '#/components/responses/RelayTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
         '503': {$ref: '#/components/responses/RelayUnavailable'}
   /api/relay/gb/pull:
@@ -841,6 +935,7 @@ paths:
       tags: [internal-cluster]
       operationId: signalGBRelayPull
       summary: Start a default-path GB28181 pull relay
+      description: Binds the outgoing socket and admits a generation-scoped subscriber before success. Optional request bodies are limited to64KiB.
       x-liveforge-permission: server:mutate
       parameters:
         - {name: stream, in: query, required: true, schema: {type: string}}
@@ -851,7 +946,9 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/RelayNotFound'}
+        '413': {$ref: '#/components/responses/RelayTooLarge'}
         '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/RelayUnavailable'}
   /webrtc/whip/{streamKey}:
     servers:
       - url: '{scheme}://127.0.0.1:8443'
@@ -864,12 +961,14 @@ paths:
       tags: [webrtc]
       operationId: publishWHIP
       summary: Publish with a WHIP SDP offer
+      description: RID simulcast requires stream.simulcast.enabled and one active video m-line with one to three configured sending RIDs. Each RID must appear exactly once in the simulcast send list. Disabled, malformed, unknown, duplicate, initially paused, alternative, or legacy SSRC SIM offers return 400 before publisher/session allocation. Highest configured max_bitrate among offered RIDs is canonical, with lexical RID tie-break; bitrate values rank layers and do not configure the sender encoder.
       security: [{streamBearerAuth: []}, {streamToken: []}, {}]
       requestBody: {required: true, description: SDP offer body; limited to 1 MiB (1048576 bytes)., content: {application/sdp: {schema: {type: string}}}}
       responses:
         '201': {$ref: '#/components/responses/SDPAnswer'}
         '400': {$ref: '#/components/responses/MediaBadRequest'}
         '401': {$ref: '#/components/responses/MediaUnauthorized'}
+        '408': {$ref: '#/components/responses/MediaRequestTimeout'}
         '413': {$ref: '#/components/responses/MediaTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMedia'}
         '429': {$ref: '#/components/responses/MediaRateLimited'}
@@ -895,6 +994,11 @@ paths:
       tags: [webrtc]
       operationId: playWHEP
       summary: Play with a WHEP SDP offer
+      parameters:
+        - name: layer
+          in: query
+          description: Session-time Simulcast selection. Omitted, auto, or high selects the highest-ranked offered RID; low selects the lowest; an exact offered RID selects that layer. Unknown selections return 400. Non-Simulcast streams accept only omission or auto. Subscriber capacity is shared across all layers and existing protocol consumers; exhaustion returns 503. No adaptive switching of an existing session.
+          schema: {type: string, minLength: 1, maxLength: 16, pattern: '^[A-Za-z0-9_-]+$'}
       security: [{streamBearerAuth: []}, {streamToken: []}, {}]
       requestBody: {required: true, description: SDP offer body; limited to 1 MiB (1048576 bytes). Every source media kind requested by a non-zero receiving m-line must negotiate. Media direction inherits the session-level direction when absent; codecs require an exact rtpmap name on a payload listed by that m-line. Unsupported requested codecs fail with 415, while disabled or non-receiving m-lines are intentionally omitted., content: {application/sdp: {schema: {type: string}}}}
       responses:
@@ -902,6 +1006,7 @@ paths:
         '400': {$ref: '#/components/responses/MediaBadRequest'}
         '401': {$ref: '#/components/responses/MediaUnauthorized'}
         '404': {$ref: '#/components/responses/MediaNotFound'}
+        '408': {$ref: '#/components/responses/MediaRequestTimeout'}
         '413': {$ref: '#/components/responses/MediaTooLarge'}
         '415': {$ref: '#/components/responses/UnsupportedMedia'}
         '429': {$ref: '#/components/responses/MediaRateLimited'}
@@ -977,6 +1082,21 @@ components:
     streamBearerAuth: {type: http, scheme: bearer, bearerFormat: publish or subscribe token}
     streamToken: {type: apiKey, in: query, name: token}
   parameters:
+    ConfigIfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: One quoted desired document_revision from GET document. A stale revision returns 409 without writing. Omission retains compatibility but concurrent changes after secret restoration are still rejected. This protects writes through this manager, not independent external source writers.
+      schema: {type: string}
+    ListLimit:
+      name: limit
+      in: query
+      description: Enables bounded pagination; 1..500, defaults to 100 when only offset is supplied. Without both pagination parameters the legacy complete data shape is preserved. Filters apply first. Paginated JSON adds top-level pagination and X-Total-Count/X-Limit/X-Offset headers. Offset pages are live snapshots, not stable cursors across mutations.
+      schema: {type: integer, minimum: 1, maximum: 500}
+    ListOffset:
+      name: offset
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
     StreamKey: {name: streamKey, in: path, required: true, description: URL-decoded catch-all stream key such as live/demo., schema: {type: string}}
     RecordingPath: {name: recordingPath, in: path, required: true, description: URL-decoded recording ID relative to configured storage; traversal is rejected., schema: {type: string}}
     DeviceId: {name: deviceId, in: path, required: true, schema: {type: string}}
@@ -1006,6 +1126,9 @@ components:
     GBRateLimited: {description: Per-IP request limit exceeded; emitted by management middleware., content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}}}
     GBInternalError: {description: SIP or media setup failed, content: {application/json: {schema: {$ref: '#/components/schemas/GBError'}}}}
     RelayBadRequest: {description: Invalid relay query or SDP, content: {text/plain: {schema: {type: string}}}}
+    RelayForbidden: {description: Management permission denied or synchronous publisher authorization rejected, content: {application/json: {schema: {$ref: '#/components/schemas/ApiError'}}, text/plain: {schema: {type: string}}}}
+    RelayConflict: {description: Destination already has a publisher, content: {text/plain: {schema: {type: string}}}}
+    RelayTooLarge: {description: Signaling request body exceeds64KiB, content: {text/plain: {schema: {type: string}}}}
     RelayNotFound: {description: Relay stream or publisher not found, content: {text/plain: {schema: {type: string}}}}
     RelayNotAcceptable: {description: No supported codec in the RTP SDP offer, content: {text/plain: {schema: {type: string}}}}
     RelayUnavailable: {description: Relay port allocation or setup unavailable, content: {text/plain: {schema: {type: string}}}}
@@ -1016,6 +1139,7 @@ components:
     MediaBadRequest: {description: Invalid stream key, body, or SDP, content: {text/plain: {schema: {type: string}}}}
     MediaUnauthorized: {description: Publish or subscribe authorization rejected, content: {text/plain: {schema: {type: string}}}}
     MediaNotFound: {description: Stream or session not found, content: {text/plain: {schema: {type: string}}}}
+    MediaRequestTimeout: {description: Incomplete SDP exceeded the10-second total request read deadline; connection slot released, content: {text/plain: {schema: {type: string}}}}
     MediaTooLarge: {description: SDP offer body exceeds 1 MiB (1048576 bytes); no session or stream state is created, content: {text/plain: {schema: {type: string}}}}
     UnsupportedMedia: {description: Unsupported Content-Type or no compatible media tracks, content: {text/plain: {schema: {type: string}}}}
     MediaRateLimited: {description: Per-IP signaling limit exceeded, content: {text/plain: {schema: {type: string}}}}
@@ -1025,7 +1149,11 @@ components:
     ApiResponse:
       type: object
       required: [code, message]
-      properties: {code: {type: integer, const: 0}, message: {type: string}, data: {}}
+      properties: {code: {type: integer, const: 0}, message: {type: string}, data: {}, pagination: {$ref: '#/components/schemas/Pagination'}}
+    Pagination:
+      type: object
+      required: [limit, offset, total, has_more]
+      properties: {limit: {type: integer}, offset: {type: integer}, total: {type: integer}, has_more: {type: boolean}}
     ApiError:
       type: object
       required: [code, message]
@@ -1035,7 +1163,13 @@ components:
     ScheduledResponse:
       allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: scheduled}}}}}]
     ConfigApplyResponse:
-      allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: written_and_refresh_scheduled}}}}}]
+      allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, properties: {status: {type: string, const: written_and_refresh_scheduled}, document_revision: {type: string}}}}}]
+    ConfigHistoryEntry:
+      type: object
+      required: [revision, created_at, bytes]
+      properties: {revision: {type: string}, created_at: {type: string, format: date-time}, bytes: {type: integer}}
+    ConfigHistoryResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/ConfigHistoryEntry'}}}}]}
+    ConfigHistoryDocumentResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [revision, document], properties: {revision: {type: string}, document: {type: string}}}}}]}
     ServerInfo:
       type: object
       required: [version, uptime_sec, modules, capabilities]
@@ -1055,6 +1189,7 @@ components:
         source: {type: string}
         active_version: {type: string}
         active_hash: {type: string}
+        document_revision: {type: string, description: Opaque desired document revision including pending writes; independent of normalized active_hash.}
         last_attempt: {type: string, format: date-time}
         last_success: {type: string, format: date-time}
         consecutive_failures: {type: integer, format: int64}
@@ -1084,6 +1219,7 @@ components:
         desired: {type: object, additionalProperties: true}
         effective_document: {type: string}
         desired_document: {type: string}
+        document_revision: {type: string, description: Opaque revision for conditional Apply and rollback.}
         source_details: {type: object, additionalProperties: true, description: Credentials are omitted; URL userinfo/query/fragment and non-root paths are opaque while safe host/address identity remains visible. Consul KV GET and PUT reject redirects and never forward X-Consul-Token.}
         schema: {type: object, additionalProperties: true, description: The complete versioned docs/config/config.schema.json object.}
         writable: {type: boolean}
@@ -1112,7 +1248,11 @@ components:
     AuditResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: array, items: {$ref: '#/components/schemas/AuditEntry'}}}}]}
     SecurityStatus:
       type: object
-      properties: {legacy_bearer_configured: {type: boolean}, tokens: {type: array, items: {type: object, properties: {name: {type: string}, role: {type: string}}}}, console_configured: {type: boolean}, console_role: {type: string}, audit_enabled: {type: boolean}, audit_entries: {type: integer}, audit_events_total: {type: integer, format: int64}}
+      properties: {legacy_bearer_configured: {type: boolean}, tokens: {type: array, items: {type: object, properties: {name: {type: string}, role: {type: string}}}}, console_configured: {type: boolean}, console_role: {type: string}, audit_enabled: {type: boolean}, audit_entries: {type: integer}, audit_events_total: {type: integer, format: int64}, audit_persistence: {$ref: '#/components/schemas/AuditPersistenceStatus'}}
+    AuditPersistenceStatus:
+      type: object
+      required: [enabled, healthy, write_failures_total]
+      properties: {enabled: {type: boolean}, healthy: {type: boolean}, error: {type: string, description: Bounded sanitized storage error without path disclosure}, write_failures_total: {type: integer, format: int64}}
     SecurityStatusResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/SecurityStatus'}}}]}
     SIPDialRequest: {type: object, additionalProperties: false, required: [target_uri, stream_key], properties: {target_uri: {type: string}, stream_key: {type: string}}}
     SIPLabRequest: {type: object, additionalProperties: false, required: [mode, device_id, stream_key, codec], properties: {mode: {type: string, enum: [publish, receive]}, device_id: {type: string, maxLength: 128, pattern: '^[A-Za-z0-9._-]+$', description: 'Letters, digits, hyphens, underscores, and periods only.'}, stream_key: {type: string, maxLength: 256, pattern: '^(?!/)(?!.*\/$)(?!.*//)(?!\.{1,2}(?:/|$))(?!.*\/\.{1,2}(?:/|$))[\x21-\x7E]+$', description: 'Printable ASCII without whitespace; slash-separated segments must be non-empty and cannot be dot or dot-dot segments.'}, codec: {type: string, enum: [PCMA, PCMU], description: 'Publish source codec or receive target codec. Receive requires direct compatibility or the configured audiocodec runtime.'}}}
@@ -1195,4 +1335,4 @@ components:
     GBLabSessionsResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {type: object, required: [sessions], properties: {sessions: {type: array, items: {$ref: '#/components/schemas/GBLabSessionView'}}}}}}]}
     GBLabSessionResponse: {allOf: [{$ref: '#/components/schemas/ApiResponse'}, {type: object, properties: {data: {$ref: '#/components/schemas/GBLabSessionView'}}}]}
     WHEPFeedStatus: {type: object, required: [generation, cursor, mode, state, first_media_wait_ms, updated_at, expected_video, expected_audio], properties: {generation: {type: integer, format: int64}, cursor: {type: integer, format: int64}, mode: {type: string, enum: [live, realtime]}, state: {type: string, enum: [waiting_keyframe, playing, no_media_input, media_stalled, codec_mismatch, sample_write_failed, generation_ended, closed]}, first_media_at: {type: string, format: date-time, description: Time of the first successfully emitted audio or video sample.}, first_media_wait_ms: {type: integer, format: int64, minimum: 0, description: Stable delay from feed status creation to the first successfully emitted audio or video sample; zero before the first sample.}, last_video_at: {type: string, format: date-time, description: Last successfully emitted video sample for this feed.}, last_audio_at: {type: string, format: date-time, description: Last successfully emitted audio sample for this feed.}, updated_at: {type: string, format: date-time}, expected_video: {type: boolean}, expected_audio: {type: boolean}, video_frames: {type: integer, format: int64}, audio_frames: {type: integer, format: int64}, dropped_video: {type: integer, format: int64, description: Dropped frames for the negotiated video track only.}, dropped_audio: {type: integer, format: int64, description: Dropped frames for the negotiated audio track only.}, source_overwrites: {type: integer, format: int64, description: Source-ring positions lost during overwrite recovery; mixed source positions are not classified as video or audio drops.}, rtp_packets_sent: {type: integer, format: int64, description: RTP packets successfully written by the PeerConnection interceptor for this feed; session close captures one final monotonic snapshot.}, rtp_bytes_sent: {type: integer, format: int64, description: RTP header plus payload bytes successfully written for this feed; session close captures one final monotonic snapshot.}, rtcp_packets_received: {type: integer, format: int64, description: Valid RTCP packets read by the outbound track sender; session close captures one final monotonic snapshot.}, last_error: {type: string, description: Bounded terminal media error}}}
-    WHEPSessionStatusResponse: {type: object, required: [session_id, stream_key, role, feed], properties: {session_id: {type: string}, stream_key: {type: string}, role: {type: string, enum: [whep]}, feed: {$ref: '#/components/schemas/WHEPFeedStatus'}}}
+    WHEPSessionStatusResponse: {type: object, required: [session_id, stream_key, role, feed], properties: {session_id: {type: string}, stream_key: {type: string}, role: {type: string, enum: [whep]}, layer: {type: string, description: Selected Simulcast RID; omitted for ordinary streams.}, feed: {$ref: '#/components/schemas/WHEPFeedStatus'}}}

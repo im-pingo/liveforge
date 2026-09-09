@@ -58,19 +58,18 @@ func WriteConfig(cfg *config.Config, dir, filename string) (string, error) {
 
 // baseConfig returns a minimal Config with sensible defaults.
 func baseConfig(name string) *config.Config {
+	stream := config.Defaults().Stream
+	stream.GOPCacheNum = 1
+	stream.RingBufferSize = 1024
+	stream.IdleTimeout = 30 * time.Second
+	stream.NoPublisherTimeout = 15 * time.Second
 	return &config.Config{
 		Server: config.ServerConfig{
 			Name:         name,
 			LogLevel:     "warn",
 			DrainTimeout: 5 * time.Second,
 		},
-		Stream: config.StreamConfig{
-			GOPCache:           true,
-			GOPCacheNum:        1,
-			RingBufferSize:     1024,
-			IdleTimeout:        30 * time.Second,
-			NoPublisherTimeout: 15 * time.Second,
-		},
+		Stream: stream,
 	}
 }
 

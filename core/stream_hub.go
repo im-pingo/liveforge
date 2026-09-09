@@ -73,12 +73,19 @@ func (h *StreamHub) Limits() config.LimitsConfig {
 // GetOrCreate returns an existing stream or creates a new one.
 // Returns an error if max_streams limit is reached and the stream does not already exist.
 func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
+	stream, _, err := h.GetOrCreateWithCreated(key)
+	return stream, err
+}
+
+// GetOrCreateWithCreated reports whether this call installed a new instance.
+// Admission rollback must use that instance, never a subsequent lookup by key.
+func (h *StreamHub) GetOrCreateWithCreated(key string) (*Stream, bool, error) {
 	h.mu.Lock()
 	var replacing *Stream
 	if s, ok := h.streams[key]; ok {
 		if s.State() != StreamStateDestroying {
 			h.mu.Unlock()
-			return s, nil
+			return s, false, nil
 		}
 		// Stream is being destroyed; replace it with a fresh one.
 		delete(h.streams, key)
@@ -88,7 +95,7 @@ func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 
 	if max := h.limits.MaxStreams; max > 0 && len(h.streams) >= max {
 		h.mu.Unlock()
-		return nil, fmt.Errorf("max streams limit reached (%d)", max)
+		return nil, false, fmt.Errorf("max streams limit reached (%d)", max)
 	}
 
 	s := NewStream(key, h.config, h.limits, h.eventBus)
@@ -112,7 +119,7 @@ func (h *StreamHub) GetOrCreate(key string) (*Stream, error) {
 
 	h.eventBus.Emit(EventStreamCreate, &EventContext{StreamKey: key}) //nolint:errcheck
 
-	return s, nil
+	return s, true, nil
 }
 
 // Find returns a stream by key, or nil if not found.

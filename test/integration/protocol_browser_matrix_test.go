@@ -26,6 +26,9 @@ import (
 
 func TestSIPGB28181WHIPBrowserBridgeMatrix(t *testing.T) {
 	if testing.Short() {
+		if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+			t.Fatal("required browser matrix cannot run with -short")
+		}
 		t.Skip("skipping real browser protocol bridge matrix in short mode")
 	}
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(),
@@ -248,7 +251,7 @@ type matrixChromiumAvailability struct {
 }
 
 func (a *matrixChromiumAvailability) canSkip(err error) bool {
-	if a == nil || a.established || err == nil {
+	if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" || a == nil || a.established || err == nil {
 		return false
 	}
 	return strings.Contains(err.Error(), "websocket url timeout") ||
@@ -329,6 +332,9 @@ func waitForMatrixBrowserProbe(t *testing.T, browser context.Context, accept fun
 		cancel()
 		if err == nil {
 			if probe.H264Supported != nil && !*probe.H264Supported {
+				if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+					t.Fatal("required browser does not advertise H.264 WebRTC receive support")
+				}
 				t.Skip("headless Chrome does not advertise H.264 WebRTC receive support")
 			}
 			if probe.ConnectError != "" {
@@ -456,6 +462,7 @@ window.__probeMatrix = () => ({
 }
 
 func TestMatrixChromiumEnvironmentalSkipEndsAfterAvailabilityIsEstablished(t *testing.T) {
+	t.Setenv("LIVEFORGE_REQUIRE_BROWSER", "")
 	var availability matrixChromiumAvailability
 	startupFailure := errors.New("websocket url timeout")
 	if !availability.canSkip(startupFailure) {
@@ -464,6 +471,14 @@ func TestMatrixChromiumEnvironmentalSkipEndsAfterAvailabilityIsEstablished(t *te
 	availability.markEstablished()
 	if availability.canSkip(startupFailure) {
 		t.Fatal("Chromium startup failure was still skippable after a successful matrix launch")
+	}
+}
+
+func TestMatrixRequiredBrowserCannotSkipUnavailableRuntime(t *testing.T) {
+	t.Setenv("LIVEFORGE_REQUIRE_BROWSER", "1")
+	var availability matrixChromiumAvailability
+	if availability.canSkip(errors.New("executable file not found")) {
+		t.Fatal("required browser gate allows a missing browser to skip")
 	}
 }
 

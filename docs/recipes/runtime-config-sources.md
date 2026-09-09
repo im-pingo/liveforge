@@ -4,6 +4,49 @@ The checked-in sample configuration is for local development only: it disables T
 
 LiveForge reads the bootstrap YAML at startup. A single background worker then loads the selected source immediately, polls it periodically, and publishes immutable snapshots. A runtime configuration read is an atomic in-memory load: it never performs file/network I/O, waits for refresh, or takes the manager status lock. Source loads, Config Apply writes, and source close are serialized; Apply waits for its source write to complete before returning 202 with `written_and_refresh_scheduled`, then schedules background parse, module application, and publication.
 
+## Conditional Writes And History
+
+`GET /api/v1/server/config` and `/document` expose `document_revision`; the
+document response also returns its quoted value as `ETag`. This opaque revision
+tracks the exact desired document, including comments, unmapped fields, and a
+successfully written pending document. It is independent of the normalized
+`active_hash` and is not reused when a document changes back to older content.
+
+Send that quoted revision in `If-Match` when applying a document. A concurrent
+change returns HTTP 409 without writing; reload the desired document and
+reconcile the draft. Version checking, source write, and pending publication are
+serialized together. Legacy requests without the header remain supported but
+still reject a race between secret restoration and writing. This is a
+current-manager precondition, not a native compare-and-swap against independent
+external file, Consul, Redis, or HTTP writers.
+
+`GET /api/v1/server/config/history` returns newest-first revision metadata.
+`GET /api/v1/server/config/history/{revision}` returns a redacted document.
+The manager retains at most 32 documents and 16 MiB of original bytes in memory;
+history is lost on restart, and unknown/evicted revisions return 404. To restore
+one, `POST /api/v1/server/config/rollback` with JSON `{"revision":"..."}` and
+the current desired `If-Match`. A missing precondition returns 428. Rollback
+validates and writes the retained original document, including its secrets,
+through the same source writer; 202 still means written and refresh scheduled,
+not applied. Immutable changes may fail application and listener/module/TLS
+changes still require restart. History responses set `Cache-Control: no-store`.
+
+The Console retains dirty drafts in page memory across blur, polling, view
+changes, delayed Apply responses, and reauthentication. It prompts before
+discarding or leaving the page; drafts are not persisted to browser storage.
+Schema is loaded once per page, and desired documents are reloaded only when
+the status revision changes. The original draft baseline is sent with Apply;
+409 keeps the draft intact. Common controls update the YAML document while
+preserving source comments and unmapped fields; the full document editor,
+redacted comparison, history preview, and explicit rollback remain available.
+The common `server.name` control is read-only because the field is immutable.
+The comparison labels immutable, restart-required, and hot-reload changes from
+the schema. It shows supplied secret/URL replacements as redacted changes
+without displaying their values. Only the language preference is persisted in
+browser storage; drafts and credentials remain in page memory.
+Long source versions, hashes, and status values wrap within their fields on
+mobile and desktop; complete values remain visible rather than being truncated.
+
 ## Prerequisites
 
 - Keep the management listener on `127.0.0.1` while validating a source.
@@ -280,7 +323,7 @@ liveforge_config_changes_total{result="accepted|rejected|application_failed"}
 - Hot policy changes are prepared/applied before atomic publication. A module rejection prevents publication, and already prepared reloaders are rolled back when a later reloader fails.
 - Restart-required desired values remain visible in `pending_restart`; effective values retain the previously applied values until process restart.
 - Exact per-field classes are in `docs/config/config.schema.json` under `x-liveforge-reload`.
-- All `stream.simulcast` fields are restart-required and deferred; no runtime layer selection exists.
+- All `stream.simulcast` fields require restart. WHIP supports up to three configured RID layers; WHEP selects at session creation, and unused noncanonical video processing can pause locally. See [Simulcast configuration](whip-simulcast.md) for ranking, validation, and limits.
 
 The deprecated `auth.api.bearer_token` is copied to `api.auth.bearer_token` only when the current path is empty. If both are present, the current path wins. Migrate with a single move:
 

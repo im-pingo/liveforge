@@ -19,19 +19,21 @@ const apiPrefix = "/api/v1/gb28181"
 // registerAPI registers GB28181 HTTP API endpoints on the server.
 func registerAPI(s *core.Server, m *Module) {
 	// Devices
-	s.RegisterAPIHandler("GET "+apiPrefix+"/devices", http.HandlerFunc(m.apiListDevices))
-	s.RegisterAPIHandler("GET "+apiPrefix+"/devices/", http.HandlerFunc(m.apiDeviceDetail))
-	s.RegisterAPIHandler("DELETE "+apiPrefix+"/devices/", http.HandlerFunc(m.apiDeleteDevice))
+	s.RegisterAPIHandler("GET "+apiPrefix+"/devices", core.WithAPIPermission("gb28181:read", http.HandlerFunc(m.apiListDevices)))
+	s.RegisterAPIHandler("GET "+apiPrefix+"/devices/", core.WithAPIPermission("gb28181:read", http.HandlerFunc(m.apiDeviceDetail)))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/devices/", core.WithAPIPermission("gb28181:delete", http.HandlerFunc(m.apiDeleteDevice)))
 
 	// Channels
-	s.RegisterAPIHandler("GET "+apiPrefix+"/channels", http.HandlerFunc(m.apiListChannels))
-	s.RegisterAPIHandler("POST "+apiPrefix+"/channels/", http.HandlerFunc(m.apiChannelAction))
-	s.RegisterAPIHandler("DELETE "+apiPrefix+"/channels/", http.HandlerFunc(m.apiChannelAction))
+	s.RegisterAPIHandler("GET "+apiPrefix+"/channels", core.WithAPIPermission("gb28181:read", http.HandlerFunc(m.apiListChannels)))
+	s.RegisterAPIHandler("POST "+apiPrefix+"/channels/", core.WithAPIPermission("gb28181:control", http.HandlerFunc(m.apiChannelAction)))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/channels/", core.WithAPIPermission("gb28181:manage", http.HandlerFunc(m.apiChannelAction)))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/channels/{channel_id}/play", core.WithAPIPermission("gb28181:control", http.HandlerFunc(m.apiChannelAction)))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/channels/{channel_id}/playback", core.WithAPIPermission("gb28181:control", http.HandlerFunc(m.apiChannelAction)))
 
 	// Sessions
-	s.RegisterAPIHandler("GET "+apiPrefix+"/sessions", http.HandlerFunc(m.apiListSessions))
-	s.RegisterAPIHandler("DELETE "+apiPrefix+"/sessions/", http.HandlerFunc(m.apiDeleteSession))
-	s.RegisterAPIHandler("GET "+apiPrefix+"/test", http.HandlerFunc(m.apiSelfTest))
+	s.RegisterAPIHandler("GET "+apiPrefix+"/sessions", core.WithAPIPermission("gb28181:read", http.HandlerFunc(m.apiListSessions)))
+	s.RegisterAPIHandler("DELETE "+apiPrefix+"/sessions/", core.WithAPIPermission("gb28181:delete", http.HandlerFunc(m.apiDeleteSession)))
+	s.RegisterAPIHandler("GET "+apiPrefix+"/test", core.WithAPIPermission("gb28181:read", http.HandlerFunc(m.apiSelfTest)))
 }
 
 func (m *Module) apiSelfTest(w http.ResponseWriter, r *http.Request) {

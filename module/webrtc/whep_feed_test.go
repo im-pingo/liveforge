@@ -611,6 +611,12 @@ func TestWHEPFeedDoesNotCountUnrequestedMediaAsDropped(t *testing.T) {
 			if test.audio {
 				audioSender, audioCapture = newWHEPOverwriteSender(t, webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMA, ClockRate: 8000, Channels: 1}, 8)
 			}
+			var targetAudioCodec avframe.CodecType
+			if test.audio {
+				targetAudioCodec = avframe.CodecG711A
+			}
+			tm := core.NewTranscodeManager(stream, &audiocodec.Registry{}, 16)
+			core.SetTranscodeManagerForTest(stream, tm)
 
 			connected := make(chan struct{})
 			close(connected)
@@ -618,7 +624,7 @@ func TestWHEPFeedDoesNotCountUnrequestedMediaAsDropped(t *testing.T) {
 			feedDone := make(chan struct{})
 			go func() {
 				defer close(feedDone)
-				whepFeedLoop(stream, startup, videoSender, audioSender, done, connected, "realtime", avframe.CodecG711A, nil, status)
+				whepFeedLoop(stream, startup, videoSender, audioSender, done, connected, "realtime", targetAudioCodec, nil, status)
 			}()
 
 			stream.WriteFrame(avframe.NewAVFrame(
@@ -634,6 +640,9 @@ func TestWHEPFeedDoesNotCountUnrequestedMediaAsDropped(t *testing.T) {
 				_ = videoCapture.readSample(t)
 			} else {
 				_ = audioCapture.readSample(t)
+			}
+			if tasks := tm.TranscodeTasks(); len(tasks) != 0 {
+				t.Errorf("unrequested audio created transcode tasks: %+v", tasks)
 			}
 			close(done)
 			select {

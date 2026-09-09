@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -94,9 +95,19 @@ type StreamsResponse struct {
 }
 
 func (h *Handlers) handleStreams(w http.ResponseWriter, r *http.Request) {
+	page, err := readPagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	query := r.URL.Query().Get("q")
-	resp := buildStreamsResponse(h.server.StreamHub(), true, query)
-	writeJSON(w, http.StatusOK, resp)
+	streams := filteredStreams(h.server.StreamHub(), query)
+	selected := pageItems(streams, page)
+	resp := StreamsResponse{Streams: make([]StreamInfo, 0, len(selected))}
+	for _, stream := range selected {
+		resp.Streams = append(resp.Streams, buildStreamInfo(stream, true))
+	}
+	writePageJSON(w, resp, page)
 }
 
 func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
@@ -157,8 +168,18 @@ func buildStreamInfo(stream *core.Stream, includeStats bool) StreamInfo {
 }
 
 func buildStreamsResponse(hub *core.StreamHub, includeStats bool, filter string) StreamsResponse {
+	streams := filteredStreams(hub, filter)
+	resp := StreamsResponse{Streams: make([]StreamInfo, 0, len(streams))}
+	for _, stream := range streams {
+		resp.Streams = append(resp.Streams, buildStreamInfo(stream, includeStats))
+	}
+	return resp
+}
+
+func filteredStreams(hub *core.StreamHub, filter string) []*core.Stream {
 	keys := hub.Keys()
-	streams := make([]StreamInfo, 0, len(keys))
+	sort.Strings(keys)
+	streams := make([]*core.Stream, 0, len(keys))
 
 	for _, key := range keys {
 		if filter != "" && !strings.Contains(key, filter) {
@@ -171,10 +192,10 @@ func buildStreamsResponse(hub *core.StreamHub, includeStats bool, filter string)
 		if stream.State() == core.StreamStateDestroying {
 			continue
 		}
-		streams = append(streams, buildStreamInfo(stream, includeStats))
+		streams = append(streams, stream)
 	}
 
-	return StreamsResponse{Streams: streams}
+	return streams
 }
 
 // extractStreamKey extracts the stream key from path after the given prefix.
@@ -367,6 +388,7 @@ type ConfigRuntimeStatus struct {
 	Source                         string    `json:"source,omitempty"`
 	ActiveVersion                  string    `json:"active_version,omitempty"`
 	ActiveHash                     string    `json:"active_hash,omitempty"`
+	DocumentRevision               string    `json:"document_revision,omitempty"`
 	LastAttempt                    time.Time `json:"last_attempt,omitempty"`
 	LastSuccess                    time.Time `json:"last_success,omitempty"`
 	ConsecutiveFailures            uint64    `json:"consecutive_failures"`
@@ -387,11 +409,16 @@ func (h *Handlers) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := manager.Status()
+	var revision string
+	if snapshot := manager.Snapshot(); snapshot != nil {
+		revision = snapshot.DocumentRevision
+	}
 	writeJSON(w, http.StatusOK, ConfigRuntimeStatus{
 		Enabled:                        true,
 		Source:                         status.Source,
 		ActiveVersion:                  status.ActiveVersion.Value,
 		ActiveHash:                     status.ActiveVersion.Hash,
+		DocumentRevision:               revision,
 		LastAttempt:                    status.LastAttempt,
 		LastSuccess:                    status.LastSuccess,
 		ConsecutiveFailures:            status.ConsecutiveFailures,
@@ -418,23 +445,20 @@ func (h *Handlers) handleConfigRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scheduled"})
 }
 
-func (h *Handlers) handleAudit(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.audit.Entries())
-}
-
 type SecurityTokenStatus struct {
 	Name string `json:"name"`
 	Role string `json:"role"`
 }
 
 type SecurityStatus struct {
-	LegacyBearerConfigured bool                  `json:"legacy_bearer_configured"`
-	Tokens                 []SecurityTokenStatus `json:"tokens"`
-	ConsoleConfigured      bool                  `json:"console_configured"`
-	ConsoleRole            string                `json:"console_role,omitempty"`
-	AuditEnabled           bool                  `json:"audit_enabled"`
-	AuditEntries           int                   `json:"audit_entries"`
-	AuditEvents            uint64                `json:"audit_events_total"`
+	LegacyBearerConfigured bool                   `json:"legacy_bearer_configured"`
+	Tokens                 []SecurityTokenStatus  `json:"tokens"`
+	ConsoleConfigured      bool                   `json:"console_configured"`
+	ConsoleRole            string                 `json:"console_role,omitempty"`
+	AuditEnabled           bool                   `json:"audit_enabled"`
+	AuditEntries           int                    `json:"audit_entries"`
+	AuditEvents            uint64                 `json:"audit_events_total"`
+	AuditPersistence       AuditPersistenceStatus `json:"audit_persistence"`
 }
 
 func (h *Handlers) handleSecurityStatus(w http.ResponseWriter, r *http.Request) {
@@ -452,6 +476,7 @@ func (h *Handlers) handleSecurityStatus(w http.ResponseWriter, r *http.Request) 
 		AuditEnabled:           true,
 		AuditEntries:           len(entries),
 		AuditEvents:            h.audit.Total(),
+		AuditPersistence:       h.audit.PersistenceStatus(),
 	})
 }
 

@@ -28,6 +28,9 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 	if len(data) < 4 {
 		return nil, errors.New("SPS data too short")
 	}
+	if data[0]&0x80 != 0 || data[0]&0x1f != NALTypeSPS {
+		return nil, errors.New("invalid SPS NAL header")
+	}
 
 	// Remove emulation prevention bytes (0x00 0x00 0x03 → 0x00 0x00)
 	rbsp := removeEmulationPrevention(data)
@@ -49,12 +52,12 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 		profileIDC == 86 || profileIDC == 118 || profileIDC == 128 ||
 		profileIDC == 138 || profileIDC == 139 || profileIDC == 134 ||
 		profileIDC == 135 {
-		chromaFormatIDC = r.readUE()
+		chromaFormatIDC = r.readUEBounded(3, "chroma_format_idc")
 		if chromaFormatIDC == 3 {
 			_ = r.readBits(1) // separate_colour_plane_flag
 		}
-		_ = r.readUE() // bit_depth_luma_minus8
-		_ = r.readUE() // bit_depth_chroma_minus8
+		_ = r.readUE()    // bit_depth_luma_minus8
+		_ = r.readUE()    // bit_depth_chroma_minus8
 		_ = r.readBits(1) // qpprime_y_zero_transform_bypass_flag
 		scalingMatrixPresent := r.readBits(1)
 		if scalingMatrixPresent != 0 {
@@ -62,7 +65,7 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 			if chromaFormatIDC == 3 {
 				count = 12
 			}
-			for i := 0; i < count; i++ {
+			for i := 0; i < count && r.err == nil; i++ {
 				if r.readBits(1) != 0 { // scaling_list_present_flag
 					size := 16
 					if i >= 6 {
@@ -82,8 +85,8 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 		_ = r.readBits(1) // delta_pic_order_always_zero_flag
 		_ = r.readSE()    // offset_for_non_ref_pic
 		_ = r.readSE()    // offset_for_top_to_bottom_field
-		numRefFrames := r.readUE()
-		for i := 0; i < numRefFrames; i++ {
+		numRefFrames := r.readUEBounded(255, "num_ref_frames_in_pic_order_cnt_cycle")
+		for i := 0; i < numRefFrames && r.err == nil; i++ {
 			_ = r.readSE() // offset_for_ref_frame
 		}
 	}
@@ -91,8 +94,13 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 	_ = r.readUE()    // max_num_ref_frames
 	_ = r.readBits(1) // gaps_in_frame_num_value_allowed_flag
 
-	picWidthInMbs := r.readUE() + 1
-	picHeightInMapUnits := r.readUE() + 1
+	// H.264 Annex A, Table A-1: level 6.2 permits at most 139264
+	// macroblocks, with either dimension at most floor(sqrt(MaxFS * 8)).
+	// Use the largest defined level here rather than imposing a profile/level.
+	const maxFrameMbs = 139264
+	const maxDimensionMbs = 1055
+	picWidthInMbs := r.readUEBounded(maxDimensionMbs-1, "pic_width_in_mbs_minus1") + 1
+	picHeightInMapUnits := r.readUEBounded(maxDimensionMbs-1, "pic_height_in_map_units_minus1") + 1
 	frameMbsOnly := r.readBits(1)
 
 	if frameMbsOnly == 0 {
@@ -104,18 +112,22 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 	frameCropping := r.readBits(1)
 	cropLeft, cropRight, cropTop, cropBottom := 0, 0, 0, 0
 	if frameCropping != 0 {
-		cropLeft = r.readUE()
-		cropRight = r.readUE()
-		cropTop = r.readUE()
-		cropBottom = r.readUE()
+		cropLeft = r.readUEBounded(maxDimensionMbs*16, "frame_crop_left_offset")
+		cropRight = r.readUEBounded(maxDimensionMbs*16, "frame_crop_right_offset")
+		cropTop = r.readUEBounded(maxDimensionMbs*16, "frame_crop_top_offset")
+		cropBottom = r.readUEBounded(maxDimensionMbs*16, "frame_crop_bottom_offset")
 	}
 
 	if r.err != nil {
 		return nil, fmt.Errorf("SPS parse error: %w", r.err)
 	}
 
+	frameHeightInMbs := (2 - frameMbsOnly) * picHeightInMapUnits
+	if frameHeightInMbs > maxDimensionMbs || picWidthInMbs*frameHeightInMbs > maxFrameMbs {
+		return nil, errors.New("SPS coded dimensions exceed H.264 limits")
+	}
 	width := picWidthInMbs * 16
-	height := (2 - frameMbsOnly) * picHeightInMapUnits * 16
+	height := frameHeightInMbs * 16
 
 	// Apply cropping
 	cropUnitX, cropUnitY := 1, 2-frameMbsOnly
@@ -127,6 +139,9 @@ func ParseSPS(data []byte) (*SPSInfo, error) {
 	}
 	width -= (cropLeft + cropRight) * cropUnitX
 	height -= (cropTop + cropBottom) * cropUnitY
+	if width <= 0 || height <= 0 {
+		return nil, errors.New("SPS crop offsets remove the entire picture")
+	}
 
 	return &SPSInfo{
 		Width:   width,
@@ -252,7 +267,7 @@ func ExtractSPSPPSFromAVCRecord(data []byte) (sps, pps []byte, err error) {
 func skipScalingList(r *bitReader, size int) {
 	lastScale := 8
 	nextScale := 8
-	for j := 0; j < size; j++ {
+	for j := 0; j < size && r.err == nil; j++ {
 		if nextScale != 0 {
 			delta := r.readSE()
 			nextScale = (lastScale + delta + 256) % 256
@@ -329,8 +344,29 @@ func (r *bitReader) readUE() int {
 	if leadingZeros == 0 {
 		return 0
 	}
-	val := (1 << uint(leadingZeros)) - 1 + r.readBits(leadingZeros)
-	return val
+	suffix := r.readBits(leadingZeros)
+	if r.err != nil {
+		return 0
+	}
+	// readBits reads at most 31 bits here, so its successful result is non-negative.
+	val := (uint64(1) << uint(leadingZeros)) - 1 + uint64(suffix) // #nosec G115
+	if val > uint64(^uint(0)>>1) {
+		r.err = errors.New("bit reader: exp-golomb value overflows int")
+		return 0
+	}
+	return int(val)
+}
+
+func (r *bitReader) readUEBounded(max int, field string) int {
+	value := r.readUE()
+	if r.err != nil {
+		return 0
+	}
+	if value > max {
+		r.err = fmt.Errorf("%s exceeds maximum %d", field, max)
+		return 0
+	}
+	return value
 }
 
 // readSE reads a signed Exp-Golomb coded value.

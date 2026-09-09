@@ -125,6 +125,7 @@ func (o *Orchestrator) Run(ctx context.Context, cfg ClusterTestConfig) (*report.
 		Protocol: cfg.PushProtocol,
 		Target:   pushURL,
 		Duration: cfg.Duration + 10*time.Second, // push slightly longer than play
+		Realtime: true,
 	}
 
 	pushCtx, pushCancel := context.WithCancel(ctx)
@@ -331,14 +332,30 @@ func fetchStreams(client *http.Client, url string) ([]string, error) {
 		return nil, fmt.Errorf("streams API returned %d", resp.StatusCode)
 	}
 
-	// The API can return either an array of strings or an array of objects
-	// with a "key" field. Try both.
 	var raw json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode streams response: %w", err)
 	}
+	var response struct {
+		Code int `json:"code"`
+		Data *struct {
+			Streams []struct {
+				Key string `json:"key"`
+			} `json:"streams"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &response); err == nil && response.Data != nil {
+		if response.Code != 0 {
+			return nil, fmt.Errorf("streams API returned error code %d", response.Code)
+		}
+		keys := make([]string, 0, len(response.Data.Streams))
+		for _, stream := range response.Data.Streams {
+			keys = append(keys, stream.Key)
+		}
+		return keys, nil
+	}
 
-	// Try array of strings.
+	// Preserve compatibility with older bare-array test servers.
 	var keys []string
 	if err := json.Unmarshal(raw, &keys); err == nil {
 		return keys, nil

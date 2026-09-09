@@ -14,6 +14,9 @@ const (
 	h265NALTypeAP = 48
 	// h265NALTypeFU is the NAL unit type for Fragmentation Units (RFC 7798 Section 4.4.3).
 	h265NALTypeFU = 49
+	// Bound incomplete NAL retention while allowing large high-resolution frames.
+	h265MaxNALBytes    = 16 << 20
+	h265MaxFUFragments = 16384
 )
 
 // H265Packetizer splits H.265 NAL units into RTP packets.
@@ -103,10 +106,15 @@ func (p *H265Packetizer) Packetize(frame *avframe.AVFrame, mtu int) ([]*pionrtp.
 
 // H265Depacketizer reassembles RTP packets into H.265 NAL units.
 type H265Depacketizer struct {
-	buf []byte
-	vps []byte
-	sps []byte
-	pps []byte
+	buf           []byte
+	fuSequence    uint16
+	fuTimestamp   uint32
+	fuSSRC        uint32
+	fuPayloadType uint8
+	fuFragments   int
+	vps           []byte
+	sps           []byte
+	pps           []byte
 }
 
 // Depacketize processes a single RTP packet and returns an AVFrame when a
@@ -124,7 +132,12 @@ func (d *H265Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, e
 
 // DepacketizeFrames processes one RTP packet and returns codec configuration
 // before media when an aggregation packet contains both.
-func (d *H265Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AVFrame, error) {
+func (d *H265Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) (frames []*avframe.AVFrame, err error) {
+	defer func() {
+		if err != nil {
+			d.resetFU()
+		}
+	}()
 	if pkt == nil || len(pkt.Payload) < 2 {
 		return nil, fmt.Errorf("h265: payload too short")
 	}
@@ -134,45 +147,77 @@ func (d *H265Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AV
 	var nalus [][]byte
 	switch {
 	case nalType >= 0 && nalType <= 47:
+		d.resetFU()
 		nalus = [][]byte{append([]byte(nil), pkt.Payload...)}
 
 	case nalType == h265NALTypeAP:
-		var err error
+		d.resetFU()
 		nalus, err = parseH265AggregationPacket(pkt.Payload)
 		if err != nil {
 			return nil, err
 		}
 
 	case nalType == h265NALTypeFU:
-		if len(pkt.Payload) < 3 {
-			return nil, fmt.Errorf("h265: FU packet too short (need at least 3 bytes)")
+		if len(pkt.Payload) < 4 {
+			return nil, fmt.Errorf("h265: FU packet too short (need a nonempty fragment)")
 		}
 
 		fuHeader := pkt.Payload[2]
 		isStart := (fuHeader & 0x80) != 0
 		isEnd := (fuHeader & 0x40) != 0
 		origNALType := fuHeader & 0x3F
+		if isStart && isEnd || origNALType > 47 || pkt.Payload[0]&0x80 != 0 || pkt.Payload[1]&7 == 0 {
+			return nil, fmt.Errorf("h265: invalid FU header")
+		}
+		if pkt.Marker && !isEnd {
+			return nil, fmt.Errorf("h265: marked FU packet lacks end bit")
+		}
+		nalHdr0 := (pkt.Payload[0] & 0x81) | (origNALType << 1)
+		nalHdr1 := pkt.Payload[1]
+		fragment := pkt.Payload[3:]
 
 		if isStart {
 			// Reconstruct the 2-byte NAL header from PayloadHdr + original NAL type.
-			// First byte: (payloadHdr[0] & 0x81) | (origNALType << 1)
-			nalHdr0 := (pkt.Payload[0] & 0x81) | (origNALType << 1)
-			nalHdr1 := pkt.Payload[1]
-
-			d.buf = make([]byte, 2, 2+len(pkt.Payload)-3)
+			d.resetFU()
+			if len(fragment) > h265MaxNALBytes-2 {
+				return nil, fmt.Errorf("h265: fragmented NAL exceeds %d bytes", h265MaxNALBytes)
+			}
+			d.buf = make([]byte, 2, 2+len(fragment))
 			d.buf[0] = nalHdr0
 			d.buf[1] = nalHdr1
-			d.buf = append(d.buf, pkt.Payload[3:]...)
+			d.fuTimestamp = pkt.Timestamp
+			d.fuSSRC = pkt.SSRC
+			d.fuPayloadType = pkt.PayloadType
 		} else {
 			if d.buf == nil {
 				return nil, fmt.Errorf("h265: FU continuation without start")
 			}
-			d.buf = append(d.buf, pkt.Payload[3:]...)
+			if pkt.SequenceNumber != d.fuSequence+1 || pkt.Timestamp != d.fuTimestamp ||
+				pkt.SSRC != d.fuSSRC || pkt.PayloadType != d.fuPayloadType ||
+				nalHdr0 != d.buf[0] || nalHdr1 != d.buf[1] {
+				return nil, fmt.Errorf("h265: discontinuous FU sequence or NAL identity")
+			}
+			if d.fuFragments >= h265MaxFUFragments {
+				return nil, fmt.Errorf("h265: fragmented NAL exceeds %d fragments", h265MaxFUFragments)
+			}
+			if len(fragment) > h265MaxNALBytes-len(d.buf) {
+				return nil, fmt.Errorf("h265: fragmented NAL exceeds %d bytes", h265MaxNALBytes)
+			}
 		}
+		// Keep capacity as well as length within the retention ceiling.
+		if size := len(d.buf) + len(fragment); size > cap(d.buf) {
+			capacity := min(h265MaxNALBytes, max(size, cap(d.buf)*2))
+			buf := make([]byte, len(d.buf), capacity)
+			copy(buf, d.buf)
+			d.buf = buf
+		}
+		d.buf = append(d.buf, fragment...)
+		d.fuSequence = pkt.SequenceNumber
+		d.fuFragments++
 
 		if isEnd {
 			payload := d.buf
-			d.buf = nil
+			d.resetFU()
 			nalus = [][]byte{payload}
 		} else {
 			return nil, nil
@@ -183,6 +228,15 @@ func (d *H265Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AV
 	}
 
 	return d.normalizeNALUs(nalus), nil
+}
+
+func (d *H265Depacketizer) resetFU() {
+	d.buf = nil
+	d.fuSequence = 0
+	d.fuTimestamp = 0
+	d.fuSSRC = 0
+	d.fuPayloadType = 0
+	d.fuFragments = 0
 }
 
 func parseH265AggregationPacket(payload []byte) ([][]byte, error) {

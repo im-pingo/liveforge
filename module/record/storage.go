@@ -108,8 +108,9 @@ type sidecarMediaFile interface {
 const metadataSuffix = ".liveforge.json"
 
 type LocalStorage struct {
-	root string
-	fs   *localfs.Root
+	root      string
+	fs        *localfs.Root
+	listIndex recordingListIndex
 }
 
 func newStorageForConfig(cfg config.RecordConfig) (*LocalStorage, string, error) {
@@ -176,7 +177,10 @@ func NewLocalStorage(root string) (*LocalStorage, error) {
 
 func (s *LocalStorage) Root() string { return s.root }
 
-func (s *LocalStorage) Close() error { return s.fs.Close() }
+func (s *LocalStorage) Close() error {
+	s.listIndex.close()
+	return s.fs.Close()
+}
 
 func (s *LocalStorage) Create(ctx context.Context, id string, info RecordingInfo) (WriteObject, error) {
 	if err := ctx.Err(); err != nil {
@@ -195,6 +199,7 @@ func (s *LocalStorage) Create(ctx context.Context, id string, info RecordingInfo
 	if err != nil {
 		return nil, fmt.Errorf("create recording: %w", mapStorageError(err))
 	}
+	s.listIndex.invalidate()
 	info.ID = cleanID
 	info.State = RecordingActive
 	if info.StartedAt.IsZero() {
@@ -211,12 +216,23 @@ func (s *LocalStorage) Create(ctx context.Context, id string, info RecordingInfo
 }
 
 func (s *LocalStorage) List(ctx context.Context) ([]RecordingInfo, error) {
-	entries, err := s.fs.List(ctx, "")
+	items, err := s.listIndex.list(ctx, s.scanRecordings)
 	if err != nil {
 		return nil, fmt.Errorf("list recordings: %w", mapStorageError(err))
 	}
+	return items, nil
+}
+
+func (s *LocalStorage) scanRecordings(ctx context.Context) ([]RecordingInfo, error) {
+	entries, err := s.fs.List(ctx, "")
+	if err != nil {
+		return nil, err
+	}
 	items := make([]RecordingInfo, 0, len(entries))
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if strings.HasSuffix(entry.RelPath, metadataSuffix) || strings.HasSuffix(entry.RelPath, ".partial") {
 			continue
 		}
@@ -388,6 +404,7 @@ func (s *LocalStorage) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	defer s.listIndex.invalidate()
 	dirRel := filepath.ToSlash(filepath.Dir(filepath.FromSlash(cleanID)))
 	if dirRel == "." {
 		dirRel = ""
@@ -476,6 +493,7 @@ func (s *LocalStorage) readMetadata(id string) RecordingInfo {
 }
 
 func (s *LocalStorage) writeMetadata(id string, info RecordingInfo) error {
+	defer s.listIndex.invalidate()
 	data, err := json.Marshal(info)
 	if err != nil {
 		return err
@@ -580,6 +598,7 @@ func (o *localWriteObject) Complete(ctx context.Context, update RecordingInfo) (
 	if o.closed {
 		return RecordingInfo{}, ErrRecordingNotReady
 	}
+	defer o.storage.listIndex.invalidate()
 	if err := o.file.Sync(); err != nil {
 		return o.failAfterClose(update, err)
 	}
@@ -621,6 +640,7 @@ func (o *localWriteObject) Fail(ctx context.Context, cause error) (RecordingInfo
 	if err := ctx.Err(); err != nil {
 		return RecordingInfo{}, err
 	}
+	defer o.storage.listIndex.invalidate()
 	if !o.closed {
 		_ = o.file.Sync()
 		_ = o.file.Close()
@@ -679,6 +699,7 @@ func failedNameCandidate(finalBase string) func(int) string {
 }
 
 func (s *LocalStorage) recoverPartials(ctx context.Context) error {
+	defer s.listIndex.invalidate()
 	entries, err := s.fs.List(ctx, "")
 	if err != nil {
 		return fmt.Errorf("recover recording partials: %w", mapStorageError(err))

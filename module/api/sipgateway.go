@@ -26,12 +26,17 @@ func (h *Handlers) sipGatewayProvider() (sipgateway.SIPGatewayProvider, bool) {
 }
 
 func (h *Handlers) handleSIPGatewayCalls(w http.ResponseWriter, r *http.Request) {
+	page, err := readPagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	provider, ok := h.sipGatewayProvider()
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "SIP gateway unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, sipGatewayCallsResponse{Calls: provider.ListCalls(), Metrics: provider.Metrics()})
+	writePageJSON(w, sipGatewayCallsResponse{Calls: pageItems(provider.ListCalls(), page), Metrics: provider.Metrics()}, page)
 }
 
 func (h *Handlers) handleSIPGatewayDial(w http.ResponseWriter, r *http.Request) {

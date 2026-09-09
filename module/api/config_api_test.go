@@ -63,7 +63,7 @@ func TestConfigAndProtocolReadAccessUsesViewerRBAC(t *testing.T) {
 		})
 	}
 
-	for _, path := range []string{"/api/v1/server/config/refresh", "/api/v1/server/config/apply"} {
+	for _, path := range []string{"/api/v1/server/config/refresh", "/api/v1/server/config/apply", "/api/v1/server/config/rollback"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("server:\n  name: test\n"))
 		req.Header.Set("Authorization", "Bearer viewer-token")
 		w := httptest.NewRecorder()
@@ -73,7 +73,7 @@ func TestConfigAndProtocolReadAccessUsesViewerRBAC(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"/api/v1/server/config/refresh", "/api/v1/server/config/apply"} {
+	for _, path := range []string{"/api/v1/server/config/refresh", "/api/v1/server/config/apply", "/api/v1/server/config/rollback"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("server:\n  name: test\n"))
 		req.Header.Set("Authorization", "Bearer operator-token")
 		w := httptest.NewRecorder()
@@ -105,13 +105,13 @@ func TestHandleConfigApplyWritesFileAndPreservesRedactedSecretsAndUnmappedFields
 	}
 	manager, err := configruntime.NewManager(configruntime.Options{
 		Source:       source,
-		Initial:      cfg,
 		PollInterval: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
+	// Complete the initial source load before testing an uncontended editor write.
 	if startErr := manager.Start(context.Background()); startErr != nil {
 		t.Fatal(startErr)
 	}

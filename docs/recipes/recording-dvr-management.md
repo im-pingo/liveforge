@@ -1,5 +1,18 @@
 # Recording And DVR Management
 
+Recording lists reuse an immutable sorted snapshot for up to five seconds,
+measured from scan start. Creation, finalization, failure, metadata recovery,
+deletion (including failed partial cleanup), reload, and close invalidate it.
+Concurrent requests share one scan with cancelable waiters. External filesystem
+changes appear on the first list after expiry; detail, open, and deletion still
+validate the actual file directly. Up to 100,000 entries within a conservative
+32 MiB value/string budget are retained; larger lists are returned complete and
+are not cached. Active `.partial` media stays outside the completed-file list.
+
+`GET /api/v1/recordings?limit=50&offset=0&q=camera` filters before pagination.
+Limits are 1..500. Omitting pagination retains the original complete array;
+paginated responses add top-level `pagination` metadata without changing `data`.
+
 The checked-in sample configuration is for local development only: it disables TLS and authentication and uses the console credentials `admin/admin`. Never expose it publicly unchanged.
 
 ## Prerequisites

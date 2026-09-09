@@ -63,6 +63,10 @@ LiveForge 是一个模块化的直播流媒体服务器，支持实时音视频�
 
 > 编译时需要 `audiocodec` 构建标签、CGO 和 FFmpeg/libav 开发库。详见 [Wiki: 音频转码](../../wiki/Audio-Transcoding-zh)。
 
+FFmpeg 推送 H.264+AAC RTMP 流时，Console 的 HLS/DASH 无需转码即可保留 AAC 音频。服务端报告音频转码不可用时，Console WebRTC 只请求视频并持续显示提示；AAC/MP3 纯音频 WebRTC 预览会明确提示能力不足。使用带标签构建并启用 `audio_codec.enabled`，才能将 AAC 转为 Opus 播放 WebRTC 音频。外部 WHEP 客户端若请求不支持的音轨，仍返回 HTTP 415。详见 [RTMP 播放排查](docs/recipes/rtmp-to-hls.md)。
+
+长 GOP 超出持久缓存上限时，会从仍保留数据的环形缓冲恢复完整起播序列；关键帧已被覆盖时则等待新的关键帧。Console HLS 在取得 0.8 秒连续缓冲后起播，目标直播延迟为 1.5 秒，实际延迟仍取决于码流和网络。
+
 ### GB28181 视频监控
 
 完整支持 GB/T 28181 国标协议，接入 IP 摄像头和 NVR：
@@ -340,6 +344,14 @@ DVR 播放列表和分片 GET 只运行同步订阅鉴权钩子，不会触发�
 
 ## 配置
 
+控制台支持中英文切换、列表分页，并在后台刷新、切页和重新登录期间保留当前页面中的配置草稿。
+常用配置控件与完整 YAML 编辑器并存，提供脱敏差异、历史预览和回滚。Apply 使用 `If-Match`
+检测并发修改，冲突返回409且不会覆盖源文档。配置历史在当前进程内最多保留32份文档、16MiB，
+重启后清空。审计支持筛选、NDJSON 导出，并可在 Linux 和 macOS 上通过 `api.audit.path` 启用有界私有文件持久化。
+常用控件中的 `server.name` 为只读，差异视图标明不可变、需要重启和可热更新的修改。
+浏览器仅持久化语言偏好，不保存草稿或凭据。操作与验证见
+[运行时配置](docs/recipes/runtime-config-sources.md)和[有界回归门禁](docs/recipes/review-regression-gate.md)。
+
 LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读取配置。完整参考见 [`configs/liveforge.yaml`](configs/liveforge.yaml)。Config 页面会展示完整脱敏的 effective/desired 文档和 schema，支持校验，并在 file、HTTP/HTTPS、Consul、Redis 数据源可写时执行 Apply；只读数据源返回 409。详见 [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md)。
 
 仓库内示例配置仅用于本地开发：它关闭 TLS 和鉴权，并使用 `admin/admin`。禁止不做修改就暴露到公网。
@@ -365,7 +377,7 @@ LiveForge 使用 bootstrap YAML 配置，并可通过 runtime source 持续读�
 | `metrics` | Prometheus 监控端点（默认 `:9090`） |
 | `limits` | 全局连接数、流数、订阅者数限制 |
 | `tls` | TLS 证书和密钥配置 |
-| `stream` | GOP 缓存及单 GOP 帧数/时长/字节上限、环形缓冲区、空闲超时、慢消费者、反馈；Simulcast 字段仍延期 |
+| `stream` | GOP 缓存及单 GOP 帧数/时长/字节上限、环形缓冲区、空闲超时、慢消费者、反馈；WHIP RID Simulcast 与 WHEP 建立会话时选层 |
 | `runtime` | 后台配置刷新源：文件、HTTP/HTTPS、Consul 或 Redis |
 
 受信任的 bootstrap/runtime source 加载支持 `${API_TOKEN}`、`${AUTH_JWT_SECRET}` 等环境变量展开。面向 viewer 的 Config Validate 绝不会展开服务端进程环境变量，而是按字面值处理引用，只接受一个 YAML/JSON 文档，并拒绝 root 或 nested typed field 中的未知键。Config Apply 和受信任的 runtime source 加载仍允许 typed runtime struct 未映射的 source 字段。
@@ -526,7 +538,7 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 - [x] SIP 网关
 - [x] 权限感知的七视图管理控制台
 - [x] 录制/DVR、集群、安全和审计管理 API（含 Storage 在线预览）
-- [ ] Simulcast 分层选择
+- [x] WHIP 最多三层 RID 隔离、WHEP 建立会话时选层及非默认空闲层的视频本地处理暂停；见[配置与能力边界](docs/recipes/whip-simulcast.md)
 
 ## 许可证
 

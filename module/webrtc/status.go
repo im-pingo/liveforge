@@ -20,6 +20,7 @@ type sessionStatusResponse struct {
 	SessionID string         `json:"session_id"`
 	StreamKey string         `json:"stream_key"`
 	Role      string         `json:"role"`
+	Layer     string         `json:"layer,omitempty"`
 	Feed      WHEPFeedStatus `json:"feed"`
 }
 

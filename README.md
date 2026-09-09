@@ -61,6 +61,10 @@ Transcoding is **shared per target codec** — multiple subscribers requesting t
 
 > Requires the `audiocodec` build tag, CGO, and FFmpeg/libav development libraries at build time. See [Wiki: Audio Transcoding](../../wiki/Audio-Transcoding) for build instructions and details.
 
+For an FFmpeg H.264+AAC RTMP stream, Console HLS/DASH playback retains AAC audio without transcoding. When the server reports audio transcoding unavailable, Console WebRTC requests video only and displays a persistent notice; AAC/MP3 audio-only WebRTC previews show a capability error. Enable the tagged build and `audio_codec.enabled` for AAC-to-Opus WebRTC audio. External WHEP clients that request unsupported audio still receive HTTP 415. See [RTMP playback troubleshooting](docs/recipes/rtmp-to-hls.md).
+
+Long GOPs that exceed the persistent cache limit recover their complete startup sequence from the retained ring buffer. If the keyframe has already left that buffer, playback waits for a fresh keyframe. Console HLS waits for 0.8 seconds of contiguous buffered media before starting and targets 1.5 seconds of live latency; actual latency depends on the stream and network.
+
 ### GB28181 Video Surveillance
 
 Full GB/T 28181 national standard support for connecting IP cameras and NVRs:
@@ -340,6 +344,19 @@ Recording preview uses the authenticated management API session. DVR preview use
 
 ## Configuration
 
+The Console supports English and Chinese, paginated lists, and configuration
+drafts that survive background refreshes and reauthentication. Config offers
+common controls alongside the full YAML editor, a redacted comparison, and
+history/rollback. Apply detects concurrent edits with `If-Match` and returns409
+without overwriting a changed document. History is limited to32 documents/16MiB
+in the current process and resets on restart. Audit supports filters and NDJSON
+export and optional bounded private disk persistence on Linux and macOS via
+`api.audit.path`. Common `server.name` is read-only; the diff labels immutable,
+restart-required, and hot-reload changes. Drafts and credentials are not stored
+in browser storage; only the language preference persists.
+See [runtime config operations](docs/recipes/runtime-config-sources.md)
+and the [bounded regression gate](docs/recipes/review-regression-gate.md).
+
 LiveForge uses a bootstrap YAML configuration plus an optional runtime source. See [`configs/liveforge.yaml`](configs/liveforge.yaml) for the full reference. The Config page displays the complete redacted effective/desired document and schema, validates candidates, and applies them through file, HTTP/HTTPS, Consul, or Redis when the source is writable; read-only sources return 409. See [`docs/recipes/runtime-config-sources.md`](docs/recipes/runtime-config-sources.md).
 
 The checked-in sample is for local development only: it disables TLS and authentication and uses `admin/admin`. Never expose it publicly unchanged.
@@ -365,7 +382,7 @@ Key sections:
 | `metrics` | Prometheus metrics endpoint (default `:9090`) |
 | `limits` | Global connection, stream, and subscriber limits |
 | `tls` | TLS certificate and key for HTTPS/secure protocols |
-| `stream` | GOP cache and per-GOP frame/duration/byte bounds, ring buffer, idle timeout, slow consumer, feedback; Simulcast fields are deferred |
+| `stream` | GOP cache and per-GOP frame/duration/byte bounds, ring buffer, idle timeout, slow consumer, feedback; WHIP RID Simulcast and WHEP session-time layer selection |
 | `runtime` | Background configuration refresh source: file, HTTP/HTTPS, Consul, or Redis |
 
 Trusted bootstrap/runtime source loading supports environment variable expansion such as `${API_TOKEN}` and `${AUTH_JWT_SECRET}`. Viewer-facing Config Validate never expands the server process environment: it treats references literally, accepts exactly one YAML/JSON document, and rejects unknown root or nested typed fields. Config Apply and trusted runtime source loading remain permissive for source fields not mapped by the typed runtime struct.
@@ -526,7 +543,7 @@ Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [
 - [x] SIP gateway
 - [x] Permission-aware seven-view management console
 - [x] Recording/DVR, cluster, security, and audit management APIs, including Storage online preview
-- [ ] Simulcast layer selection
+- [x] WHIP Simulcast with up to three isolated RID layers, WHEP session-time selection, and local pause of unused noncanonical video processing; see [configuration and boundaries](docs/recipes/whip-simulcast.md)
 
 ## License
 

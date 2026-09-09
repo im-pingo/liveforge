@@ -540,8 +540,12 @@ type ConsoleConfig struct {
 	Role     string `yaml:"role"`
 }
 
-// AuditConfig controls the bounded in-memory management audit trail. Audit
-// entries are also emitted as structured logs.
+// AuditConfig controls the management audit trail. A non-empty Path enables
+// bounded persistence; all audit storage settings require restart.
 type AuditConfig struct {
-	MaxEntries int `yaml:"max_entries"`
+	MaxEntries int    `yaml:"max_entries"`
+	Path       string `yaml:"path"`
+	MaxBytes   int64  `yaml:"max_bytes"`
 }
+
+const DefaultAuditMaxBytes int64 = 8 << 20

@@ -59,7 +59,9 @@ bucket on every request. A malformed non-empty chain falls back to the direct
 peer.
 
 The API, WebRTC signaling, and metrics HTTP listeners use fixed transport
-guards: `ReadHeaderTimeout` is 5 seconds and `IdleTimeout` is 2 minutes. This
+guards: `ReadHeaderTimeout` is 5 seconds and `IdleTimeout` is 2 minutes. API and
+WebRTC signaling also use a 10-second total request `ReadTimeout`; incomplete
+SDP bodies return408 and release their connection slot. This
 limits slow header parsing and idle keep-alive connections without replacing
 the existing handler or media write deadlines; no server-level `WriteTimeout`
 is added by this policy.
@@ -85,6 +87,14 @@ curl --cacert /etc/liveforge/tls/fullchain.pem -sS -o /dev/null -w '%{http_code}
 Health and authorized reads return 200. Viewer deletion returns 403. Missing or invalid credentials return 401; rate limiting can return 429. Do not use `curl -k` as a production workaround.
 
 Management authentication accepts `Authorization: Bearer <token>` or a valid `lf_session` cookie issued by console login. The cookie is HttpOnly, SameSite=Strict, scoped to `/`, and carries `Secure` whenever the API listener is configured for TLS. A plain HTTP development listener leaves `Secure` unset so local login remains usable; never use that profile on a public endpoint. Health is always public. When neither a management bearer nor named token is configured, compatibility mode grants anonymous admin access; use that only on an isolated development listener.
+
+Registered management endpoints are protected even when a custom signaling
+path is outside `/api/`; custom mutations require admin `server:mutate`.
+`POST /console/logout` expires the browser cookie and redirects303 to login
+(GET returns405). This is browser logout, not revocation of previously copied
+signed tokens. A401 pauses Console polling, keeps the draft in page memory, and
+allows sign-in in a new tab followed by Resume; no bearer token or draft is
+persisted in browser storage.
 
 WebRTC publish/subscribe authorization is controlled by `auth.publish` and `auth.subscribe`, not management RBAC. Browser camera/microphone access also requires HTTPS or a browser-recognized secure context; ICE/TURN and UDP reachability are separate requirements.
 

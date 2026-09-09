@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -83,8 +84,46 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stream not found or not publishing", http.StatusNotFound)
 		return
 	}
+	parentStream := stream
+	var lifecycleStartup core.StreamStartupSnapshot
+	var selectedFamily *core.SimulcastFamily
+	var releaseSubscriber func()
+	var selectedLayer string
+	if family := stream.Simulcast(); family != nil {
+		selectedFamily = family
+		var err error
+		stream, selectedLayer, releaseSubscriber, err = family.Acquire(r.URL.Query().Get("layer"), "webrtc")
+		if err != nil {
+			releaseConn()
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, core.ErrUnknownSimulcastLayer) {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+	} else if layer := r.URL.Query().Get("layer"); layer != "" && layer != "auto" {
+		releaseConn()
+		http.Error(w, "stream has no simulcast layers", http.StatusBadRequest)
+		return
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred && releaseSubscriber != nil {
+			releaseSubscriber()
+		}
+	}()
 
 	pending := stream.StartupSnapshot()
+	if selectedFamily != nil {
+		var active bool
+		pending, lifecycleStartup, active = captureWHEPSimulcastStartup(parentStream, stream, selectedFamily)
+		if !active {
+			releaseConn()
+			http.Error(w, "simulcast publisher generation ended", http.StatusNotFound)
+			return
+		}
+	}
 	if pending.Generation == 0 || !stream.IsPublisherGeneration(pending.Generation) {
 		releaseConn()
 		http.Error(w, "stream startup unavailable", http.StatusNotFound)
@@ -101,13 +140,19 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info := &startup.MediaInfo
+	if selectedFamily == nil {
+		lifecycleStartup = startup
+	}
 
 	// Track subscriber limit.
-	releaseSubscriber, err := stream.AddSubscriberForGeneration("webrtc", startup.Generation)
-	if err != nil {
-		releaseConn()
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
+	if releaseSubscriber == nil {
+		var err error
+		releaseSubscriber, err = stream.AddSubscriberForGeneration("webrtc", startup.Generation)
+		if err != nil {
+			releaseConn()
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	// Set GCC initial bitrate to the stream's actual bitrate (with 20% headroom)
@@ -129,16 +174,18 @@ func (m *Module) handleWHEP(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := uuid.New().String()
 	sess := newSession(sessionID, pc, streamKey, "whep", m)
+	sess.layer = selectedLayer
 	lifecycleCtx := *subscribeCtx
 	lifecycleCtx.SubscriberID = sessionID
-	lifecycleCtx.StreamInstanceID = startup.StreamInstanceID
-	lifecycleCtx.PublisherGeneration = startup.Generation
-	lifecycleCtx.PublisherID = startup.PublisherID
+	lifecycleCtx.StreamInstanceID = lifecycleStartup.StreamInstanceID
+	lifecycleCtx.PublisherGeneration = lifecycleStartup.Generation
+	lifecycleCtx.PublisherID = lifecycleStartup.PublisherID
 	sess.setCleanup(func() {
 		releaseSubscriber()
 		sess.stopLifecycle(m.server.GetEventBus(), core.EventSubscribeStop, &lifecycleCtx)
 		releaseConn()
 	})
+	leaseTransferred = true
 	if !m.storeSession(sess) {
 		sess.Close()
 		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
@@ -379,6 +426,13 @@ func normalizeWHEPMode(value string) string {
 	default:
 		return "live"
 	}
+}
+
+func captureWHEPSimulcastStartup(parent, selected *core.Stream, family *core.SimulcastFamily) (core.StreamStartupSnapshot, core.StreamStartupSnapshot, bool) {
+	startup := selected.StartupSnapshot()
+	lifecycle := parent.StartupSnapshot()
+	active := family.Active() && startup.Generation == family.Generation() && lifecycle.Generation == family.Generation()
+	return startup, lifecycle, active
 }
 
 func waitWHEPStartup(ctx context.Context, stream *core.Stream, pending core.StreamStartupSnapshot) (core.StreamStartupSnapshot, bool) {

@@ -136,6 +136,7 @@ func TestH265DepacketizeRoundTrip(t *testing.T) {
 	d := &H265Depacketizer{}
 	var result *avframe.AVFrame
 	for i, pkt := range pkts {
+		pkt.SequenceNumber = uint16(i)
 		f, err := d.Depacketize(pkt)
 		if err != nil {
 			t.Fatalf("Depacketize failed on packet %d: %v", i, err)

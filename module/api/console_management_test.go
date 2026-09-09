@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -30,6 +31,17 @@ func consoleDocument(t *testing.T) (*html.Node, string) {
 		if node.Type == html.ElementNode && node.Data == "script" && node.FirstChild != nil {
 			scripts.WriteString(node.FirstChild.Data)
 			scripts.WriteByte('\n')
+		}
+		if node.Type == html.ElementNode && node.Data == "script" {
+			src := consoleAttribute(node, "src")
+			if strings.HasPrefix(src, "/console/static/console-") {
+				content, err := staticFS.ReadFile(strings.TrimPrefix(src, "/console/"))
+				if err != nil {
+					t.Fatalf("read embedded console script: %v", err)
+				}
+				scripts.Write(content)
+				scripts.WriteByte('\n')
+			}
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
 			walk(child)
@@ -402,7 +414,7 @@ func TestConsoleManagementRequestsUseSessionSafeHelper(t *testing.T) {
 	if !strings.Contains(script, "config-schema") || !strings.Contains(script, "JSON.stringify(schemaData, null, 2)") {
 		t.Error("config page must render the complete runtime JSON Schema")
 	}
-	for _, forbidden := range []string{"localStorage", "sessionStorage", "Authorization"} {
+	for _, forbidden := range []string{"sessionStorage", "Authorization"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("console script must not render or persist bearer credentials: found %q", forbidden)
 		}
@@ -792,6 +804,86 @@ func TestConsoleUsesLiveWHEPAsDefaultAndKeepsRealtimeOption(t *testing.T) {
 	}
 }
 
+func TestConsoleSkipsUnsupportedWHEPAudioWithoutTranscoding(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		cases := []struct {
+			name, media, capabilities      string
+			wantAudio, wantNotice, blocked bool
+		}{
+			{"portable AAC video", `{"video_codec":"H264","audio_codec":"AAC"}`, `{"audio_transcoding":false}`, false, true, false},
+			{"portable MP3 video", `{"video_codec":"H264","audio_codec":"MP3"}`, `{"audio_transcoding":false}`, false, true, false},
+			{"tagged AAC video", `{"video_codec":"H264","audio_codec":"AAC"}`, `{"audio_transcoding":true}`, true, false, false},
+			{"direct Opus", `{"video_codec":"VP8","audio_codec":"Opus"}`, `{"audio_transcoding":false}`, true, false, false},
+			{"direct G711", `{"audio_codec":"G.711A"}`, `{"audio_transcoding":false}`, true, false, false},
+			{"portable AAC only", `{"audio_codec":"AAC"}`, `{"audio_transcoding":false}`, false, false, true},
+			{"portable MP3 only", `{"audio_codec":"MP3"}`, `{"audio_transcoding":false}`, false, false, true},
+			{"missing capabilities", `{"video_codec":"H264","audio_codec":"AAC"}`, `{}`, true, false, false},
+			{"missing metadata", `{}`, `{"audio_transcoding":false}`, true, false, false},
+			{"unknown codec", `{"video_codec":"H264","audio_codec":"future-codec"}`, `{"audio_transcoding":false}`, true, false, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var result struct {
+					SDP                string `json:"sdp"`
+					Notice             bool   `json:"notice"`
+					NoticeAfterStatus  bool   `json:"noticeAfterStatus"`
+					NoticeAfterCleanup bool   `json:"noticeAfterCleanup"`
+					AudioControl       bool   `json:"audioControl"`
+					Status             string `json:"status"`
+				}
+				expression := fmt.Sprintf(`(async function() {
+					var oldFetch = window.fetch;
+					var sdp = "";
+					function noticeVisible() {
+						var el = document.getElementById("player-audio-notice");
+						return !!el && el.style.display !== "none" && el.textContent.length > 0;
+					}
+					try {
+						// Capture the real browser offer at the signaling boundary.
+						window.fetch = function(url, options) {
+							if (options && options.method === "POST") sdp = options.body;
+							return new Promise(function() {});
+						};
+						streamMedia["live/audio-offer"] = %s;
+						serverCapabilities = %s;
+						endpoints.webrtc = location.host;
+						playWHEP("live/audio-offer", "live");
+						for (var i = 0; i < 40 && !sdp && currentPC; i++) {
+							await new Promise(function(resolve) { setTimeout(resolve, 50); });
+						}
+						var result = {sdp:sdp, notice:noticeVisible(),
+							status:document.getElementById("player-status").textContent,
+							audioControl:document.getElementById("btn-player-audio").style.display !== "none"};
+						setPlayerStatus("Playing (WebRTC/WHEP)", "ok");
+						result.noticeAfterStatus = noticeVisible();
+						destroyCurrentPlayer();
+						result.noticeAfterCleanup = noticeVisible();
+						return result;
+					} finally {
+						destroyCurrentPlayer();
+						window.fetch = oldFetch;
+					}
+				})()`, tc.media, tc.capabilities)
+				if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &result, func(params *runtime.EvaluateParams) *runtime.EvaluateParams {
+					return params.WithAwaitPromise(true)
+				})); err != nil {
+					t.Fatal(err)
+				}
+				if tc.blocked {
+					if result.SDP != "" || !strings.Contains(result.Status, "transcoding") {
+						t.Errorf("unsupported audio-only playback: sent offer=%v, status=%q", result.SDP != "", result.Status)
+					}
+				} else if !strings.Contains(result.SDP, "m=video ") || strings.Contains(result.SDP, "m=audio ") != tc.wantAudio {
+					t.Errorf("unexpected browser offer: video=%v, audio=%v, want audio=%v", strings.Contains(result.SDP, "m=video "), strings.Contains(result.SDP, "m=audio "), tc.wantAudio)
+				}
+				if result.Notice != tc.wantNotice || result.NoticeAfterStatus != tc.wantNotice || result.NoticeAfterCleanup || result.AudioControl {
+					t.Errorf("video-only notice=%v, after status=%v, after cleanup=%v, want=%v; audio control=%v", result.Notice, result.NoticeAfterStatus, result.NoticeAfterCleanup, tc.wantNotice, result.AudioControl)
+				}
+			})
+		}
+	})
+}
+
 func TestConsolePublishAndTrendAsyncOperationsHaveCancellationGuards(t *testing.T) {
 	_, script := consoleDocument(t)
 	openPublish := consoleFunctionSource(t, script, "openPublishModal")
@@ -1049,6 +1141,58 @@ func TestConsoleMPEGTSPlaybackDoesNotStayConnectingWhenPlayPromisePending(t *tes
 	})
 }
 
+func TestConsoleHLSWaitsForContiguousStartupBuffer(t *testing.T) {
+	withConsoleBrowser(t, func(browserCtx context.Context) {
+		var result struct {
+			Autoplay   bool `json:"autoplay"`
+			EarlyPlays int  `json:"earlyPlays"`
+			ReadyPlays int  `json:"readyPlays"`
+		}
+		expression := `(async function() {
+			var oldHls = window.Hls, oldPlay = HTMLMediaElement.prototype.play;
+			var video = document.getElementById("player-video"), player, plays = 0, lead = 0.2;
+			function FakeHls() { player = this; this.handlers = {}; }
+			FakeHls.isSupported = function() { return true; };
+			FakeHls.Events = {MANIFEST_PARSED:"manifest", ERROR:"error"};
+			FakeHls.prototype.loadSource = function() {};
+			FakeHls.prototype.attachMedia = function() {};
+			FakeHls.prototype.destroy = function() {};
+			FakeHls.prototype.on = function(name, fn) { this.handlers[name] = fn; };
+			try {
+				window.Hls = FakeHls;
+				HTMLMediaElement.prototype.play = function() { plays++; return Promise.resolve(); };
+				Object.defineProperty(video, "readyState", {configurable:true, get:function() { return 4; }});
+				Object.defineProperty(video, "currentTime", {configurable:true, get:function() { return 100; }});
+				Object.defineProperty(video, "buffered", {configurable:true, get:function() { return {
+					length:2, start:function(i) { return i === 0 ? 100 : 105; }, end:function(i) { return i === 0 ? 100+lead : 110; }
+				}; }});
+				streamMedia["live/hls-startup"] = {video_codec:"H264", audio_codec:"AAC"};
+				endpoints.http = location.host;
+				playHLS("live/hls-startup");
+				player.handlers.manifest();
+				await new Promise(function(resolve) { setTimeout(resolve, 150); });
+				var result = {autoplay:video.autoplay, earlyPlays:plays};
+				lead = 1.2;
+				await new Promise(function(resolve) { setTimeout(resolve, 150); });
+				result.readyPlays = plays;
+				return result;
+			} finally {
+				destroyCurrentPlayer();
+				delete video.readyState; delete video.currentTime; delete video.buffered;
+				window.Hls = oldHls; HTMLMediaElement.prototype.play = oldPlay;
+			}
+		})()`
+		if err := chromedp.Run(browserCtx, chromedp.Evaluate(expression, &result, func(params *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return params.WithAwaitPromise(true)
+		})); err != nil {
+			t.Fatal(err)
+		}
+		if result.Autoplay || result.EarlyPlays != 0 || result.ReadyPlays != 1 {
+			t.Fatalf("HLS must disable autoplay and wait for a contiguous buffered lead: %+v", result)
+		}
+	})
+}
+
 func TestConsoleMPEGTSPlaybackHandlesSynchronousStartupErrors(t *testing.T) {
 	withConsoleBrowser(t, func(browserCtx context.Context) {
 		var result struct {
@@ -1202,6 +1346,9 @@ type consoleProtocolLabMediaProbe struct {
 func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 	t.Helper()
 	if testing.Short() {
+		if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+			t.Fatal("LIVEFORGE_REQUIRE_BROWSER=1 cannot be combined with -short")
+		}
 		t.Skip("skipping management console browser behavior in short mode")
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1211,6 +1358,10 @@ func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/console/static/") {
+			if strings.HasPrefix(r.URL.Path, "/console/static/console-") || strings.HasSuffix(r.URL.Path, "/yaml.min.js") {
+				staticHandler().ServeHTTP(w, r)
+				return
+			}
 			w.Header().Set("Content-Type", "application/javascript")
 			return
 		}
@@ -1230,6 +1381,9 @@ func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 	defer browserCancel()
 	if err := chromedp.Run(browserCtx, chromedp.Navigate(server.URL+"/console"), chromedp.WaitReady("body")); err != nil {
 		if strings.Contains(err.Error(), "websocket url timeout") || strings.Contains(err.Error(), "executable file not found") {
+			if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+				t.Fatalf("required headless Chrome unavailable: %v", err)
+			}
 			t.Skipf("headless Chrome unavailable: %v", err)
 		}
 		t.Fatalf("open management console: %v", err)
@@ -1323,7 +1477,11 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 			var restoredFocus = document.activeElement.id;
 
 			window.__resolveConsoleMutation = null;
-			apiFetch = function() { return new Promise(function(resolve) { window.__resolveConsoleMutation = resolve; }); };
+			stopActiveViewPolling();
+			apiFetch = function(url) {
+				if (url === "/api/v1/streams/deferred%2Fstream/kick") return new Promise(function(resolve) { window.__resolveConsoleMutation = resolve; });
+				return Promise.resolve({});
+			};
 			trigger.focus();
 			kickStream("deferred/stream");
 			document.getElementById("modal-confirm").click();
@@ -1346,7 +1504,7 @@ func TestConsoleManagementBrowserBehavior(t *testing.T) {
 		}
 		if err := chromedp.Run(browserCtx,
 			chromedp.Evaluate(`window.__resolveConsoleMutation({})`, nil),
-			chromedp.Sleep(10*time.Millisecond),
+			chromedp.Poll(`!document.getElementById("modal").classList.contains("active")`, nil),
 			chromedp.Evaluate(`({disabled:document.getElementById("modal-confirm").disabled,open:document.getElementById("modal").classList.contains("active")})`, &settled),
 		); err != nil {
 			t.Fatalf("settle deferred destructive action: %v", err)

@@ -72,6 +72,12 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 		Type: webrtc.SDPTypeOffer,
 		SDP:  string(offerBytes),
 	}
+	simulcastPlan, err := parseWHIPSimulcastOffer(offer.SDP, m.server.Config().Stream.Simulcast)
+	if err != nil {
+		releaseConn()
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	pc, _, _, err := m.newPeerConnection(webrtc.Configuration{
 		ICEServers: m.iceServersFromConfig(),
@@ -100,6 +106,10 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	pub.info.Store(&avframe.MediaInfo{})
 
 	sess := newSession(sessionID, pc, streamKey, "whip", m)
+	var simulcast *whipSimulcastIngest
+	if simulcastPlan != nil {
+		simulcast = newWHIPSimulcastIngest(stream, pub, sess, simulcastPlan, publishCtx)
+	}
 
 	var (
 		videoDetected       bool
@@ -111,6 +121,11 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	)
 	mediaClock := newWHIPMediaClock()
 	sess.setCleanup(func() {
+		if simulcast != nil {
+			simulcast.close()
+			releaseConn()
+			return
+		}
 		pubMu.Lock()
 		wasPublisher := publisherSet
 		instanceID := publisherInstanceID
@@ -162,6 +177,10 @@ func (m *Module) handleWHIP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		if simulcast != nil {
+			simulcast.onTrack(track)
+			return
+		}
 		codec := track.Codec()
 		avCodec := mimeToCodecType(codec.MimeType)
 		if avCodec == 0 {
@@ -288,6 +307,17 @@ func requestWHIPKeyframes(pc *webrtc.PeerConnection, mediaSSRC uint32, done <-ch
 //   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
 //   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
 func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, pub *WHIPPublisher, _ <-chan struct{}, codec avframe.CodecType, mediaClock *whipMediaClock) {
+	readTrackLoopWithOptions(track, dp, stream, pub, codec, mediaClock, nil)
+}
+
+type whipTrackReadOptions struct {
+	processing func() (bool, uint64)
+	write      func(*avframe.AVFrame, uint64) bool
+	active     func() bool
+	resume     func()
+}
+
+func readTrackLoopWithOptions(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, pub *WHIPPublisher, codec avframe.CodecType, mediaClock *whipMediaClock, options *whipTrackReadOptions) {
 	var (
 		accPayload    []byte
 		accFrame      avframe.FrameType
@@ -308,7 +338,21 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 	if mediaClock == nil {
 		mediaClock = newWHIPMediaClock()
 	}
+	var processingEpoch uint64
+	waitKeyframe, haveHeader := false, false
 	writeFrame := func(frame *avframe.AVFrame) bool {
+		if options != nil {
+			if codec.IsVideo() && waitKeyframe {
+				if frame.FrameType == avframe.FrameTypeSequenceHeader {
+					haveHeader = true
+				} else if frame.FrameType == avframe.FrameTypeKeyframe && haveHeader {
+					waitKeyframe = false
+				} else {
+					return options.active()
+				}
+			}
+			return options.write(frame, processingEpoch) || options.active()
+		}
 		if stream.WriteFrameForPublisher(pub, frame) {
 			return true
 		}
@@ -326,6 +370,27 @@ func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *co
 			return
 		}
 		packetArrival := time.Now()
+		if options != nil {
+			if !options.active() {
+				return
+			}
+			if options.processing != nil {
+				active, epoch := options.processing()
+				if !active {
+					continue
+				}
+				if processingEpoch != epoch {
+					processingEpoch = epoch
+					dp, _ = pkgrtp.NewDepacketizer(codec)
+					accPayload, accSeqPayload, accFrame = nil, nil, 0
+					waitKeyframe = true
+					haveHeader = codec != avframe.CodecH264 && codec != avframe.CodecH265
+					if options.resume != nil {
+						options.resume()
+					}
+				}
+			}
+		}
 
 		// Parse raw bytes into pion/rtp/v2 Packet (our depacketizers' expected type).
 		var pkt pionrtp.Packet

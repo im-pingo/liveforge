@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/im-pingo/liveforge/pkg/avframe"
+	pioncodecs "github.com/pion/rtp/codecs"
 	pionrtp "github.com/pion/rtp/v2"
 )
 
@@ -73,33 +74,67 @@ func (p *VP8Packetizer) Packetize(frame *avframe.AVFrame, mtu int) ([]*pionrtp.P
 
 // VP8Depacketizer reassembles RTP packets into VP8 frames.
 type VP8Depacketizer struct {
-	buf []byte
+	buf         []byte
+	sequence    uint16
+	timestamp   uint32
+	ssrc        uint32
+	payloadType uint8
+	fragments   int
 }
+
+const (
+	vp8MaxFrameBytes     = 16 << 20
+	vp8MaxFrameFragments = 16384
+)
 
 // Depacketize processes one RTP packet. It accumulates fragments and returns
 // a completed AVFrame when the marker bit is set. Returns (nil, nil) for
 // intermediate fragments.
-func (d *VP8Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, error) {
-	payload := pkt.Payload
-	if len(payload) < 2 {
-		return nil, fmt.Errorf("VP8 RTP payload too short")
+func (d *VP8Depacketizer) Depacketize(pkt *pionrtp.Packet) (frame *avframe.AVFrame, err error) {
+	defer func() {
+		if err != nil {
+			d.reset()
+		}
+	}()
+	if pkt == nil {
+		return nil, fmt.Errorf("VP8 RTP packet is nil")
 	}
-
-	descriptor := payload[0]
-	sBit := descriptor & 0x10
-
-	if sBit != 0 {
-		// Start of a new frame.
-		d.buf = make([]byte, 0, len(payload)*4)
-		d.buf = append(d.buf, payload[1:]...)
+	var descriptor pioncodecs.VP8Packet
+	payload, err := descriptor.Unmarshal(pkt.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("VP8 descriptor: %w", err)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("VP8 RTP payload is empty")
+	}
+	if descriptor.S == 1 && descriptor.PID == 0 {
+		d.reset()
+		d.timestamp, d.ssrc, d.payloadType = pkt.Timestamp, pkt.SSRC, pkt.PayloadType
 	} else {
-		// Continuation fragment.
-		d.buf = append(d.buf, payload[1:]...)
+		if d.buf == nil {
+			return nil, fmt.Errorf("VP8 continuation without frame start")
+		}
+		if pkt.SequenceNumber != d.sequence+1 || pkt.Timestamp != d.timestamp || pkt.SSRC != d.ssrc || pkt.PayloadType != d.payloadType {
+			return nil, fmt.Errorf("VP8 discontinuous frame")
+		}
 	}
+	if d.fragments >= vp8MaxFrameFragments || len(payload) > vp8MaxFrameBytes-len(d.buf) {
+		return nil, fmt.Errorf("VP8 frame exceeds %d bytes or %d fragments", vp8MaxFrameBytes, vp8MaxFrameFragments)
+	}
+	// Bound capacity as well as length; returned frame storage is never reused.
+	if size := len(d.buf) + len(payload); size > cap(d.buf) {
+		capacity := min(vp8MaxFrameBytes, max(size, cap(d.buf)*2))
+		buffer := make([]byte, len(d.buf), capacity)
+		copy(buffer, d.buf)
+		d.buf = buffer
+	}
+	d.buf = append(d.buf, payload...)
+	d.sequence = pkt.SequenceNumber
+	d.fragments++
 
 	if pkt.Marker {
 		data := d.buf
-		d.buf = nil
+		d.reset()
 		// VP8 keyframe detection: bit 0 of the first byte is the inverse keyframe flag.
 		// See RFC 6386 §9.1: keyframe when (data[0] & 0x01) == 0.
 		ft := avframe.FrameTypeInterframe
@@ -116,4 +151,9 @@ func (d *VP8Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, er
 	}
 
 	return nil, nil
+}
+
+func (d *VP8Depacketizer) reset() {
+	d.buf = nil
+	d.fragments = 0
 }

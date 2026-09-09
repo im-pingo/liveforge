@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,9 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 		// timeout) are environment problems, not product bugs.
 		if strings.Contains(err.Error(), "websocket url timeout") ||
 			strings.Contains(err.Error(), "executable file not found") {
+			if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+				t.Fatalf("required Chrome unavailable: %v", err)
+			}
 			t.Skipf("headless Chrome unavailable in this environment: %v", err)
 		}
 		t.Fatalf("Failed to navigate to player: %v", err)
@@ -331,6 +335,9 @@ func runBrowserJitterDiagnostic(t *testing.T, allocCtx context.Context, withAudi
 
 func TestWHEPH264BrowserDecode(t *testing.T) {
 	if testing.Short() {
+		if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+			t.Fatal("required browser regression cannot run with -short")
+		}
 		t.Skip("skipping browser H.264 regression in short mode")
 	}
 
@@ -382,6 +389,9 @@ func TestWHEPH264BrowserDecode(t *testing.T) {
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "websocket url timeout") || strings.Contains(err.Error(), "executable file not found") {
+			if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+				t.Fatalf("required Chrome unavailable: %v", err)
+			}
 			t.Skipf("headless Chrome unavailable in this environment: %v", err)
 		}
 		t.Fatalf("navigate to H.264 player: %v", err)
@@ -427,6 +437,9 @@ func TestWHEPH264BrowserDecode(t *testing.T) {
 		}
 		if probe.ConnectErr != "" {
 			if probe.H264 != nil && !*probe.H264 {
+				if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
+					t.Fatal("required browser does not advertise H.264 WebRTC receive support")
+				}
 				t.Skip("headless Chrome does not advertise H.264 WebRTC receive support")
 			}
 			t.Fatalf("H.264 browser connection failed: %s (ICE=%s stage=%s)", probe.ConnectErr, probe.ICE, probe.Stage)

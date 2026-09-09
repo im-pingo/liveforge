@@ -1,10 +1,37 @@
 # 技术风险、性能瓶颈与问题记录
 
-> 记录日期：2026-09-04
+> 记录日期：2026-09-09
 >
 > 本文是源码审查和当前复现结果的工作记录。`已确认` 表示已经从源码、测试或稳定复现得到证据；`待复现` 表示代码路径明确但还需要真实控制台/协议输入确认；`功能边界` 表示当前没有实现或受构建条件限制，不能当作已支持能力。
 
 ## 当前最高优先级回归
+
+### 2026-09-09 FFmpeg RTMP 播放回归
+
+- **用户长 GOP 追加复现**：实际命令为 30 fps、libx264 `veryfast`、`zerolatency`、未设置 `-g`，ffprobe 确认 High Profile、无 B 帧；实际 GOP 8.33 秒。High Profile 本身尚未证实为此次解码故障根因，独立浏览器可以解码该输入。300 帧混合 GOP 缓存只覆盖约 3.9 秒，原 snapshot 会把截断前缀直接接到 LiveCursor，丢掉中间参考帧。现从仍保留关键帧的环缓冲恢复完整起播链；关键帧已被覆盖则明确等待下一关键帧，不桥接缺失数据。临时 replay 最多引用一个 ring 的帧，持久缓存上限不变。
+- **HLS 起播**：原 video 的 autoplay 绕过 0.15 秒 readiness 门槛，且使用最后一段 buffer 的末尾误把跨洞数据算为可播放缓冲。hls.js 路径改为关闭 autoplay，等待当前播放点 0.8 秒连续缓冲，并将目标直播延迟设为 1.5 秒。新增浏览器回归在原实现得到 `Autoplay=true, EarlyPlays=1`，修复后只在连续缓冲就绪时播放一次。
+- **长 GOP 修复验证**：便携构建、tagged 构建、重点 snapshot/GOP race、核心完整 race、Console 缓冲回归、lint、文档检查及完整 tagged race/coverage 套件通过。并发 ingress fixture 现在明确断言关键帧已被覆盖时不重放断裂前缀，并在新关键帧后恢复完整 snapshot。独立 `18091` 实例通过 RTMP 复制同一条用户码流，默认 WebRTC 打开预览约一秒内取得 640x360、`readyState=4` 与 `currentTime=0.363`，随后持续推进；HLS 先暂停等待缓冲，随后正常播放，重复起播后继续推进且浏览器无 warning/error。该实例保留用于验收；原 `8090` 的活跃 publisher 未被重启或踢出，切换时机待用户选择。显式 WebRTC-Realtime 仍会等待下一关键帧，当前输入的最坏等待接近 8.33 秒。
+
+- **首轮复现范围**：当时用户使用的 `127.0.0.1:8090` 实例为便携构建，报告 `audio_transcoding=false`。持续 FFmpeg H.264+AAC 推流时，Console WebRTC 返回 `WHEP 415: source audio codec is not supported by the offer`。首轮 HLS/DASH 仅验证了两秒 GOP 的合成输入，原命令后来才从当前 FFmpeg 进程确认，长 GOP 的后续问题与修复见上文。
+- **根因与修复**：Console 无条件请求音轨与 WHEP 严格的请求轨校验冲突。已知 AAC/MP3 且服务端明确无转码能力时，混合流只请求视频并持续提示“仅视频”；纯音频显示能力错误。能力信息或 codec 未知时保留协商。未请求音轨的 feed 不再创建目标为 Unknown 的无效转码任务；外部请求不兼容音轨仍返回 415。
+- **行为回归**：浏览器测试直接截取 Chrome 生成的 SDP，覆盖便携 AAC/MP3、带转码能力的 AAC、直接 Opus/G.711、纯音频、未知 codec/能力与提示清理；feed 测试验证仅视频 offer 无转码任务并继续发送 RTP。两处新增断言都在对应修复前观察到失败。
+- **最终验证**：便携与 tagged 构建、上述便携 focused tests、Console/WebRTC tagged race、启用 `LIVEFORGE_REQUIRE_BROWSER=1` 并通过 `LF_BINARY` 提供当前构建的完整 tagged race/coverage 套件、lint 和 agent-doc 检查通过。实际 8090 实例更新为 tagged 构建后，持续 FFmpeg H.264+AAC 的 WebRTC 解码 640x360，视频帧数从 661 增至 1003，音频包数从 1051 增至 1685；HLS 时钟从 24.03 秒推进到 50.16 秒，DASH 从 25.68 秒推进到 66.14 秒，均为 `readyState=4`。测试 publisher 已停止，服务继续运行。该结果是本机有界播放验证，不代表所有输入格式或部署环境。
+- **文档影响检查**：同步 manifest、完整 AI 导航、中英文 README 与 RTMP 播放 recipe；没有改变 REST、配置、端口或顶层发现入口，因此 OpenAPI、配置 schema 和 `llms.txt` 无需新增变更。
+
+### 2026-09-07 增量复查
+
+| 项目 | 修复与验证状态 |
+| --- | --- |
+| Cluster 入站接纳 | GB 超限不再解引用空流；首次 RTP push 可创建目的流，响应成功前绑定 socket 并接纳 publisher/subscriber。失败清理仅删除本次创建且仍无新 owner 的空 StreamHub 实例；资源与 generation lifecycle 回归已通过 race。 |
+| 自定义管理权限 | 按实际 mux handler 决定鉴权、RBAC 与 mutation audit，未知自定义写入默认 `server:mutate`；GB 明确声明细分权限。嵌套 read/operator namespace 不能降权，注册路径不能继承内置健康探针公开豁免；含限流拒绝审计的 tagged/untagged race 回归通过。 |
+| 非可信媒体输入 | H.264 SPS 的 POC cycle、编码宏块与裁剪检查有界；H.265 FU 和 VP8 frame 均限制 16 MiB/16384 片并验证连续性，错误后可重新开始；VP8 使用 Pion 扩展描述符解析并要求新帧起点，普通 WHIP 和 Simulcast 共用。focused/race 与四个有界 fuzz target 通过。 |
+| 慢 SDP 请求 | API/WebRTC 增加 10 秒请求读取上限，408 后释放连接配额；真实 TCP 超时与配额恢复回归通过。 |
+| 配置并发与草稿 | 精确文档 revision/ETag、If-Match 409、32 份/16 MiB 进程内历史和校验后回滚；dirty draft 在轮询、切页、延迟响应与重新登录间保留。重复 Apply/history/race 和必需浏览器测试通过。 |
+| 管理效率与易用性 | 列表可选分页；录制索引最多缓存 5 秒/100000 条/32 MiB 并按 lifecycle 失效；控制台分模块、中英文、YAML 保留注释的常用控件及脱敏差异。桌面/移动端双语截图无横向溢出，常用 server.name 只读。 |
+| 审计持久化 | Linux/macOS 可选私有 NDJSON，单写者、轮转、有界恢复与显式健康状态；同步 append，rotation/Close 才 fsync。审计 race 回归通过，不承诺每事件落盘或无限历史。 |
+| 测试终态与时序 | 集群循环源按实时节奏发送，避免正确性测试意外压满 relay ring。HTTP muxer 先通知 overwrite 再取消 pump，外部终止注入不能抢先暴露 EOF；保留 fMP4 丢弃残留片段与正常结束刷新断言，500 轮相关 race 通过。Simulcast 实际 RTP 接收和成功发送计数之间使用有界等待，保留逐层媒体内容与两帧计数断言，20 次便携和 5 次 tagged race 通过。 |
+
+三层 Simulcast、普通 VP8 WHIP、配置和 Console 的重点回归已通过。完整便携套件通过 54 个包、2810 项测试及子测试；tagged race/coverage 基线通过 54 个包、2937 项测试及子测试，均零失败、零跳过，语句覆盖率 78.0%。最后的 Simulcast 测试同步调整没有修改生产源码，调整后已通过上述重复测试及完整便携复验。默认门禁的三场景 60 秒浏览器 soak、构建、lint、vet 和文档检查均通过；当前实例的桌面/移动端双语页面复验无页面横向溢出或浏览器错误。详细过程见 [修复与验证记录](superpowers/plans/2026-09-07-review-closure.md)；这些有界回归不替代下面记录的目标环境容量测试。
 
 ### WEBRTC-001：控制台 WHEP 播放报 `No advancing media received`
 
@@ -107,10 +134,10 @@
 
 | ID | 当前边界 | 处理方式 |
 | --- | --- | --- |
-| FUNC-001 | WebRTC simulcast layer selection 和 automatic layer pausing 未实现 | `stream.simulcast.*` 明确标记 deferred/unsupported，不得宣传为已支持 |
+| FUNC-001 | 已关闭（明确实现边界） | WHIP 最多三层 RID 独立 buffer/header/GOP，WHEP 建立会话时按 RID/low/high/auto 选层；其他协议使用最高配置排序的默认层。父子层共用订阅配额，热更新策略同步，旧代 setup/媒体不能进入替代 publisher。空闲非默认层仅暂停本地视频处理，持续读 RTP；不承诺上游编码暂停、网络带宽节约或自适应切层。真实 H.264/VP8 三层、WHEP、fMP4 解码、Opus 复制、暂停恢复与清理测试通过；见 Simulcast recipe。 |
 | FUNC-002 | 已关闭（明确构建边界） | `!audiocodec` 的非 AAC 音频在 Record/DVR 中过滤并保留可播放视频-only；tagged FFmpeg 路径转 AAC；no-CGO、tagged tests 和 Console 文档均标明前提 |
 | FUNC-003 | 已关闭（fail closed） | SIP/GB28181 仅接受各自已实现的 H.264/G.711/PCMA/PCMU 组合；不支持 codec 在 INVITE/实验室 admission 前返回 mismatch，保留有界原因；focused provider tests 覆盖 |
-| FUNC-004 | 已关闭（可重复门禁） | 统一 Chromium matrix 支持 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s`，逐秒校验解码尺寸、时钟、RTP/RTCP、ICE 和非 stalled；缺 Chromium/H.264 是显式环境 skip，Pion matrix 仍强制 |
+| FUNC-004 | 已关闭（可重复门禁） | 统一 Chromium matrix 支持 `LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s`，逐秒校验解码尺寸、时钟、RTP/RTCP、ICE 和非 stalled；CI 的 `LIVEFORGE_REQUIRE_BROWSER=1` 让缺 Chromium/H.264 或 short-mode 跳过变成失败，普通本地运行保留明确环境 skip |
 | FUNC-005 | 已关闭（能力矩阵） | tagged `TestRegistryAllCodecsRegistered`/`TestCanTranscodeMatrix`、SIP/GB28181/WHEP codec tests 和 `server/info.capabilities.audio_transcoding` 明确 supported、FFmpeg-required、video-only fallback、codec mismatch；未实现组合不会伪装成成功播放 |
 
 ## `audioCache` 删除后的设计记录
@@ -122,7 +149,7 @@
 ## 后续验证顺序
 
 1. 对已关闭的性能路径按目标平台执行有界并发/背压 smoke；这些结果用于回归，不外推为部署容量。
-2. 持续检查 Simulcast 层选择这一明确功能边界，并在实现前保持 schema、Console 和 release 文档中的 deferred 标识。
+2. 保留 Simulcast 的固定会话选层与本地暂停边界；通过 `tools/check-review-regressions.sh` 复验三层隔离、generation、输入边界与必需浏览器推进。
 3. 对已关闭的 PERF-001/PERF-007 继续按目标平台执行多 publisher、多 subscriber 和 Prometheus scrape 长时容量测试；微基准和短时矩阵是回归门禁，不能替代部署容量验证。
 
 ## 当前验证记录
