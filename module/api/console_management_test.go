@@ -1371,6 +1371,7 @@ func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 	defer server.Close()
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(os.Getenv("CHROME_BIN")),
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),

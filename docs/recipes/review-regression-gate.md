@@ -10,6 +10,19 @@ instance. It does not contact a production deployment or delete live streams.
 - Available loopback ports; do not run two cluster test binaries concurrently
   because some legacy fixtures reserve the same ports.
 
+Set `CHROME_BIN` to the H.264-capable browser executable when multiple browsers
+are installed. CI uses `/usr/bin/google-chrome` and prints its version before
+testing; chromedp's automatic Linux search prefers the runner's Chromium
+snapshot, which does not advertise H.264. All Console and tagged media browser
+tests use this selection. An unset value preserves automatic discovery; an
+invalid explicit path never falls back and fails in required-browser mode.
+For example, on macOS:
+
+```sh
+CHROME_BIN='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+  tools/check-review-regressions.sh
+```
+
 Run `tools/check-review-regressions.sh`. The gate includes repeated concurrent
 ingress, generation replacement, lifecycle backpressure, cluster admission and
 cleanup, config conflict/history, registered-handler RBAC, body-timeout,

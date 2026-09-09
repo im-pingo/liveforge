@@ -321,6 +321,15 @@ CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermo
 
 The first command skips FFmpeg-tagged transcoding integration tests. The tagged commands are the complete verification path and require Go 1.26 plus FFmpeg development libraries.
 
+Browser tests honor `CHROME_BIN` as an executable path or command name. CI sets
+`CHROME_BIN=/usr/bin/google-chrome` and reports its version: chromedp's Linux
+auto-discovery prefers Chromium, whose runner snapshot lacks H.264 WebRTC
+support. Leave the variable unset for local auto-discovery or select a known
+H.264-capable browser explicitly. An invalid explicit path never falls back
+and fails in required-browser mode. `LIVEFORGE_REQUIRE_BROWSER=1` requires browser startup
+and H.264 capability; this test-environment selection changes no server,
+Console runtime, API, or configuration behavior.
+
 The `lf-test` tool emits human-readable or JSON reports and uses exit code 0 for success, 1 for assertion failure, and 2 for an execution error.
 
 GitHub Actions maintenance uses Node 24-compatible action majors: checkout and setup-go v7, upload-artifact v7, Docker setup-buildx v4, login v4, build-push v7, golangci-lint v9, and action-gh-release v3. CI passes `--new-from-rev` against the fetched base revision (or `HEAD^` on main pushes), so the new-code lint gate does not depend on the GitHub PR diff API's 20,000-line limit. The Linux lint job remains authoritative for platform-specific `x/sys/unix` types that a Darwin lint run cannot reproduce. Do not reintroduce deprecated Node 20 action versions or the `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` workaround.

@@ -113,6 +113,7 @@
   ],
   "verification": {
     "docs": "tools/check-agent-docs_test.sh",
+    "browser_executable": "Console and tagged media browser tests honor CHROME_BIN; CI explicitly selects /usr/bin/google-chrome and logs its version to avoid chromedp selecting the runner's Chromium without H.264. Unset preserves automatic discovery; an invalid explicit path never falls back. LIVEFORGE_REQUIRE_BROWSER=1 makes missing browser/H.264 support fail.",
     "build": "CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge",
 	"tests": "CGO_ENABLED=1 go test -tags audiocodec -race -coverprofile=coverage.out -covermode=atomic ./...",
 	"protocol_browser_matrix": "CGO_ENABLED=1 go test -tags audiocodec ./test/integration -run '^TestSIPGB28181WHIPBrowserBridgeMatrix$' -count=1; set LIVEFORGE_PROTOCOL_MATRIX_SOAK=60s for extended per-second advancement checks",

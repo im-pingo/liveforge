@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,7 @@ func TestConsolePublishFlow(t *testing.T) {
 	// --- set up Chrome ---
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.ExecPath(os.Getenv("CHROME_BIN")),
 			chromedp.Flag("headless", true),
 			chromedp.Flag("disable-gpu", true),
 			chromedp.Flag("no-sandbox", true),
@@ -282,6 +284,7 @@ func TestConsoleWHEPWaitsForDecodedFrameBeforeReportingPlaying(t *testing.T) {
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.ExecPath(os.Getenv("CHROME_BIN")),
 			chromedp.Flag("headless", true),
 			chromedp.Flag("disable-gpu", true),
 			chromedp.Flag("no-sandbox", true),

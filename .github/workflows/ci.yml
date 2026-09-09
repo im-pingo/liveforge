@@ -56,6 +56,9 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # chromedp otherwise prefers the runner's Chromium without H.264.
+      CHROME_BIN: /usr/bin/google-chrome
     steps:
       - uses: actions/checkout@v7
         with:
@@ -73,6 +76,11 @@ jobs:
 
       - name: Build
         run: CGO_ENABLED=1 go build -tags audiocodec ./cmd/liveforge
+
+      - name: Verify browser executable
+        run: |
+          printf 'Browser executable: %s\n' "$CHROME_BIN"
+          "$CHROME_BIN" --version
 
       - name: Test
         env:

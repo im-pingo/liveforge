@@ -30,6 +30,7 @@ func TestWHEPBrowserJitterDiagnostic(t *testing.T) {
 	// Set up Chrome allocator.
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.ExecPath(os.Getenv("CHROME_BIN")),
 			chromedp.Flag("headless", true),
 			chromedp.Flag("disable-gpu", true),
 			chromedp.Flag("no-sandbox", true),
@@ -343,6 +344,7 @@ func TestWHEPH264BrowserDecode(t *testing.T) {
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.ExecPath(os.Getenv("CHROME_BIN")),
 			chromedp.Flag("headless", true),
 			chromedp.Flag("disable-gpu", true),
 			chromedp.Flag("no-sandbox", true),
