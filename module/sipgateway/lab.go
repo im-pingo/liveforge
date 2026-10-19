@@ -85,13 +85,7 @@ func (m *labManager) start(ctx context.Context, request LabSessionRequest) (LabS
 	m.mu.Unlock()
 
 	if err := session.start(ctx); err != nil {
-		session.fail(err)
-		m.mu.Lock()
-		if m.identities[identity] == id {
-			delete(m.identities, identity)
-		}
-		m.pruneTerminalsLocked()
-		m.mu.Unlock()
+		m.failSession(session, err)
 		return session.snapshot(), err
 	}
 	if call := session.callSession(); call != nil {
@@ -124,6 +118,10 @@ func (m *labManager) watchCall(session *sipLabSession, call *CallSession) {
 	if snapshot.LastError != "" {
 		err = errors.New(snapshot.LastError)
 	}
+	m.failSession(session, err)
+}
+
+func (m *labManager) failSession(session *sipLabSession, err error) {
 	session.fail(err)
 	m.mu.Lock()
 	if m.identities[session.identity] == session.id {
@@ -211,6 +209,10 @@ func validateLabRequest(request LabSessionRequest) error {
 	if !validLabIdentity(request.DeviceID) || !validLabStreamKey(request.StreamKey) {
 		return ErrLabInvalidRequest
 	}
+	if request.SourceStreamKey != "" && (request.Mode != LabModePublish ||
+		!validLabStreamKey(request.SourceStreamKey) || request.SourceStreamKey == request.StreamKey) {
+		return ErrLabInvalidRequest
+	}
 	switch strings.ToUpper(strings.TrimSpace(request.Codec)) {
 	case "PCMA", "PCMU":
 	default:
@@ -269,6 +271,7 @@ type sipLabSession struct {
 	rtcpConn      *net.UDPConn
 	videoRTPConn  *net.UDPConn
 	videoRTCPConn *net.UDPConn
+	source        *sipLabSource
 
 	rtpPacketsSent  atomic.Uint64
 	rtpPacketsRecv  atomic.Uint64
@@ -352,6 +355,18 @@ func (s *sipLabSession) protocolContext(caller context.Context) (context.Context
 }
 
 func (s *sipLabSession) startPublish(requestContext context.Context) error {
+	if s.request.SourceStreamKey != "" {
+		source, err := s.admitPublishSource(requestContext)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.source = source
+		s.mu.Unlock()
+		var cancel context.CancelFunc
+		requestContext, cancel = bindSIPGeneration(requestContext, source.snapshot)
+		defer cancel()
+	}
 	rtpConn, rtcpConn, err := s.gateway.listenLabUDPPair()
 	if err != nil {
 		return err
@@ -414,6 +429,15 @@ func (s *sipLabSession) startPublish(requestContext context.Context) error {
 	s.mu.Lock()
 	s.call = call
 	s.mu.Unlock()
+	if s.source != nil {
+		if err := s.source.active(); err != nil {
+			return err
+		}
+		s.setState(LabSessionStateActive)
+		s.mediaWG.Add(1)
+		go s.publishSourceLoop(audio.Port, video.Port)
+		return nil
+	}
 	s.setState(LabSessionStateActive)
 	s.mediaWG.Add(2)
 	go s.publishAudioLoop(audio.Port, codec)
@@ -756,6 +780,7 @@ func (s *sipLabSession) cleanup() {
 		peerCancel, peerDone, ua := s.peerCancel, s.peerDone, s.ua
 		rtpConn, rtcpConn := s.rtpConn, s.rtcpConn
 		videoRTPConn, videoRTCPConn := s.videoRTPConn, s.videoRTCPConn
+		source := s.source
 		s.mu.RUnlock()
 		if rtpConn != nil {
 			_ = rtpConn.Close()
@@ -793,6 +818,9 @@ func (s *sipLabSession) cleanup() {
 			closeErr = errors.Join(closeErr, sipclose.CloseUserAgent(ua, sipConns))
 		}
 		s.mediaWG.Wait()
+		if source != nil {
+			source.close()
+		}
 		if closeErr != nil {
 			s.mu.Lock()
 			s.closeErr = closeErr
@@ -850,19 +878,20 @@ func (s *sipLabSession) snapshot() LabSessionSnapshot {
 	callID := s.callID
 	mode := s.request.Mode
 	result := LabSessionSnapshot{
-		ID:          s.id,
-		Identity:    s.identity,
-		DeviceID:    s.request.DeviceID,
-		StreamKey:   s.request.StreamKey,
-		Mode:        s.request.Mode,
-		State:       s.state,
-		Direction:   s.direction,
-		Codec:       strings.ToUpper(strings.TrimSpace(s.request.Codec)),
-		LastError:   redactedTerminalError(s.closeErr),
-		StartedAt:   s.startedAt,
-		UpdatedAt:   s.updatedAt,
-		LastMediaAt: s.lastMedia,
-		StoppedAt:   s.stoppedAt,
+		ID:              s.id,
+		Identity:        s.identity,
+		DeviceID:        s.request.DeviceID,
+		StreamKey:       s.request.StreamKey,
+		SourceStreamKey: s.request.SourceStreamKey,
+		Mode:            s.request.Mode,
+		State:           s.state,
+		Direction:       s.direction,
+		Codec:           strings.ToUpper(strings.TrimSpace(s.request.Codec)),
+		LastError:       redactedTerminalError(s.closeErr),
+		StartedAt:       s.startedAt,
+		UpdatedAt:       s.updatedAt,
+		LastMediaAt:     s.lastMedia,
+		StoppedAt:       s.stoppedAt,
 	}
 	s.mu.RUnlock()
 	result.RTPPacketsSent = s.rtpPacketsSent.Load()

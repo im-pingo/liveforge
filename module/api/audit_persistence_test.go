@@ -198,6 +198,10 @@ func TestAuditPersistenceRejectsUnsafeAndUnboundedFiles(t *testing.T) {
 			if err := os.WriteFile(path, nil, 0644); err != nil { // #nosec G306 -- Verify rejection of an intentionally unsafe audit file.
 				t.Fatal(err)
 			}
+			// Apply the unsafe fixture mode explicitly; creation is affected by umask.
+			if err := os.Chmod(path, 0644); err != nil { // #nosec G302 -- Intentional invalid-permission fixture.
+				t.Fatal(err)
+			}
 		}},
 		{name: "hard link", make: func(t *testing.T, path string) {
 			if err := os.WriteFile(path+".other", nil, 0600); err != nil {

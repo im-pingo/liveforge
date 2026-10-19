@@ -15,8 +15,11 @@ This is the short Agent entrypoint. Use `agent-manifest.json` for structured fac
 - Browser preview and listener troubleshooting: [docs/recipes/rtmp-to-hls.md](docs/recipes/rtmp-to-hls.md)
 - Authentication and RBAC recipes: [docs/recipes/auth-and-tls.md](docs/recipes/auth-and-tls.md), [docs/recipes/rbac-audit.md](docs/recipes/rbac-audit.md)
 - Operations recipes: [WHIP H.265 + Opus playback](docs/recipes/whip-h265-opus-playback.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [release verification](docs/recipes/release-verification.md)
-- Architecture analysis: [中文架构分析](docs/architecture.zh-CN.md)（模块设计、数据流、GOP 缓存、RingBuffer、转发和转码）
-- Technical risks and open issues: [技术风险、性能瓶颈与问题记录](docs/TECHNICAL-RISKS.md)
+- Architecture analysis: [Architecture analysis](docs/architecture.md) (module design, data flow, GOP caching, RingBuffer, relay and transcoding)
+- Development process: [Loop Engineering design](docs/superpowers/specs/2026-10-15-loop-engineering-design.md) and [verification executor](docs/recipes/loop-executor.md)(the first executor is implemented; additional CI orchestration remains planned)
+- Protocol input guards: [RTSP, H.264 and notification boundaries](docs/recipes/protocol-input-safety.md)
+- Technical risks and open issues: [Technical risks, performance bottlenecks and issue history](docs/TECHNICAL-RISKS.md)
+- Browser camera/microphone to WHIP, SIP or GB28181: [camera publishing](docs/recipes/browser-camera-publishing.md)
 - Runnable recipes: [docs/recipes/](docs/recipes/)
 - Bounded input, configuration conflict/history, pagination, and required-browser gate: [review regression recipe](docs/recipes/review-regression-gate.md)
 

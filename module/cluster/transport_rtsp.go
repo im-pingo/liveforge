@@ -16,6 +16,7 @@ import (
 
 	"github.com/im-pingo/liveforge/config"
 	"github.com/im-pingo/liveforge/core"
+	"github.com/im-pingo/liveforge/internal/rtspwire"
 	"github.com/im-pingo/liveforge/pkg/avframe"
 	pkgrtp "github.com/im-pingo/liveforge/pkg/rtp"
 	"github.com/im-pingo/liveforge/pkg/sdp"
@@ -384,11 +385,10 @@ func (rc *rtspClient) doRequestWithResponse(method, reqURL string, headers map[s
 }
 
 func (rc *rtspClient) readResponse() (*rtspResponse, error) {
-	line, err := rc.br.ReadString('\n')
+	line, headers, err := rtspwire.ReadHead(rc.br)
 	if err != nil {
 		return nil, fmt.Errorf("read status line: %w", err)
 	}
-	line = strings.TrimRight(line, "\r\n")
 	parts := strings.SplitN(line, " ", 3)
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("malformed status line: %q", line)
@@ -400,33 +400,11 @@ func (rc *rtspClient) readResponse() (*rtspResponse, error) {
 
 	resp := &rtspResponse{
 		statusCode: code,
-		headers:    make(http.Header),
+		headers:    headers,
 	}
-
-	for {
-		hline, err := rc.br.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("read header: %w", err)
-		}
-		hline = strings.TrimRight(hline, "\r\n")
-		if hline == "" {
-			break
-		}
-		idx := strings.Index(hline, ":")
-		if idx < 0 {
-			continue
-		}
-		resp.headers.Add(strings.TrimSpace(hline[:idx]), strings.TrimSpace(hline[idx+1:]))
-	}
-
-	if cl := resp.headers.Get("Content-Length"); cl != "" {
-		length, err := strconv.Atoi(cl)
-		if err == nil && length > 0 {
-			resp.body = make([]byte, length)
-			if _, err := io.ReadFull(rc.br, resp.body); err != nil {
-				return nil, fmt.Errorf("read body: %w", err)
-			}
-		}
+	resp.body, err = rtspwire.ReadBody(rc.br, resp.headers)
+	if err != nil {
+		return nil, err
 	}
 
 	if resp.statusCode >= 400 {

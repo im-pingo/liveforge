@@ -80,10 +80,11 @@ const (
 
 // LabSessionRequest contains the protocol-neutral portion of a SIP lab start.
 type LabSessionRequest struct {
-	Mode      LabMode `json:"mode"`
-	DeviceID  string  `json:"device_id"`
-	StreamKey string  `json:"stream_key"`
-	Codec     string  `json:"codec,omitempty"`
+	Mode            LabMode `json:"mode"`
+	DeviceID        string  `json:"device_id"`
+	StreamKey       string  `json:"stream_key"`
+	SourceStreamKey string  `json:"source_stream_key,omitempty"`
+	Codec           string  `json:"codec,omitempty"`
 }
 
 // LabSessionSnapshot is an immutable point-in-time view of a SIP lab session.
@@ -92,6 +93,7 @@ type LabSessionSnapshot struct {
 	Identity            string          `json:"identity"`
 	DeviceID            string          `json:"device_id"`
 	StreamKey           string          `json:"stream_key"`
+	SourceStreamKey     string          `json:"source_stream_key,omitempty"`
 	Mode                LabMode         `json:"mode"`
 	State               LabSessionState `json:"state"`
 	Direction           LabDirection    `json:"direction"`

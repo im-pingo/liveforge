@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "whep-continuity",
+  "objective": "Verify WHEP direct mixed-source recovery and replacement-generation exclusion.",
+  "checks": [
+    {
+      "id": "whep",
+      "kind": "go-test",
+      "packages": ["./module/webrtc"],
+      "run": "^(TestWHEPEstablishedDirectMixedSourceOverwriteRecoversAtFreshKeyframe|TestWHEPOverwriteRecoveryStopsBeforeReplacementGeneration)$",
+      "required_tests": [
+        {"package": "github.com/im-pingo/liveforge/module/webrtc", "test": "TestWHEPEstablishedDirectMixedSourceOverwriteRecoversAtFreshKeyframe"},
+        {"package": "github.com/im-pingo/liveforge/module/webrtc", "test": "TestWHEPOverwriteRecoveryStopsBeforeReplacementGeneration"}
+      ]
+    }
+  ]
+}

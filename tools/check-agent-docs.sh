@@ -61,6 +61,7 @@ if [[ -f "$repo_root/agent-manifest.json" ]]; then
     done
 
     jq -e '
+      .operations.console.language == "en" and
       .operations.console.views == ["Streams", "GB28181", "Config", "Cluster", "SIP Calls", "Storage", "Security"] and
       .operations.console.recent_audit == "inside Security; not a separate tab"
     ' "$repo_root/agent-manifest.json" >/dev/null || fail "manifest console tabs do not match the canonical seven-tab UI"
@@ -82,10 +83,8 @@ for file in README.md llms.txt llms-full.txt docs/PROGRESS.md; do
   require_text "$file" "$canonical_tabs"
   require_text "$file" 'Recent Audit is a surface inside Security, not a separate tab.'
 done
-require_text README.zh-CN.md "$canonical_tabs"
-require_text README.zh-CN.md 'Recent Audit 是 Security 内部的界面，不是单独的第八个标签页。'
+require_text README.zh-CN.md '[README.md](README.md)'
 reject_text README.md 'Permission-aware streams, config, cluster, SIP, storage, security, and audit operations'
-reject_text README.zh-CN.md '权限感知的流、配置、集群、SIP、存储、安全和审计运维视图'
 
 if [[ -f "$repo_root/llms.txt" ]]; then
   grep -Fq 'agent-manifest.json' "$repo_root/llms.txt" || fail "llms.txt must link agent-manifest.json"

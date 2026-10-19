@@ -272,13 +272,18 @@ func ExtractSPSPPS(config []byte) (sps, pps []byte) {
 }
 
 // H264Depacketizer reassembles RTP packets into H.264 NAL units.
-// Delegates to pion's H264Packet for correct Single NAL / STAP-A / FU-A handling.
+// Single NAL / STAP-A / FU-A input is validated before bounded assembly.
 // Output is in AVCC format (4-byte length prefix) to match RTMP/FLV conventions.
 type H264Depacketizer struct {
-	pkt        pioncodecs.H264Packet // pion's stateful depacketizer (tracks FU-A buffer)
-	sps        []byte
-	pps        []byte
-	configSent bool
+	buf           []byte
+	fuSequence    uint16
+	fuTimestamp   uint32
+	fuSSRC        uint32
+	fuPayloadType uint8
+	fuFragments   int
+	sps           []byte
+	pps           []byte
+	configSent    bool
 }
 
 // Depacketize processes one RTP packet and returns an AVFrame when a complete
@@ -295,40 +300,47 @@ func (d *H264Depacketizer) Depacketize(pkt *pionrtp.Packet) (*avframe.AVFrame, e
 // DepacketizeFrames preserves SPS/PPS received in separate RTP packets and
 // emits the AVC sequence header before the first media frame that uses it.
 func (d *H264Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AVFrame, error) {
-	if len(pkt.Payload) == 0 {
-		return nil, fmt.Errorf("empty RTP payload")
-	}
-
-	data, err := d.pkt.Unmarshal(pkt.Payload)
+	data, err := d.depacketizePayload(pkt)
 	if err != nil {
 		return nil, err
 	}
-	// pion returns empty slice for intermediate FU-A fragments
 	if len(data) == 0 {
 		return nil, nil
 	}
 
-	frameType := classifyAnnexB(data)
+	frameType := avframe.FrameTypeInterframe
 	hasVCL := false
-	forEachNAL(data, func(nal []byte) {
-		if len(nal) == 0 {
-			return
-		}
+	hasParameterSets := false
+	// depacketizePayload has validated every NAL and its AVCC length. Preserve
+	// the RTP NAL boundaries rather than searching encoded data for start codes.
+	for offset := 0; offset < len(data); {
+		nalLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		offset += 4
+		nal := data[offset : offset+nalLen]
+		offset += nalLen
 		switch nal[0] & 0x1f {
-		case 1, 5:
+		case 1:
 			hasVCL = true
+		case 5:
+			hasVCL = true
+			frameType = avframe.FrameTypeKeyframe
 		case 7:
+			hasParameterSets = true
 			if !bytes.Equal(d.sps, nal) {
 				d.sps = append(d.sps[:0], nal...)
 				d.configSent = false
 			}
 		case 8:
+			hasParameterSets = true
 			if !bytes.Equal(d.pps, nal) {
 				d.pps = append(d.pps[:0], nal...)
 				d.configSent = false
 			}
 		}
-	})
+	}
+	if hasVCL && hasParameterSets {
+		frameType = avframe.FrameTypeKeyframe
+	}
 
 	var frames []*avframe.AVFrame
 	if !d.configSent && len(d.sps) > 0 && len(d.pps) > 0 {
@@ -347,43 +359,10 @@ func (d *H264Depacketizer) DepacketizeFrames(pkt *pionrtp.Packet) ([]*avframe.AV
 			avframe.CodecH264,
 			frameType,
 			0, 0,
-			AnnexBToAVCC(data),
+			data,
 		))
 	}
 	return frames, nil
-}
-
-// classifyAnnexB scans Annex-B data for NAL types and returns the frame type.
-// Priority: Keyframe > SequenceHeader > Interframe
-func classifyAnnexB(data []byte) avframe.FrameType {
-	best := avframe.FrameTypeInterframe
-	hasSlice := false
-
-	forEachNAL(data, func(nal []byte) {
-		if len(nal) == 0 {
-			return
-		}
-		nalType := nal[0] & 0x1F
-		switch nalType {
-		case 5: // IDR
-			best = avframe.FrameTypeKeyframe
-			hasSlice = true
-		case 1: // non-IDR slice
-			hasSlice = true
-		case 7, 8: // SPS, PPS
-			if best != avframe.FrameTypeKeyframe {
-				best = avframe.FrameTypeSequenceHeader
-			}
-		}
-	})
-
-	// If SPS/PPS came with slice data (e.g., SPS+PPS+IDR in one access unit),
-	// the slice type takes precedence
-	if hasSlice && best == avframe.FrameTypeSequenceHeader {
-		best = avframe.FrameTypeKeyframe
-	}
-
-	return best
 }
 
 // forEachNAL calls fn for each NAL unit in Annex-B data.

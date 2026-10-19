@@ -19,6 +19,7 @@ const wsClientQueueDepth = 64
 type WSSender struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
+	closed  bool
 	dropped atomic.Uint64
 }
 
@@ -75,11 +76,19 @@ func (s *WSSender) Send(p *NotifyPayload) {
 // Query parameter "events" is a comma-separated list of event names to filter.
 // If omitted, all events are sent.
 func (s *WSSender) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		http.Error(w, "notification sender closed", http.StatusServiceUnavailable)
+		return
+	}
+
 	events := parseEventFilter(r.URL.Query().Get("events"))
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
-	})
+	// The default Origin policy requires the request host (including port),
+	// while allowing native clients that omit Origin.
+	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		slog.Error("ws accept error", "module", "notify", "error", err)
 		return
@@ -96,6 +105,11 @@ func (s *WSSender) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.closeClient(c, websocket.StatusGoingAway, "server shutdown")
+		return
+	}
 	s.clients[c] = struct{}{}
 	s.mu.Unlock()
 
@@ -121,9 +135,14 @@ func (s *WSSender) ClientCount() int {
 	return len(s.clients)
 }
 
-// Close disconnects all clients.
+// Close permanently stops client admission and disconnects all clients.
 func (s *WSSender) Close() {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
 	clients := make([]*wsClient, 0, len(s.clients))
 	for c := range s.clients {
 		clients = append(clients, c)

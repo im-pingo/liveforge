@@ -4,6 +4,11 @@ RTP signaling validates advertised payload types in 0..127 and explicit RTP
 clock rates in 1..4294967295 before constructing packet sessions. GB peer media
 ports must be in 1..65535; invalid values fail before socket/session setup.
 
+RTSP peer responses use the same bounded framing reader as the RTSP server:
+8 KiB per line, 64 KiB complete headers, 1 MiB body. Invalid/duplicate
+Content-Length and Transfer-Encoding are rejected before body allocation or
+reads. See [protocol input guards](protocol-input-safety.md).
+
 The local origin-edge testkit uses production Stream defaults, including hard
 GOP bounds, and reads the current management response envelope. Supply an
 already built binary with `LF_BINARY=/absolute/path/to/liveforge` when running

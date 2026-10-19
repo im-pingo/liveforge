@@ -23,50 +23,48 @@ func TestConsoleConfigAndSecurityFitDesktopAndMobile(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, width := range []int64{1440, 390} {
-			for _, language := range []string{"en", "zh-CN"} {
-				for _, view := range []string{"config", "security"} {
-					var dimensions struct{ Width, Scroll int }
-					if err := chromedp.Run(ctx,
-						chromedp.EmulateViewport(width, 844),
-						chromedp.Evaluate(fmt.Sprintf(`setConsoleLanguage(%q);switchTab(%q);stopActiveViewPolling();`, language, view), nil),
-						chromedp.Evaluate(`({Width:innerWidth,Scroll:document.documentElement.scrollWidth})`, &dimensions),
-					); err != nil {
-						t.Fatal(err)
-					}
-					if dimensions.Scroll > dimensions.Width {
-						t.Errorf("%s %s at %d pixels overflows: %+v", language, view, width, dimensions)
-					}
+			for _, view := range []string{"config", "security"} {
+				var dimensions struct{ Width, Scroll int }
+				if err := chromedp.Run(ctx,
+					chromedp.EmulateViewport(width, 844),
+					chromedp.Evaluate(fmt.Sprintf(`switchTab(%q);stopActiveViewPolling();`, view), nil),
+					chromedp.Evaluate(`({Width:innerWidth,Scroll:document.documentElement.scrollWidth})`, &dimensions),
+				); err != nil {
+					t.Fatal(err)
+				}
+				if dimensions.Scroll > dimensions.Width {
+					t.Errorf("%s at %d pixels overflows: %+v", view, width, dimensions)
 				}
 			}
 		}
 	})
 }
 
-func TestConsoleLanguageSelectionPreservesDraftAndPersists(t *testing.T) {
+func TestConsoleEnglishLocalePreservesDraftAndClearsLegacyPreference(t *testing.T) {
 	withConsoleBrowser(t, func(ctx context.Context) {
 		var result struct{ Language, Label, Draft, Saved string }
 		err := chromedp.Run(ctx, consoleAwait(`(async function(){`+consoleDraftFixture+`
           var editor = document.getElementById("config-editor");
           editor.value = "# local draft\n"; editor.dispatchEvent(new Event("input"));
-          var language = document.getElementById("console-language");
-          if (!language) return {};
-          language.value = "zh-CN"; language.dispatchEvent(new Event("change"));
+          localStorage.setItem("liveforge.console.language", "zh-CN");
+          initializeConsoleLanguage();
+          if (document.getElementById("console-language")) throw new Error("Obsolete language selector remains visible");
           var label = document.getElementById("tab-config").textContent;
-          var saved = localStorage.getItem("liveforge.console.language");
-          if (localStorage.length !== 1) throw new Error("Console persisted more than the locale preference");
+          var saved = localStorage.getItem("liveforge.console.language") || "";
+          if (localStorage.length !== 0) throw new Error("Console retained obsolete locale data");
           return {Language:document.documentElement.lang, Label:label, Draft:editor.value, Saved:saved};
         })()`, &result))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Language != "zh-CN" || result.Label != "配置" || result.Draft != "# local draft\n" || result.Saved != "zh-CN" {
-			t.Fatalf("language switch did not preserve the draft or preference: %#v", result)
+		if result.Language != "en" || result.Label != "Configuration" || result.Draft != "# local draft\n" || result.Saved != "" {
+			t.Fatalf("English initialization changed the draft or retained a legacy preference: %#v", result)
 		}
-		if err := chromedp.Run(ctx, chromedp.Reload(), chromedp.WaitReady("#console-language"), chromedp.Evaluate(`document.documentElement.lang`, &result.Language)); err != nil {
+		if err := chromedp.Run(ctx, chromedp.Reload(), chromedp.WaitReady("#tab-config"), chromedp.Evaluate(`document.documentElement.lang`, &result.Language)); err != nil {
 			t.Fatal(err)
 		}
-		if result.Language != "zh-CN" {
-			t.Fatalf("language was not restored after reload: %q", result.Language)
+		if result.Language != "en" {
+			t.Fatalf("English was not preserved after reload: %q", result.Language)
 		}
 	})
 }
@@ -173,19 +171,18 @@ func TestConsoleAuditPersistenceFailureIsVisible(t *testing.T) {
 	})
 }
 
-func TestConsoleSecurityKeepsSelectedLanguageAfterRefresh(t *testing.T) {
+func TestConsoleSecurityUsesEnglishAfterRefresh(t *testing.T) {
 	withConsoleBrowser(t, func(ctx context.Context) {
 		var result struct{ State, Label, Empty string }
 		if err := chromedp.Run(ctx, consoleAwait(`(async function(){
-          setConsoleLanguage("zh-CN");
           apiFetch=function(url){return Promise.resolve(url.endsWith("/audit")?[]:{console_role:"admin",audit_enabled:true});};
           await refreshSecurity();
           return {State:document.getElementById("security-audit").textContent,Label:document.getElementById("security-tokens").previousElementSibling.textContent,Empty:document.getElementById("audit-empty").textContent.trim()};
         })()`, &result)); err != nil {
 			t.Fatal(err)
 		}
-		if result.State != "已启用" || result.Label != "命名令牌" || result.Empty != "暂无审计记录" {
-			t.Fatalf("security refresh lost its selected language: %#v", result)
+		if result.State != "Enabled" || result.Label != "Named Tokens" || result.Empty != "No audit entries" {
+			t.Fatalf("security refresh did not use English labels: %#v", result)
 		}
 	})
 }

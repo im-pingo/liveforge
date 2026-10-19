@@ -20,17 +20,13 @@ type RTSPPublisher struct {
 	mediaInfo     *avframe.MediaInfo
 	stream        *core.Stream
 	depacketizers map[uint8]pkgrtp.Depacketizer // payloadType → depacketizer
+	codecs        PTMap
+	ingressMu     sync.Mutex // serializes codec/assembly state without blocking Close
+	assemblers    map[uint8]*pkgrtp.AccessUnitAssembler
 	mu            sync.Mutex
 	closed        bool
 	frameCount    int
-	tsBase        uint32 // first RTP timestamp for normalization
-	tsBaseSet     bool
-
-	// Access unit accumulation: collect NALs until RTP marker bit
-	accPayload   []byte            // accumulated AVCC payload for current access unit
-	accFrameType avframe.FrameType // best frame type seen in current access unit
-	accMediaType avframe.MediaType
-	accCodec     avframe.CodecType
+	tsBases       map[uint8]uint32 // independent RTP clock origins per track
 
 	// RTCP RR support
 	rtcpWriter   io.Writer // TCP conn for sending RTCP
@@ -53,6 +49,9 @@ func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream, p
 		mediaInfo:     info,
 		stream:        stream,
 		depacketizers: make(map[uint8]pkgrtp.Depacketizer),
+		codecs:        make(PTMap),
+		assemblers:    make(map[uint8]*pkgrtp.AccessUnitAssembler),
+		tsBases:       make(map[uint8]uint32),
 		localSSRC:     rand.Uint32(),
 		done:          make(chan struct{}),
 	}
@@ -65,6 +64,7 @@ func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream, p
 				return nil, err
 			}
 			p.depacketizers[pt] = dp
+			p.codecs[pt] = codec
 		}
 	} else {
 		// Fallback: use default PT assignments.
@@ -74,6 +74,7 @@ func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream, p
 				return nil, err
 			}
 			p.depacketizers[codecDefaultPT(info.VideoCodec)] = dp
+			p.codecs[codecDefaultPT(info.VideoCodec)] = info.VideoCodec
 		}
 		if info.AudioCodec != 0 {
 			dp, err := pkgrtp.NewDepacketizer(info.AudioCodec)
@@ -81,6 +82,7 @@ func NewRTSPPublisher(id string, info *avframe.MediaInfo, stream *core.Stream, p
 				return nil, err
 			}
 			p.depacketizers[codecDefaultPT(info.AudioCodec)] = dp
+			p.codecs[codecDefaultPT(info.AudioCodec)] = info.AudioCodec
 		}
 	}
 
@@ -143,14 +145,20 @@ func (p *RTSPPublisher) rtcpLoop() {
 	}
 }
 
-// FeedRTP processes an incoming RTP packet.
-// NALs are accumulated until the RTP marker bit indicates end of access unit,
-// then emitted as a single AVFrame with all NALs in AVCC format.
+// FeedRTP processes an incoming RTP packet. Video access units are bounded and
+// isolated by payload type. Damaged media is discarded without ending ingress;
+// closed or replaced publishers still return terminal errors to the receiver.
 func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
+	p.ingressMu.Lock()
+	defer p.ingressMu.Unlock()
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return fmt.Errorf("RTSP publisher %s is closed", p.id)
+	}
+	if pkt == nil {
+		p.mu.Unlock()
+		return nil
 	}
 	dp, ok := p.depacketizers[pkt.PayloadType]
 	p.receivedPkts++
@@ -161,52 +169,58 @@ func (p *RTSPPublisher) FeedRTP(pkt *pionrtp.Packet) error {
 	p.mu.Unlock()
 	if !ok {
 		slog.Debug("FeedRTP unknown PT", "module", "rtsp", "pt", pkt.PayloadType, "registered", p.registeredPTs())
-		return nil // Unknown PT, skip
-	}
-	frame, err := dp.Depacketize(pkt)
-	if err != nil {
-		slog.Error("FeedRTP depacketize error", "module", "rtsp", "error", err)
-		return err
-	}
-	if frame != nil {
-		// Accumulate NAL data for the current access unit.
-		p.accPayload = append(p.accPayload, frame.Payload...)
-		p.accMediaType = frame.MediaType
-		p.accCodec = frame.Codec
-		// Track best frame type: SequenceHeader > Keyframe > Interframe
-		if frame.FrameType == avframe.FrameTypeSequenceHeader {
-			p.accFrameType = avframe.FrameTypeSequenceHeader
-		} else if frame.FrameType == avframe.FrameTypeKeyframe && p.accFrameType != avframe.FrameTypeSequenceHeader {
-			p.accFrameType = avframe.FrameTypeKeyframe
-		} else if p.accFrameType == 0 {
-			p.accFrameType = frame.FrameType
-		}
+		return nil
 	}
 
-	// Emit accumulated access unit when marker bit is set (end of frame)
-	if pkt.Marker && len(p.accPayload) > 0 {
-		if !p.tsBaseSet {
-			p.tsBase = pkt.Timestamp
-			p.tsBaseSet = true
+	var frames []*avframe.AVFrame
+	var err error
+	if codec := p.codecs[pkt.PayloadType]; codec.IsVideo() {
+		assembler := p.assemblers[pkt.PayloadType]
+		if assembler == nil {
+			assembler = pkgrtp.NewAccessUnitAssembler(codec, dp)
+			p.assemblers[pkt.PayloadType] = assembler
 		}
-		dts := int64(pkt.Timestamp-p.tsBase) / 90 // 90kHz → ms
-		auFrame := avframe.NewAVFrame(
-			p.accMediaType,
-			p.accCodec,
-			p.accFrameType,
-			dts, dts,
-			p.accPayload,
-		)
+		frames, err = assembler.Push(pkt)
+	} else {
+		// Audio depacketizers emit complete samples; RTP Marker denotes a
+		// talkspurt for several audio codecs, not the end of an access unit.
+		frames, err = pkgrtp.DepacketizeFrames(dp, pkt)
+	}
+
+	// Depacketization may overlap Close or replacement. Never hold the
+	// lifecycle mutex while parsing or taking a stream write lock.
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return fmt.Errorf("RTSP publisher %s is closed", p.id)
+	}
+	if p.stream != nil && p.stream.Publisher() != p {
+		return fmt.Errorf("RTSP publisher %s no longer owns stream", p.id)
+	}
+	if err != nil {
+		slog.Debug("dropping damaged RTP access unit", "module", "rtsp", "pt", pkt.PayloadType, "error", err)
+		return nil
+	}
+	for _, frame := range frames {
+		base, exists := p.tsBases[pkt.PayloadType]
+		if !exists {
+			base = pkt.Timestamp
+			p.tsBases[pkt.PayloadType] = base
+		}
+		clockRate := uint32(90000)
+		if frame.MediaType.IsAudio() {
+			info := *p.mediaInfo
+			info.AudioCodec = frame.Codec
+			clockRate = audioClockRate(&info)
+		}
+		dts := int64(pkt.Timestamp-base) * 1000 / int64(clockRate)
+		frame.DTS, frame.PTS = dts, dts
 		p.frameCount++
-		if !p.stream.WriteFrameForPublisher(p, auFrame) && p.stream.Publisher() != p {
+		if !p.stream.WriteFrameForPublisher(p, frame) && p.stream.Publisher() != p {
 			return fmt.Errorf("RTSP publisher %s no longer owns stream", p.id)
 		}
-
-		// Reset accumulation buffer
-		p.accPayload = nil
-		p.accFrameType = 0
 	}
-
 	return nil
 }
 

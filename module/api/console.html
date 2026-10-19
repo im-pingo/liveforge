@@ -1121,7 +1121,6 @@ button, input, select, textarea { font: inherit; }
 #config-history-select { max-width: 100%; min-width: 0; flex: 1 1 240px; }
 #config-schema-section .ops-section-title { flex-wrap: wrap; }
 #config-schema-version { min-width: 0; overflow-wrap: anywhere; }
-#console-language { width: 100px; }
 .brand { flex-shrink: 0; }
 .brand h1 { white-space: nowrap; }
 .config-toolbar { flex-wrap: wrap; }
@@ -1151,7 +1150,6 @@ button, input, select, textarea { font: inherit; }
       <div class="live-indicator"><span class="dot live-dot"></span><span>API connected</span></div>
       <span id="server-version" class="server-version"></span>
       <span id="updated" class="clock"></span>
-      <select id="console-language" class="ops-input" aria-label="Language"><option value="en">English</option><option value="zh-CN">&#20013;&#25991;</option></select>
       <button class="btn btn-primary btn-publish" id="btn-publish" onclick="openPublishModal()">Open Publish Workspace</button>
       <form id="console-logout" action="/console/logout" method="post"><button class="btn" type="submit">Sign out</button></form>
     </div>
@@ -1605,23 +1603,23 @@ button, input, select, textarea { font: inherit; }
           </div>
           <select id="publish-protocol" class="protocol-native-select" aria-label="Publish protocol"><option value="whip">WHIP / WebRTC</option><option value="sip">SIP Gateway</option><option value="gb28181">GB28181</option></select>
           <div class="connection"><span class="connection-dot" id="connection-dot"></span><span><strong id="connection-state">Ready when you are</strong><br><span id="connection-note">Camera and microphone are local only</span></span></div>
-          <div id="publish-whip-config" class="publish-protocol-panel protocol-fields active">
-            <div class="field"><label for="publish-stream-key">Stream key</label><input type="text" id="publish-stream-key" placeholder="live/test" value="live/test" spellcheck="false"></div>
+          <div id="publish-capture-config" class="protocol-fields active">
             <div class="field"><label for="publish-video-device">Camera</label><select id="publish-video-device"></select></div>
             <div class="field"><label for="publish-audio-device">Microphone</label><select id="publish-audio-device"></select></div>
+          </div>
+          <div id="publish-whip-config" class="publish-protocol-panel protocol-fields active">
+            <div class="field"><label for="publish-stream-key">Stream key</label><input type="text" id="publish-stream-key" placeholder="live/test" value="live/test" spellcheck="false"></div>
             <div class="field"><label for="publish-video-codec">Video codec</label><select id="publish-video-codec"><option value="H264">H.264</option><option value="VP8">VP8</option><option value="VP9">VP9</option><option value="H265">H.265 (HEVC)</option><option value="AV1">AV1</option></select></div>
           </div>
           <div id="publish-sip-config" class="publish-protocol-panel protocol-fields" hidden>
-            <div class="field"><label for="publish-sip-mode">Mode</label><select id="publish-sip-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
-            <div class="field"><label for="publish-sip-device">Device ID</label><input id="publish-sip-device" placeholder="lab-device" spellcheck="false"></div>
-            <div class="field"><label for="publish-sip-stream">Stream key</label><input id="publish-sip-stream" placeholder="sip/live" spellcheck="false"></div>
+            <div class="field"><label for="publish-sip-device">Device ID</label><input id="publish-sip-device" value="browser-camera" placeholder="browser-camera" spellcheck="false"></div>
+            <div class="field"><label for="publish-sip-stream">Stream key</label><input id="publish-sip-stream" value="sip/live" placeholder="sip/live" spellcheck="false"></div>
             <div class="field"><label for="publish-sip-codec">Audio codec</label><select id="publish-sip-codec"><option value="PCMA">PCMA</option><option value="PCMU">PCMU</option></select></div>
           </div>
           <div id="publish-gb-config" class="publish-protocol-panel protocol-fields" hidden>
-            <div class="field"><label for="publish-gb-mode">Mode</label><select id="publish-gb-mode"><option value="publish">Publish to LiveForge</option><option value="receive">Receive from LiveForge</option></select></div>
-            <div class="field"><label for="publish-gb-device">Device ID</label><input id="publish-gb-device" placeholder="34020000001320000011" spellcheck="false"></div>
-            <div class="field"><label for="publish-gb-channel">Channel ID</label><input id="publish-gb-channel" placeholder="34020000001320000012" spellcheck="false"></div>
-            <div class="field"><label for="publish-gb-stream">Stream key</label><input id="publish-gb-stream" placeholder="gb28181/live" spellcheck="false"></div>
+            <div class="field"><label for="publish-gb-device">Device ID</label><input id="publish-gb-device" value="34020000001320000011" placeholder="34020000001320000011" spellcheck="false"></div>
+            <div class="field"><label for="publish-gb-channel">Channel ID</label><input id="publish-gb-channel" value="34020000001320000012" placeholder="34020000001320000012" spellcheck="false"></div>
+            <div class="field"><label for="publish-gb-stream">Stream key</label><input id="publish-gb-stream" value="gb28181/live" placeholder="gb28181/live" spellcheck="false"></div>
           </div>
           <div class="publish-actions"><button class="btn btn-primary btn-start-publish" id="btn-start-publish" onclick="startPublish()">Start publishing</button><button class="btn btn-quiet btn-stop-publish" id="btn-stop-publish" onclick="stopPublish()">Stop</button><button class="btn-stats" id="btn-publish-stats" onclick="togglePublishStats()" style="display:none">Stats</button></div>
           <p class="rail-note publish-status" id="publish-status">Choose a transport, configure the source, and publish one stream into LiveForge.</p>
@@ -1690,6 +1688,7 @@ button, input, select, textarea { font: inherit; }
 <script src="/console/static/console-core.js"></script>
 <script src="/console/static/console-i18n.js"></script>
 <script src="/console/static/console-media.js"></script>
+<script src="/console/static/console-publish.js"></script>
 <script src="/console/static/console-management.js"></script>
 <script src="/console/static/console-config.js"></script>
 <script src="/console/static/console-lists.js"></script>

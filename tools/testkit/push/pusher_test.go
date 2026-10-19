@@ -105,6 +105,7 @@ func TestRTMPPush(t *testing.T) {
 		Protocol: "rtmp",
 		Target:   fmt.Sprintf("rtmp://%s/live/test", srv.RTMPAddr()),
 		Duration: 3 * time.Second,
+		Realtime: true, // keep the duration assertion independent of local upload speed
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
