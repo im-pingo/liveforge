@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
+
+	"github.com/im-pingo/liveforge/internal/rtspwire"
 )
 
 // Request represents an RTSP request.
@@ -29,11 +30,10 @@ type Response struct {
 // ReadRequest reads an RTSP request from a buffered reader.
 func ReadRequest(r *bufio.Reader) (*Request, error) {
 	// Read request line: "METHOD URL RTSP/1.0\r\n"
-	line, err := r.ReadString('\n')
+	line, headers, err := rtspwire.ReadHead(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading request line: %w", err)
 	}
-	line = strings.TrimRight(line, "\r\n")
 
 	parts := strings.SplitN(line, " ", 3)
 	if len(parts) != 3 {
@@ -44,42 +44,11 @@ func ReadRequest(r *bufio.Reader) (*Request, error) {
 		Method:  parts[0],
 		URL:     parts[1],
 		Proto:   parts[2],
-		Headers: make(http.Header),
+		Headers: headers,
 	}
-
-	// Read headers until blank line
-	for {
-		hline, err := r.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("reading header: %w", err)
-		}
-		hline = strings.TrimRight(hline, "\r\n")
-		if hline == "" {
-			break
-		}
-
-		colonIdx := strings.IndexByte(hline, ':')
-		if colonIdx < 0 {
-			return nil, fmt.Errorf("malformed header: %q", hline)
-		}
-		key := strings.TrimSpace(hline[:colonIdx])
-		val := strings.TrimSpace(hline[colonIdx+1:])
-		req.Headers.Add(key, val)
-	}
-
-	// Read body if Content-Length is present
-	if cl := req.Headers.Get("Content-Length"); cl != "" {
-		n, err := strconv.Atoi(cl)
-		if err != nil {
-			return nil, fmt.Errorf("invalid Content-Length %q: %w", cl, err)
-		}
-		if n > 0 {
-			body := make([]byte, n)
-			if _, err := io.ReadFull(r, body); err != nil {
-				return nil, fmt.Errorf("reading body: %w", err)
-			}
-			req.Body = body
-		}
+	req.Body, err = rtspwire.ReadBody(r, req.Headers)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil

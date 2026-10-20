@@ -643,14 +643,26 @@ func TestHLSPlay(t *testing.T) {
 		_, err := pusher.Push(pushCtx, src, push.PushConfig{
 			Protocol: "rtmp",
 			Target:   pushURL,
+			Realtime: true, // keep the sliding segment window at playback speed
 		})
 		pushDone <- err
 	}()
 
-	// HLS needs time to generate the first TS segment. The server waits up to
-	// 10s for at least one segment on m3u8 request, but the stream must be
-	// publishing first. Wait for the RTMP push to establish.
-	time.Sleep(1 * time.Second)
+	// Wait for decodable media rather than assuming the publisher is ready
+	// after a fixed delay. The playlist request waits for the first segment.
+	readyTimer := time.NewTimer(10 * time.Second)
+	defer readyTimer.Stop()
+	readyTicker := time.NewTicker(10 * time.Millisecond)
+	defer readyTicker.Stop()
+	for !srv.StreamHasVideoGOP("live/test") || !srv.StreamHasAudio("live/test", avframe.CodecAAC) {
+		select {
+		case err := <-pushDone:
+			t.Fatalf("RTMP pusher stopped before HLS media was ready: %v", err)
+		case <-readyTimer.C:
+			t.Fatal("timed out waiting for RTMP audio/video before HLS playback")
+		case <-readyTicker.C:
+		}
+	}
 
 	// Play via HLS.
 	player, err := NewPlayer("hls")

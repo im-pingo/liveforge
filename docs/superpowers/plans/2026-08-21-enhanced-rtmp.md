@@ -511,7 +511,7 @@ After the PR is created, retrieve its URL and use it in the issue comment:
 
 ~~~bash
 PR_URL=$(gh pr view --repo im-pingo/liveforge --json url --jq .url)
-gh issue comment 10 --repo im-pingo/liveforge --body "已实现单轨 E-RTMP 支持，包含 FourCC 音视频头、AMF0 能力协商、classic/enhanced 输出协商及旧客户端回退。多轨、HDR、ModEx 暂不在本阶段。PR: ${PR_URL}"
+gh issue comment 10 --repo im-pingo/liveforge --body "Implemented single-track E-RTMP support, including FourCC audio/video headers, AMF0 capability negotiation, classic/enhanced output negotiation, and legacy client fallback. Multitrack, HDR, and ModEx are outside the scope of this phase. PR: ${PR_URL}"
 ~~~
 
 Do not close the issue automatically unless the PR is merged or the user

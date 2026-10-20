@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "media-browser",
+  "objective": "Verify actual SIP, GB28181 and WHIP browser decoding and media advancement; run with -profile tagged.",
+  "checks": [
+    {
+      "id": "browser",
+      "kind": "go-test",
+      "packages": ["./test/integration"],
+      "run": "^TestSIPGB28181WHIPBrowserBridgeMatrix$",
+      "timeout": "20m",
+      "require_browser": true,
+      "required_tests": [
+        {"package": "github.com/im-pingo/liveforge/test/integration", "test": "TestSIPGB28181WHIPBrowserBridgeMatrix"}
+      ]
+    }
+  ]
+}

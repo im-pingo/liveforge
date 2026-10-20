@@ -37,6 +37,8 @@ type Module struct {
 
 var errRTSPDrainTimeout = errors.New("rtsp: drain timeout")
 
+const rtspPacketReadTimeout = 10 * time.Second
+
 // NewModule creates a new RTSP module.
 func NewModule() *Module {
 	return &Module{
@@ -233,15 +235,27 @@ func (m *Module) handleConn(conn net.Conn) {
 		if m.isClosing() {
 			return
 		}
+		// Idle clients and partially sent control/interleaved packets must not
+		// hold a connection slot forever. The completion budget starts with
+		// the first byte and cannot be renewed by dribbling more bytes.
+		if err := conn.SetReadDeadline(time.Now().Add(DefaultTimeout)); err != nil {
+			return
+		}
+		first, err := reader.Peek(1)
+		if err != nil {
+			return
+		}
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(rtspPacketReadTimeout)); deadlineErr != nil {
+			return
+		}
 		// Check if interleaved data ($ prefix) when in Recording state
 		if session != nil && session.GetState() == StateRecording {
-			b, err := reader.Peek(1)
-			if err != nil {
-				return
-			}
-			if b[0] == '$' {
+			if first[0] == '$' {
 				ch, data, err := ReadInterleaved(reader)
 				if err != nil {
+					return
+				}
+				if err := conn.SetReadDeadline(time.Time{}); err != nil {
 					return
 				}
 				if err := m.processInterleaved(session, ch, data); err != nil {
@@ -253,6 +267,9 @@ func (m *Module) handleConn(conn net.Conn) {
 
 		req, err := ReadRequest(reader)
 		if err != nil {
+			return
+		}
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
 			return
 		}
 		if m.isClosing() {

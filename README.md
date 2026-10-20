@@ -8,11 +8,9 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/im-pingo/liveforge/actions/workflows/ci.yml/badge.svg)](https://github.com/im-pingo/liveforge/actions/workflows/ci.yml)
 
-[English](README.md) | [中文](README.zh-CN.md)
-
 ---
 
-**[📖 Wiki Documentation (EN)](../../wiki) | [📖 Wiki 文档 (中文)](../../wiki/Home-zh)**
+**[Wiki Documentation](../../wiki)**
 
 *Full guides on deployment, configuration, cluster topologies, GB28181, audio transcoding, and more.*
 
@@ -140,7 +138,7 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 
 ### Management & Operations
 
-- **Web console** — Seven permission-aware tabs with multi-protocol preview and a dedicated `/console/publish` broadcaster workspace. All management views share the dark teal, mint/cyan/amber/coral visual system used by the console direction demo. Streams keeps fixed column tracks, restores a Preview action, and expands the selected row with four compact 60-second trends (bitrate, video FPS, audio FPS, and GOP duration) sampled once per second. The publish workspace selects WHIP/WebRTC, SIP, or GB28181 while preserving the existing protocol-lab lifecycle. Recent Audit is a surface inside Security, not a separate tab.
+- **Web console** — Seven permission-aware tabs with multi-protocol preview and a dedicated `/console/publish` broadcaster workspace. All management views share the dark teal, mint/cyan/amber/coral visual system used by the console direction demo. Streams keeps fixed column tracks, restores a Preview action, and expands the selected row with four compact 60-second trends (bitrate, video FPS, audio FPS, and GOP duration) sampled once per second. The publish workspace captures the selected camera and microphone for WHIP/WebRTC, SIP, and GB28181, with a shared local preview and outbound statistics. Recent Audit is a surface inside Security, not a separate tab.
 - **REST API** — Stream lifecycle, config refresh/status, cluster status, SIP call control, recording/DVR management, security/audit, GB28181, and public health probes
 - **Auth and RBAC** — Named viewer/operator/admin API tokens, console sessions, JWT/callback publish/subscribe auth, bounded redacted audit trail
 - **Recording and DVR** — FLV, fragmented MP4, MP4, MPEG-TS, and HLS recording; new recordings default to fMP4/`.mp4`; every rotated recording file retains the declared tracks and latest codec initialization, starts each track on a zero-based file-local timeline, and remains independently parseable; TS emits PAT/PMT before its first media PES, while classic MP4 calculates audio/video durations on their independent clocks, saturates version-0 timing fields instead of wrapping, uses signed `ctts` version 1 for negative B-frame composition offsets, and writes expandable AAC ESDS lengths; fMP4 declares AAC directly, converts non-AAC source audio such as G.711, Opus, and MP3 to AAC through the optional `audiocodec`/FFmpeg build, and filters audio to keep playable video-only output when that path is unavailable; a stopped transformed recording drains source frames already committed before finalizing, while publisher-generation completion flushes retained resampler samples, pads the final partial PCM frame, and emits delayed encoder packets exactly once before Record/DVR output closes; DVR TS similarly normalizes audio unsupported by its target; segmentation, storage health, download/range/inline-play/delete management, exact full-ID action routing, retryable cleanup-before-primary deletion, zero-byte session protection, and time-shift status. Recording play/download acquire the global connection budget before opening media and apply a 10-second write deadline.
@@ -155,7 +153,8 @@ Apple LL-HLS implementation for sub-second latency HLS delivery:
 - **GB28181 overwrite recovery** — Outbound PS/RTP serializes source and transformed-audio control results ahead of pending output, discards overwritten and pending pre-gap media, advances only the affected reader, and keeps unaffected media flowing. Source gaps start fresh PS state without resetting RTP sequence and resume H.264 only at the latest post-gap header plus IDR; transformed-audio gaps preserve clean video and PS state without restarting its original 20 ms holdback deadline
 - **Lab diagnostics** — Managers retain all active sessions plus the newest 16 terminal records. Failed sessions expose a bounded `last_error` with SIP credentials and bearer tokens removed; session views expose receiver-side RTCP and separate audio/video counters. Playback paths escape each stream-key segment and use actual bound listeners for absolute RTMP/RTSP URLs; Console Lab Preview consumes those returned paths directly
 - **Startup rollback** — Listener or module initialization failures report the original error, close only modules whose initialization was attempted, and do not panic while rolling back later uninitialized modules
-- **Notifications** — HTTP webhook (HMAC-SHA256 signed) and WebSocket real-time events
+- **Notifications** — HTTP webhook (HMAC-SHA256 signed) and authenticated WebSocket events; browser Origin must match host/port, native clients may omit Origin, and shutdown closes admission
+- **Protocol input guards** — Bounded RTSP control headers/bodies and read deadlines, validated H.264 aggregation/fragment continuity, and bounded RTSP/WHIP video assembly with recovery after damaged packets. See [limits and compatibility](docs/recipes/protocol-input-safety.md).
 - **Prometheus metrics** — Server-level gauges are always available when enabled; per-stream bitrate/FPS/GOP/subscriber labels are opt-in. Without an allowlist, the configured limit is a Collector-lifetime cardinality budget: active keys are admitted in creation order, retained as scalar keys after their streams disappear, and never replaced by churn. An exact allowlist defines the only eligible keys and the limit still bounds each scrape. `stream_detail_limit: 0` disables per-stream series; negative configured limits are invalid and rejected. Use the management API for current stream detail or an exact allowlist for selected Prometheus labels
 - **Rate limiting** — Per-IP token bucket for connection flood protection; trusted proxy chains are resolved right-to-left so attacker-controlled XFF prefixes cannot select new buckets
 - **HTTP connection timeouts** — API, WebRTC signaling, and metrics listeners bound header parsing to 5 seconds and idle keep-alive connections to 2 minutes; existing write deadlines remain unchanged
@@ -278,7 +277,7 @@ ffmpeg -re -i input.mp4 -c copy -f mpegts "srt://localhost:6000?streamid=publish
 ```
 
 **WebRTC (Browser):**
-Open `http://localhost:8090/console`, click **"+ WebRTC Publish"**, select camera/mic, and start streaming.
+Open `http://localhost:8090/console/publish`, select WHIP, SIP, or GB28181, choose the camera/microphone and target stream key, then start publishing. All three modes use browser capture and a local preview. SIP requires H.264 plus the selected PCMA/PCMU; GB28181 requires H.264 plus PCMA. The browser must support those codecs and camera access over HTTPS or localhost. SIP/GB28181 capture is relayed through a temporary WHIP source into the real local protocol receiver, so WebRTC and the selected protocol module must be enabled. This path works in portable builds without FFmpeg. Stop releases capture and both sessions; receive/generated-media tests remain on the protocol management pages. See [browser camera publishing](docs/recipes/browser-camera-publishing.md).
 
 The Console can publish H.265/HEVC video with Opus audio when the browser and platform expose an H.265 WebRTC encoder. WHIP maps audio and video RTP onto one session timeline, and HLS/DASH/FLV/TS use a combined transcode reader from the cached GOP source position so target audio history and live source video continue without a first-frame freeze or duplicate cached video. Its FMP4 preview preserves signed B-frame composition offsets on a near-zero timeline established when the shared muxer starts; later subscribers seek to their first buffered timestamp. For G.711 sources, the Console declares AAC in the FMP4 SourceBuffer only when `GET /api/v1/server/info` reports that the configured process can actually transcode both G.711 variants to AAC; portable builds keep the video-only declaration. WHEP Live replays the atomic cached GOP while source video continues from the matching ring cursor, with transcoded target audio read independently. The WebRTC transcode worker waits without consuming the source playback wakeup, so video pacing remains stable even when source audio pauses. The tagged audio build is the complete cross-protocol profile; see [WHIP H.265 + Opus playback verification](docs/recipes/whip-h265-opus-playback.md).
 
@@ -329,7 +328,7 @@ The tabs, in order, are Streams, GB28181, Config, Cluster, SIP Calls, Storage, a
 - Live stream list with state, codecs, bitrate, FPS, and visible on-demand audio transcode tasks (`source -> target`, state, subscriber count, and bounded errors)
 - GOP Cache visualization with keyframe-driven generation, interleaved video/audio frame counts, and duration; audio-only streams show `Not applicable (audio-only)`. Selected-stream trends retain a continuous 60-second window across ordinary GOP rotations and reset only for a publisher or counter reset
 - Multi-protocol preview player (HTTP-FLV, WS-FLV, HTTP-TS, FMP4, HLS, DASH, WebRTC realtime, and WebRTC Live)
-- WebRTC publish with camera/mic and outbound stats
+- WHIP, SIP, and GB28181 camera/microphone publishing with local preview and outbound stats
 - Permission-aware stream kick/delete and runtime config refresh
 - Cluster relay/peer status and SIP call dial/detail/hangup
 - Recording metadata/download/inline-play/delete, DVR session/storage status and online HLS preview, security posture, and bounded audit events
@@ -344,7 +343,7 @@ Recording preview uses the authenticated management API session. DVR preview use
 
 ## Configuration
 
-The Console supports English and Chinese, paginated lists, and configuration
+The Console uses English labels, paginated lists, and configuration
 drafts that survive background refreshes and reauthentication. Config offers
 common controls alongside the full YAML editor, a redacted comparison, and
 history/rollback. Apply detects concurrent edits with `If-Match` and returns409
@@ -398,6 +397,17 @@ After a successful Apply write, the server keeps a pending desired overlay in me
 Operators can inspect the redacted loader state at `GET /api/v1/server/config` (protected by the normal API authentication rules).
 
 ## Testing Tools
+
+### Loop Engineering executor
+
+`lf-loop` executes trusted local verification tasks with bounded time, source snapshots, strict Go test results and private evidence reports. Available from source on Linux/macOS with Go 1.26+ and Git:
+
+```sh
+CGO_ENABLED=0 go build -o bin/lf-loop ./tools/lf-loop
+bin/lf-loop run -task tools/lf-loop/tasks/core.json
+```
+
+The default portable profile has no audio transcoding or race check. Use `-profile tagged` with a working C/FFmpeg toolchain for those checks. Reports live in ignored `.lf-loop/runs/`. See the [task format, profiles and exit codes](docs/recipes/loop-executor.md).
 
 ### lf-test CLI
 
@@ -515,16 +525,16 @@ For coding agents, start with [`AGENTS.md`](AGENTS.md), [`agent-manifest.json`](
 
 Operational recipes: [runtime config](docs/recipes/runtime-config-sources.md), [authentication/TLS](docs/recipes/auth-and-tls.md), [recording/DVR](docs/recipes/recording-dvr-management.md), [SIP Gateway](docs/recipes/sipgateway-management.md), [SIP/GB28181 protocol test lab](docs/recipes/protocol-test-lab.md), [cluster relay](docs/recipes/cluster-relay-operations.md), [RBAC/audit](docs/recipes/rbac-audit.md), and [release verification](docs/recipes/release-verification.md).
 
-| Topic | EN | 中文 |
-|-------|-----|------|
-| Home | [Wiki Home](../../wiki) | [Wiki 首页](../../wiki/Home-zh) |
-| Audio Transcoding | [Audio Transcoding](../../wiki/Audio-Transcoding) | [音频转码](../../wiki/Audio-Transcoding-zh) |
-| GB28181 Guide | [GB28181](../../wiki/GB28181) | [GB28181 指南](../../wiki/GB28181-zh) |
-| Cluster Deployment | [Cluster Deployment](../../wiki/Cluster-Deployment) | [集群部署](../../wiki/Cluster-Deployment-zh) |
-| LL-HLS | [LL-HLS](../../wiki/LLHLS) | [低延迟 HLS](../../wiki/LLHLS-zh) |
-| Testing Tools | [Testing Tools](../../wiki/Testing-Tools) | [测试工具](../../wiki/Testing-Tools-zh) |
-| Configuration Reference | [Configuration](../../wiki/Configuration) | [配置参考](../../wiki/Configuration-zh) |
-| REST API | [REST API](../../wiki/REST-API) | [REST API](../../wiki/REST-API-zh) |
+| Topic | Documentation |
+|-------|---------------|
+| Home | [Wiki Home](../../wiki) |
+| Audio Transcoding | [Audio Transcoding](../../wiki/Audio-Transcoding) |
+| GB28181 Guide | [GB28181](../../wiki/GB28181) |
+| Cluster Deployment | [Cluster Deployment](../../wiki/Cluster-Deployment) |
+| LL-HLS | [LL-HLS](../../wiki/LLHLS) |
+| Testing Tools | [Testing Tools](../../wiki/Testing-Tools) |
+| Configuration Reference | [Configuration](../../wiki/Configuration) |
+| REST API | [REST API](../../wiki/REST-API) |
 
 ## Roadmap
 

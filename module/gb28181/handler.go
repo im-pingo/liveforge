@@ -351,6 +351,11 @@ func (h *handler) closeSession(session *MediaSession, remoteAddr string) bool {
 	if session == nil {
 		return false
 	}
+	// A competing Lab cleanup must wait for signaling and registry removal
+	// before closing its peer. Keep this separate from the media-only Close
+	// path, which can run while SessionManager holds its own lock.
+	session.cleanupMu.Lock()
+	defer session.cleanupMu.Unlock()
 	snapshot, closed := session.closeSnapshot()
 	if !closed {
 		return false

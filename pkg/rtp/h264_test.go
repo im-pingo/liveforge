@@ -101,7 +101,8 @@ func TestH264DepacketizerEmitsSequenceHeaderForSeparateSPSAndPPSPackets(t *testi
 	}
 	depacketizer := &H264Depacketizer{}
 	var sequenceHeaders, keyframes int
-	for _, packet := range packets {
+	for i, packet := range packets {
+		packet.SequenceNumber = uint16(i)
 		frames, depacketizeErr := DepacketizeFrames(depacketizer, packet)
 		if depacketizeErr != nil {
 			t.Fatalf("DepacketizeFrames: %v", depacketizeErr)
@@ -136,7 +137,8 @@ func TestH264DepacketizeRoundTrip(t *testing.T) {
 
 	d := &H264Depacketizer{}
 	var result *avframe.AVFrame
-	for _, pkt := range pkts {
+	for i, pkt := range pkts {
+		pkt.SequenceNumber = uint16(i)
 		f, err := d.Depacketize(pkt)
 		if err != nil {
 			t.Fatalf("Depacketize: %v", err)

@@ -100,6 +100,13 @@ WebRTC publish/subscribe authorization is controlled by `auth.publish` and `auth
 
 ## Diagnostics And Metrics
 
+The notification WebSocket (default `/api/v1/events`) requires management
+`server:read` when enabled. A present browser Origin must match the request
+host and port; native clients may omit Origin. The library does not compare
+Origin scheme. Rejected origins receive 403, and sender shutdown stops new
+handshakes with 503. See [protocol input guards](protocol-input-safety.md) for
+RTSP framing/read budgets, H.264 assembly limits and shutdown behavior.
+
 Use `GET /api/v1/security/status` and `GET /api/v1/audit` with an authenticated viewer or stronger role. Status never returns token values. Audit metadata removes keys containing token, secret, password, or authorization.
 
 ```text

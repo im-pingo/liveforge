@@ -304,8 +304,8 @@ func requestWHIPKeyframes(pc *webrtc.PeerConnection, mediaSSRC uint32, done <-ch
 // Key invariant for H.264/H.265: parameter sets may be interleaved with IDR
 // NALs in the same Marker-delimited window. We handle them as separate
 // AVFrames so the ring buffer and GOP cache stay consistent:
-//   - SequenceHeader (SPS/PPS): flushed immediately, resets accSeqHeader payload.
-//   - Keyframe/Interframe: accumulated and flushed on the Marker bit.
+//   - SequenceHeader (SPS/PPS): emitted before associated media.
+//   - Keyframe/Interframe: bounded assembly, emitted only on an intact Marker.
 func readTrackLoop(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, pub *WHIPPublisher, _ <-chan struct{}, codec avframe.CodecType, mediaClock *whipMediaClock) {
 	readTrackLoopWithOptions(track, dp, stream, pub, codec, mediaClock, nil)
 }
@@ -318,17 +318,9 @@ type whipTrackReadOptions struct {
 }
 
 func readTrackLoopWithOptions(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer, stream *core.Stream, pub *WHIPPublisher, codec avframe.CodecType, mediaClock *whipMediaClock, options *whipTrackReadOptions) {
-	var (
-		accPayload    []byte
-		accFrame      avframe.FrameType
-		accMedia      avframe.MediaType
-		accSeqPayload []byte // accumulated SPS/PPS to write as SequenceHeader
-	)
-
+	var video *pkgrtp.AccessUnitAssembler
 	if codec.IsVideo() {
-		accMedia = avframe.MediaTypeVideo
-	} else {
-		accMedia = avframe.MediaTypeAudio
+		video = pkgrtp.NewAccessUnitAssembler(codec, dp)
 	}
 
 	clockRate := int64(90000)
@@ -382,7 +374,9 @@ func readTrackLoopWithOptions(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer,
 				if processingEpoch != epoch {
 					processingEpoch = epoch
 					dp, _ = pkgrtp.NewDepacketizer(codec)
-					accPayload, accSeqPayload, accFrame = nil, nil, 0
+					if codec.IsVideo() {
+						video = pkgrtp.NewAccessUnitAssembler(codec, dp)
+					}
 					waitKeyframe = true
 					haveHeader = codec != avframe.CodecH264 && codec != avframe.CodecH265
 					if options.resume != nil {
@@ -395,10 +389,19 @@ func readTrackLoopWithOptions(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer,
 		// Parse raw bytes into pion/rtp/v2 Packet (our depacketizers' expected type).
 		var pkt pionrtp.Packet
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
+			if video != nil {
+				video.Discard()
+			}
 			continue
 		}
 
-		frames, err := pkgrtp.DepacketizeFrames(dp, &pkt)
+		var frames []*avframe.AVFrame
+		var err error
+		if video != nil {
+			frames, err = video.Push(&pkt)
+		} else {
+			frames, err = pkgrtp.DepacketizeFrames(dp, &pkt)
+		}
 		if err != nil {
 			continue
 		}
@@ -425,49 +428,10 @@ func readTrackLoopWithOptions(track *webrtc.TrackRemote, dp pkgrtp.Depacketizer,
 				}
 				continue
 			}
-			if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				// SPS/PPS: accumulate separately. If there is already pending
-				// media data (unlikely but possible), flush it first.
-				if len(accPayload) > 0 {
-					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
-					avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
-					if !writeFrame(avF) {
-						return
-					}
-					accPayload = nil
-					accFrame = 0
-				}
-				accSeqPayload = append(accSeqPayload[:0], frame.Payload...)
-			} else {
-				// Media frame: if we have buffered SPS/PPS, flush them now as
-				// SequenceHeader before the IDR so the ring buffer sees the
-				// parameter sets first.
-				if len(accSeqPayload) > 0 {
-					dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
-					seqF := avframe.NewAVFrame(accMedia, codec, avframe.FrameTypeSequenceHeader, dts, dts, accSeqPayload)
-					if !writeFrame(seqF) {
-						return
-					}
-					accSeqPayload = nil
-				}
-				accPayload = append(accPayload, frame.Payload...)
-				if frame.FrameType == avframe.FrameTypeKeyframe {
-					accFrame = avframe.FrameTypeKeyframe
-				} else if accFrame == 0 {
-					accFrame = frame.FrameType
-				}
-			}
-		}
-
-		// Flush accumulated media payload on the Marker bit (end of access unit).
-		if pkt.Marker && len(accPayload) > 0 {
 			dts := mediaClock.DTS(uint32(track.SSRC()), pkt.Timestamp, clockRate, packetArrival)
-			avF := avframe.NewAVFrame(accMedia, codec, accFrame, dts, dts, accPayload)
-			if !writeFrame(avF) {
+			if !writeFrame(avframe.NewAVFrame(avframe.MediaTypeVideo, codec, frame.FrameType, dts, dts, frame.Payload)) {
 				return
 			}
-			accPayload = nil
-			accFrame = 0
 		}
 	}
 }

@@ -60,10 +60,11 @@ const (
 
 // LabSessionRequest contains the protocol-neutral portion of a GB28181 lab start.
 type LabSessionRequest struct {
-	Mode      LabMode `json:"mode"`
-	DeviceID  string  `json:"device_id"`
-	ChannelID string  `json:"channel_id"`
-	StreamKey string  `json:"stream_key"`
+	Mode            LabMode `json:"mode"`
+	DeviceID        string  `json:"device_id"`
+	ChannelID       string  `json:"channel_id"`
+	StreamKey       string  `json:"stream_key"`
+	SourceStreamKey string  `json:"source_stream_key,omitempty"`
 }
 
 // LabSessionSnapshot is an immutable point-in-time view of a GB28181 lab session.
@@ -73,6 +74,7 @@ type LabSessionSnapshot struct {
 	DeviceID        string          `json:"device_id"`
 	ChannelID       string          `json:"channel_id"`
 	StreamKey       string          `json:"stream_key"`
+	SourceStreamKey string          `json:"source_stream_key,omitempty"`
 	Mode            LabMode         `json:"mode"`
 	State           LabSessionState `json:"state"`
 	Direction       LabDirection    `json:"direction"`
@@ -122,13 +124,8 @@ type contractLabManager struct{}
 func NewLabManager() LabManager { return contractLabManager{} }
 
 func (contractLabManager) Start(_ context.Context, request LabSessionRequest) (LabSessionSnapshot, error) {
-	if request.Mode != LabModePublish && request.Mode != LabModeReceive {
-		return LabSessionSnapshot{}, ErrLabInvalidRequest
-	}
-	if strings.TrimSpace(request.DeviceID) == "" ||
-		strings.TrimSpace(request.ChannelID) == "" ||
-		!validGBLabStreamKey(request.StreamKey) {
-		return LabSessionSnapshot{}, ErrLabInvalidRequest
+	if err := validateGBLabRequest(request); err != nil {
+		return LabSessionSnapshot{}, err
 	}
 	return LabSessionSnapshot{}, ErrLabManagerUnimplemented
 }
@@ -140,7 +137,8 @@ func (contractLabManager) Stop(string) error { return ErrLabManagerUnimplemented
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
 	mu                  sync.Mutex
-	ID                  string // SIP Call-ID
+	cleanupMu           sync.Mutex // Serializes complete handler teardown, including signaling.
+	ID                  string     // SIP Call-ID
 	DeviceID            string
 	ChannelID           string
 	StreamKey           string

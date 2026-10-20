@@ -24,6 +24,18 @@ export OPERATOR_TOKEN='replace-me'
 
 ## SIP
 
+For real browser camera/microphone publishing, use `/console/publish` and the
+[camera publishing recipe](browser-camera-publishing.md). The SIP and GB28181
+publish APIs accept optional `source_stream_key` to forward that existing
+publisher generation instead of generated samples. The field is publish-only,
+uses the same key validation as `stream_key`, and must differ from it. Source
+codec/header and subscriber admission completes before signaling, with a
+five-second readiness bound. SIP requires direct H.264 plus matching PCMA/PCMU;
+GB28181 requires H.264 plus PCMA. Source termination, replacement or ring
+overwrite fails the session and releases its ownership. No transcoding is
+performed on this source-backed publish path. Omit the field for the sample
+workflows below; their management-page controls remain available.
+
 ```bash
 curl -fsS -H "Authorization: Bearer $VIEWER_TOKEN" \
   "$LIVEFORGE_API/api/v1/sipgateway/test"
@@ -41,7 +53,7 @@ returning. The Console SIP page renders every phase and its failure detail.
 For a persistent provider session, call the `SIPGatewayProvider` methods
 `StartLabSession(ctx, LabSessionRequest)`, `ListLabSessions()`, and
 `StopLabSession(id)`. In `publish` mode, the fake device creates a real inbound
-SIP call and sends deterministic H.264 video plus PCMA/PCMU audio on separate
+SIP call and, when no source is selected, sends deterministic H.264 video plus PCMA/PCMU audio on separate
 RTP tracks, with RTCP, into the gateway-created stream. The gateway binds and
 parses both real RTCP receiver sockets, and the Lab counter reflects packets
 accepted there rather than successful UDP writes. Gateway RTP/RTCP allocation
@@ -77,7 +89,7 @@ retirement closes and releases the target reader, generation subscriber, and
 media sockets, returns the exact port pair to the allocator, and sends one BYE
 even if another local teardown races with retirement.
 
-The publish stream contains a dependency-free moving 160x90 constrained-baseline
+The generated publish stream contains a dependency-free moving 160x90 constrained-baseline
 H.264 pattern at 25 fps, with one IDR per 25-frame loop, plus audible 20 ms
 PCMA/PCMU frames. The Console uses the video player and prefers WebRTC/WHEP for
 direct G.711 passthrough, so this path does not require FFmpeg. WHEP starts
@@ -134,7 +146,7 @@ REGISTER, Keepalive, Catalog, INVITE, ACK, BYE, and unregister signaling. In
 `publish` mode the fake device starts a listening SIP endpoint and advertises
 that Contact during registration. LiveForge then uses its normal invite client
 to initiate live play; the fake device accepts INVITE, consumes ACK without a
-response, handles BYE, and sends deterministic H.264 plus G.711A in PS/RTP
+response, handles BYE, and, when no source is selected, sends deterministic H.264 plus G.711A in PS/RTP
 payload type 96 with RTCP into LiveForge's real RTP/RTCP receiver. In `receive`
 mode LiveForge requires H.264 plus direct G.711A or source audio that the
 tagged runtime can convert to G.711A. A module-owned outbound media session
@@ -165,6 +177,13 @@ Successful server-initiated live and playback INVITEs transfer dialog ownership
 to the media session. Local stop, receiver failure, rollback after an accepted
 2xx response, and repeated cleanup converge on one managed dialog, so at most
 one BYE is sent and the transaction is closed once.
+
+Concurrent handler cleanup for one GB28181 media session waits for the first
+caller to finish media shutdown, its BYE transmission attempt, registry removal
+and lifecycle emission. A Lab therefore keeps its SIP peer alive until that
+handler teardown completes. This ordering does not promise remote BYE
+acknowledgement. The handler cleanup lock is separate from the session state
+lock and the media-only `MediaSession.Close` path to preserve manager lock order.
 
 After the initial registration, each persistent fake device continues sending
 Keepalive messages at roughly one-third of the configured

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "core-invariants",
+  "objective": "Verify generation isolation, lifecycle backpressure and atomic ring overwrite.",
+  "checks": [
+    {
+      "id": "core",
+      "kind": "go-test",
+      "packages": ["./core"],
+      "run": "^(TestStreamPublisherGenerationIsolation|TestEventBusLifecycleQueueBackpressureIsBoundedAndObservable)$",
+      "required_tests": [
+        {"package": "github.com/im-pingo/liveforge/core", "test": "TestStreamPublisherGenerationIsolation"},
+        {"package": "github.com/im-pingo/liveforge/core", "test": "TestEventBusLifecycleQueueBackpressureIsBoundedAndObservable"}
+      ]
+    },
+    {
+      "id": "ring",
+      "kind": "go-test",
+      "packages": ["./pkg/util"],
+      "run": "^TestRingReaderReadReportsOverwriteAtomically$",
+      "required_tests": [
+        {"package": "github.com/im-pingo/liveforge/pkg/util", "test": "TestRingReaderReadReportsOverwriteAtomically"}
+      ]
+    },
+    {"id": "docs", "kind": "command", "argv": ["bash", "tools/check-agent-docs_test.sh"], "timeout": "30s"}
+  ]
+}

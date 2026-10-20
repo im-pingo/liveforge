@@ -93,7 +93,7 @@ func TestWHIPToWHEPStartsAfterIngestedKeyframe(t *testing.T) {
 		t.Logf("sending WHIP frame type=%v bytes=%d packets=%d", frame.FrameType, len(frame.Payload), len(packets))
 		for _, packet := range packets {
 			if err := whipTrack.WriteRTP(&pionrtp.Packet{
-				Header:  pionrtp.Header{Version: 2, Marker: packet.Marker, SequenceNumber: sequence, Timestamp: uint32(sequence * 3000)},
+				Header:  pionrtp.Header{Version: 2, Marker: packet.Marker, SequenceNumber: sequence, Timestamp: uint32((frame.PTS * 90) & 0xffffffff)},
 				Payload: append([]byte(nil), packet.Payload...),
 			}); err != nil {
 				t.Fatal(err)

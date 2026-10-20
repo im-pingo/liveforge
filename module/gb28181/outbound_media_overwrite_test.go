@@ -150,10 +150,6 @@ func TestGBOutboundDirectSourceOverwriteRecoversFreshPSAtLatestHeaderAndIDR(t *t
 	if got := muxerCreations.Load(); got != 2 {
 		t.Fatalf("PS muxer creations = %d, want startup plus fresh overwrite state", got)
 	}
-	if video, audio := sender.videoFrames.Load(), sender.audioFrames.Load(); video != 4 || audio != 3 {
-		t.Fatalf("successfully sent frame counters video/audio = %d/%d, want 4/3", video, audio)
-	}
-
 	sender.cancel()
 	select {
 	case err := <-done:
@@ -162,6 +158,11 @@ func TestGBOutboundDirectSourceOverwriteRecoversFreshPSAtLatestHeaderAndIDR(t *t
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("GB28181 direct media loop did not stop after cancellation")
+	}
+	// UDP receipt can precede the sender's post-write accounting. Joining the
+	// media loop keeps this exact counter assertion independent of scheduling.
+	if video, audio := sender.videoFrames.Load(), sender.audioFrames.Load(); video != 4 || audio != 3 {
+		t.Fatalf("successfully sent frame counters video/audio = %d/%d, want 4/3", video, audio)
 	}
 }
 

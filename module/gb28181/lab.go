@@ -228,6 +228,9 @@ func validateGBLabRequest(request LabSessionRequest) error {
 	if !validGBLabIdentity(request.DeviceID) || !validGBLabIdentity(request.ChannelID) || !validGBLabStreamKey(request.StreamKey) {
 		return ErrLabInvalidRequest
 	}
+	if source := request.SourceStreamKey; source != "" && (request.Mode != LabModePublish || !validGBLabStreamKey(source) || source == request.StreamKey) {
+		return ErrLabInvalidRequest
+	}
 	return nil
 }
 
@@ -286,6 +289,7 @@ type gbLabSession struct {
 	cleanupOnce sync.Once
 	stopRequest bool
 	mediaWG     sync.WaitGroup
+	source      *gbLabPublishSource
 	workerDone  chan error
 	controlWG   sync.WaitGroup
 
@@ -393,6 +397,20 @@ func (s *gbLabSession) protocolContext(caller context.Context) (context.Context,
 }
 
 func (s *gbLabSession) startPublish(ctx context.Context) error {
+	if s.request.SourceStreamKey != "" {
+		source, err := s.preparePublishSource(ctx)
+		if err != nil {
+			return err
+		}
+		s.source = source
+		bound, cancel := bindGBGeneration(ctx, source.snapshot)
+		defer cancel()
+		ctx = bound
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if err := s.openMediaPair(); err != nil {
 		return err
 	}
@@ -446,9 +464,22 @@ func (s *gbLabSession) startPublish(ctx context.Context) error {
 	if remotePort <= 0 {
 		return errors.New("GB28181 lab server INVITE has no RTP port")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.source != nil {
+		if err := s.source.active(s.ctx); err != nil {
+			return err
+		}
+	}
 	s.setState(LabSessionStateActive)
 	s.startKeepaliveLoop(serverHost, serverPort)
-	s.startMediaWorker("publish media", func() error { return s.publishMediaLoop(remotePort) })
+	s.startMediaWorker("publish media", func() error {
+		if s.source != nil {
+			return s.publishSourceMediaLoop(remotePort)
+		}
+		return s.publishMediaLoop(remotePort)
+	})
 	return nil
 }
 
@@ -734,6 +765,11 @@ func deterministicGBLabH264Payload() []byte {
 }
 
 func (s *gbLabSession) sendFrame(remoteRTP, remoteRTCP *net.UDPAddr, muxer *ps.Muxer, frame *avframe.AVFrame) error {
+	if s.source != nil {
+		if err := s.source.active(s.ctx); err != nil {
+			return err
+		}
+	}
 	data, err := muxer.Pack(frame)
 	if err != nil {
 		return err
@@ -749,6 +785,11 @@ func (s *gbLabSession) sendFrame(remoteRTP, remoteRTCP *net.UDPAddr, muxer *ps.M
 		packetData, marshalErr := packet.Marshal()
 		if marshalErr != nil {
 			return marshalErr
+		}
+		if s.source != nil {
+			if err := s.source.active(s.ctx); err != nil {
+				return err
+			}
 		}
 		n, writeErr := s.rtpConn.WriteToUDP(packetData, remoteRTP)
 		if writeErr != nil {
@@ -947,6 +988,9 @@ func (s *gbLabSession) cleanup() {
 			cleanupErr = errors.Join(cleanupErr, sipclose.CloseUserAgent(clientUA, sipConns))
 		}
 		s.mediaWG.Wait()
+		if s.source != nil {
+			s.source.discardReferences()
+		}
 		if s.module.registry.Get(deviceID) != nil {
 			s.module.registry.Unregister(deviceID)
 		}
@@ -998,7 +1042,7 @@ func (s *gbLabSession) snapshot() LabSessionSnapshot {
 	mode := s.request.Mode
 	result := LabSessionSnapshot{
 		ID: s.id, Identity: s.identity, DeviceID: s.request.DeviceID, ChannelID: s.request.ChannelID,
-		StreamKey: s.request.StreamKey, Mode: s.request.Mode, State: s.state, Direction: s.direction,
+		StreamKey: s.request.StreamKey, SourceStreamKey: s.request.SourceStreamKey, Mode: s.request.Mode, State: s.state, Direction: s.direction,
 		LastError: redactedLabError(s.closeErr),
 		StartedAt: s.startedAt, UpdatedAt: s.updatedAt, LastMediaAt: s.lastMedia, StoppedAt: s.stoppedAt,
 	}

@@ -16,6 +16,7 @@
 # Output
 *.out
 *.prof
+/.lf-loop/
 
 # IDE
 .idea/

@@ -3,7 +3,7 @@
 The first-party console scripts are split by ownership:
 
 - `console-core.js`: session-safe requests, permissions, modal and navigation guards.
-- `console-i18n.js`: English/Chinese UI selection; only the locale preference is stored in local storage.
+- `console-i18n.js`: English text helpers and removal of obsolete saved locale preferences; no application data is persisted.
 - `console-media.js`: stream inventory, playback, publishing, and media statistics.
 - `console-management.js`: cluster, SIP/GB28181 labs, recordings, security, and view polling.
 - `console-config.js`: full-document drafts, common controls, redacted comparison with schema reload impact, history, and revision-aware writes. The common server-name control is read-only because runtime application rejects name changes.

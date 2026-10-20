@@ -94,10 +94,11 @@ func newSimulcastPeer(t *testing.T, m *Module, mime, key string, extraTracks ...
 		t.Fatal("RID extensions not negotiated")
 	}
 	var seq [3]uint16
+	var timestamp [3]uint32
 	write := func(layer int, payload []byte, marker bool) {
 		t.Helper()
 		seq[layer]++
-		packet := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: seq[layer], Timestamp: uint32(seq[layer]) * 3000, Marker: marker}, Payload: payload}
+		packet := &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: seq[layer], Timestamp: timestamp[layer], Marker: marker}, Payload: payload}
 		if err := packet.SetExtension(midID, []byte("0")); err != nil {
 			t.Fatal(err)
 		}
@@ -106,6 +107,9 @@ func newSimulcastPeer(t *testing.T, m *Module, mime, key string, extraTracks ...
 		}
 		if err := tracks[layer].WriteRTP(packet); err != nil {
 			t.Fatal(err)
+		}
+		if marker {
+			timestamp[layer] += 3000
 		}
 	}
 	return pc, tracks, write
