@@ -178,6 +178,13 @@ to the media session. Local stop, receiver failure, rollback after an accepted
 2xx response, and repeated cleanup converge on one managed dialog, so at most
 one BYE is sent and the transaction is closed once.
 
+Concurrent handler cleanup for one GB28181 media session waits for the first
+caller to finish media shutdown, its BYE transmission attempt, registry removal
+and lifecycle emission. A Lab therefore keeps its SIP peer alive until that
+handler teardown completes. This ordering does not promise remote BYE
+acknowledgement. The handler cleanup lock is separate from the session state
+lock and the media-only `MediaSession.Close` path to preserve manager lock order.
+
 After the initial registration, each persistent fake device continues sending
 Keepalive messages at roughly one-third of the configured
 `gb28181.keepalive.timeout` (bounded to a practical interval), so a session

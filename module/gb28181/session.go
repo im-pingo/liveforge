@@ -137,7 +137,8 @@ func (contractLabManager) Stop(string) error { return ErrLabManagerUnimplemented
 // MediaSession tracks the state of a GB28181 media session.
 type MediaSession struct {
 	mu                  sync.Mutex
-	ID                  string // SIP Call-ID
+	cleanupMu           sync.Mutex // Serializes complete handler teardown, including signaling.
+	ID                  string     // SIP Call-ID
 	DeviceID            string
 	ChannelID           string
 	StreamKey           string
