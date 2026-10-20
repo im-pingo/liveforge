@@ -108,7 +108,7 @@ func prerequisites(ctx context.Context, root string, check Check, profile string
 					major, _ := strconv.Atoi(match[1])
 					minor, _ := strconv.Atoi(match[2])
 					if major < 1 || (major == 1 && minor < 26) {
-						err = errors.New("Go 1.26 or newer is required")
+						err = errors.New("requires Go 1.26 or newer")
 					}
 				}
 			}

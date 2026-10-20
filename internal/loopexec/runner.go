@@ -88,8 +88,8 @@ func run(parent context.Context, root string, task Task, opts Options) (report R
 	for _, check := range task.Checks {
 		report.Checks = append(report.Checks, CheckResult{ID: check.ID, Kind: check.Kind, Status: "not_run", ExitCode: -1})
 	}
-	if err := saveReport(report); err != nil {
-		return report, err
+	if saveErr := saveReport(report); saveErr != nil {
+		return report, saveErr
 	}
 	release, err := acquireLock(ctx, common)
 	if err != nil {

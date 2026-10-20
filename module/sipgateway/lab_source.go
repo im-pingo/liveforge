@@ -112,7 +112,7 @@ func (s *sipLabSession) publishSourceLoop(audioPort, videoPort int) {
 	// Retire the sender before fail joins all media workers; a sender must
 	// never wait for itself during transport cleanup.
 	s.mediaWG.Done()
-	if err != nil && s.ctx.Err() == nil {
+	if s.ctx.Err() == nil {
 		s.gateway.labs.failSession(s, err)
 	}
 }
@@ -123,9 +123,9 @@ func (s *sipLabSession) forwardPublishSource(audioPort, videoPort int) error {
 	video := mediarp.NewSession(96, 90000)
 	audioPacketizer := &mediarp.G711Packetizer{}
 	videoPacketizer := &mediarp.H264Packetizer{}
-	header, err := sipSourceVideoHeader(source.snapshot.VideoSequenceHeader)
-	if err != nil {
-		return err
+	header, headerErr := sipSourceVideoHeader(source.snapshot.VideoSequenceHeader)
+	if headerErr != nil {
+		return headerErr
 	}
 	waitingKeyframe := true
 	var origin time.Time
@@ -142,9 +142,9 @@ func (s *sipLabSession) forwardPublishSource(audioPort, videoPort int) error {
 				return fmt.Errorf("%w: SIP publish source video changed", ErrCodecMismatch)
 			}
 			if frame.FrameType == avframe.FrameTypeSequenceHeader {
-				header, err = sipSourceVideoHeader(frame)
+				header, headerErr = sipSourceVideoHeader(frame)
 				waitingKeyframe = true
-				return err
+				return headerErr
 			}
 			if waitingKeyframe && !frame.FrameType.IsKeyframe() {
 				return nil
@@ -238,9 +238,9 @@ func sipSourceVideoHeader(frame *avframe.AVFrame) (*avframe.AVFrame, error) {
 }
 
 func (s *sipLabSession) sendPublishSourceFrame(frame *avframe.AVFrame, packetizer mediarp.Packetizer, session *mediarp.Session, conn, control *net.UDPConn, port int) error {
-	packets, err := prepareSIPFrame(frame, packetizer, session)
-	if err != nil {
-		return err
+	packets, prepareErr := prepareSIPFrame(frame, packetizer, session)
+	if prepareErr != nil {
+		return prepareErr
 	}
 	remote := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}
 	for _, packet := range packets {
@@ -259,7 +259,7 @@ func (s *sipLabSession) sendPublishSourceFrame(frame *avframe.AVFrame, packetize
 			return io.ErrShortWrite
 		}
 		s.rtpPacketsSent.Add(1)
-		s.rtpBytesSent.Add(uint64(n))
+		s.rtpBytesSent.Add(uint64(len(data)))
 		if frame.MediaType.IsVideo() {
 			s.videoRTPSent.Add(1)
 		} else {

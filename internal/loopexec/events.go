@@ -62,17 +62,18 @@ func parseTestEvents(r io.Reader, check Check) (TestSummary, error) {
 			return summary, errors.New("test event has no package")
 		}
 		if event.Test == "" {
-			if event.Action == "start" {
+			switch event.Action {
+			case "start":
 				if _, exists := packages[event.Package]; exists {
 					invalid = append(invalid, "duplicate package start")
 				}
 				packages[event.Package] = "running"
-			} else if event.Action == "pass" || event.Action == "fail" || event.Action == "skip" {
+			case "pass", "fail", "skip":
 				if packages[event.Package] != "running" {
 					invalid = append(invalid, "package terminal without unique start")
 				}
 				packages[event.Package] = event.Action
-			} else {
+			default:
 				invalid = append(invalid, "unexpected package event")
 			}
 			continue

@@ -82,8 +82,11 @@ func (a *AccessUnitAssembler) Push(pkt *pionrtp.Packet) ([]*avframe.AVFrame, err
 	if a.haveDiscarded && pkt.Timestamp == a.discardedTimestamp && pkt.SSRC == a.discardedSSRC && pkt.PayloadType == a.discardedPayloadType {
 		return nil, fmt.Errorf("RTP access unit was discarded")
 	}
-	forwardTimestamp := sameSource && int32(pkt.Timestamp-a.timestamp) > 0
-	sequenceRestart := sameSource && int16(pkt.SequenceNumber-a.sequence) <= 0
+	// RTP counters wrap; deltas in the lower half of their range move forward.
+	timestampDelta := pkt.Timestamp - a.timestamp
+	sequenceDelta := pkt.SequenceNumber - a.sequence
+	forwardTimestamp := sameSource && timestampDelta != 0 && timestampDelta < 1<<31
+	sequenceRestart := sameSource && (sequenceDelta == 0 || sequenceDelta >= 1<<15)
 	if sequenceRestart && !forwardTimestamp {
 		if sameUnit {
 			a.Discard()

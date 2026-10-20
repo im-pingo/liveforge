@@ -17,11 +17,11 @@ func TestIncompleteRTSPControlBodyReleasesConnection(t *testing.T) {
 	}
 	defer conn.Close()
 	waitForRTSPConnections(t, server, 1)
-	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		t.Fatal(err)
+	if deadlineErr := conn.SetDeadline(time.Now().Add(15 * time.Second)); deadlineErr != nil {
+		t.Fatal(deadlineErr)
 	}
-	if _, err := io.WriteString(conn, "ANNOUNCE rtsp://host/live/stalled RTSP/1.0\r\nContent-Length: 10\r\n\r\nx"); err != nil {
-		t.Fatal(err)
+	if _, writeErr := io.WriteString(conn, "ANNOUNCE rtsp://host/live/stalled RTSP/1.0\r\nContent-Length: 10\r\n\r\nx"); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	var b [1]byte
 	_, err = conn.Read(b[:])

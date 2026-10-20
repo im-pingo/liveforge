@@ -68,7 +68,7 @@ func (s *gbLabSession) preparePublishSource(parent context.Context) (*gbLabPubli
 	}
 	parameters, err := gbLabSourceParameters(snapshot.VideoSequenceHeader.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("%w: source H.264 header: %v", ErrLabInvalidRequest, err)
+		return nil, fmt.Errorf("%w: source H.264 header: %w", ErrLabInvalidRequest, err)
 	}
 	release, err := stream.AddSubscriberForGeneration("gb28181", snapshot.Generation)
 	if err != nil {
@@ -224,7 +224,7 @@ func gbLabSourceAnnexB(payload []byte) ([]byte, error) {
 		if size == 0 || size > uint64(len(remaining)) {
 			return nil, errors.New("invalid source H.264 AVCC frame")
 		}
-		remaining = remaining[int(size):]
+		remaining = remaining[size:]
 	}
 	if len(payload) == 0 || len(remaining) != 0 {
 		return nil, errors.New("invalid source H.264 AVCC frame")

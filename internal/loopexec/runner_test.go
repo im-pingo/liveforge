@@ -50,8 +50,8 @@ func TestRunnerUsesRealGoEventsAndKeepsEveryAttempt(t *testing.T) {
 				t.Fatal(err)
 			}
 			var saved Report
-			if err := json.Unmarshal(data, &saved); err != nil {
-				t.Fatal(err)
+			if decodeErr := json.Unmarshal(data, &saved); decodeErr != nil {
+				t.Fatal(decodeErr)
 			}
 			if saved.Status != report.Status || saved.After.Digest == "" {
 				t.Fatal("incomplete persisted evidence")
@@ -144,7 +144,7 @@ func TestRunnerKeepsDeadlineStatusDuringRepositoryDiscovery(t *testing.T) {
 	root := fixtureRepo(t)
 	bin := t.TempDir()
 	// A slow Git probe deterministically expires after setup begins.
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexec sleep 10\n"), 0700); err != nil { // #nosec G306 -- This private Git fixture must be executable to exercise the discovery deadline.
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

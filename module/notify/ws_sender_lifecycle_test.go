@@ -24,8 +24,11 @@ func TestWSSenderCloseRejectsLaterHandshakes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, resp, err := websocket.Dial(ctx, "ws"+ts.URL[4:], nil)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if conn != nil {
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 	}
 	if err == nil {
 		t.Fatal("WebSocket handshake succeeded after sender Close")
@@ -52,11 +55,14 @@ func TestWSSenderCloseDuringUpgradeClosesUnregisteredConnection(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+ts.URL[4:], nil)
+	conn, resp, err := websocket.Dial(ctx, "ws"+ts.URL[4:], nil)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("dial in-progress upgrade: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	_, _, err = conn.Read(ctx)
 	if got := websocket.CloseStatus(err); got != websocket.StatusGoingAway {
@@ -97,11 +103,14 @@ func TestWSSenderCloseIsIdempotentWithConnectedClient(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+ts.URL[4:], nil)
+	conn, resp, err := websocket.Dial(ctx, "ws"+ts.URL[4:], nil)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	closed := conn.CloseRead(ctx)
 	// A pong proves the server entered its read loop after registration.
 	if err := conn.Ping(ctx); err != nil {

@@ -32,7 +32,7 @@ func newWHIPBoundedInputPeer(t *testing.T) (*core.Stream, *webrtc.TrackLocalStat
 	}
 	go func() {
 		for {
-			if _, _, err := sender.ReadRTCP(); err != nil {
+			if _, _, readErr := sender.ReadRTCP(); readErr != nil {
 				return
 			}
 		}
@@ -83,7 +83,8 @@ func TestWHIPVideoReceiveDiscardsDamagedAccessUnits(t *testing.T) {
 			stream, track := newWHIPBoundedInputPeer(t)
 			reader := stream.RingBuffer().NewReaderAt(0)
 			t.Cleanup(reader.Close)
-			packets := append(tc.packets, &rtpv1.Packet{Header: rtpv1.Header{SequenceNumber: uint16(len(tc.packets) + 1), Timestamp: 200, Marker: true}, Payload: []byte{0x65, 0xcc}})
+			nextSequence := tc.packets[len(tc.packets)-1].SequenceNumber + 1
+			packets := append(tc.packets, &rtpv1.Packet{Header: rtpv1.Header{SequenceNumber: nextSequence, Timestamp: 200, Marker: true}, Payload: []byte{0x65, 0xcc}})
 			for _, packet := range packets {
 				packet.Version = 2
 				if err := track.WriteRTP(packet); err != nil {

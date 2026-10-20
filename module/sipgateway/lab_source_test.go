@@ -75,7 +75,7 @@ func TestSIPLabPublishSourceContentTraversesRTPAndStopReleasesSource(t *testing.
 			defer cancel()
 			var gotVideo, gotHeader bool
 			var audioDTS []int64
-			for !(gotVideo && gotHeader && len(audioDTS) == 2) {
+			for !gotVideo || !gotHeader || len(audioDTS) != 2 {
 				frame, ok := reader.ReadContext(ctx)
 				if !ok {
 					t.Fatalf("actual source content missing: video=%v header=%v audio timestamps=%v", gotVideo, gotHeader, audioDTS)

@@ -75,7 +75,7 @@ func CaptureSnapshot(ctx context.Context, root string, inputs []string) (Snapsho
 }
 
 func gitOutput(ctx context.Context, root string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...) // #nosec G204 -- Internal callers supply fixed Git operations; paths are trusted local task inputs passed as argv.
 	data, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
@@ -102,9 +102,9 @@ func hashFile(ctx context.Context, h hash.Hash, path string, required bool) erro
 	}
 	hashField(h, info.Mode().String())
 	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(path)
-		if err != nil {
-			return err
+		target, linkErr := os.Readlink(path)
+		if linkErr != nil {
+			return linkErr
 		}
 		hashField(h, target)
 		if !required {

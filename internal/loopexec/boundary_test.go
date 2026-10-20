@@ -27,7 +27,7 @@ func fixtureRepo(t *testing.T) string {
 	gitCmd(t, root, "commit", "-qm", "fixture")
 	return root
 }
-func gitCmd(t *testing.T, root string, args ...string) string {
+func gitCmd(t *testing.T, root string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = root
@@ -35,7 +35,6 @@ func gitCmd(t *testing.T, root string, args ...string) string {
 	if err != nil {
 		t.Fatalf("git %v: %s %v", args, out, err)
 	}
-	return strings.TrimSpace(string(out))
 }
 func writeFixture(t *testing.T, root, path, content string) {
 	t.Helper()
@@ -151,7 +150,7 @@ func TestProcessHelper(t *testing.T) {
 		}
 		for _, entry := range entries {
 			if entry.IsDir() {
-				_ = os.WriteFile(filepath.Join(path, entry.Name(), "later.stdout.log"), []byte("collision"), 0600)
+				_ = os.WriteFile(filepath.Join(path, entry.Name(), "later.stdout.log"), []byte("collision"), 0600) // #nosec G703 -- The parent test supplies its temporary report directory through helperArgs.
 			}
 		}
 		os.Exit(0)
@@ -159,14 +158,18 @@ func TestProcessHelper(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, "captured output")
 		os.Exit(7)
 	case "mark":
-		_ = os.WriteFile(path, []byte("ran"), 0600)
+		_ = os.WriteFile(path, []byte("ran"), 0600) // #nosec G703 -- The parent test supplies its temporary fixture path through helperArgs.
 		os.Exit(0)
 	case "delayed":
 		time.Sleep(600 * time.Millisecond)
-		_ = os.WriteFile(path, []byte("orphan survived"), 0600)
+		_ = os.WriteFile(path, []byte("orphan survived"), 0600) // #nosec G703 -- The parent test supplies its temporary fixture path through helperArgs.
 		os.Exit(0)
 	case "tree":
-		cmd := exec.Command(os.Args[0], "-test.run=^TestProcessHelper$", "--", "--lf-loop-helper", "delayed", path)
+		executable, err := os.Executable()
+		if err != nil {
+			os.Exit(9)
+		}
+		cmd := exec.Command(executable, "-test.run=^TestProcessHelper$", "--", "--lf-loop-helper", "delayed", path) // #nosec G204 G702 -- Re-execute the current test binary resolved by os.Executable with a parent-owned temporary fixture path.
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {

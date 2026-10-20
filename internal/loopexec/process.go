@@ -70,12 +70,12 @@ func runProcess(ctx context.Context, root string, argv, env []string, stdout, st
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.WaitDelay = time.Second
-	if err := prepareProcess(cmd); err != nil {
-		result.Err = err
+	if prepareErr := prepareProcess(cmd); prepareErr != nil {
+		result.Err = prepareErr
 		return result
 	}
-	if err := cmd.Start(); err != nil {
-		result.Err = err
+	if startErr := cmd.Start(); startErr != nil {
+		result.Err = startErr
 		return result
 	}
 	result.Started = true

@@ -245,7 +245,7 @@ func (m *Module) handleConn(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		if err := conn.SetReadDeadline(time.Now().Add(rtspPacketReadTimeout)); err != nil {
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(rtspPacketReadTimeout)); deadlineErr != nil {
 			return
 		}
 		// Check if interleaved data ($ prefix) when in Recording state

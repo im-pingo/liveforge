@@ -231,9 +231,10 @@ func TestH264SingleNALByteLimit(t *testing.T) {
 func TestH264STAPAOutputByteLimit(t *testing.T) {
 	// 255 NALs with their AVCC prefixes take 255*65536 bytes. The final NAL
 	// brings the output to 16 MiB + 3 bytes, just below the ceiling.
-	payload := []byte{0x78}
 	nal := bytes.Repeat([]byte{0xaa}, 65535)
 	nal[0] = 0x65
+	payload := make([]byte, 1, 1+255*(2+65532)+2+len(nal)+3)
+	payload[0] = 0x78
 	for range 255 {
 		payload = append(payload, 0xff, 0xfc)
 		payload = append(payload, nal[:65532]...)

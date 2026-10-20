@@ -36,7 +36,7 @@ func gbCameraFixture(t *testing.T, h realGBLabHarness, ready bool) (*core.Stream
 	t.Helper()
 	// The source IDR has distinct user-data SEI and audio bytes absent from the
 	// lab generator; the browser-style frame carries no inline parameter sets.
-	marker := []byte("camera-source-unique-content")
+	const marker = "camera-source-unique-content"
 	sei := append([]byte{0, 0, 0, 1, 6, 5, byte(16 + len(marker))}, bytes.Repeat([]byte{0x43}, 16)...)
 	sei = append(sei, marker...)
 	sei = append(sei, 0x80)
@@ -76,9 +76,8 @@ func TestGBLabPublishSourcePreservesMediaThroughRealIngress(t *testing.T) {
 		t.Fatal(err)
 	}
 	lab := h.module.labs.session(snapshot.ID)
-	addresses := []string{lab.peerAddress()}
 	rtp, rtcp := lab.mediaAddresses()
-	addresses = append(addresses, rtp, rtcp)
+	addresses := []string{lab.peerAddress(), rtp, rtcp}
 	encoded, _ := json.Marshal(snapshot)
 	if !bytes.Contains(encoded, []byte(`"source_stream_key":"browser/camera"`)) {
 		t.Errorf("snapshot omitted source identity: %s", encoded)
@@ -92,7 +91,7 @@ func TestGBLabPublishSourcePreservesMediaThroughRealIngress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var sawVideo, sawAudio, sawHeader bool
-	for !(sawVideo && sawAudio && sawHeader) {
+	for !sawVideo || !sawAudio || !sawHeader {
 		frame, ok := reader.ReadContext(ctx)
 		if !ok {
 			t.Fatalf("source content not received through PS/RTP: video=%v audio=%v header=%v", sawVideo, sawAudio, sawHeader)

@@ -130,7 +130,7 @@ func validateH264NAL(nal []byte) error {
 
 func h264NALToAVCC(nal []byte) []byte {
 	data := make([]byte, 4+len(nal))
-	binary.BigEndian.PutUint32(data[:4], uint32(len(nal)))
+	binary.BigEndian.PutUint32(data[:4], uint32(len(nal))) // #nosec G115 -- Every caller first validates the NAL's 16 MiB limit with validateH264NAL.
 	copy(data[4:], nal)
 	return data
 }
@@ -162,9 +162,10 @@ func parseH264STAPA(payload []byte) ([]byte, error) {
 	}
 	data := make([]byte, size)
 	for offset, out := 1, 0; offset < len(payload); {
-		nalLen := int(binary.BigEndian.Uint16(payload[offset : offset+2]))
+		nalSize := binary.BigEndian.Uint16(payload[offset : offset+2])
+		nalLen := int(nalSize)
 		offset += 2
-		binary.BigEndian.PutUint32(data[out:out+4], uint32(nalLen))
+		binary.BigEndian.PutUint32(data[out:out+4], uint32(nalSize))
 		copy(data[out+4:], payload[offset:offset+nalLen])
 		out += 4 + nalLen
 		offset += nalLen

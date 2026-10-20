@@ -278,7 +278,7 @@ func cameraEventually(t *testing.T, browser context.Context, description string,
 	t.Fatalf("timed out waiting for %s; Console status: %s", description, status)
 }
 
-func cameraGet(t *testing.T, srv *testutil.TestServer, path string, result any) int {
+func cameraGet(t *testing.T, srv *testutil.TestServer, path string, result any) {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
 	response, err := client.Get("http://" + srv.APIAddr() + path)
@@ -288,14 +288,13 @@ func cameraGet(t *testing.T, srv *testutil.TestServer, path string, result any) 
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		if response.StatusCode == http.StatusNotFound {
-			return response.StatusCode
+			return
 		}
 		t.Fatalf("read %s: HTTP %d", path, response.StatusCode)
 	}
 	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
 		t.Fatalf("decode %s: %v", path, err)
 	}
-	return response.StatusCode
 }
 
 func cameraStream(t *testing.T, srv *testutil.TestServer, key string) api.StreamInfo {

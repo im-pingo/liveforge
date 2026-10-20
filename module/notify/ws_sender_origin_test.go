@@ -39,8 +39,11 @@ func TestWSSenderOriginPolicy(t *testing.T) {
 				header.Set("Origin", origin)
 			}
 			conn, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http"), &websocket.DialOptions{HTTPHeader: header})
+			if resp != nil && resp.Body != nil {
+				defer resp.Body.Close()
+			}
 			if conn != nil {
-				defer conn.CloseNow()
+				defer func() { _ = conn.CloseNow() }()
 			}
 			if !tc.allow {
 				if err == nil {

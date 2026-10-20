@@ -64,7 +64,7 @@ func prepareOutput(ctx context.Context, root, common, output, id string) (string
 			return "", err
 		}
 		probe := exec.CommandContext(ctx, "git", "-C", root, "check-ignore", "-q", "--", rel+string(filepath.Separator))
-		if err := probe.Run(); err != nil {
+		if probeErr := probe.Run(); probeErr != nil {
 			return "", errors.New("report directory inside the repository must be git-ignored; use .lf-loop/runs or an external path")
 		}
 		tracked, err := gitOutput(ctx, root, "ls-files", "-z", "--", rel)
