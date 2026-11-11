@@ -30,6 +30,10 @@ A missing Marker, timestamp/source/payload-type discontinuity, sequence gap, mal
 
 WHIP keeps its shared media clock, publisher ownership checks, Simulcast processing epochs and audio path. Resuming a paused video layer starts with fresh assembly state and retains the existing header/keyframe gate.
 
+## GB28181 MPEG-PS input
+
+The Program Stream Map parser checks each nested program-info length, elementary-stream map length, and entry/descriptor length against the map's declared boundary before its mandatory four-byte CRC trailer. The declared elementary-stream map must fill the space up to that trailer exactly; undeclared bytes are rejected. A malformed map returns a demux error without changing the detected audio or video codec, even if another packet follows it in the same buffer. This is a framing check; the parser reserves but does not validate the CRC value or every MPEG-PS syntax rule. A GB28181 publisher logs the demux error and resets the accumulated input at that RTP marker; frames parsed before the malformed map may still be emitted.
+
 ## Notification WebSockets
 
 When enabled, the default `/api/v1/events` route uses management authentication and `server:read`, including when a custom path is configured. Browser Origin must match the request host and port; the library does not compare the scheme. Native clients may omit Origin. Cross-host/port or opaque Origin handshakes receive 403 before client registration.
@@ -39,7 +43,7 @@ Sender shutdown permanently closes admission. A later handshake receives 503; an
 ## Verification
 
 ```sh
-CGO_ENABLED=0 go test ./module/rtsp ./module/cluster ./module/notify ./module/webrtc ./pkg/rtp -count=1
+CGO_ENABLED=0 go test ./module/rtsp ./module/cluster ./module/notify ./module/webrtc ./pkg/rtp ./pkg/muxer/ps -count=1
 CGO_ENABLED=1 go test -tags audiocodec -race ./pkg/rtp -count=1
 tools/check-agent-docs_test.sh
 ```

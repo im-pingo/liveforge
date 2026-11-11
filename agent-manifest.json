@@ -185,6 +185,7 @@
   },
   "security": {
     "rtsp_input": {"line_bytes": 8192, "header_section_bytes": 65536, "body_bytes": 1048576, "framing": "Server requests and cluster RTSP responses reject malformed headers, invalid or duplicate Content-Length and Transfer-Encoding before body allocation or reads; a malformed server request closes that connection", "server_read_budget": "60 seconds for the next byte, then 10 seconds to complete a control or interleaved packet; read deadlines clear before media handlers"},
+    "gb28181_ps_input": "Program Stream Map nested lengths and elementary stream entries must exactly fill the declared map before its four-byte CRC trailer; malformed maps return an error without changing detected codecs. The CRC value and complete MPEG-PS syntax are not validated.",
     "notification_websocket": "Management authentication and server:read apply; Origin must match request host and port when present (scheme is not compared); origin-less native clients remain supported. Sender Close permanently stops admission: late handshakes return503 and already-upgrading clients close before registration.",
     "sample_config_scope": "local_development_only",
     "default_auth_enabled": false,

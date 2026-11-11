@@ -123,33 +123,47 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 		return 0, fmt.Errorf("ps: PSM length overflow")
 	}
 
-	if psmLen < 6 {
-		return total, nil
+	// The final four bytes are the CRC trailer. Keep nested fields out of it,
+	// even though checksum validation is outside this framing parser.
+	if psmLen < 10 {
+		return 0, fmt.Errorf("ps: PSM fields are truncated")
 	}
+	contentEnd := total - 4
 
 	// Skip current_next_indicator(1) + reserved(1) + program_stream_info_length(2)
 	offset := 8
-	if offset+2 > len(data) {
-		return total, nil
-	}
 	progInfoLen := int(binary.BigEndian.Uint16(data[offset:]))
-	offset += 2 + progInfoLen
+	offset += 2
+	if progInfoLen > contentEnd-offset {
+		return 0, fmt.Errorf("ps: PSM program info exceeds map")
+	}
+	offset += progInfoLen
 
-	if offset+2 > len(data) {
-		return total, nil
+	if contentEnd-offset < 2 {
+		return 0, fmt.Errorf("ps: PSM elementary stream length is truncated")
 	}
 	esMapLen := int(binary.BigEndian.Uint16(data[offset:]))
 	offset += 2
 
-	end := offset + esMapLen
-	if end > total {
-		end = total
+	if esMapLen > contentEnd-offset {
+		return 0, fmt.Errorf("ps: PSM elementary stream map exceeds map")
 	}
+	end := offset + esMapLen
+	if end != contentEnd {
+		return 0, fmt.Errorf("ps: PSM elementary stream map leaves undeclared bytes")
+	}
+	videoCodec, audioCodec := d.videoCodec, d.audioCodec
 
-	for offset+4 <= end {
+	for offset < end {
+		if end-offset < 4 {
+			return 0, fmt.Errorf("ps: PSM elementary stream entry is truncated")
+		}
 		streamType := data[offset]
 		streamID := data[offset+1]
 		esInfoLen := int(binary.BigEndian.Uint16(data[offset+2:]))
+		if esInfoLen > end-offset-4 {
+			return 0, fmt.Errorf("ps: PSM elementary stream info exceeds map")
+		}
 		offset += 4 + esInfoLen
 
 		codec := CodecFromStreamType(streamType)
@@ -157,11 +171,12 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 			continue
 		}
 		if codec.IsVideo() && streamID >= 0xE0 && streamID <= 0xEF {
-			d.videoCodec = codec
+			videoCodec = codec
 		} else if codec.IsAudio() {
-			d.audioCodec = codec
+			audioCodec = codec
 		}
 	}
+	d.videoCodec, d.audioCodec = videoCodec, audioCodec
 
 	return total, nil
 }
@@ -427,7 +442,6 @@ func isVideoKeyframe(codec avframe.CodecType, data []byte) bool {
 	return false
 }
 
-
 // parsePESTimestamp parses a 5-byte PES timestamp field.
 func parsePESTimestamp(data []byte) int64 {
 	if len(data) < 5 {
@@ -443,4 +457,3 @@ func parsePESTimestamp(data []byte) int64 {
 func isPESStartCode(code uint32) bool {
 	return (code >> 8) == 0x000001
 }
-
