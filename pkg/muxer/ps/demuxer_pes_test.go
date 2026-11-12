@@ -209,3 +209,19 @@ func TestDemuxPESKeepsEarlierFrameOnLaterError(t *testing.T) {
 		t.Fatalf("Feed lost or mixed the earlier PES media: %+v", frames)
 	}
 }
+
+func TestDemuxIgnoresUnknownStartCodeAfterPES(t *testing.T) {
+	pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		buildPES(0xc0, []byte{0x31}, 0, 0)...)
+	// 0xB8 is not a PES stream ID. A trailing unknown start code must not be
+	// parsed as a truncated PES packet.
+	pack = append(pack, 0, 0, 1, 0xb8)
+
+	frames, err := NewDemuxer().Feed(pack)
+	if err != nil {
+		t.Fatalf("Feed rejected a pack with a trailing unknown start code: %v", err)
+	}
+	if len(frames) != 1 || !bytes.Equal(frames[0].Payload, []byte{0x31}) {
+		t.Fatalf("Feed did not preserve the preceding PES media: %+v", frames)
+	}
+}

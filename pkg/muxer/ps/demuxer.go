@@ -551,7 +551,9 @@ func validPESTimestamp(data []byte, prefix byte) bool {
 		data[0]&0x01 != 0 && data[2]&0x01 != 0 && data[4]&0x01 != 0
 }
 
-// isPESStartCode checks if a 4-byte value is a valid PES start code (00 00 01 xx).
+// isPESStartCode checks if a 4-byte value is a PES start code with a valid
+// stream ID. Other MPEG-PS start codes are handled separately by Feed.
 func isPESStartCode(code uint32) bool {
-	return (code >> 8) == 0x000001
+	streamID := byte(code)
+	return (code>>8) == 0x000001 && streamID >= 0xBD && streamID <= 0xEF
 }
