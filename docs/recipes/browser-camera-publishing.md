@@ -75,3 +75,7 @@ unavailable. Browser tests use fake camera/microphone devices through the same
 capture API: they verify source and target codecs, decoded target dimensions,
 advancing audio/video, stop/restart and resource release. They do not constitute
 verification of a particular physical camera or microphone.
+
+The integration test bounds target WHEP answer application and browser decoding
+in separate waits, and reports the player's current stage on error or
+timeout. This keeps slow signaling from consuming the decoding window.
