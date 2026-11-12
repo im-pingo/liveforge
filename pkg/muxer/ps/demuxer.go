@@ -126,8 +126,8 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 		return 0, fmt.Errorf("ps: PSM length overflow")
 	}
 
-	// The final four bytes are the CRC trailer. Keep nested fields out of it,
-	// even though checksum validation is outside this framing parser.
+	// The final four bytes are the CRC trailer. Keep nested fields out of it
+	// before validating the checksum over the preceding map bytes.
 	if psmLen < 10 {
 		return 0, fmt.Errorf("ps: PSM fields are truncated")
 	}
@@ -179,9 +179,28 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 			audioCodec = codec
 		}
 	}
+	if got, want := binary.BigEndian.Uint32(data[contentEnd:total]), psmCRC32(data[:contentEnd]); got != want {
+		return 0, fmt.Errorf("ps: PSM CRC is invalid")
+	}
 	d.videoCodec, d.audioCodec = videoCodec, audioCodec
 
 	return total, nil
+}
+
+// psmCRC32 computes the MPEG-2 CRC used by a Program Stream Map.
+func psmCRC32(data []byte) uint32 {
+	crc := uint32(0xffffffff)
+	for _, b := range data {
+		crc ^= uint32(b) << 24
+		for bit := 0; bit < 8; bit++ {
+			if crc&0x80000000 != 0 {
+				crc = (crc << 1) ^ 0x04c11db7
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc
 }
 
 // parsePES parses a PES packet and returns frames and bytes consumed.

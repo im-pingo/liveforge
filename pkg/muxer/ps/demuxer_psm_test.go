@@ -79,12 +79,13 @@ func TestDemuxPSMRejectsLengthsOutsideDeclaredMap(t *testing.T) {
 }
 
 func TestDemuxPSMDetectsCodecWithinDeclaredMap(t *testing.T) {
+	// This wire fixture has MPEG-2 CRC 0xf4dcbd45 over the preceding bytes.
 	data := []byte{
 		0, 0, 1, 0xbc, 0, 14,
-		0xe0, 0xff, 0, 0, // no program info
-		0, 4, // one elementary stream entry
+		0xe0, 0xff, 0, 0,
+		0, 4,
 		0x1b, 0xe0, 0, 0, // H.264 video with no descriptors
-		0, 0, 0, 0, // CRC
+		0xf4, 0xdc, 0xbd, 0x45,
 	}
 	d := NewDemuxer()
 	if _, err := d.Feed(data); err != nil {
@@ -92,5 +93,59 @@ func TestDemuxPSMDetectsCodecWithinDeclaredMap(t *testing.T) {
 	}
 	if got := d.VideoCodec(); got != avframe.CodecH264 {
 		t.Fatalf("VideoCodec = %v, want H.264", got)
+	}
+}
+
+func TestDemuxPSMRejectsInvalidCRCWithoutCommittingCodecs(t *testing.T) {
+	seed := []byte{
+		0, 0, 1, 0xbc, 0, 18,
+		0xe0, 0xff, 0, 0,
+		0, 8,
+		0x24, 0xe0, 0, 0, // H.265 video with no descriptors
+		0x90, 0xc0, 0, 0, // G.711A audio with no descriptors
+		0x5e, 0x5f, 0x92, 0xc2,
+	}
+	d := NewDemuxer()
+	if _, err := d.Feed(seed); err != nil {
+		t.Fatalf("Feed seed map: %v", err)
+	}
+
+	valid := []byte{
+		0, 0, 1, 0xbc, 0, 14,
+		0xe0, 0xff, 0, 0,
+		0, 4,
+		0x1b, 0xe0, 0, 0, // H.264 video with no descriptors
+		0xf4, 0xdc, 0xbd, 0x45,
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func([]byte)
+	}{
+		{
+			name: "map payload",
+			mutate: func(data []byte) {
+				data[12] ^= 0x01
+			},
+		},
+		{
+			name: "CRC trailer",
+			mutate: func(data []byte) {
+				data[len(data)-1] ^= 0x01
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := append([]byte(nil), valid...)
+			tt.mutate(data)
+			if _, err := d.Feed(data); err == nil {
+				t.Fatal("Feed accepted a program stream map with an invalid CRC")
+			}
+			if got := d.VideoCodec(); got != avframe.CodecH265 {
+				t.Fatalf("VideoCodec = %v after rejected map, want H.265", got)
+			}
+			if got := d.AudioCodec(); got != avframe.CodecG711A {
+				t.Fatalf("AudioCodec = %v after rejected map, want G.711A", got)
+			}
+		})
 	}
 }
