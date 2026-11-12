@@ -84,7 +84,7 @@ func TestDemuxAACHeaderOnlyFramesDoNotInitializeDecoder(t *testing.T) {
 	}
 }
 
-func TestDemuxAACReservedFrequencyIndexDoesNotInitializeDecoder(t *testing.T) {
+func TestDemuxAACInvalidHeaderFieldsDoNotInitializeDecoder(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		malformed []byte
@@ -96,6 +96,10 @@ func TestDemuxAACReservedFrequencyIndexDoesNotInitializeDecoder(t *testing.T) {
 		{
 			name:      "channel configuration zero",
 			malformed: []byte{0xff, 0xf1, 0x50, 0x00, 0x01, 0x00, 0x00, 0x55},
+		},
+		{
+			name:      "reserved layer",
+			malformed: []byte{0xff, 0xf7, 0x50, 0x80, 0x01, 0xe0, 0x00, 0xff, 0xf1, 0x50, 0x80, 0x01, 0x00, 0x00, 0x55},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

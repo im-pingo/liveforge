@@ -372,7 +372,7 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 	offset := 0
 
 	for offset+7 <= len(payload) {
-		// Verify ADTS sync word
+		// Verify ADTS sync word.
 		if payload[offset] != 0xFF || (payload[offset+1]&0xF0) != 0xF0 {
 			offset++
 			continue
@@ -388,6 +388,10 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 		}
 		if offset+frameLen > len(payload) {
 			break
+		}
+		if (payload[offset+1] & 0x06) != 0 { // layer is reserved and must be zero
+			offset += frameLen
+			continue
 		}
 		headerLen := 7
 		if (payload[offset+1] & 0x01) == 0 { // protection_absent=0 means CRC is present
