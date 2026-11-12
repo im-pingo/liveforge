@@ -44,6 +44,83 @@ func TestDemuxPESRejectsIncompleteDeclaredFields(t *testing.T) {
 	}
 }
 
+func TestDemuxPESRejectsInvalidTimestampEncoding(t *testing.T) {
+	tests := []struct {
+		name string
+		pes  []byte
+	}{
+		{
+			name: "first PTS marker bit is clear",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1000)
+				pes[9] &^= 0x01
+				return pes
+			}(),
+		},
+		{
+			name: "second PTS marker bit is clear",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1000)
+				pes[11] &^= 0x01
+				return pes
+			}(),
+		},
+		{
+			name: "third PTS marker bit is clear",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1000)
+				pes[13] &^= 0x01
+				return pes
+			}(),
+		},
+		{
+			name: "PTS only prefix is wrong",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1000)
+				pes[9] = (pes[9] & 0x0f) | 0x30
+				return pes
+			}(),
+		},
+		{
+			name: "DTS prefix is wrong",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1100)
+				pes[14] = (pes[14] & 0x0f) | 0x20
+				return pes
+			}(),
+		},
+		{
+			name: "DTS marker bit is clear",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1100)
+				pes[18] &^= 0x01
+				return pes
+			}(),
+		},
+		{
+			name: "PTS DTS flags use reserved value",
+			pes: func() []byte {
+				pes := buildPES(0xc0, []byte{0x11}, 1000, 1000)
+				pes[7] = (pes[7] & 0x3f) | 0x40
+				return pes
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, tt.pes...)
+			frames, err := NewDemuxer().Feed(pack)
+			if err == nil {
+				t.Fatalf("Feed accepted PES with malformed timestamp encoding and returned %d frames", len(frames))
+			}
+			if len(frames) != 0 {
+				t.Fatalf("Feed returned %d frames from PES with malformed timestamp encoding", len(frames))
+			}
+		})
+	}
+}
+
 func TestDemuxPESPreservesDistinctTimestamps(t *testing.T) {
 	pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 		buildPES(0xc0, []byte{0x11}, 1000, 1100)...)

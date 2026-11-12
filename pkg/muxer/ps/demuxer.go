@@ -218,13 +218,26 @@ func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
 	if ptsDtsFlags == 2 && pesHeaderLen < 5 || ptsDtsFlags == 3 && pesHeaderLen < 10 {
 		return nil, 0, fmt.Errorf("ps: PES timestamp fields exceed optional header")
 	}
+	if ptsDtsFlags == 1 {
+		return nil, 0, fmt.Errorf("ps: PES has reserved PTS/DTS flags")
+	}
 
 	var pts, dts int64
 	if ptsDtsFlags >= 2 {
+		ptsPrefix := byte(0x2)
+		if ptsDtsFlags == 3 {
+			ptsPrefix = 0x3
+		}
+		if !validPESTimestamp(data[9:14], ptsPrefix) {
+			return nil, 0, fmt.Errorf("ps: PES PTS encoding is invalid")
+		}
 		pts = parsePESTimestamp(data[9:14])
 		dts = pts
 	}
 	if ptsDtsFlags == 3 {
+		if !validPESTimestamp(data[14:19], 0x1) {
+			return nil, 0, fmt.Errorf("ps: PES DTS encoding is invalid")
+		}
 		dts = parsePESTimestamp(data[14:19])
 	}
 	if pesLen == 0 && streamID >= 0xE0 && streamID <= 0xEF {
@@ -476,6 +489,12 @@ func parsePESTimestamp(data []byte) int64 {
 	ts |= int64(binary.BigEndian.Uint16(data[1:3])>>1) << 15
 	ts |= int64(binary.BigEndian.Uint16(data[3:5]) >> 1)
 	return ts
+}
+
+// validPESTimestamp validates the prefix and marker bits in a five-byte PES timestamp.
+func validPESTimestamp(data []byte, prefix byte) bool {
+	return len(data) == 5 && data[0]>>4 == prefix &&
+		data[0]&0x01 != 0 && data[2]&0x01 != 0 && data[4]&0x01 != 0
 }
 
 // isPESStartCode checks if a 4-byte value is a valid PES start code (00 00 01 xx).
