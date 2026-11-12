@@ -20,6 +20,9 @@ func TestDemuxAACTruncatedCRCHeaderDoesNotConsumeSequenceHeader(t *testing.T) {
 	if len(frames) != 0 {
 		t.Fatalf("malformed ADTS emitted %d frames, want none", len(frames))
 	}
+	if demuxer.AudioCodec() != 0 {
+		t.Fatalf("truncated ADTS header selected codec %v, want unknown", demuxer.AudioCodec())
+	}
 
 	valid := []byte{0xff, 0xf0, 0x50, 0x80, 0x01, 0x40, 0x00, 0x00, 0x00, 0x55}
 	frames, err = demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, valid, 20, 20)...))
@@ -31,6 +34,28 @@ func TestDemuxAACTruncatedCRCHeaderDoesNotConsumeSequenceHeader(t *testing.T) {
 		frames[1].FrameType != avframe.FrameTypeKeyframe ||
 		!bytes.Equal(frames[1].Payload, []byte{0x55}) {
 		t.Fatalf("valid ADTS did not emit AAC config and media: %+v", frames)
+	}
+}
+
+func TestDemuxAACShortSyncCandidateDoesNotSelectG711AFallback(t *testing.T) {
+	demuxer := NewDemuxer()
+	packHeader := []byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	frames, err := demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, []byte{0xff, 0xf1}, 0, 0)...))
+	if err != nil {
+		t.Fatalf("Feed short ADTS sync: %v", err)
+	}
+	if len(frames) != 0 || demuxer.AudioCodec() != 0 {
+		t.Fatalf("short ADTS sync did not leave codec unknown: frames=%+v codec=%v", frames, demuxer.AudioCodec())
+	}
+
+	valid := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x00, 0x00, 0x55}
+	frames, err = demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, valid, 20, 20)...))
+	if err != nil {
+		t.Fatalf("Feed valid ADTS: %v", err)
+	}
+	if len(frames) != 2 || frames[0].FrameType != avframe.FrameTypeSequenceHeader ||
+		!bytes.Equal(frames[1].Payload, []byte{0x55}) {
+		t.Fatalf("valid ADTS did not initialize after short sync: %+v", frames)
 	}
 }
 
@@ -66,6 +91,27 @@ func TestDemuxAACTruncatedDeclaredFrameResyncsWithinPES(t *testing.T) {
 		!bytes.Equal(frames[0].Payload, []byte{0x12, 0x10}) ||
 		!bytes.Equal(frames[1].Payload, []byte{0x55}) {
 		t.Fatalf("valid ADTS after truncated frame was lost: %+v", frames)
+	}
+}
+
+func TestDemuxAACDetectsCompleteFrameAfterDamagedPayloadPrefix(t *testing.T) {
+	demuxer := NewDemuxer()
+	packHeader := []byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	// No Program Stream Map is present. The PES starts with damaged bytes, then
+	// contains a complete ADTS frame that must select AAC rather than G.711A.
+	payload := []byte{0x00, 0x7f, 0xff, 0xf1, 0x50, 0x80, 0x01, 0x00, 0x00, 0x55}
+	frames, err := demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, payload, 0, 0)...))
+	if err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	if demuxer.AudioCodec() != avframe.CodecAAC {
+		t.Fatalf("detected audio codec = %v, want AAC", demuxer.AudioCodec())
+	}
+	if len(frames) != 2 || frames[0].FrameType != avframe.FrameTypeSequenceHeader ||
+		!bytes.Equal(frames[0].Payload, []byte{0x12, 0x10}) ||
+		frames[1].FrameType != avframe.FrameTypeKeyframe ||
+		!bytes.Equal(frames[1].Payload, []byte{0x55}) {
+		t.Fatalf("AAC after damaged prefix was not emitted: %+v", frames)
 	}
 }
 
