@@ -397,17 +397,19 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 			offset += frameLen
 			continue
 		}
+		asc := adtsToAudioSpecificConfig(payload[offset:])
+		if asc == nil {
+			offset += frameLen
+			continue
+		}
 
 		// Emit AudioSpecificConfig sequence header on first AAC frame
 		if !d.audioSeqSent {
-			asc := adtsToAudioSpecificConfig(payload[offset:])
-			if asc != nil {
-				d.audioSeqSent = true
-				frames = append(frames, avframe.NewAVFrame(
-					avframe.MediaTypeAudio, avframe.CodecAAC,
-					avframe.FrameTypeSequenceHeader, dts, pts, asc,
-				))
-			}
+			d.audioSeqSent = true
+			frames = append(frames, avframe.NewAVFrame(
+				avframe.MediaTypeAudio, avframe.CodecAAC,
+				avframe.FrameTypeSequenceHeader, dts, pts, asc,
+			))
 		}
 
 		// Strip the complete ADTS header and emit raw AAC.
@@ -442,6 +444,9 @@ func adtsToAudioSpecificConfig(adts []byte) []byte {
 	objectType := ((adts[2] >> 6) & 0x03) + 1 // ADTS profile is objectType-1
 	freqIndex := (adts[2] >> 2) & 0x0F
 	channelConfig := ((adts[2] & 0x01) << 2) | ((adts[3] >> 6) & 0x03)
+	if freqIndex == 0x0F || channelConfig == 0 {
+		return nil
+	}
 
 	// AudioSpecificConfig: objectType(5) + freqIndex(4) + channelConfig(4) + 0(3)
 	asc := make([]byte, 2)

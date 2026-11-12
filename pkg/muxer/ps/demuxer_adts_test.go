@@ -83,3 +83,41 @@ func TestDemuxAACHeaderOnlyFramesDoNotInitializeDecoder(t *testing.T) {
 		})
 	}
 }
+
+func TestDemuxAACReservedFrequencyIndexDoesNotInitializeDecoder(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		malformed []byte
+	}{
+		{
+			name:      "reserved frequency index",
+			malformed: []byte{0xff, 0xf1, 0x7c, 0x80, 0x01, 0x00, 0x00, 0x55},
+		},
+		{
+			name:      "channel configuration zero",
+			malformed: []byte{0xff, 0xf1, 0x50, 0x00, 0x01, 0x00, 0x00, 0x55},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			demuxer := NewDemuxer()
+			packHeader := []byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+			frames, err := demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, tt.malformed, 0, 0)...))
+			if err != nil {
+				t.Fatalf("Feed malformed ADTS: %v", err)
+			}
+			if len(frames) != 0 {
+				t.Fatalf("invalid ADTS configuration emitted %d frames, want none", len(frames))
+			}
+
+			valid := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x00, 0x00, 0x66}
+			frames, err = demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, valid, 20, 20)...))
+			if err != nil {
+				t.Fatalf("Feed valid ADTS: %v", err)
+			}
+			if len(frames) != 2 || frames[0].FrameType != avframe.FrameTypeSequenceHeader ||
+				!bytes.Equal(frames[1].Payload, []byte{0x66}) {
+				t.Fatalf("valid ADTS did not initialize after invalid configuration: %+v", frames)
+			}
+		})
+	}
+}
