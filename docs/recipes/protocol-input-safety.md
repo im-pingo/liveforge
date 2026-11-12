@@ -36,6 +36,8 @@ The Program Stream Map parser checks each nested program-info length, elementary
 
 The PES parser rejects a bounded packet when its declared length exceeds the received bytes. It also requires the optional header to fit inside that packet and any signaled PTS/DTS fields to fit inside the declared optional header. Malformed PES returns a demux error without emitting media from that packet; earlier complete frames in the same buffer may still be returned. Zero-length PES remains unbounded and consumes the rest of the supplied pack, as before.
 
+For ADTS-wrapped AAC, a frame must contain media after its 7-byte header or its 9-byte CRC-protected header. A shorter or header-only frame emits neither an AAC sequence header nor media, so the next valid frame can still initialize the decoder. A synced frame declaring fewer than seven bytes resumes scanning for a later frame in the same PES. This validates the declared frame and header lengths, not the AAC bitstream or CRC value.
+
 ## Notification WebSockets
 
 When enabled, the default `/api/v1/events` route uses management authentication and `server:read`, including when a custom path is configured. Browser Origin must match the request host and port; the library does not compare the scheme. Native clients may omit Origin. Cross-host/port or opaque Origin handshakes receive 403 before client registration.

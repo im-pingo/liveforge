@@ -337,8 +337,20 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 		frameLen := (int(payload[offset+3]&0x03) << 11) |
 			(int(payload[offset+4]) << 3) |
 			(int(payload[offset+5]) >> 5)
-		if frameLen < 7 || offset+frameLen > len(payload) {
+		if frameLen < 7 {
+			offset++
+			continue
+		}
+		if offset+frameLen > len(payload) {
 			break
+		}
+		headerLen := 7
+		if (payload[offset+1] & 0x01) == 0 { // protection_absent=0 means CRC is present
+			headerLen = 9
+		}
+		if frameLen <= headerLen {
+			offset += frameLen
+			continue
 		}
 
 		// Emit AudioSpecificConfig sequence header on first AAC frame
@@ -353,18 +365,12 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 			}
 		}
 
-		// Strip ADTS header (7 or 9 bytes) and emit raw AAC
-		headerLen := 7
-		if (payload[offset+1] & 0x01) == 0 { // protection_absent=0 → CRC present
-			headerLen = 9
-		}
-		if headerLen < frameLen {
-			raw := payload[offset+headerLen : offset+frameLen]
-			frames = append(frames, avframe.NewAVFrame(
-				avframe.MediaTypeAudio, avframe.CodecAAC,
-				avframe.FrameTypeKeyframe, dts, pts, raw,
-			))
-		}
+		// Strip the complete ADTS header and emit raw AAC.
+		raw := payload[offset+headerLen : offset+frameLen]
+		frames = append(frames, avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC,
+			avframe.FrameTypeKeyframe, dts, pts, raw,
+		))
 
 		offset += frameLen
 	}
