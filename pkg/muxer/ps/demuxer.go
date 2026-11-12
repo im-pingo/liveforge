@@ -434,33 +434,45 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 
 // detectAudioCodec detects the audio codec from raw payload bytes.
 func detectAudioCodec(data []byte) avframe.CodecType {
-	foundADTSSync := false
+	leadingADTSSync := len(data) >= 2 && data[0] == 0xFF && (data[1]&0xF0) == 0xF0
 	for offset := 0; offset+1 < len(data); offset++ {
 		if data[offset] != 0xFF || (data[offset+1]&0xF0) != 0xF0 {
 			continue
 		}
-		foundADTSSync = true
-		if offset+7 > len(data) {
+		end := completeADTSFrameEnd(data, offset)
+		if end == 0 {
 			continue
 		}
-		frameLen := (int(data[offset+3]&0x03) << 11) |
-			(int(data[offset+4]) << 3) |
-			(int(data[offset+5]) >> 5)
-		headerLen := 7
-		if (data[offset+1] & 0x01) == 0 {
-			headerLen = 9
+		// A single ADTS-shaped run inside otherwise unmarked bytes can be
+		// ordinary G.711A. Two adjacent frames establish AAC when the PES
+		// does not begin with an ADTS sync candidate.
+		if offset == 0 || leadingADTSSync || completeADTSFrameEnd(data, end) != 0 {
+			return avframe.CodecAAC
 		}
-		if frameLen <= headerLen || offset+frameLen > len(data) ||
-			(data[offset+1]&0x06) != 0 || adtsToAudioSpecificConfig(data[offset:]) == nil {
-			continue
-		}
-		return avframe.CodecAAC
 	}
-	if foundADTSSync {
+	if leadingADTSSync {
 		return 0
 	}
 	// Fallback: assume G.711A for GB28181 when no ADTS detected
 	return avframe.CodecG711A
+}
+
+func completeADTSFrameEnd(data []byte, offset int) int {
+	if offset+7 > len(data) || data[offset] != 0xFF || (data[offset+1]&0xF0) != 0xF0 {
+		return 0
+	}
+	frameLen := (int(data[offset+3]&0x03) << 11) |
+		(int(data[offset+4]) << 3) |
+		(int(data[offset+5]) >> 5)
+	headerLen := 7
+	if (data[offset+1] & 0x01) == 0 {
+		headerLen = 9
+	}
+	if frameLen <= headerLen || offset+frameLen > len(data) ||
+		(data[offset+1]&0x06) != 0 || adtsToAudioSpecificConfig(data[offset:]) == nil {
+		return 0
+	}
+	return offset + frameLen
 }
 
 // adtsToAudioSpecificConfig builds a 2-byte AudioSpecificConfig from an ADTS header.
@@ -474,7 +486,7 @@ func adtsToAudioSpecificConfig(adts []byte) []byte {
 	objectType := ((adts[2] >> 6) & 0x03) + 1 // ADTS profile is objectType-1
 	freqIndex := (adts[2] >> 2) & 0x0F
 	channelConfig := ((adts[2] & 0x01) << 2) | ((adts[3] >> 6) & 0x03)
-	if freqIndex == 0x0F || channelConfig == 0 {
+	if freqIndex >= 13 || channelConfig == 0 {
 		return nil
 	}
 
