@@ -52,6 +52,23 @@ func TestDemuxAACShortDeclaredFrameResyncsWithinPES(t *testing.T) {
 	}
 }
 
+func TestDemuxAACTruncatedDeclaredFrameResyncsWithinPES(t *testing.T) {
+	demuxer := NewDemuxer()
+	packHeader := []byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	// The first synced frame declares 32 bytes but ends before a complete frame.
+	malformed := []byte{0xff, 0xf1, 0x50, 0x80, 0x04, 0x00, 0x00}
+	valid := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x00, 0x00, 0x55}
+	frames, err := demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, append(malformed, valid...), 0, 0)...))
+	if err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	if len(frames) != 2 || frames[0].FrameType != avframe.FrameTypeSequenceHeader ||
+		!bytes.Equal(frames[0].Payload, []byte{0x12, 0x10}) ||
+		!bytes.Equal(frames[1].Payload, []byte{0x55}) {
+		t.Fatalf("valid ADTS after truncated frame was lost: %+v", frames)
+	}
+}
+
 func TestDemuxAACHeaderOnlyFramesDoNotInitializeDecoder(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -387,7 +387,8 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 			continue
 		}
 		if offset+frameLen > len(payload) {
-			break
+			offset++
+			continue
 		}
 		if (payload[offset+1] & 0x06) != 0 { // layer is reserved and must be zero
 			offset += frameLen
