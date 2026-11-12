@@ -183,6 +183,20 @@ func TestDemuxPESZeroLengthVideoStopsAtProgramEnd(t *testing.T) {
 	}
 }
 
+func TestDemuxPESRejectsInvalidMPEG2HeaderPrefix(t *testing.T) {
+	pes := buildPES(0xc0, []byte{0x22}, 1020, 1020)
+	pes[6] = 0
+	pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, pes...)
+
+	frames, err := NewDemuxer().Feed(pack)
+	if err == nil {
+		t.Fatalf("Feed accepted PES with an invalid MPEG-2 header prefix: frames=%+v", frames)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("Feed returned %d frames from PES with an invalid MPEG-2 header prefix", len(frames))
+	}
+}
+
 func TestDemuxPESKeepsEarlierFrameOnLaterError(t *testing.T) {
 	pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 		buildPES(0xc0, []byte{0x31}, 0, 0)...)

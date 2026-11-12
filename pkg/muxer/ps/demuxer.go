@@ -227,6 +227,9 @@ func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
 	if total < 9 {
 		return nil, 0, fmt.Errorf("ps: PES optional header is truncated")
 	}
+	if data[6]&0xC0 != 0x80 {
+		return nil, 0, fmt.Errorf("ps: PES is missing the MPEG-2 header prefix")
+	}
 
 	ptsDtsFlags := (data[7] >> 6) & 0x03
 	pesHeaderLen := int(data[8])
