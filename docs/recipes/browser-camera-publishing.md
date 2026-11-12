@@ -79,3 +79,9 @@ verification of a particular physical camera or microphone.
 The integration test bounds target WHEP answer application and browser decoding
 in separate waits, and reports the player's current stage on error or
 timeout. This keeps slow signaling from consuming the decoding window.
+The Console's undecodable-frame WHEP browser test opens its known fixture
+stream after server endpoint discovery, independent of the asynchronous
+stream inventory poll. A valid H.264 sequence header permits signaling; an
+incomplete IDR reaches the browser as RTP, where the test requires a connected
+video track and zero decoded frames. It records every player status transition
+from before opening the player and rejects even a transient `Playing` status.

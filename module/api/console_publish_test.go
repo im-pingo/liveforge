@@ -270,19 +270,28 @@ func TestConsoleWHEPWaitsForDecodedFrameBeforeReportingPlaying(t *testing.T) {
 	t.Cleanup(srv.Shutdown)
 	cfg.WebRTC.Listen = webrtcMod.Addr().String()
 
-	const streamKey = "live/whep-no-frames"
+	const streamKey = "live/whep-undecodable-frame"
 	stream, err := srv.StreamHub().GetOrCreate(streamKey)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A valid AVC sequence header lets WHEP complete signaling without
+	// providing a decodable video frame to the browser.
+	sequenceHeader := []byte{
+		0x01, 0x42, 0x00, 0x1f, 0xff, 0xe1, 0x00, 0x09,
+		0x67, 0x42, 0x00, 0x1f, 0xe9, 0x40, 0x14, 0x04, 0x78,
+		0x01, 0x00, 0x04, 0x68, 0xce, 0x38, 0x80,
+	}
 	if err := stream.SetPublisher(&testPublisher{
-		id:   "no-frame-publisher",
-		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264},
+		id:   "undecodable-frame-publisher",
+		info: &avframe.MediaInfo{VideoCodec: avframe.CodecH264, VideoSequenceHeader: sequenceHeader},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
+	testCtx, testCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer testCancel()
+	allocCtx, allocCancel := chromedp.NewExecAllocator(testCtx,
 		append(chromedp.DefaultExecAllocatorOptions[:],
 			chromedp.ExecPath(os.Getenv("CHROME_BIN")),
 			chromedp.Flag("headless", true),
@@ -300,8 +309,20 @@ func TestConsoleWHEPWaitsForDecodedFrameBeforeReportingPlaying(t *testing.T) {
 	if err := chromedp.Run(browserCtx,
 		chromedp.Navigate(consoleURL),
 		chromedp.WaitReady("body"),
-		chromedp.WaitVisible(`button[data-action="stream-preview"]`, chromedp.ByQuery),
-		chromedp.Click(`button[data-action="stream-preview"]`, chromedp.ByQuery),
+		chromedp.Poll(`Boolean(endpoints.webrtc)`, nil, chromedp.WithPollingTimeout(10*time.Second)),
+		chromedp.Evaluate(`(() => {
+			const status = document.getElementById("player-status");
+			window.__whepStatusTransitions = [status.textContent];
+			window.__whepStatusObserver = new MutationObserver(records => {
+				for (const record of records) {
+					if (record.type === "childList") {
+						window.__whepStatusTransitions.push(Array.from(record.addedNodes, node => node.textContent).join(""));
+					}
+				}
+			});
+			window.__whepStatusObserver.observe(status, {childList: true});
+		})()`, nil),
+		chromedp.Evaluate(`stopActiveViewPolling(); openPlayer("live/whep-undecodable-frame", {video_codec:"H264"})`, nil),
 		chromedp.WaitVisible(`.proto-tab[data-proto="whep-realtime"]`, chromedp.ByQuery),
 		chromedp.Click(`.proto-tab[data-proto="whep-realtime"]`, chromedp.ByQuery),
 	); err != nil {
@@ -310,14 +331,81 @@ func TestConsoleWHEPWaitsForDecodedFrameBeforeReportingPlaying(t *testing.T) {
 		}
 		t.Fatalf("open WHEP preview: %v", err)
 	}
-
-	time.Sleep(3 * time.Second)
-	var status string
-	if err := chromedp.Run(browserCtx, chromedp.TextContent("#player-status", &status)); err != nil {
-		t.Fatalf("read player status: %v", err)
+	if err := chromedp.Run(browserCtx, chromedp.Poll(`currentPC && ["connected", "completed"].includes(currentPC.iceConnectionState) && document.getElementById("player-video").srcObject && document.getElementById("player-video").srcObject.getVideoTracks().length === 1`, nil, chromedp.WithPollingTimeout(12*time.Second))); err != nil {
+		t.Fatalf("WHEP did not reach a connected browser video track: %v", err)
 	}
-	if strings.Contains(status, "Playing") {
-		t.Fatalf("player status = %q without a decoded frame", status)
+
+	// Send one AVCC IDR NAL with no slice data. It reaches the RTP receiver,
+	// but the browser cannot decode a video frame from it.
+	if !stream.WriteFrame(avframe.NewAVFrame(
+		avframe.MediaTypeVideo, avframe.CodecH264, avframe.FrameTypeKeyframe,
+		40, 40, []byte{0, 0, 0, 1, 0x65},
+	)) {
+		t.Fatal("undecodable test frame was rejected")
+	}
+	if err := chromedp.Run(browserCtx, chromedp.PollFunction(`async () => {
+		let packets = 0;
+		(await currentPC.getStats()).forEach(stat => {
+			if (stat.type === "inbound-rtp" && (stat.kind === "video" || stat.mediaType === "video")) packets += stat.packetsReceived || 0;
+		});
+		return packets > 0;
+	}`, nil, chromedp.WithPollingTimeout(8*time.Second), chromedp.WithPollingInterval(100*time.Millisecond))); err != nil {
+		t.Fatalf("WHEP video RTP did not reach the browser: %v", err)
+	}
+
+	time.Sleep(time.Second)
+	var probe struct {
+		Status            string   `json:"status"`
+		StatusTransitions []string `json:"statusTransitions"`
+		ICE               string   `json:"ice"`
+		VideoTracks       int      `json:"videoTracks"`
+		VideoPackets      uint64   `json:"videoPackets"`
+		FramesDecoded     uint64   `json:"framesDecoded"`
+		Width             int      `json:"width"`
+		Height            int      `json:"height"`
+	}
+	if err := chromedp.Run(browserCtx, chromedp.Evaluate(`(async () => {
+		const video = document.getElementById("player-video");
+		let videoPackets = 0, framesDecoded = 0;
+		(await currentPC.getStats()).forEach(stat => {
+			if (stat.type === "inbound-rtp" && (stat.kind === "video" || stat.mediaType === "video")) {
+				videoPackets += stat.packetsReceived || 0;
+				framesDecoded += stat.framesDecoded || 0;
+			}
+		});
+		for (const record of window.__whepStatusObserver.takeRecords()) {
+			if (record.type === "childList") {
+				window.__whepStatusTransitions.push(Array.from(record.addedNodes, node => node.textContent).join(""));
+			}
+		}
+		return {
+			status: document.getElementById("player-status").textContent,
+			statusTransitions: window.__whepStatusTransitions.slice(),
+			ice: currentPC.iceConnectionState,
+			videoTracks: video.srcObject.getVideoTracks().length,
+			videoPackets, framesDecoded,
+			width: video.videoWidth, height: video.videoHeight
+		};
+	})()`, &probe, func(params *runtime.EvaluateParams) *runtime.EvaluateParams {
+		return params.WithAwaitPromise(true)
+	})); err != nil {
+		t.Fatalf("read WHEP browser state: %v", err)
+	}
+	if probe.ICE != "connected" && probe.ICE != "completed" || probe.VideoTracks != 1 || probe.VideoPackets == 0 {
+		t.Fatalf("WHEP video did not remain connected: %+v", probe)
+	}
+	if probe.FramesDecoded != 0 || probe.Width != 0 || probe.Height != 0 || !strings.Contains(probe.Status, "waiting") || strings.Contains(probe.Status, "Playing") {
+		t.Fatalf("player did not wait for a decoded frame: %+v", probe)
+	}
+	observedWaiting := false
+	for _, status := range probe.StatusTransitions {
+		if strings.Contains(status, "Playing") {
+			t.Fatalf("player reported Playing without a decoded frame: %+v", probe)
+		}
+		observedWaiting = observedWaiting || strings.Contains(status, "waiting")
+	}
+	if !observedWaiting {
+		t.Fatalf("player status recorder missed the waiting state: %+v", probe)
 	}
 }
 
