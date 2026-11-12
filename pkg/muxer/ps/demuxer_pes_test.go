@@ -3,6 +3,9 @@ package ps
 import (
 	"bytes"
 	"testing"
+
+	"github.com/im-pingo/liveforge/pkg/avframe"
+	"github.com/im-pingo/liveforge/pkg/rtp"
 )
 
 func TestDemuxPESRejectsIncompleteDeclaredFields(t *testing.T) {
@@ -62,6 +65,44 @@ func TestDemuxPESZeroLengthConsumesPackRemainder(t *testing.T) {
 	}
 	if len(frames) != 1 || !bytes.Equal(frames[0].Payload, []byte{0x22, 0x33}) {
 		t.Fatalf("Feed returned wrong unbounded PES media: %+v", frames)
+	}
+}
+
+func TestDemuxPESZeroLengthVideoStopsAtNextPacket(t *testing.T) {
+	video := []byte{0, 0, 0, 1, 0x41, 0x88, 0, 0, 1, 0x41, 0x99}
+	videoPES := buildPES(0xe0, video, 1000, 1000)
+	videoPES[4], videoPES[5] = 0, 0
+	pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, videoPES...)
+	pack = append(pack, buildPES(0xc0, []byte{0x22, 0x33}, 1020, 1020)...)
+
+	frames, err := NewDemuxer().Feed(pack)
+	if err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("Feed returned %d frames, want video and audio", len(frames))
+	}
+	if frames[0].MediaType != avframe.MediaTypeVideo || !bytes.Equal(frames[0].Payload, rtp.AnnexBToAVCC(video)) {
+		t.Fatalf("Feed returned wrong video media: %+v", frames[0])
+	}
+	if frames[1].MediaType != avframe.MediaTypeAudio || frames[1].DTS != 1020 || !bytes.Equal(frames[1].Payload, []byte{0x22, 0x33}) {
+		t.Fatalf("Feed returned wrong audio media: %+v", frames[1])
+	}
+}
+
+func TestDemuxPESZeroLengthVideoStopsAtProgramEnd(t *testing.T) {
+	video := []byte{0, 0, 1, 0x41, 0x88}
+	videoPES := buildPES(0xe0, video, 1000, 1000)
+	videoPES[4], videoPES[5] = 0, 0
+	pack := append([]byte{0, 0, 1, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, videoPES...)
+	pack = append(pack, 0, 0, 1, 0xb9)
+
+	frames, err := NewDemuxer().Feed(pack)
+	if err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	if len(frames) != 1 || !bytes.Equal(frames[0].Payload, rtp.AnnexBToAVCC(video)) {
+		t.Fatalf("Feed included program end in video media: %+v", frames)
 	}
 }
 

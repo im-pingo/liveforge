@@ -62,6 +62,9 @@ func (d *Demuxer) Feed(data []byte) ([]*avframe.AVFrame, error) {
 			}
 			offset += n
 
+		case startCode == 0x000001B9: // MPEG-PS program end
+			return frames, nil
+
 		case isPESStartCode(startCode):
 			pesFrames, n, err := d.parsePES(data[offset:])
 			if err != nil {
@@ -191,7 +194,7 @@ func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
 	pesLen := int(binary.BigEndian.Uint16(data[4:6]))
 	total := 6 + pesLen
 	if pesLen == 0 {
-		// Unbounded PES — consume rest of data
+		// The video boundary is found after validating its optional header.
 		total = len(data)
 	}
 	if len(data) < total {
@@ -223,6 +226,16 @@ func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
 	}
 	if ptsDtsFlags == 3 {
 		dts = parsePESTimestamp(data[14:19])
+	}
+	if pesLen == 0 && streamID >= 0xE0 && streamID <= 0xEF {
+		// A zero-length video PES ends at the next program-stream start code.
+		// Annex-B NAL start codes use IDs below 0xB9 and stay in the payload.
+		for i := payloadStart; i+4 <= len(data); i++ {
+			if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 && data[i+3] >= 0xB9 {
+				total = i
+				break
+			}
+		}
 	}
 
 	// Convert 90kHz timestamps to milliseconds
