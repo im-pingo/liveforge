@@ -34,6 +34,8 @@ WHIP keeps its shared media clock, publisher ownership checks, Simulcast process
 
 The Program Stream Map parser checks each nested program-info length, elementary-stream map length, and entry/descriptor length against the map's declared boundary before its mandatory four-byte CRC trailer. The declared elementary-stream map must fill the space up to that trailer exactly; undeclared bytes are rejected. A malformed map returns a demux error without changing the detected audio or video codec, even if another packet follows it in the same buffer. This is a framing check; the parser reserves but does not validate the CRC value or every MPEG-PS syntax rule. A GB28181 publisher logs the demux error and resets the accumulated input at that RTP marker; frames parsed before the malformed map may still be emitted.
 
+The PES parser rejects a bounded packet when its declared length exceeds the received bytes. It also requires the optional header to fit inside that packet and any signaled PTS/DTS fields to fit inside the declared optional header. Malformed PES returns a demux error without emitting media from that packet; earlier complete frames in the same buffer may still be returned. Zero-length PES remains unbounded and consumes the rest of the supplied pack, as before.
+
 ## Notification WebSockets
 
 When enabled, the default `/api/v1/events` route uses management authentication and `server:read`, including when a custom path is configured. Browser Origin must match the request host and port; the library does not compare the scheme. Native clients may omit Origin. Cross-host/port or opaque Origin handshakes receive 403 before client registration.

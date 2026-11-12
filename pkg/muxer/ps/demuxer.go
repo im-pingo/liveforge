@@ -183,7 +183,7 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 
 // parsePES parses a PES packet and returns frames and bytes consumed.
 func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
-	if len(data) < 9 {
+	if len(data) < 6 {
 		return nil, 0, fmt.Errorf("ps: PES too short")
 	}
 
@@ -195,27 +195,33 @@ func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
 		total = len(data)
 	}
 	if len(data) < total {
-		total = len(data)
+		return nil, 0, fmt.Errorf("ps: PES length overflow")
 	}
 
 	// Skip padding/navigation streams
 	if streamID == 0xBE || streamID == 0xBF {
 		return nil, total, nil
 	}
+	if total < 9 {
+		return nil, 0, fmt.Errorf("ps: PES optional header is truncated")
+	}
 
 	ptsDtsFlags := (data[7] >> 6) & 0x03
 	pesHeaderLen := int(data[8])
 	payloadStart := 9 + pesHeaderLen
 	if payloadStart > total {
-		return nil, total, nil
+		return nil, 0, fmt.Errorf("ps: PES optional header exceeds packet")
+	}
+	if ptsDtsFlags == 2 && pesHeaderLen < 5 || ptsDtsFlags == 3 && pesHeaderLen < 10 {
+		return nil, 0, fmt.Errorf("ps: PES timestamp fields exceed optional header")
 	}
 
 	var pts, dts int64
-	if ptsDtsFlags >= 2 && len(data) >= 14 {
+	if ptsDtsFlags >= 2 {
 		pts = parsePESTimestamp(data[9:14])
 		dts = pts
 	}
-	if ptsDtsFlags == 3 && len(data) >= 19 {
+	if ptsDtsFlags == 3 {
 		dts = parsePESTimestamp(data[14:19])
 	}
 
