@@ -65,7 +65,9 @@ func TestDemuxAACShortDeclaredFrameResyncsWithinPES(t *testing.T) {
 	// The first synced frame declares six bytes, shorter than any ADTS header.
 	malformed := []byte{0xff, 0xf1, 0x50, 0x80, 0x00, 0xc0, 0x00}
 	valid := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0x00, 0x00, 0x55}
-	payload := append(malformed, valid...)
+	payload := make([]byte, 0, len(malformed)+len(valid))
+	payload = append(payload, malformed...)
+	payload = append(payload, valid...)
 	frames, err := demuxer.Feed(append(bytes.Clone(packHeader), buildPES(0xc0, payload, 0, 0)...))
 	if err != nil {
 		t.Fatalf("Feed: %v", err)
