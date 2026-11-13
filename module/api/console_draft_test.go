@@ -32,14 +32,16 @@ await refreshRuntimeConfig();
 `
 
 func TestConsoleConfigDraftSurvivesBlurPollingAndViewSwitch(t *testing.T) {
-	withConsoleBrowser(t, func(ctx context.Context) {
+	withConsoleBrowserRole(t, "admin", func(ctx context.Context) {
 		var result struct {
 			Editor       string `json:"editor"`
 			DirtyGuard   bool   `json:"dirtyGuard"`
 			DiscardReady bool   `json:"discardReady"`
 		}
+		var editorReadOnly bool
 		if err := chromedp.Run(ctx,
 			consoleAwait(`(async function(){`+consoleDraftFixture+`switchTab("config"); stopActiveViewPolling();})()`, nil),
+			chromedp.Evaluate(`document.getElementById("config-editor").readOnly`, &editorReadOnly),
 			chromedp.Focus("#config-editor"),
 			chromedp.SendKeys("#config-editor", "# unsaved local draft\n"),
 			chromedp.Click("#tab-streams"),
@@ -55,6 +57,9 @@ func TestConsoleConfigDraftSurvivesBlurPollingAndViewSwitch(t *testing.T) {
             })()`, &result),
 		); err != nil {
 			t.Fatal(err)
+		}
+		if editorReadOnly {
+			t.Fatal("config editor was read-only before typing")
 		}
 		if result.Editor != "# unsaved local draft\nserver:\n  name: original\n" && result.Editor != "server:\n  name: original\n# unsaved local draft\n" {
 			t.Fatalf("blurred draft was replaced: %#v", result)

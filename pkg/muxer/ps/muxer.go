@@ -206,7 +206,7 @@ func buildPES(streamID byte, payload []byte, dtsMs, ptsMs int64) []byte {
 	buf = append(buf, byte(headerDataLen))
 
 	if hasPTS {
-		buf = append(buf, encodePESTimestamp(pts, ptsDtsFlags>>4)...)
+		buf = append(buf, encodePESTimestamp(pts, ptsDtsFlags>>6)...)
 	}
 	if hasDTS {
 		buf = append(buf, encodePESTimestamp(dts, 0x01)...)

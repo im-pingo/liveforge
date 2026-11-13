@@ -62,6 +62,9 @@ func (d *Demuxer) Feed(data []byte) ([]*avframe.AVFrame, error) {
 			}
 			offset += n
 
+		case startCode == 0x000001B9: // MPEG-PS program end
+			return frames, nil
+
 		case isPESStartCode(startCode):
 			pesFrames, n, err := d.parsePES(data[offset:])
 			if err != nil {
@@ -123,33 +126,47 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 		return 0, fmt.Errorf("ps: PSM length overflow")
 	}
 
-	if psmLen < 6 {
-		return total, nil
+	// The final four bytes are the CRC trailer. Keep nested fields out of it
+	// before validating the checksum over the preceding map bytes.
+	if psmLen < 10 {
+		return 0, fmt.Errorf("ps: PSM fields are truncated")
 	}
+	contentEnd := total - 4
 
 	// Skip current_next_indicator(1) + reserved(1) + program_stream_info_length(2)
 	offset := 8
-	if offset+2 > len(data) {
-		return total, nil
-	}
 	progInfoLen := int(binary.BigEndian.Uint16(data[offset:]))
-	offset += 2 + progInfoLen
+	offset += 2
+	if progInfoLen > contentEnd-offset {
+		return 0, fmt.Errorf("ps: PSM program info exceeds map")
+	}
+	offset += progInfoLen
 
-	if offset+2 > len(data) {
-		return total, nil
+	if contentEnd-offset < 2 {
+		return 0, fmt.Errorf("ps: PSM elementary stream length is truncated")
 	}
 	esMapLen := int(binary.BigEndian.Uint16(data[offset:]))
 	offset += 2
 
-	end := offset + esMapLen
-	if end > total {
-		end = total
+	if esMapLen > contentEnd-offset {
+		return 0, fmt.Errorf("ps: PSM elementary stream map exceeds map")
 	}
+	end := offset + esMapLen
+	if end != contentEnd {
+		return 0, fmt.Errorf("ps: PSM elementary stream map leaves undeclared bytes")
+	}
+	videoCodec, audioCodec := d.videoCodec, d.audioCodec
 
-	for offset+4 <= end {
+	for offset < end {
+		if end-offset < 4 {
+			return 0, fmt.Errorf("ps: PSM elementary stream entry is truncated")
+		}
 		streamType := data[offset]
 		streamID := data[offset+1]
 		esInfoLen := int(binary.BigEndian.Uint16(data[offset+2:]))
+		if esInfoLen > end-offset-4 {
+			return 0, fmt.Errorf("ps: PSM elementary stream info exceeds map")
+		}
 		offset += 4 + esInfoLen
 
 		codec := CodecFromStreamType(streamType)
@@ -157,18 +174,38 @@ func (d *Demuxer) parsePSM(data []byte) (int, error) {
 			continue
 		}
 		if codec.IsVideo() && streamID >= 0xE0 && streamID <= 0xEF {
-			d.videoCodec = codec
+			videoCodec = codec
 		} else if codec.IsAudio() {
-			d.audioCodec = codec
+			audioCodec = codec
 		}
 	}
+	if got, want := binary.BigEndian.Uint32(data[contentEnd:total]), psmCRC32(data[:contentEnd]); got != want {
+		return 0, fmt.Errorf("ps: PSM CRC is invalid")
+	}
+	d.videoCodec, d.audioCodec = videoCodec, audioCodec
 
 	return total, nil
 }
 
+// psmCRC32 computes the MPEG-2 CRC used by a Program Stream Map.
+func psmCRC32(data []byte) uint32 {
+	crc := uint32(0xffffffff)
+	for _, b := range data {
+		crc ^= uint32(b) << 24
+		for bit := 0; bit < 8; bit++ {
+			if crc&0x80000000 != 0 {
+				crc = (crc << 1) ^ 0x04c11db7
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc
+}
+
 // parsePES parses a PES packet and returns frames and bytes consumed.
 func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
-	if len(data) < 9 {
+	if len(data) < 6 {
 		return nil, 0, fmt.Errorf("ps: PES too short")
 	}
 
@@ -176,32 +213,64 @@ func (d *Demuxer) parsePES(data []byte) ([]*avframe.AVFrame, int, error) {
 	pesLen := int(binary.BigEndian.Uint16(data[4:6]))
 	total := 6 + pesLen
 	if pesLen == 0 {
-		// Unbounded PES — consume rest of data
+		// The video boundary is found after validating its optional header.
 		total = len(data)
 	}
 	if len(data) < total {
-		total = len(data)
+		return nil, 0, fmt.Errorf("ps: PES length overflow")
 	}
 
 	// Skip padding/navigation streams
 	if streamID == 0xBE || streamID == 0xBF {
 		return nil, total, nil
 	}
+	if total < 9 {
+		return nil, 0, fmt.Errorf("ps: PES optional header is truncated")
+	}
+	if data[6]&0xC0 != 0x80 {
+		return nil, 0, fmt.Errorf("ps: PES is missing the MPEG-2 header prefix")
+	}
 
 	ptsDtsFlags := (data[7] >> 6) & 0x03
 	pesHeaderLen := int(data[8])
 	payloadStart := 9 + pesHeaderLen
 	if payloadStart > total {
-		return nil, total, nil
+		return nil, 0, fmt.Errorf("ps: PES optional header exceeds packet")
+	}
+	if ptsDtsFlags == 2 && pesHeaderLen < 5 || ptsDtsFlags == 3 && pesHeaderLen < 10 {
+		return nil, 0, fmt.Errorf("ps: PES timestamp fields exceed optional header")
+	}
+	if ptsDtsFlags == 1 {
+		return nil, 0, fmt.Errorf("ps: PES has reserved PTS/DTS flags")
 	}
 
 	var pts, dts int64
-	if ptsDtsFlags >= 2 && len(data) >= 14 {
+	if ptsDtsFlags >= 2 {
+		ptsPrefix := byte(0x2)
+		if ptsDtsFlags == 3 {
+			ptsPrefix = 0x3
+		}
+		if !validPESTimestamp(data[9:14], ptsPrefix) {
+			return nil, 0, fmt.Errorf("ps: PES PTS encoding is invalid")
+		}
 		pts = parsePESTimestamp(data[9:14])
 		dts = pts
 	}
-	if ptsDtsFlags == 3 && len(data) >= 19 {
+	if ptsDtsFlags == 3 {
+		if !validPESTimestamp(data[14:19], 0x1) {
+			return nil, 0, fmt.Errorf("ps: PES DTS encoding is invalid")
+		}
 		dts = parsePESTimestamp(data[14:19])
+	}
+	if pesLen == 0 && streamID >= 0xE0 && streamID <= 0xEF {
+		// A zero-length video PES ends at the next program-stream start code.
+		// Annex-B NAL start codes use IDs below 0xB9 and stay in the payload.
+		for i := payloadStart; i+4 <= len(data); i++ {
+			if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 && data[i+3] >= 0xB9 {
+				total = i
+				break
+			}
+		}
 	}
 
 	// Convert 90kHz timestamps to milliseconds
@@ -306,7 +375,7 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 	offset := 0
 
 	for offset+7 <= len(payload) {
-		// Verify ADTS sync word
+		// Verify ADTS sync word.
 		if payload[offset] != 0xFF || (payload[offset+1]&0xF0) != 0xF0 {
 			offset++
 			continue
@@ -316,34 +385,47 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 		frameLen := (int(payload[offset+3]&0x03) << 11) |
 			(int(payload[offset+4]) << 3) |
 			(int(payload[offset+5]) >> 5)
-		if frameLen < 7 || offset+frameLen > len(payload) {
-			break
+		if frameLen < 7 {
+			offset++
+			continue
+		}
+		if offset+frameLen > len(payload) {
+			offset++
+			continue
+		}
+		if (payload[offset+1] & 0x06) != 0 { // layer is reserved and must be zero
+			offset += frameLen
+			continue
+		}
+		headerLen := 7
+		if (payload[offset+1] & 0x01) == 0 { // protection_absent=0 means CRC is present
+			headerLen = 9
+		}
+		if frameLen <= headerLen {
+			offset += frameLen
+			continue
+		}
+		asc := adtsToAudioSpecificConfig(payload[offset:])
+		if asc == nil {
+			offset += frameLen
+			continue
 		}
 
 		// Emit AudioSpecificConfig sequence header on first AAC frame
 		if !d.audioSeqSent {
-			asc := adtsToAudioSpecificConfig(payload[offset:])
-			if asc != nil {
-				d.audioSeqSent = true
-				frames = append(frames, avframe.NewAVFrame(
-					avframe.MediaTypeAudio, avframe.CodecAAC,
-					avframe.FrameTypeSequenceHeader, dts, pts, asc,
-				))
-			}
-		}
-
-		// Strip ADTS header (7 or 9 bytes) and emit raw AAC
-		headerLen := 7
-		if (payload[offset+1] & 0x01) == 0 { // protection_absent=0 → CRC present
-			headerLen = 9
-		}
-		if headerLen < frameLen {
-			raw := payload[offset+headerLen : offset+frameLen]
+			d.audioSeqSent = true
 			frames = append(frames, avframe.NewAVFrame(
 				avframe.MediaTypeAudio, avframe.CodecAAC,
-				avframe.FrameTypeKeyframe, dts, pts, raw,
+				avframe.FrameTypeSequenceHeader, dts, pts, asc,
 			))
 		}
+
+		// Strip the complete ADTS header and emit raw AAC.
+		raw := payload[offset+headerLen : offset+frameLen]
+		frames = append(frames, avframe.NewAVFrame(
+			avframe.MediaTypeAudio, avframe.CodecAAC,
+			avframe.FrameTypeKeyframe, dts, pts, raw,
+		))
 
 		offset += frameLen
 	}
@@ -352,11 +434,45 @@ func (d *Demuxer) handleAACPayload(payload []byte, dts, pts int64) []*avframe.AV
 
 // detectAudioCodec detects the audio codec from raw payload bytes.
 func detectAudioCodec(data []byte) avframe.CodecType {
-	if len(data) >= 2 && data[0] == 0xFF && (data[1]&0xF0) == 0xF0 {
-		return avframe.CodecAAC // ADTS sync word
+	leadingADTSSync := len(data) >= 2 && data[0] == 0xFF && (data[1]&0xF0) == 0xF0
+	for offset := 0; offset+1 < len(data); offset++ {
+		if data[offset] != 0xFF || (data[offset+1]&0xF0) != 0xF0 {
+			continue
+		}
+		end := completeADTSFrameEnd(data, offset)
+		if end == 0 {
+			continue
+		}
+		// A single ADTS-shaped run inside otherwise unmarked bytes can be
+		// ordinary G.711A. Two adjacent frames establish AAC when the PES
+		// does not begin with an ADTS sync candidate.
+		if offset == 0 || leadingADTSSync || completeADTSFrameEnd(data, end) != 0 {
+			return avframe.CodecAAC
+		}
+	}
+	if leadingADTSSync {
+		return 0
 	}
 	// Fallback: assume G.711A for GB28181 when no ADTS detected
 	return avframe.CodecG711A
+}
+
+func completeADTSFrameEnd(data []byte, offset int) int {
+	if offset+7 > len(data) || data[offset] != 0xFF || (data[offset+1]&0xF0) != 0xF0 {
+		return 0
+	}
+	frameLen := (int(data[offset+3]&0x03) << 11) |
+		(int(data[offset+4]) << 3) |
+		(int(data[offset+5]) >> 5)
+	headerLen := 7
+	if (data[offset+1] & 0x01) == 0 {
+		headerLen = 9
+	}
+	if frameLen <= headerLen || offset+frameLen > len(data) ||
+		(data[offset+1]&0x06) != 0 || adtsToAudioSpecificConfig(data[offset:]) == nil {
+		return 0
+	}
+	return offset + frameLen
 }
 
 // adtsToAudioSpecificConfig builds a 2-byte AudioSpecificConfig from an ADTS header.
@@ -370,6 +486,9 @@ func adtsToAudioSpecificConfig(adts []byte) []byte {
 	objectType := ((adts[2] >> 6) & 0x03) + 1 // ADTS profile is objectType-1
 	freqIndex := (adts[2] >> 2) & 0x0F
 	channelConfig := ((adts[2] & 0x01) << 2) | ((adts[3] >> 6) & 0x03)
+	if freqIndex >= 13 || channelConfig == 0 {
+		return nil
+	}
 
 	// AudioSpecificConfig: objectType(5) + freqIndex(4) + channelConfig(4) + 0(3)
 	asc := make([]byte, 2)
@@ -427,7 +546,6 @@ func isVideoKeyframe(codec avframe.CodecType, data []byte) bool {
 	return false
 }
 
-
 // parsePESTimestamp parses a 5-byte PES timestamp field.
 func parsePESTimestamp(data []byte) int64 {
 	if len(data) < 5 {
@@ -439,8 +557,14 @@ func parsePESTimestamp(data []byte) int64 {
 	return ts
 }
 
-// isPESStartCode checks if a 4-byte value is a valid PES start code (00 00 01 xx).
-func isPESStartCode(code uint32) bool {
-	return (code >> 8) == 0x000001
+// validPESTimestamp validates the prefix and marker bits in a five-byte PES timestamp.
+func validPESTimestamp(data []byte, prefix byte) bool {
+	return len(data) == 5 && data[0]>>4 == prefix &&
+		data[0]&0x01 != 0 && data[2]&0x01 != 0 && data[4]&0x01 != 0
 }
 
+// isPESStartCode checks if a 4-byte value is a PES start code with a valid
+// stream ID. Other MPEG-PS start codes are handled separately by Feed.
+func isPESStartCode(code uint32) bool {
+	return code >= 0x000001BD && code <= 0x000001EF
+}

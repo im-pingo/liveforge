@@ -30,6 +30,16 @@ A missing Marker, timestamp/source/payload-type discontinuity, sequence gap, mal
 
 WHIP keeps its shared media clock, publisher ownership checks, Simulcast processing epochs and audio path. Resuming a paused video layer starts with fresh assembly state and retains the existing header/keyframe gate.
 
+## GB28181 MPEG-PS input
+
+The Program Stream Map parser checks each nested program-info length, elementary-stream map length, and entry/descriptor length against the map's declared boundary before its mandatory four-byte CRC trailer. The declared elementary-stream map must fill the space up to that trailer exactly; undeclared bytes are rejected. It also verifies the mandatory MPEG-2 CRC over the complete map before that trailer. A malformed map returns a demux error without changing the detected audio or video codec, even if another packet follows it in the same buffer. This validates map framing and integrity, not every MPEG-PS syntax rule. A GB28181 publisher logs the demux error and resets the accumulated input at that RTP marker; frames parsed before the malformed map may still be emitted.
+
+The PES parser recognizes its supported stream IDs `0xBD` through `0xEF`; other top-level MPEG-PS start codes are skipped rather than misread as truncated PES. It requires the MPEG-2 `10` header prefix before reading optional fields and rejects a bounded packet when its declared length exceeds the received bytes. It also requires the optional header to fit inside that packet and any signaled PTS/DTS fields to fit inside the declared optional header. Timestamp fields must use their required PTS/DTS prefix and marker bits; the reserved PTS/DTS flag value is rejected. Malformed PES returns a demux error without emitting media from that packet; earlier complete frames in the same buffer may still be returned. A zero-length video PES ends at the next MPEG-PS start code (including program end), so a following audio PES in the same complete pack is parsed separately. Annex-B video NAL start codes do not end that PES. A zero-length non-video PES still consumes the supplied pack remainder.
+
+The outbound PS muxer writes the MPEG-2 PTS timestamp prefix `0010` for PTS-only PES packets and `0011` when DTS is also present. Its timestamp fields therefore pass the same prefix validation used for inbound PES packets.
+
+For ADTS-wrapped AAC, a frame must contain media after its 7-byte header or its 9-byte CRC-protected header. A shorter or header-only frame, one declaring bytes beyond the remaining PES payload, nonzero reserved layer, reserved sampling-frequency index 13, 14, or 15, or channel configuration zero emits neither an AAC sequence header nor media, so the next valid frame can still initialize the decoder. Without a Program Stream Map, a complete frame at the start of a PES selects AAC. A leading ADTS sync candidate keeps detection open for a later complete frame after a damaged header; a malformed leading candidate alone leaves the codec unknown. If the PES starts with other bytes, detection requires two adjacent complete ADTS frames before selecting AAC. A lone ADTS-shaped run embedded in otherwise unmarked bytes is treated as G.711A, avoiding a permanent AAC lock on ordinary PCMA data. This means a single AAC frame after an arbitrary nonsync prefix cannot be distinguished from PCMA without a Program Stream Map. A synced frame declaring fewer than seven bytes or more bytes than remain resumes bytewise scanning for a later complete frame in the same PES. This validates the declared frame, header lengths, and basic configuration, not the AAC bitstream or CRC value.
+
 ## Notification WebSockets
 
 When enabled, the default `/api/v1/events` route uses management authentication and `server:read`, including when a custom path is configured. Browser Origin must match the request host and port; the library does not compare the scheme. Native clients may omit Origin. Cross-host/port or opaque Origin handshakes receive 403 before client registration.
@@ -39,7 +49,7 @@ Sender shutdown permanently closes admission. A later handshake receives 503; an
 ## Verification
 
 ```sh
-CGO_ENABLED=0 go test ./module/rtsp ./module/cluster ./module/notify ./module/webrtc ./pkg/rtp -count=1
+CGO_ENABLED=0 go test ./module/rtsp ./module/cluster ./module/notify ./module/webrtc ./pkg/rtp ./pkg/muxer/ps -count=1
 CGO_ENABLED=1 go test -tags audiocodec -race ./pkg/rtp -count=1
 tools/check-agent-docs_test.sh
 ```

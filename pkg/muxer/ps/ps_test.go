@@ -98,6 +98,26 @@ func TestMuxAudio(t *testing.T) {
 	}
 }
 
+func TestBuildPESUsesRequiredPTSPrefix(t *testing.T) {
+	tests := []struct {
+		name          string
+		dtsMs, ptsMs  int64
+		wantFirstByte byte
+	}{
+		{name: "PTS only", dtsMs: 1000, ptsMs: 1000, wantFirstByte: 0x21},
+		{name: "PTS and DTS", dtsMs: 900, ptsMs: 1000, wantFirstByte: 0x31},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pes := buildPES(PESVideoStreamID, []byte{0x11}, tt.dtsMs, tt.ptsMs)
+			if got := pes[9]; got != tt.wantFirstByte {
+				t.Errorf("first PTS byte = 0x%02x, want 0x%02x", got, tt.wantFirstByte)
+			}
+		})
+	}
+}
+
 func TestMuxDemuxAVCCVideoRoundTrip(t *testing.T) {
 	startCode := []byte{0x00, 0x00, 0x00, 0x01}
 	annexB := append(append(append([]byte{}, startCode...), []byte{0x67, 0x42, 0x00, 0x1e, 0xab, 0x40}...), startCode...)

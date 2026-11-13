@@ -1343,6 +1343,10 @@ type consoleProtocolLabMediaProbe struct {
 }
 
 func withConsoleBrowser(t *testing.T, run func(context.Context)) {
+	withConsoleBrowserRole(t, "viewer", run)
+}
+
+func withConsoleBrowserRole(t *testing.T, role string, run func(context.Context)) {
 	t.Helper()
 	if testing.Short() {
 		if os.Getenv("LIVEFORGE_REQUIRE_BROWSER") == "1" {
@@ -1365,6 +1369,10 @@ func withConsoleBrowser(t *testing.T, run func(context.Context)) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/security/status" && role == "admin" {
+			_, _ = w.Write([]byte(`{"data":{"console_role":"admin"}}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"data":{}}`))
 	}))
 	defer server.Close()

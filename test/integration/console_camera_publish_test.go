@@ -176,6 +176,10 @@ return document.getElementById('publish-video-device').options.length > 0 &&
 				})
 
 				cameraEvaluate(t, browser, cameraTargetPlayer("http://"+srv.WebRTCAddr(), streamKey), nil)
+				cameraEventually(t, browser, "protocol target WHEP answer application", func() bool {
+					playback := cameraPlayback(t, browser)
+					return playback.Location != "" && playback.Stage == "receiving media"
+				})
 				var firstPlayback cameraPlaybackProbe
 				cameraEventually(t, browser, "decoded protocol target matching the captured camera", func() bool {
 					firstPlayback = cameraPlayback(t, browser)
@@ -275,7 +279,9 @@ func cameraEventually(t *testing.T, browser context.Context, description string,
 	}
 	var status string
 	cameraEvaluate(t, browser, `document.getElementById('publish-status').textContent`, &status)
-	t.Fatalf("timed out waiting for %s; Console status: %s", description, status)
+	var playbackStage string
+	cameraEvaluate(t, browser, `window.__cameraPlayback ? window.__cameraPlayback.stage : ''`, &playbackStage)
+	t.Fatalf("timed out waiting for %s; Console status: %s; WHEP player stage: %s", description, status, playbackStage)
 }
 
 func cameraGet(t *testing.T, srv *testutil.TestServer, path string, result any) {
@@ -376,7 +382,7 @@ type cameraPlaybackProbe struct {
 	Width, Height, SourceWidth, SourceHeight int
 	CurrentTime                              float64
 	Frames, VideoPackets, AudioPackets       uint64
-	Error                                    string
+	Error, Stage, Location                   string
 }
 
 func cameraPlayback(t *testing.T, browser context.Context) cameraPlaybackProbe {
@@ -386,10 +392,10 @@ func cameraPlayback(t *testing.T, browser context.Context) cameraPlaybackProbe {
 const p = window.__cameraPlayback, v = p.video, source = document.getElementById('publish-preview');
 return {width:v.videoWidth, height:v.videoHeight, sourceWidth:source.videoWidth, sourceHeight:source.videoHeight,
   currentTime:v.currentTime, frames:p.frames, videoPackets:p.videoPackets, audioPackets:p.audioPackets,
-  error:p.error || (v.error ? String(v.error.code) : '')};
+  error:p.error || (v.error ? String(v.error.code) : ''), stage:p.stage, location:p.location};
 })()`, &result)
 	if result.Error != "" {
-		t.Fatalf("protocol target browser playback failed: %s", result.Error)
+		t.Fatalf("protocol target browser playback failed at %s: %s", result.Stage, result.Error)
 	}
 	return result
 }
@@ -400,23 +406,29 @@ const video = document.createElement('video');
 video.autoplay = true; video.muted = true; video.playsInline = true;
 document.body.appendChild(video);
 const pc = new RTCPeerConnection(), media = new MediaStream();
-const p = window.__cameraPlayback = {pc, video, error:'', frames:0, videoPackets:0, audioPackets:0, location:''};
+const p = window.__cameraPlayback = {pc, video, error:'', stage:'creating offer', frames:0, videoPackets:0, audioPackets:0, location:''};
 pc.ontrack = event => { media.addTrack(event.track); video.srcObject = media; video.play().catch(() => {}); };
 pc.addTransceiver('video', {direction:'recvonly'});
 pc.addTransceiver('audio', {direction:'recvonly'});
 (async () => {
   await pc.setLocalDescription(await pc.createOffer());
+  p.stage = 'gathering ICE';
   await new Promise(resolve => {
     if (pc.iceGatheringState === 'complete') return resolve();
     const timer = setTimeout(resolve, 2000);
     pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); } };
   });
+  p.stage = 'posting WHEP offer';
   const response = await fetch(%q + '/webrtc/whep/' + %q + '?mode=live', {
     method:'POST', headers:{'Content-Type':'application/sdp'}, body:pc.localDescription.sdp
   });
   if (!response.ok) throw new Error('WHEP ' + response.status + ': ' + await response.text());
-  p.location = new URL(response.headers.get('Location'), %q).href;
+  const resource = response.headers.get('Location');
+  if (!resource) throw new Error('WHEP response has no session Location');
+  p.location = new URL(resource, %q).href;
+  p.stage = 'setting WHEP answer';
   await pc.setRemoteDescription({type:'answer', sdp:await response.text()});
+  p.stage = 'receiving media';
   const timer = setInterval(async () => {
     if (pc.connectionState === 'closed') { clearInterval(timer); return; }
     const stats = await pc.getStats();
